@@ -246,10 +246,10 @@ at construction, not something to rediscover each frame:
   (tiny integer domain) and any small-domain flag/enum column qualify too; today
   the union-find columns are the only ones worth enabling.
 
-So `const COMPRESS` is per-column, and for a value-eligible column it selects a
-scheme *family* (index axis plus value axis) rather than a bool. Within the
-eligible set the per-frame winner is still the argmin below, so never-worse holds
-per column.
+So the per-instance `CompressionMode` is chosen per column, and for a
+value-eligible column it names a scheme *family* (index axis plus value axis)
+rather than a bool. Within the eligible set the per-frame winner is still the
+argmin below, so never-worse holds per column.
 
 Within the eligible set the decision **factorizes**, since the index axis (which
 cells) and the value axis (what values) are independent — the exception is
@@ -336,20 +336,39 @@ value-axis win. Recorded so it is not confused with the `parent` case.
 | history memory | `P·(T+I) + F·usize` | `P·T` + near-entropy structure |
 | VecP mark clear | `O(N/64)` whole bitmap | `O(runs + touched/64)` |
 
-## Runtime selection
+## Runtime selection (per-instance mode, not a const generic)
 
-A const generic beside `TRACK`:
+Compression mode is a **per-instance runtime field**, chosen at construction, not
+a compile-time const generic. The requirement it serves: one binary runs both
+regimes without recompilation — SMT with compression off (speed), equality
+saturation with compression on and each data structure configured to its best
+mode — so the choice must be a value, not a type parameter.
 
 ```
-pub struct Vec<T, I, S, const TRACK: bool = true, const COMPRESS: bool = false>
+pub enum CompressionMode { None, ValueDict, IndexRuns /* extensible */ }
+
+pub struct Vec<T, I, S, const TRACK: bool = true> {
+    // ... existing fields ...
+    mode: CompressionMode,           // set at construction, consulted at mark/restore
+    compressed: CompressedStore<T, I>, // empty and unused when mode == None
+}
 ```
 
-`COMPRESS = false` keeps today's single uncompressed `diff_log` (zero cost when
-off — the compressed store fields compile out like `TRACK=false` does).
-`COMPRESS = true` uses the layered stack and the chosen encoder. The choice is
-orthogonal to `VecI`/`VecP` (compression lives in the frame representation, not
-in where the capture stamp lives), so both gain it. Type aliases expose the four
-combinations.
+`mode == None` keeps today's single uncompressed `diff_log`; the only cost is one
+branch at `mark`/`restore`, and the compressed store stays empty. Other modes
+finalize the closing frame with the corresponding encoder. Each aggregate
+(`EClasses`, `NodeStore`) sets a per-column mode: `None` everywhere for the SMT
+profile; for the eq-sat profile, `ValueDict` on the union-find `parent`/`rank`
+columns and `IndexRuns` (or `None`) on the rest, per the per-column analysis.
+
+Const-generic `COMPRESS` was rejected: it bakes the choice into the type, forcing
+two builds and preventing a single library from serving SMT and eq-sat callers at
+runtime. The runtime field costs one predictable branch when off (measured against
+the const-generic's compile-out only if that branch ever shows up in a profile),
+which is the right trade for one-binary flexibility.
+
+The choice is orthogonal to `VecI`/`VecP` (compression lives in the frame
+representation, not where the capture stamp lives), so both gain it.
 
 ## Verification
 
@@ -384,11 +403,11 @@ frame representation behind the abstraction.
 
 ## Benchmark plan
 
-Report peak memory and wall-clock for `COMPRESS ∈ {false, true}` × `{VecI,
-VecP}` × {singleton-bitmap, Elias-Fano} on the Sundance regression corpus and
-saturation runs. Expect: memory down (proportional to run density and
-`1/sizeof(T)`), wall-clock flat-to-slightly-up (the finalize sort). Gate a
-configuration only if memory is the target; otherwise keep `COMPRESS = false`.
+Report peak memory and wall-clock for `mode ∈ {None, ValueDict, IndexRuns}` ×
+`{VecI, VecP}` on the Sundance regression corpus and saturation runs. Expect:
+memory down (proportional to run density and `1/sizeof(T)`), wall-clock
+flat-to-slightly-up (the finalize work). Gate a mode only if memory is the target;
+otherwise keep `None` (the SMT profile).
 Measure the run-length distribution of real finalized frames first — if frames
 are mostly singletons, index-structure compression is not worth the finalize
 cost. Measure the value multiset at the same time: per finalized frame and per
@@ -399,3 +418,76 @@ dictionary+codes (encoder A). Expect the union-find `parent`/`rank` columns to
 show `D ≪ P`; expect arbitrary payload columns to show `D ≈ P` and gain nothing
 on the value axis. Because the axes are independent, report the pool term and the
 structure term separately so each encoder's contribution is attributable.
+
+## Implementation plan (code-level)
+
+Grounded in `vec.rs` as it stands (the `Vec<T, I, S, const TRACK: bool = true>`
+at `vec.rs:640`). Compression is a `Vec` concern, not a `DiffStore` one: the base
+data and capture bits live in `S: DiffStore`, but the diff trail (`diff_log:
+Vec<(T, I)>` and `frames: Vec<Frame<I>>`, partitioned by `frames[k].diff_start`)
+lives in `Vec`. So the const generic goes on `Vec`.
+
+**Step 1 — standalone verified encoder module (`diff_compress.rs`), additive.**
+No `Vec` change, cannot touch the existing ~1705 obligations. Contents:
+- The compressed frame representation (index-major run-coalescing first;
+  dictionary+codes for the value axis second; value-major last).
+- `spec fn decode(cf) -> Seq<(T, I)>` and `exec fn compress(&[(T, I)]) -> cf`.
+- The **encode/decode bijection** theorem: on a finalized frame (first-write-wins
+  gives unique indices; take sorted-unique as a `requires`, discharged in step 2
+  by the radix sort), `decode(compress(d)) == d`. Proof risk lives here: the
+  run-coalescing bijection is an inductive sequence-refinement; the dictionary
+  bijection is a pointwise map (`decode[t] = (dict[codes[t]], idx[t])`), which is
+  the lower-risk proof and the value-axis win for `parent`, so land it first.
+  Generic-`T` equality is the friction point for the dictionary dedup: constrain
+  the value column to `T: IndexLike` (node ids) and compare by `as_nat`, or thread
+  a verified `PartialEq`.
+
+**Step 2 — per-instance `mode: CompressionMode` field on `Vec`.** A runtime field
+(default `None`), not a const generic, so one binary serves SMT (`None`) and
+eq-sat (per-column modes) without recompilation. `Vec::new` keeps `None`; a
+`with_mode(mode)` constructor sets it. The compressed store fields always exist
+but stay empty when `mode == None`. `mark`/`restore` branch on `mode`; the
+`None` arm is today's code path, so the `None` proofs are the current proofs plus
+a mode discriminant carried through the invariant (`mode == None ==> compressed
+store empty`). No const-generic proliferation across impl blocks.
+
+**Step 3 — finalize at `mark`.** `mark` (`vec.rs:~1409`) closes the active frame.
+Under `COMPRESS`, replace pushing the raw closing stratum with: radix-sort the
+stratum's `(T, I)` by index (`O(p)`), `compress` it (step 1), and append to a
+compressed store beside `diff_log`. Fuse the capture-bit clear into the same
+sweep. The frame index now points into the compressed store.
+
+**Step 4 — restore.** `restore` reverse-replays compressed frames run by run
+(`decode` a run, write `values[run] -> cells[start..start+len]` as a slice), then
+the uncompressed active frame. The **restore-equivalence** theorem reduces to the
+step-1 bijection plus the existing disjoint-index replay argument, so the
+mark/restore model proofs are reused; `COMPRESS` selects the representation behind
+the same abstract `view()`.
+
+**Step 5 — per-column eligibility.** Distinct-payload columns run index-major
+only; the value axis (dictionary) is enabled only on the value-repetitive columns
+(`parent`, `rank`), per the per-column analysis. Expose this as the column's
+`COMPRESS` scheme selection where each aggregate constructs its vectors.
+
+Order: step 1 (verified, standalone, committable alone) is the safe first
+increment; steps 2-4 are the invasive `Vec` change and land together (the
+`COMPRESS=true` path is not partially meaningful); step 5 is the aggregate wiring.
+
+## Performance: SIMD acceleration under conformance
+
+The finalize/restore encoders are on the hot path (every `mark` and `restore`
+touches them), so once correct they are performance-critical and want SIMD:
+radix-sorting the index stratum, run-coalescing, dictionary dedup, and the
+run-by-run `memcpy` on restore all vectorize. Verus cannot verify SIMD intrinsics
+(they are outside its model), so the verified scalar encoder in `diff_compress`
+is the **reference specification**, and a SIMD implementation is checked for
+equivalence against it — not proved — through the existing `containers-conformance`
+crate (differential + property + Criterion checks between the verified and
+production paths). Concretely: the verified `compress`/`compress_frame`/
+`compress_runs` and their `decode` are the oracle; the SIMD encoder passes iff, on
+proptest-generated frames, its output decodes to the same diff sequence
+(`decode(simd_compress(d)) == d`) and matches the scalar encoder byte-for-byte
+where the representation is canonical. This keeps the soundness guarantee (the
+scalar path is verified; the fast path is conformance-tested against it) without
+forcing SIMD into Verus. Land the scalar verified encoder first; add the SIMD
+path and its conformance checks after, gated in `containers-conformance`.

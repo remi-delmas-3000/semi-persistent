@@ -95,6 +95,7 @@ pub mod circular_list;
 pub mod container_id;
 pub mod dense_id;
 pub mod dense_span_map;
+pub mod diff_compress;
 pub mod diff_store;
 pub mod eclasses;
 pub mod error;
@@ -103,6 +104,7 @@ pub mod external_specs;
 pub mod fork_history;
 pub mod frame;
 pub mod guard;
+pub(crate) mod history;
 pub mod hasher_spec;
 pub mod id_factory;
 #[macro_use]
