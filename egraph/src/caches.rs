@@ -51,9 +51,10 @@ impl BuildHasher for PassthroughBuildHasher {
 /// bits do that: at a million nodes the expected number of colliding pairs in
 /// the whole table is under two hundred.
 ///
-/// What the width buys is the entry: `(StoredKey<u32>, ())` is eight bytes
-/// where `(StoredKey<u64>, G)` was sixteen, so a probe of a million-node table
-/// touches half as many cache lines and a growth rehashes half as much memory.
+/// What the width buys is the entry size: a hint is one fingerprint bucket
+/// key plus a list of 4-byte local ids, so a probe of a million-node table
+/// touches half the cache lines a 64-bit key would and a growth rehashes half
+/// as much memory.
 type Fingerprint = u32;
 
 /// Fold a 64-bit content hash into a fingerprint, mixing the high half in so
@@ -76,23 +77,67 @@ fn spread(fp: Fingerprint) -> u64 {
     (fp as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
-#[derive(Clone, Copy, Debug)]
-struct StoredKey<L> {
-    fp: Fingerprint,
-    local_id: L,
+/// Bucket key for the hint index: one bucket per fingerprint, hashed through
+/// the passthrough hasher as `spread(fp)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FpKey(Fingerprint);
+
+impl Hash for FpKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(spread(self.0));
+    }
 }
 
-impl<L> Hash for StoredKey<L> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u64(spread(self.fp));
+/// One hint-map value, packed to 4 bytes so a map entry stays 8 bytes — the
+/// same footprint as the retired exact table's `(StoredKey, ())` entry. At
+/// EqSat scale entry size IS probe cost: a 32-byte entry (key + inline
+/// SmallVec bucket) made the table 4x the cache lines and regressed
+/// math-microbenchmark 9 to 12% with bit-identical work counts (same node,
+/// recanonize and collision totals); the small SMT tables never left L2, so
+/// the corpus sweep did not see it.
+///
+/// MSB clear: the value IS the single local id hinted at this fingerprint
+/// (the common all-distinct case; ids are 31-bit by the `define_id31`
+/// doctrine, so the MSB is free). MSB set: the low 31 bits index the cache's
+/// `spill` table, whose entry lists every id hinted at this fingerprint
+/// (congruent clusters and re-key histories).
+#[derive(Clone, Copy, Debug)]
+struct HintSlot(u32);
+
+const HINT_SPILL_TAG: u32 = 1 << 31;
+
+impl HintSlot {
+    #[inline]
+    fn single(id: usize) -> Self {
+        debug_assert!(id < HINT_SPILL_TAG as usize);
+        HintSlot(id as u32)
+    }
+    #[inline]
+    fn spilled(ix: usize) -> Self {
+        debug_assert!(ix < HINT_SPILL_TAG as usize);
+        HintSlot(ix as u32 | HINT_SPILL_TAG)
+    }
+    #[inline]
+    fn as_single(self) -> Option<usize> {
+        (self.0 & HINT_SPILL_TAG == 0).then_some(self.0 as usize)
+    }
+    #[inline]
+    fn spill_index(self) -> usize {
+        (self.0 & !HINT_SPILL_TAG) as usize
     }
 }
-impl<L: PartialEq> PartialEq for StoredKey<L> {
-    fn eq(&self, other: &Self) -> bool {
-        self.local_id == other.local_id
-    }
-}
-impl<L: Eq> Eq for StoredKey<L> {}
+
+/// One spilled hint bucket. Four ids inline: a bucket exists only once a
+/// fingerprint has at least two hinted ids.
+type HintBucket<L> = smallvec::SmallVec<[L; 4]>;
+
+/// Per-bucket length that triggers an in-place compaction on the next push:
+/// sort + dedup + drop bounds-dead ids, and drop content-stale ids when NO
+/// mark is live (droppability of a stale hint is exactly "no restore can
+/// revive it"). While marks are live a content-stale hint must survive: a
+/// later restore rolls the node's content back and revalidates it (that is
+/// the whole design — restore does no index work).
+const HINT_COMPACT_LEN: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InsertResult<G, L> {
@@ -101,46 +146,28 @@ pub enum InsertResult<G, L> {
 }
 
 /// One open mark, mirroring the frame the node arena pushed for the same mark.
-///
-/// `saved_len` splits the arena at restore time: local ids below it existed at
-/// the mark and keep their index entries, ids at or above it are the suffix the
-/// restore deletes. `dirty_start` cuts [`dirty`](FixedArityCache::dirty) into
-/// per-frame segments the same way the arena's `diff_start` cuts its diff log.
+/// The hint index needs nothing from it at restore time (restore does no
+/// index work); the frame stack exists to validate and consume tokens.
 #[derive(Clone, Copy, Debug)]
 struct CacheFrame {
     saved_len: usize,
-    dirty_start: usize,
-    /// Set when the budget dropped a pre-mark write from `dirty`. Restore must
-    /// then rebuild: the dirty segment is incomplete. The ratio test reaches
-    /// the same verdict arithmetically (an overflowing segment already fails
-    /// it), and this flag states the requirement instead of relying on that
-    /// coupling.
-    dirty_overflow: bool,
 }
 
-/// Restore rebuilds the whole index once the incremental work would exceed
-/// `1 / REBUILD_RATIO` of it.
-///
-/// Deleting one index entry costs a fingerprint and a probe, about what
-/// inserting one during a rebuild costs, and the incremental path also
-/// re-inserts every recanonized pre-mark node, so the two paths break even
-/// near `suffix + 2 * dirty == live`. A quarter keeps the incremental path
-/// below that break-even point and bounds the cost of a restore that takes the
-/// rebuild it did not need to a quarter of one.
+/// Restore rebuilds an append-only value index once the incremental deletions
+/// would exceed `1 / REBUILD_RATIO` of a rebuild. Used by the literal value
+/// interner (`crate::literal::LitValStore`), whose entries never re-key; the
+/// node caches' hint index has no rebuild path at all.
 pub(crate) const REBUILD_RATIO: usize = 4;
 
-/// Per-frame cap on recorded pre-mark writes: past it, restore is going to
-/// rebuild anyway (the fallback test below is already false), so recording
-/// more would only cost memory.
+/// Whether a suffix-only restore can fix an append-only index in place rather
+/// than rebuilding it. See [`REBUILD_RATIO`].
 #[inline]
-fn dirty_budget(saved_len: usize) -> usize {
-    saved_len / REBUILD_RATIO
-}
-
-/// Whether restore can fix the index in place rather than rebuilding it.
-#[inline]
-pub(crate) fn restore_incrementally(suffix_len: usize, dirty_len: usize, saved_len: usize) -> bool {
-    REBUILD_RATIO * (suffix_len + dirty_len) <= saved_len
+pub(crate) fn restore_incrementally(
+    suffix_len: usize,
+    pending_len: usize,
+    saved_len: usize,
+) -> bool {
+    REBUILD_RATIO * (suffix_len + pending_len) <= saved_len
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -176,17 +203,24 @@ pub struct FixedArityCache<
     // candidates cost 7.28/6.84 MB against 5.06 MB plain and 4.62 MB sorted
     // runs on the corpus, zero wins in 39,272 frames. Revisit at EqSat scale.
     nodes: VecI<FixedArityNode<G, O, K>, L, TRACK>,
-    index: hashbrown::HashMap<StoredKey<L>, (), PassthroughBuildHasher>,
+    /// Hint index: fingerprint -> local ids that at some point held content
+    /// with that fingerprint. The arena is the source of truth; a probe
+    /// validates every candidate against current node content, so restore
+    /// performs NO index maintenance — rolling the arena back revalidates the
+    /// old-content hints and invalidates the new-content ones by itself. This
+    /// is what removes the re-key repair from the restore path entirely, and
+    /// it is also what keeps congruent-duplicate clusters (thousands of nodes
+    /// with identical content after merge waves, measured 14 distinct
+    /// fingerprints across 11678 live nodes on QF_UF_cyclic_scheduler.3) from
+    /// degrading the table: a cluster is one bucket pushed to in O(1), not a
+    /// same-hash probe chain the map walks quadratically.
+    index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
+    /// Spilled hint buckets; `HintSlot` values with the spill tag index here.
+    spill: Vec<HintBucket<L>>,
     /// Recanonicalization history, indexed at `usize`: its population is the number of
     /// rewrites performed, not the number of nodes, and a single node can be recanonicalized
     /// arbitrarily many times — so no id capacity bounds it and `L` here would be a cap.
     history: Option<VecI<FixedArityNode<G, O, K>, usize, TRACK>>,
-    /// Local ids below the enclosing mark's `saved_len` whose content
-    /// `recanonize_node` changed. Their index entries were re-keyed at
-    /// recanonize time and the arena rolls their content back on restore, so
-    /// restore has to re-key them a second time, back to the mark's content.
-    /// Duplicates are allowed: re-keying a node twice is idempotent.
-    dirty: Vec<L>,
     frames: Vec<CacheFrame>,
 }
 
@@ -217,8 +251,8 @@ impl<
         Self {
             nodes: VecI::new(),
             index: hashbrown::HashMap::with_hasher(PassthroughBuildHasher),
+            spill: Vec::new(),
             history: if PROOFS { Some(VecI::new()) } else { None },
-            dirty: Vec::new(),
             frames: Vec::new(),
         }
     }
@@ -240,16 +274,89 @@ impl<
     }
 
     pub fn probe(&self, op: &O, children: &[G; K]) -> Option<G> {
+        self.probe_hints(op, children, None)
+    }
+
+    /// Scan the hint bucket for `(op, children)`: the first id whose CURRENT
+    /// arena content equals the query is the answer. The content compare is
+    /// the validity check — a hint whose node has since re-keyed (or been
+    /// truncated) simply fails it and is skipped. `skip` excludes one id, for
+    /// the recanonize collision probe: a node that oscillated back to earlier
+    /// content has a valid hint for ITSELF in the bucket, which is not a
+    /// collision.
+    fn probe_hints(&self, op: &O, children: &[G; K], skip: Option<L>) -> Option<G> {
         let fp = self.fingerprint(op, children);
-        self.index
-            .raw_entry()
-            .from_hash(spread(fp), |sk| {
-                sk.fp == fp && {
-                    let n = self.nodes.get(sk.local_id);
-                    n.op() == *op && n.children == *children
-                }
-            })
-            .map(|(sk, _)| self.nodes.get(sk.local_id).global_id())
+        let slot = *self.index.get(&FpKey(fp))?;
+        let live = self.nodes.len().as_usize();
+        let check = |id: L| -> Option<G> {
+            if Some(id) == skip || id.as_usize() >= live {
+                return None;
+            }
+            let n = self.nodes.get(id);
+            (n.op() == *op && n.children == *children).then(|| n.global_id())
+        };
+        match slot.as_single() {
+            Some(raw) => check(L::from_usize(raw)),
+            None => self.spill[slot.spill_index()]
+                .iter()
+                .find_map(|&id| check(id)),
+        }
+    }
+
+    /// Record that `id` (currently) holds content with fingerprint `fp`.
+    /// O(1): no duplicate scan — a repeated hint is harmless and compaction
+    /// dedups it later. Hints are never removed on re-key or restore; see the
+    /// `index` field doc for why that is the design and not a leak.
+    ///
+    /// Amortized compaction drops duplicate and bounds-dead ids always, and
+    /// content-stale ids when NO mark is live: droppability of a stale hint
+    /// is exactly "no restore can revive it", and with an empty frame stack
+    /// nothing can.
+    fn push_hint(&mut self, fp: Fingerprint, id: L) {
+        let key = FpKey(fp);
+        let Some(&slot) = self.index.get(&key) else {
+            self.index.insert(key, HintSlot::single(id.as_usize()));
+            return;
+        };
+        if let Some(raw) = slot.as_single() {
+            if raw == id.as_usize() {
+                return;
+            }
+            // A dead single (its id truncated by a restore) is replaced in
+            // place instead of promoted: droppability is the compaction rule
+            // for dead ids (a truncated id only returns via a fresh intern,
+            // which pushes a fresh hint), and promoting it would manufacture
+            // a heap spill bucket for a fingerprint with one live hint.
+            if raw >= self.nodes.len().as_usize() {
+                self.index.insert(key, HintSlot::single(id.as_usize()));
+                return;
+            }
+            let ix = self.spill.len();
+            let mut b = HintBucket::<L>::new();
+            b.push(L::from_usize(raw));
+            b.push(id);
+            self.spill.push(b);
+            self.index.insert(key, HintSlot::spilled(ix));
+            return;
+        }
+        let ix = slot.spill_index();
+        let b = &self.spill[ix];
+        if b.len() >= HINT_COMPACT_LEN && b.len().is_power_of_two() {
+            let live = self.nodes.len().as_usize();
+            let frameless = self.frames.is_empty();
+            let nodes = &self.nodes;
+            let b = &mut self.spill[ix];
+            if frameless {
+                b.retain(|&mut e| {
+                    e.as_usize() < live && fold32(nodes.get(e).content_hash()) == fp
+                });
+            } else {
+                b.retain(|&mut e| e.as_usize() < live);
+            }
+            b.sort_unstable_by_key(|e| e.as_usize());
+            b.dedup();
+        }
+        self.spill[ix].push(id);
     }
 
     pub fn insert(&mut self, global_id: G, op: O, children: [G; K]) -> L {
@@ -257,7 +364,7 @@ impl<
         let fp = self.fingerprint(&op, &children);
         let lid = self.nodes.len();
         self.nodes.try_push(node).expect("push: within index word");
-        self.index.insert(StoredKey { fp, local_id: lid }, ());
+        self.push_hint(fp, lid);
         lid
     }
 
@@ -303,7 +410,6 @@ impl<
         // Node's canonical form genuinely changed this round — record it for
         // the semi-naive delta (after the no-change early-return above).
         touched.push(node.global_id());
-        self.note_dirty(local_id);
 
         // save to history on first recanonize
         if let Some(hist) = &mut self.history
@@ -313,11 +419,6 @@ impl<
                 .expect("push: within index word");
         }
 
-        self.index.remove(&StoredKey {
-            fp: old_fp,
-            local_id,
-        });
-
         let gid = node.global_id();
         let mut new_node = FixedArityNode::new(gid, node.op(), node.children);
         if PROOFS {
@@ -325,17 +426,16 @@ impl<
         }
         self.nodes.set(local_id, new_node);
 
-        if let Some(existing_gid) = self.probe(&node.op(), &node.children) {
+        // Collision probe AFTER the write, excluding this node: the old hint
+        // stays in its bucket (a restore past this point revalidates it), and
+        // a self-hint from earlier content is not a collision.
+        if let Some(existing_gid) =
+            self.probe_hints(&node.op(), &node.children, Some(local_id))
+        {
             collisions.push((gid, existing_gid));
         }
 
-        self.index.insert(
-            StoredKey {
-                fp: new_fp,
-                local_id,
-            },
-            (),
-        );
+        self.push_hint(new_fp, local_id);
     }
 
     /// Retrieve the original (pre-recanonize) children for a node by global id.
@@ -352,29 +452,6 @@ impl<
         None
     }
 
-    /// Record a pre-mark node whose content just changed, so restore can put
-    /// its index entry back under the mark's key. Nodes at or above the
-    /// enclosing mark's `saved_len` need no entry: they are in the suffix
-    /// restore deletes outright, and every enclosing mark's `saved_len` is no
-    /// larger, so they are in its suffix too.
-    #[inline]
-    fn note_dirty(&mut self, local_id: L) {
-        if !TRACK {
-            return;
-        }
-        let Some(frame) = self.frames.last_mut() else {
-            return;
-        };
-        if local_id.as_usize() >= frame.saved_len {
-            return;
-        }
-        if self.dirty.len() - frame.dirty_start > dirty_budget(frame.saved_len) {
-            frame.dirty_overflow = true;
-            return;
-        }
-        self.dirty.push(local_id);
-    }
-
     pub fn mark(&mut self, shrink: ShrinkPolicy) -> CacheToken {
         let token = CacheToken {
             nodes: self
@@ -389,20 +466,15 @@ impl<
         };
         self.frames.push(CacheFrame {
             saved_len: self.nodes.len().as_usize(),
-            dirty_start: self.dirty.len(),
-            dirty_overflow: false,
         });
         token
     }
 
     pub fn restore(&mut self, token: CacheToken) {
-        let frame = *self
+        let _frame = *self
             .frames
             .get(token.frame_index)
             .expect("restore: token minted by this cache's own mark, and not already spent");
-        // Validate every inner token BEFORE touching the index: the deletions
-        // below are not undoable, so an invalid token must refuse while the
-        // cache is still consistent.
         assert!(
             self.nodes.is_valid_token(&token.nodes),
             "restore: node-arena token is not restorable"
@@ -413,32 +485,12 @@ impl<
                 "restore: history token is not restorable"
             );
         }
-        let live_len = self.nodes.len().as_usize();
-        let incremental = !frame.dirty_overflow
-            && restore_incrementally(
-                live_len - frame.saved_len,
-                self.dirty.len() - frame.dirty_start,
-                frame.saved_len,
-            );
-
-        // The arena is append-only, so the nodes added since the mark are the
-        // contiguous suffix at or above `saved_len` and theirs are the entries
-        // to delete. The only other entries the scope moved are those of the
-        // pre-mark nodes `recanonize_node` re-keyed, which `dirty` names, so
-        // the correction is O(added + recanonized) rather than O(live).
-        //
-        // Delete under the CURRENT keys, before the arena rolls the content
-        // back: an entry is filed under the fingerprint of the content it had
-        // when it was last written.
-        if incremental {
-            for i in frame.saved_len..live_len {
-                self.remove_entry(L::from_usize(i));
-            }
-            for k in frame.dirty_start..self.dirty.len() {
-                self.remove_entry(self.dirty[k]);
-            }
-        }
-
+        // The index needs NO maintenance here: hints self-correct. Rolling
+        // the arena back revalidates every pre-mark hint (the content it
+        // points at returns) and invalidates every post-mark one (its content
+        // is gone or reverted, so the probe's content compare skips it).
+        // Truncated ids fail the probe's bounds check until a fresh intern
+        // reuses the slot and pushes a fresh hint.
         self.nodes
             .try_restore(token.nodes)
             .expect("restore: token minted by this container's own mark");
@@ -446,88 +498,29 @@ impl<
             h.try_restore(tok)
                 .expect("restore: token minted by this container's own mark");
         }
-
-        if incremental {
-            for k in frame.dirty_start..self.dirty.len() {
-                // Only pre-mark ids get their entries back. `note_dirty` filters
-                // against the TOP frame's saved_len at push time, but this restore
-                // may target an OLDER frame with a SMALLER saved_len: a node added
-                // after THIS frame's mark and later re-keyed sits in `dirty` yet is
-                // part of the deleted suffix here, so re-inserting it would read a
-                // rolled-back slot (the corpus-measured out-of-bounds abort in
-                // notify_backtrack). Its entry was already removed by the suffix
-                // loop above; skipping is the correct semantics, not a workaround.
-                let id = self.dirty[k];
-                if id.as_usize() < frame.saved_len {
-                    self.insert_entry(id);
-                }
-            }
-        } else {
-            self.rebuild_index();
-        }
-        self.dirty.truncate(frame.dirty_start);
         self.frames.truncate(token.frame_index);
         #[cfg(debug_assertions)]
         debug_assert!(
-            self.index_matches_rebuild(),
-            "restore left the hashcons index out of step with the node arena"
+            self.index_is_complete(),
+            "restore left the hashcons hint index incomplete"
         );
     }
 
-    /// Drop `local_id`'s entry, keyed by the content it holds right now. A
-    /// repeat call is a no-op: the entry is already gone.
-    #[inline]
-    fn remove_entry(&mut self, local_id: L) {
-        let fp = fold32(self.nodes.get(local_id).content_hash());
-        self.index.remove(&StoredKey { fp, local_id });
-    }
-
-    #[inline]
-    fn insert_entry(&mut self, local_id: L) {
-        let fp = fold32(self.nodes.get(local_id).content_hash());
-        self.index.insert(StoredKey { fp, local_id }, ());
-    }
-
-    /// The index holds exactly one entry per live node, keyed by that node's
-    /// current content, which is what [`rebuild_index`](Self::rebuild_index)
-    /// produces from scratch.
+    /// Completeness oracle: every live node's content is findable through the
+    /// hint index (probe returns SOME node with equal content, not necessarily
+    /// this one — congruent duplicates share an answer). This is the invariant
+    /// hash-consing needs; hints being stale is fine, hints being missing is
+    /// not.
     #[cfg(debug_assertions)]
-    fn index_matches_rebuild(&self) -> bool {
-        let count = self.nodes.len().as_usize();
-        if self.index.len() != count {
-            return false;
-        }
-        let mut seen = vec![false; count];
-        for (sk, ()) in self.index.iter() {
-            let i = sk.local_id.as_usize();
-            if i >= count || seen[i] || sk.fp != fold32(self.nodes.get(sk.local_id).content_hash())
-            {
-                return false;
-            }
-            seen[i] = true;
-        }
-        true
-    }
-
-    fn rebuild_index(&mut self) {
-        self.index.clear();
-        // `from_usize` needs no bound check here: `nodes` is indexed *by* `L`, so its own
-        // capacity guard is the id bound (`IndexLike::max_nat()` of a dense id is its
-        // `id_bound()`). Every position the arena can hold therefore has a local id. The
-        // scans that DO need a check are the ones over a container indexed by an id's
-        // *word* rather than the id — see `EGraph::node_ids`.
+    fn index_is_complete(&self) -> bool {
         let count = self.nodes.len().as_usize();
         for i in 0..count {
-            let lid = L::from_usize(i);
-            let n = self.nodes.get(lid);
-            self.index.insert(
-                StoredKey {
-                    fp: fold32(n.content_hash()),
-                    local_id: lid,
-                },
-                (),
-            );
+            let n = self.nodes.get(L::from_usize(i));
+            if self.probe(&n.op(), &n.children).is_none() {
+                return false;
+            }
         }
+        true
     }
 
     fn fingerprint(&self, op: &O, children: &[G; K]) -> Fingerprint {
@@ -559,7 +552,10 @@ pub struct VariableArityCache<
     /// nodes, which neither `L`'s nor `G`'s capacity bounds, so an id-width index here would
     /// be a new cap rather than a narrowing. See [`VariableArityNode::start`].
     children: VecI<C, usize, TRACK>,
-    index: hashbrown::HashMap<StoredKey<L>, (), PassthroughBuildHasher>,
+    /// Hint index over (op, span contents); see [`FixedArityCache::index`].
+    index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
+    /// Spilled hint buckets; `HintSlot` values with the spill tag index here.
+    spill: Vec<HintBucket<L>>,
     /// Recanonicalization history. `usize` for a different reason than `children`: the
     /// population here is the number of *rewrites* the run has performed, which is unbounded
     /// by any id capacity — a single node can be recanonicalized arbitrarily many times.
@@ -567,10 +563,6 @@ pub struct VariableArityCache<
     /// Children of the history entries; `Σ arity` over `history_nodes`, so `usize` for both
     /// of the reasons above at once.
     history_children: Option<VecI<C, usize, TRACK>>,
-    /// Local ids below the enclosing mark's `saved_len` whose content
-    /// `recanonize_node` changed, through the node's own span or through the
-    /// child pool it addresses. See [`FixedArityCache::dirty`].
-    dirty: Vec<L>,
     frames: Vec<CacheFrame>,
 }
 
@@ -602,9 +594,9 @@ impl<
             nodes: VecI::new(),
             children: VecI::new(),
             index: hashbrown::HashMap::with_hasher(PassthroughBuildHasher),
+            spill: Vec::new(),
             history_nodes: if PROOFS { Some(VecI::new()) } else { None },
             history_children: if PROOFS { Some(VecI::new()) } else { None },
-            dirty: Vec::new(),
             frames: Vec::new(),
         }
     }
@@ -639,16 +631,82 @@ impl<
     }
 
     pub fn probe(&self, op: O, elems: &[C]) -> Option<G> {
+        self.probe_hints(op, elems, None)
+    }
+
+    /// Hint-bucket scan; see [`FixedArityCache::probe_hints`]. Validity here
+    /// reads through the child pool (`children_eq` over the node's span), so
+    /// a pool-only recanonize invalidates and a pool rollback revalidates
+    /// without the node record changing.
+    fn probe_hints(&self, op: O, elems: &[C], skip: Option<L>) -> Option<G> {
         let fp = self.fingerprint(&op, elems);
-        self.index
-            .raw_entry()
-            .from_hash(spread(fp), |sk| {
-                sk.fp == fp && {
-                    let n = self.nodes.get(sk.local_id);
-                    n.op() == op && self.children_eq(&n, elems)
-                }
-            })
-            .map(|(sk, _)| self.nodes.get(sk.local_id).global_id())
+        let slot = *self.index.get(&FpKey(fp))?;
+        let live = self.nodes.len().as_usize();
+        let check = |id: L| -> Option<G> {
+            if Some(id) == skip || id.as_usize() >= live {
+                return None;
+            }
+            let n = self.nodes.get(id);
+            (n.op() == op && self.children_eq(&n, elems)).then(|| n.global_id())
+        };
+        match slot.as_single() {
+            Some(raw) => check(L::from_usize(raw)),
+            None => self.spill[slot.spill_index()]
+                .iter()
+                .find_map(|&id| check(id)),
+        }
+    }
+
+    /// See [`FixedArityCache::push_hint`], including the frameless
+    /// content-validating compaction (validity here reads through the child
+    /// pool, as `var_children_fingerprint` does).
+    fn push_hint(&mut self, fp: Fingerprint, id: L) {
+        let key = FpKey(fp);
+        let Some(&slot) = self.index.get(&key) else {
+            self.index.insert(key, HintSlot::single(id.as_usize()));
+            return;
+        };
+        if let Some(raw) = slot.as_single() {
+            if raw == id.as_usize() {
+                return;
+            }
+            // A dead single (its id truncated by a restore) is replaced in
+            // place instead of promoted: droppability is the compaction rule
+            // for dead ids (a truncated id only returns via a fresh intern,
+            // which pushes a fresh hint), and promoting it would manufacture
+            // a heap spill bucket for a fingerprint with one live hint.
+            if raw >= self.nodes.len().as_usize() {
+                self.index.insert(key, HintSlot::single(id.as_usize()));
+                return;
+            }
+            let ix = self.spill.len();
+            let mut b = HintBucket::<L>::new();
+            b.push(L::from_usize(raw));
+            b.push(id);
+            self.spill.push(b);
+            self.index.insert(key, HintSlot::spilled(ix));
+            return;
+        }
+        let ix = slot.spill_index();
+        let b = &self.spill[ix];
+        if b.len() >= HINT_COMPACT_LEN && b.len().is_power_of_two() {
+            let live = self.nodes.len().as_usize();
+            let frameless = self.frames.is_empty();
+            let nodes = &self.nodes;
+            let children = &self.children;
+            let b = &mut self.spill[ix];
+            if frameless {
+                b.retain(|&mut e| {
+                    e.as_usize() < live
+                        && var_children_fingerprint(children, &nodes.get(e)) == fp
+                });
+            } else {
+                b.retain(|&mut e| e.as_usize() < live);
+            }
+            b.sort_unstable_by_key(|e| e.as_usize());
+            b.dedup();
+        }
+        self.spill[ix].push(id);
     }
 
     pub fn insert(&mut self, global_id: G, op: O, elems: &[C]) -> L {
@@ -661,7 +719,7 @@ impl<
         let fp = self.fingerprint(&op, elems);
         let lid = self.nodes.len();
         self.nodes.try_push(node).expect("push: within index word");
-        self.index.insert(StoredKey { fp, local_id: lid }, ());
+        self.push_hint(fp, lid);
         lid
     }
 
@@ -696,7 +754,6 @@ impl<
     ) {
         let node = self.nodes.get(local_id);
         let (start, end) = node.span();
-        let old_fp = self.children_fingerprint(&node);
 
         buf.clear();
         V::canonize(buf, start, end, |i| self.children.get(i), &find, mode);
@@ -719,7 +776,6 @@ impl<
         // Node's canonical form genuinely changed this round — record it for
         // the semi-naive delta (after the no-change early-return above).
         touched.push(node.global_id());
-        self.note_dirty(local_id);
 
         // save to history on first recanonize
         if let (Some(hn), Some(hc)) = (&mut self.history_nodes, &mut self.history_children)
@@ -740,11 +796,6 @@ impl<
             .expect("push: within index word");
         }
 
-        self.index.remove(&StoredKey {
-            fp: old_fp,
-            local_id,
-        });
-
         for i in 0..new_len {
             self.children.set(start + i, buf[i]);
         }
@@ -761,17 +812,14 @@ impl<
 
         let new_fp = self.fingerprint(&node.op(), &buf[..new_len]);
 
-        if let Some(existing_gid) = self.probe(node.op(), &buf[..new_len]) {
+        // Collision probe excluding this node (see the fixed-arity twin: a
+        // self-hint from earlier content is not a collision), then hint the
+        // new content. The old hint stays for restore to revalidate.
+        if let Some(existing_gid) = self.probe_hints(node.op(), &buf[..new_len], Some(local_id)) {
             collisions.push((gid, existing_gid));
         }
 
-        self.index.insert(
-            StoredKey {
-                fp: new_fp,
-                local_id,
-            },
-            (),
-        );
+        self.push_hint(new_fp, local_id);
     }
 
     /// Retrieve the original (pre-recanonize) children for a node by global id.
@@ -796,25 +844,6 @@ impl<
         false
     }
 
-    /// See [`FixedArityCache::note_dirty`].
-    #[inline]
-    fn note_dirty(&mut self, local_id: L) {
-        if !TRACK {
-            return;
-        }
-        let Some(frame) = self.frames.last_mut() else {
-            return;
-        };
-        if local_id.as_usize() >= frame.saved_len {
-            return;
-        }
-        if self.dirty.len() - frame.dirty_start > dirty_budget(frame.saved_len) {
-            frame.dirty_overflow = true;
-            return;
-        }
-        self.dirty.push(local_id);
-    }
-
     pub fn mark(&mut self, shrink: ShrinkPolicy) -> PoolCacheToken {
         let token = PoolCacheToken {
             nodes: self
@@ -837,19 +866,15 @@ impl<
         };
         self.frames.push(CacheFrame {
             saved_len: self.nodes.len().as_usize(),
-            dirty_start: self.dirty.len(),
-            dirty_overflow: false,
         });
         token
     }
 
     pub fn restore(&mut self, token: PoolCacheToken) {
-        let frame = *self
+        let _frame = *self
             .frames
             .get(token.frame_index)
             .expect("restore: token minted by this cache's own mark, and not already spent");
-        // Validate every inner token BEFORE touching the index (as in the
-        // fixed-arity restore above).
         assert!(
             self.nodes.is_valid_token(&token.nodes),
             "restore: node-arena token is not restorable"
@@ -870,26 +895,10 @@ impl<
                 "restore: history token is not restorable"
             );
         }
-        let live_len = self.nodes.len().as_usize();
-        let incremental = !frame.dirty_overflow
-            && restore_incrementally(
-                live_len - frame.saved_len,
-                self.dirty.len() - frame.dirty_start,
-                frame.saved_len,
-            );
-
-        // Delete under the CURRENT keys, before the arena and the child pool
-        // roll back: an entry is filed under the fingerprint of the content it
-        // had when it was last written.
-        if incremental {
-            for i in frame.saved_len..live_len {
-                self.remove_entry(L::from_usize(i));
-            }
-            for k in frame.dirty_start..self.dirty.len() {
-                self.remove_entry(self.dirty[k]);
-            }
-        }
-
+        // No index maintenance: hints self-correct against the rolled-back
+        // arena and child pool (see the fixed-arity restore above). A
+        // pool-only recanonize is covered because validity reads through the
+        // span into the pool, which rolls back here too.
         self.nodes
             .try_restore(token.nodes)
             .expect("restore: token minted by this container's own mark");
@@ -904,65 +913,29 @@ impl<
             h.try_restore(tok)
                 .expect("restore: token minted by this container's own mark");
         }
-
-        if incremental {
-            for k in frame.dirty_start..self.dirty.len() {
-                // Only pre-mark ids get their entries back. `note_dirty` filters
-                // against the TOP frame's saved_len at push time, but this restore
-                // may target an OLDER frame with a SMALLER saved_len: a node added
-                // after THIS frame's mark and later re-keyed sits in `dirty` yet is
-                // part of the deleted suffix here, so re-inserting it would read a
-                // rolled-back slot (the corpus-measured out-of-bounds abort in
-                // notify_backtrack). Its entry was already removed by the suffix
-                // loop above; skipping is the correct semantics, not a workaround.
-                let id = self.dirty[k];
-                if id.as_usize() < frame.saved_len {
-                    self.insert_entry(id);
-                }
-            }
-        } else {
-            self.rebuild_index();
-        }
-        self.dirty.truncate(frame.dirty_start);
         self.frames.truncate(token.frame_index);
         #[cfg(debug_assertions)]
         debug_assert!(
-            self.index_matches_rebuild(),
-            "restore left the hashcons index out of step with the node arena"
+            self.index_is_complete(),
+            "restore left the hashcons hint index incomplete"
         );
     }
 
-    /// Drop `local_id`'s entry, keyed by the content it holds right now. A
-    /// repeat call is a no-op: the entry is already gone.
-    #[inline]
-    fn remove_entry(&mut self, local_id: L) {
-        let fp = self.children_fingerprint(&self.nodes.get(local_id));
-        self.index.remove(&StoredKey { fp, local_id });
-    }
-
-    #[inline]
-    fn insert_entry(&mut self, local_id: L) {
-        let fp = self.children_fingerprint(&self.nodes.get(local_id));
-        self.index.insert(StoredKey { fp, local_id }, ());
-    }
-
-    /// See [`FixedArityCache::index_matches_rebuild`].
+    /// See [`FixedArityCache::index_is_complete`].
     #[cfg(debug_assertions)]
-    fn index_matches_rebuild(&self) -> bool {
+    fn index_is_complete(&self) -> bool {
         let count = self.nodes.len().as_usize();
-        if self.index.len() != count {
-            return false;
-        }
-        let mut seen = vec![false; count];
-        for (sk, ()) in self.index.iter() {
-            let i = sk.local_id.as_usize();
-            if i >= count
-                || seen[i]
-                || sk.fp != self.children_fingerprint(&self.nodes.get(sk.local_id))
-            {
+        let mut elems: Vec<C> = Vec::new();
+        for i in 0..count {
+            let n = self.nodes.get(L::from_usize(i));
+            elems.clear();
+            let (s, e) = n.span();
+            for j in s..e {
+                elems.push(self.children.get(j));
+            }
+            if self.probe(n.op(), &elems).is_none() {
                 return false;
             }
-            seen[i] = true;
         }
         true
     }
@@ -975,22 +948,6 @@ impl<
         (0..elems.len()).all(|i| self.children.get(start + i) == elems[i])
     }
 
-    fn rebuild_index(&mut self) {
-        self.index.clear();
-        // `from_usize` needs no bound check here: `nodes` is indexed *by* `L`, so its own
-        // capacity guard is the id bound (`IndexLike::max_nat()` of a dense id is its
-        // `id_bound()`). Every position the arena can hold therefore has a local id. The
-        // scans that DO need a check are the ones over a container indexed by an id's
-        // *word* rather than the id — see `EGraph::node_ids`.
-        let count = self.nodes.len().as_usize();
-        for i in 0..count {
-            let lid = L::from_usize(i);
-            let n = self.nodes.get(lid);
-            let fp = self.children_fingerprint(&n);
-            self.index.insert(StoredKey { fp, local_id: lid }, ());
-        }
-    }
-
     fn fingerprint(&self, op: &O, elems: &[C]) -> Fingerprint {
         let mut h = rapidhash::fast::RapidHasher::default();
         op.hash(&mut h);
@@ -998,16 +955,30 @@ impl<
         fold32(h.finish())
     }
 
-    fn children_fingerprint(&self, node: &VariableArityNode<G, O>) -> Fingerprint {
-        let mut h = rapidhash::fast::RapidHasher::default();
-        node.op().hash(&mut h);
-        let (start, end) = node.span();
-        (end - start).hash(&mut h);
-        for i in start..end {
-            self.children.get(i).hash(&mut h);
-        }
-        fold32(h.finish())
+}
+
+/// Fingerprint of a variable-arity node's CURRENT content, reading through
+/// the child pool. Free function (not a method) so compaction can call it
+/// under a split borrow of the pool and the node arena. Matches
+/// `VariableArityCache::fingerprint` on the same content: a slice hash is a
+/// length prefix followed by the elements.
+fn var_children_fingerprint<G, O, C, const TRACK: bool>(
+    children: &VecI<C, usize, TRACK>,
+    node: &VariableArityNode<G, O>,
+) -> Fingerprint
+where
+    G: DenseId + Hash,
+    O: DenseId + Hash,
+    C: Tagged + Clone + Copy + Hash + Eq + core::fmt::Debug,
+{
+    let mut h = rapidhash::fast::RapidHasher::default();
+    node.op().hash(&mut h);
+    let (start, end) = node.span();
+    (end - start).hash(&mut h);
+    for i in start..end {
+        children.get(i).hash(&mut h);
     }
+    fold32(h.finish())
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,10 +987,11 @@ impl<
 
 pub struct LitCache<G: DenseId, O: DenseId, V: DenseId, L: DenseId, const TRACK: bool = true> {
     nodes: VecI<LitNode<G, O, V>, L, TRACK>,
-    index: hashbrown::HashMap<StoredKey<L>, (), PassthroughBuildHasher>,
-    /// No `dirty` counterpart to the other two caches: a literal's content is
-    /// its operator and its value, and nothing recanonizes either, so the only
-    /// entries a restore has to drop are the suffix's.
+    /// Hint index; see [`FixedArityCache::index`]. Literal content never
+    /// changes, so the only staleness here is truncated ids after a restore.
+    index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
+    /// Spilled hint buckets; `HintSlot` values with the spill tag index here.
+    spill: Vec<HintBucket<L>>,
     frames: Vec<CacheFrame>,
 }
 
@@ -1038,6 +1010,7 @@ impl<G: DenseId + Hash, O: DenseId + Hash, V: DenseId + Hash, L: DenseId, const 
         Self {
             nodes: VecI::new(),
             index: hashbrown::HashMap::with_hasher(PassthroughBuildHasher),
+            spill: Vec::new(),
             frames: Vec::new(),
         }
     }
@@ -1060,15 +1033,21 @@ impl<G: DenseId + Hash, O: DenseId + Hash, V: DenseId + Hash, L: DenseId, const 
 
     pub fn probe(&self, op: O, lit: V) -> Option<G> {
         let fp = self.fingerprint(&op, &lit);
-        self.index
-            .raw_entry()
-            .from_hash(spread(fp), |sk| {
-                sk.fp == fp && {
-                    let n = self.nodes.get(sk.local_id);
-                    n.op() == op && n.lit == lit
-                }
-            })
-            .map(|(sk, _)| self.nodes.get(sk.local_id).global_id())
+        let slot = *self.index.get(&FpKey(fp))?;
+        let live = self.nodes.len().as_usize();
+        let check = |id: L| -> Option<G> {
+            if id.as_usize() >= live {
+                return None;
+            }
+            let n = self.nodes.get(id);
+            (n.op() == op && n.lit == lit).then(|| n.global_id())
+        };
+        match slot.as_single() {
+            Some(raw) => check(L::from_usize(raw)),
+            None => self.spill[slot.spill_index()]
+                .iter()
+                .find_map(|&id| check(id)),
+        }
     }
 
     pub fn insert(&mut self, global_id: G, op: O, lit: V) -> L {
@@ -1076,7 +1055,43 @@ impl<G: DenseId + Hash, O: DenseId + Hash, V: DenseId + Hash, L: DenseId, const 
         let fp = self.fingerprint(&op, &lit);
         let lid = self.nodes.len();
         self.nodes.try_push(node).expect("push: within index word");
-        self.index.insert(StoredKey { fp, local_id: lid }, ());
+        // Same single/spill protocol as the node caches; literal content
+        // never changes, so compaction is bounds + dedup only.
+        let key = FpKey(fp);
+        match self.index.get(&key).copied() {
+            None => {
+                self.index.insert(key, HintSlot::single(lid.as_usize()));
+            }
+            Some(slot) => {
+                if let Some(raw) = slot.as_single() {
+                    if raw >= lid.as_usize() {
+                        // Equal: duplicate hint, nothing to do. Greater: a
+                        // dead single from a restore (lid is the newest live
+                        // id), replaced in place as in the node caches.
+                        if raw > lid.as_usize() {
+                            self.index.insert(key, HintSlot::single(lid.as_usize()));
+                        }
+                    } else {
+                        let ix = self.spill.len();
+                        let mut b = HintBucket::<L>::new();
+                        b.push(L::from_usize(raw));
+                        b.push(lid);
+                        self.spill.push(b);
+                        self.index.insert(key, HintSlot::spilled(ix));
+                    }
+                } else {
+                    let ix = slot.spill_index();
+                    let b = &mut self.spill[ix];
+                    if b.len() >= HINT_COMPACT_LEN && b.len().is_power_of_two() {
+                        let live = lid.as_usize() + 1;
+                        b.retain(|&mut e| e.as_usize() < live);
+                        b.sort_unstable_by_key(|e| e.as_usize());
+                        b.dedup();
+                    }
+                    b.push(lid);
+                }
+            }
+        }
         lid
     }
 
@@ -1099,81 +1114,38 @@ impl<G: DenseId + Hash, O: DenseId + Hash, V: DenseId + Hash, L: DenseId, const 
         };
         self.frames.push(CacheFrame {
             saved_len: self.nodes.len().as_usize(),
-            dirty_start: 0,
-            dirty_overflow: false,
         });
         token
     }
 
     pub fn restore(&mut self, token: CacheToken) {
-        let frame = *self
+        let _frame = *self
             .frames
             .get(token.frame_index)
             .expect("restore: token minted by this cache's own mark, and not already spent");
-        let live_len = self.nodes.len().as_usize();
-        let incremental = restore_incrementally(live_len - frame.saved_len, 0, frame.saved_len);
-
-        if incremental {
-            for i in frame.saved_len..live_len {
-                let local_id = L::from_usize(i);
-                let fp = fold32(self.nodes.get(local_id).content_hash());
-                self.index.remove(&StoredKey { fp, local_id });
-            }
-        }
-
+        // No index maintenance: truncated ids fail the probe's bounds check.
         self.nodes
             .try_restore(token.nodes)
             .expect("restore: token minted by this container's own mark");
-
-        if !incremental {
-            self.rebuild_index();
-        }
         self.frames.truncate(token.frame_index);
         #[cfg(debug_assertions)]
         debug_assert!(
-            self.index_matches_rebuild(),
-            "restore left the hashcons index out of step with the node arena"
+            self.index_is_complete(),
+            "restore left the literal hint index incomplete"
         );
     }
 
-    /// See [`FixedArityCache::index_matches_rebuild`].
+    /// See [`FixedArityCache::index_is_complete`].
     #[cfg(debug_assertions)]
-    fn index_matches_rebuild(&self) -> bool {
-        let count = self.nodes.len().as_usize();
-        if self.index.len() != count {
-            return false;
-        }
-        let mut seen = vec![false; count];
-        for (sk, ()) in self.index.iter() {
-            let i = sk.local_id.as_usize();
-            if i >= count || seen[i] || sk.fp != fold32(self.nodes.get(sk.local_id).content_hash())
-            {
-                return false;
-            }
-            seen[i] = true;
-        }
-        true
-    }
-
-    fn rebuild_index(&mut self) {
-        self.index.clear();
-        // `from_usize` needs no bound check here: `nodes` is indexed *by* `L`, so its own
-        // capacity guard is the id bound (`IndexLike::max_nat()` of a dense id is its
-        // `id_bound()`). Every position the arena can hold therefore has a local id. The
-        // scans that DO need a check are the ones over a container indexed by an id's
-        // *word* rather than the id — see `EGraph::node_ids`.
+    fn index_is_complete(&self) -> bool {
         let count = self.nodes.len().as_usize();
         for i in 0..count {
-            let lid = L::from_usize(i);
-            let n = self.nodes.get(lid);
-            self.index.insert(
-                StoredKey {
-                    fp: fold32(n.content_hash()),
-                    local_id: lid,
-                },
-                (),
-            );
+            let n = self.nodes.get(L::from_usize(i));
+            if self.probe(n.op(), n.lit).is_none() {
+                return false;
+            }
         }
+        true
     }
 
     fn fingerprint(&self, op: &O, lit: &V) -> Fingerprint {
@@ -1557,12 +1529,12 @@ mod tests {
     }
 
     /// A node added after the OUTER mark and re-keyed under the inner scope
-    /// sits in `dirty` past the outer frame's `dirty_start` yet belongs to the
-    /// suffix the outer restore deletes: `note_dirty` filtered it against the
-    /// INNER frame's larger `saved_len`. The restore must skip it instead of
-    /// re-reading the rolled-back slot (the corpus-measured out-of-bounds
-    /// abort in `notify_backtrack`). The in-restore `index_matches_rebuild`
-    /// assertion checks the resulting index against the from-scratch rebuild.
+    /// appears in the pending set of an outer restore (the inner stratum's
+    /// capture names it) yet belongs to the suffix the outer restore deletes.
+    /// The restore must skip it instead of re-reading the rolled-back slot
+    /// (the corpus-measured out-of-bounds abort in `notify_backtrack`). The
+    /// in-restore `index_matches_rebuild` assertion checks the resulting
+    /// index against the from-scratch rebuild.
     #[test]
     fn restore_to_outer_skips_a_rekeyed_inner_suffix_node() {
         let mut c = FixedArityCache::<ENodeId, OpId, Plain2Id, 2>::new();
@@ -1632,29 +1604,23 @@ mod tests {
         assert!(c.probe(&op, &[id(200), id(0)]).is_none());
     }
 
-    /// The check `restore` asserts on rejects a stale key. Without this, an
-    /// index that never diverges and a check that never looks are the same
+    /// The check `restore` asserts on rejects a missing hint. Without this,
+    /// an index that never diverges and a check that never looks are the same
     /// test result.
     #[cfg(debug_assertions)]
     #[test]
-    fn index_check_rejects_a_stale_key() {
+    fn completeness_check_rejects_a_missing_hint() {
         let mut c = FixedArityCache::<ENodeId, OpId, Plain2Id, 2>::new();
         let op = OpId::new(0);
         c.probe_or_insert(id(10), op, [id(1), id(2)]);
-        assert!(c.index_matches_rebuild());
+        assert!(c.index_is_complete());
 
-        let local_id = Plain2Id::new(0);
         let fp = c.fingerprint(&op, &[id(1), id(2)]);
-        c.index.remove(&StoredKey { fp, local_id });
-        assert!(!c.index_matches_rebuild(), "a missing entry is a mismatch");
-        c.index.insert(
-            StoredKey {
-                fp: fp ^ 1,
-                local_id,
-            },
-            (),
+        c.index.remove(&FpKey(fp));
+        assert!(
+            !c.index_is_complete(),
+            "a node whose content no probe can find is incomplete"
         );
-        assert!(!c.index_matches_rebuild(), "a stale key is a mismatch");
     }
 
     #[test]
