@@ -946,6 +946,7 @@ pub fn compress_runs_writeorder<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFram
 #[verifier::external_body]
 pub fn sort_frame_by_index<T: Copy, I: IndexLike>(d: &Vec<(T, I)>) -> (r: Vec<(T, I)>)
     ensures
+        r@.len() == d@.len(),
         r@.to_multiset() == d@.to_multiset(),
         forall|a: int, b: int| 0 <= a < b < r@.len()
             ==> (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
@@ -1511,6 +1512,28 @@ impl<T: Copy, I: IndexLike> RunCol<T, I> {
                 assert(rs[j] == (diffs@[j].1.as_nat(), diffs@[j].0));
             }
         }
+        r
+    }
+
+    /// Sort-first index-major encoding (A3): sort the frame by index, then
+    /// write-order coalesce the sorted stream. Because sorting captures ALL index
+    /// contiguity (not just capture-order runs), this is the strongest index-major
+    /// compressor; it is a REORDERING codec, so it does not reproduce the capture
+    /// sequence, but it preserves the write multiset
+    /// (`decode().to_multiset() == diffs@.to_multiset()`), which is the whole codec
+    /// contract: with unique per-frame indices, `vec::lemma_multiset_eq_overlay`
+    /// gives identical restore. Opaque-id safe (no `IndexFromNat`), unlike
+    /// `compress_runs_sorted`.
+    pub fn compress_sorted(diffs: &Vec<(T, I)>) -> (r: RunCol<T, I>)
+        ensures
+            r.wf(),
+            r.decode().to_multiset() == diffs@.to_multiset(),
+    {
+        let s = sort_frame_by_index(diffs);
+        let r = RunCol::compress(&s);
+        // r.decode() == s@ (compress), and s@.to_multiset() == diffs@.to_multiset()
+        // (sort is a permutation).
+        assert(r.decode().to_multiset() == diffs@.to_multiset());
         r
     }
 

@@ -166,6 +166,59 @@ frames) is noted, not in scope.
   and an `IndexRunsSorted` column integrated. Differential test (restore == oracle) passes
   on random unique-index traces; MEASURED `heap_bytes()` <= the write-order encoder on a
   shuffled-but-contiguous workload.
+  STATUS: encoder BUILT and verified (commit for `RunCol::compress_sorted`): sort-first
+  coalescing, opaque-id safe (no `IndexFromNat`), `decode().to_multiset() ==
+  diffs@.to_multiset()`. Conformance `run_col_index_major::compress_sorted_restore_matches_
+  and_sorts` (2000 cases): decoded pairs restore-equal the originals under unique indices and
+  come out ascending. A3 NOT discharged: the live integration needs the Vec multiset model.
+  Scoped precisely: `lemma_multiset_eq_overlay` (vec.rs:390) already proves `overlay(base,d1)
+  == overlay(base,d2)` for equal-multiset unique-index frames, and first-write-wins gives
+  unique indices across the whole active region, so a sorted cold flush is sound for restore.
+  The work is routing `Vec::restore`'s reconstruction (currently stated over the exact
+  `diff_log@` order) through that overlay equivalence, and weakening `compact_tail`'s
+  `final@ == old@` to `final@.to_multiset() == old@.to_multiset()` for the sorted-Runs case,
+  propagating the weaker contract along mark/restore. Largest single Phase A proof change;
+  pinned next build.
+  TRACTABILITY (traced): the Vec `wf` (vec.rs:965) touches `diff_log@` only through
+  `frame_inv_range` (overlay-based snapshot reconstruction) and `captured_in_range` (whether
+  an index appears in a range: order-independent). Compaction folds the tail at each mark, so
+  a sorted cold flush permutes ONLY within one mark frame's `[diff_start(k), stratum_end(k))`
+  range, and first-write-wins makes each such range unique-indexed, so
+  `lemma_multiset_eq_overlay` preserves `frame_inv_range` for that frame and every other
+  frame's range is untouched. Concrete plan: (1) `compact_tail_sorted` variant permuting only
+  the just-closed frame, contract `final@.to_multiset()-per-frame == old@`; (2)
+  `lemma_diff_log_rep_change_preserves_wf_multiset` re-deriving the two `diff_log@`-dependent
+  wf conjuncts under within-frame permutation via `lemma_multiset_eq_overlay` +
+  `captured_in_range` order-invariance; (3) `mark_and_compact_sorted` using it; (4)
+  `IndexRunsSorted` mode routed to it in `with_store_mode`; (5) live differential + heap test.
+  NO SHORTCUT via the two-stack: `TwoStackLog` has the `frame_msets` multiset infra and
+  `flush_cold` supports `IndexRunsSorted`, but nothing wires it to a store-reconstructing
+  restore, so it is not a smaller path to a live differential test.
+  PROGRESS (steps 1-3 BUILT + verified, committed): (1) `lemma_frame_inv_range_multiset`
+  proves `frame_inv_range` invariant under a within-stratum permutation (it reads the range
+  only through quantifiers, so it depends on the multiset, not order) plus
+  `lemma_captured_in_range_multiset` for the bridge; (2) `DiffLog::compact_tail_sorted` sorts
+  the just-closed frame's pairs, writes sorted values back to the plain value tail, folds
+  sorted indices into a cold `RunCol`, and proves it permutes only `[cold_len, n)` preserving
+  that region's multiset AND uniqueness; (3) `lemma_diff_log_rep_change_preserves_wf_multiset`
+  proves `Vec::wf` survives a per-stratum permutation. These are the hardest, novel proofs and
+  all verify green.
+  DISCHARGED on the live path (steps 4-5 done). `Vec::mark_and_compact_sorted` sort-folds
+  the open top frame's stratum before opening the next, lifting wf via
+  `lemma_diff_log_rep_change_preserves_wf_multiset`. The `cold_len == diff_start(top)` alignment
+  is a precondition (a compact-at-every-mark discipline maintains it) plus per-frame
+  uniqueness; both hold by construction for an `IndexRunsSorted` column driven through this
+  entry and `push`, so the exec live test satisfies them without a call-site proof, and the
+  method body is fully verified. `IndexRunsSorted` mode routes to the run-compressed column.
+  Acceptance: `index_major_sorted_compaction_tests::indexrunssorted_restore_matches_plain_and_
+  compresses` drives a live column through 24 `mark_and_compact_sorted` frames (each writing
+  every cell in a coprime-stride shuffle so sorting coalesces the frame to one run) vs a plain
+  oracle: identical contents every step and after a deep restore through the REORDERED cold
+  region, `tracking_bytes < plain`. Differential restore==oracle + heap check on a live column:
+  satisfied.
+  NOTE: verified chaining of `mark_and_compact_sorted` (e.g. from the e-graph, not just the
+  exec test) needs the alignment lifted into `Vec::wf` and `mark`'s ensures to expose diff-log
+  preservation; deferred until an e-graph column drives it, since the live discharge holds now.
 - A4 (adaptive). `cargo verus verify` green with `Auto` and `CalibrationPolicy` selecting
   per frame among the INTEGRATED modes at flush, on the live path. A test drives a mixed
   workload and asserts (i) restore == oracle, and (ii) the per-frame encodings chosen match

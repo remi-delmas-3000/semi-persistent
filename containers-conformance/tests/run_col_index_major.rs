@@ -108,6 +108,49 @@ proptest! {
     }
 }
 
+/// First-write-wins dedup: keep the first pair per index, giving unique indices
+/// (the per-frame invariant the sorted encoder requires).
+fn dedup_first(raw: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for &(v, i) in raw {
+        if seen.insert(i) {
+            out.push((v, i));
+        }
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
+
+    // Sorted index-major (A3): sort-first coalescing over unique-index frames. The
+    // codec reorders, so it does NOT reproduce the capture sequence; it preserves the
+    // write multiset, and with unique indices the restore is order-independent, so
+    // applying the decoded (sorted) pairs to a base column equals applying the
+    // originals. Decoded indices come out ascending.
+    #[test]
+    fn compress_sorted_restore_matches_and_sorts(
+        raw in prop::collection::vec((any::<u32>(), 0u32..64u32), 0..200usize),
+    ) {
+        let diffs = dedup_first(&raw);
+
+        let col: RunCol<u32, u32> = RunCol::compress_sorted(&diffs);
+        let decoded = col.decode_exec();
+
+        // Same number of writes (multiset size), and restore-equivalent to the
+        // originals despite the reorder (unique indices).
+        prop_assert_eq!(decoded.len(), diffs.len());
+        let base = vec![0u32; 64];
+        prop_assert_eq!(apply_pairs(&base, &decoded), apply_pairs(&base, &diffs));
+
+        // Decoded indices are ascending (the sort captured all contiguity).
+        for w in decoded.windows(2) {
+            prop_assert!(w[0].1 <= w[1].1);
+        }
+    }
+}
+
 #[test]
 fn single_run_boundaries() {
     // One entry: byte_len == start index + one value; round-trip holds.

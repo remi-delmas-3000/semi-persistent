@@ -22,7 +22,7 @@
 
 use vstd::prelude::*;
 use crate::index_like::IndexLike;
-use crate::diff_compress::{ValFrame, RunCol};
+use crate::diff_compress::{ValFrame, RunCol, sort_frame_by_index};
 
 verus! {
 
@@ -311,6 +311,16 @@ impl<I: IndexLike> DiffIdxs<I> {
     /// Whether this is the run-compressed variant (for variant-preservation ensures).
     pub open spec fn is_runs(self) -> bool {
         self is Runs
+    }
+
+    /// Length of the cold (already-folded) prefix: `cold_idxs(cold@).len()` for the
+    /// run-compressed variant, else the whole plain length. The boundary below which a
+    /// sorted tail flush leaves `@` untouched.
+    pub open spec fn cold_len_spec(self) -> nat {
+        match self {
+            DiffIdxs::Plain(v) => v@.len(),
+            DiffIdxs::Runs { cold, .. } => cold_idxs(cold@).len(),
+        }
     }
 }
 
@@ -676,6 +686,156 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
             }
         }
         assert(self@ =~= old(self)@);
+    }
+
+    /// Sorted index-major fold (A3): sort the just-closed frame's `(value, index)`
+    /// pairs by index, write the sorted values back into the plain value tail, and
+    /// fold the sorted (now maximally coalescible) indices into one cold `RunCol`
+    /// frame. This PERMUTES `@` within the tail region `[cold_len, n)`; that region's
+    /// write multiset is preserved (sorting is a permutation), which is exactly what
+    /// the Vec multiset model consumes. Requires the index column run-compressed and
+    /// the value column plain (index-major keeps values plain).
+    pub fn compact_tail_sorted(&mut self)
+        where T: Copy
+        requires
+            old(self).wf(),
+            old(self).idxs is Runs,
+            // The just-closed frame (the tail region) has unique indices
+            // (first-write-wins), which makes the sort sound and stays true after it.
+            crate::diff_compress::unique_idx(old(self)@.subrange(
+                old(self).idxs.cold_len_spec() as int, old(self)@.len() as int)),
+        ensures
+            final(self).wf(),
+            final(self).idxs is Runs,
+            final(self)@.len() == old(self)@.len(),
+            // Whole tail folded into cold: the cold region now covers the log.
+            final(self).idxs.cold_len_spec() == final(self)@.len(),
+            final(self)@.subrange(0, old(self).idxs.cold_len_spec() as int)
+                == old(self)@.subrange(0, old(self).idxs.cold_len_spec() as int),
+            final(self)@.subrange(
+                old(self).idxs.cold_len_spec() as int, final(self)@.len() as int).to_multiset()
+                == old(self)@.subrange(
+                    old(self).idxs.cold_len_spec() as int, old(self)@.len() as int).to_multiset(),
+            // The reordered region stays unique-indexed (sort preserves it), so the
+            // Vec's frame_inv_range uniqueness carries for the permuted stratum.
+            crate::diff_compress::unique_idx(final(self)@.subrange(
+                old(self).idxs.cold_len_spec() as int, final(self)@.len() as int)),
+    {
+        proof { reveal(cold_idxs); }
+        let ghost n: int = self@.len() as int;
+        let ghost ts: int = self.idxs.cold_len_spec() as int;
+        match self {
+            DiffLog { idxs: DiffIdxs::Runs { cold, tail }, vals: DiffVals::Plain(vals) } => {
+                let ghost cold0 = cold@;
+                let ghost vals0 = vals@;
+                let ghost tail0 = tail@;
+                let tl = tail.len();
+                let base = vals.len() - tl;  // == ts == cold_idxs(cold@).len()
+                assert(base == ts);
+                // Gather the tail's (value, index) pairs in capture order, indexing
+                // the value column absolutely (i = base + q) to avoid an overflow check.
+                let mut pairs: Vec<(T, I)> = Vec::new();
+                let vlen = vals.len();
+                let mut i: usize = base;
+                while i < vlen
+                    invariant
+                        base <= i <= vlen,
+                        vlen == vals@.len(),
+                        tl == tail@.len(),
+                        base + tl == vals@.len(),
+                        vals@ == vals0,
+                        tail@ == tail0,
+                        pairs@.len() == i - base,
+                        forall|q: int| 0 <= q < i - base ==>
+                            #[trigger] pairs@[q] == (vals0[base + q], tail0[q]),
+                    decreases vlen - i,
+                {
+                    pairs.push((vals[i], tail[i - base]));
+                    i += 1;
+                }
+                assert(pairs@ =~= Seq::new(tl as nat, |q: int| (vals0[base + q], tail0[q])));
+                // Sort by index (multiset-preserving permutation).
+                let sorted = sort_frame_by_index(&pairs);
+                assert(sorted@.to_multiset() == pairs@.to_multiset());
+                // Write sorted values back into the plain value tail (absolute index).
+                let mut iw: usize = base;
+                while iw < vlen
+                    invariant
+                        base <= iw <= vlen,
+                        vlen == vals@.len(),
+                        sorted@.len() == tl,
+                        base + tl == vals@.len(),
+                        forall|q: int| 0 <= q < iw - base ==> #[trigger] vals@[base + q] == sorted@[q].0,
+                        forall|q: int| 0 <= q < base ==> #[trigger] vals@[q] == vals0[q],
+                        forall|q: int| iw - base <= q < tl ==> #[trigger] vals@[base + q] == vals0[base + q],
+                    decreases vlen - iw,
+                {
+                    vals.set(iw, sorted[iw - base].0);
+                    iw += 1;
+                }
+                // Fold the sorted indices into one cold RunCol frame ((),index pairs).
+                let mut idx_pairs: Vec<((), I)> = Vec::new();
+                let mut p: usize = 0;
+                while p < tl
+                    invariant
+                        0 <= p <= tl,
+                        sorted@.len() == tl,
+                        idx_pairs@.len() == p,
+                        forall|q: int| 0 <= q < p ==> #[trigger] idx_pairs@[q] == ((), sorted@[q].1),
+                    decreases tl - p,
+                {
+                    idx_pairs.push(((), sorted[p].1));
+                    p += 1;
+                }
+                assert(idx_pairs@ =~= Seq::new(tl as nat, |q: int| ((), sorted@[q].1)));
+                let f: RunCol<(), I> = RunCol::compress(&idx_pairs);
+                let ghost fg = f;
+                proof {
+                    // f.idx_seq() == the sorted index column.
+                    assert(f.idx_seq() =~= Seq::new(tl as nat, |q: int| sorted@[q].1));
+                    lemma_cold_idxs_snoc(cold0, fg);
+                }
+                cold.push(f);
+                *tail = Vec::new();
+                proof {
+                    assert(cold@ =~= cold0.push(fg));
+                    assert(cold_idxs(cold@) =~= cold_idxs(cold0) + fg.idx_seq());
+                    let idxseq = fg.idx_seq();
+                    // cold_idxs is unchanged below ts and equals the sorted indices above.
+                    assert forall|i: int| 0 <= i < ts implies
+                        cold_idxs(cold@)[i] == cold_idxs(cold0)[i] by {}
+                    assert forall|q: int| 0 <= q < tl implies
+                        cold_idxs(cold@)[ts + q] == sorted@[q].1 by {
+                        assert(cold_idxs(cold@)[ts + q] == idxseq[q]);
+                    }
+                    // Prefix [0, ts) of the view is untouched.
+                    assert(self@.subrange(0, ts) =~= old(self)@.subrange(0, ts)) by {
+                        assert forall|i: int| 0 <= i < ts implies
+                            self@[i] == old(self)@[i] by {}
+                    }
+                    // Region [ts, n): new view == sorted, old view == pairs (capture order).
+                    assert(self@.subrange(ts, n) =~= sorted@) by {
+                        assert forall|q: int| 0 <= q < tl implies
+                            self@[ts + q] == sorted@[q] by {}
+                    }
+                    assert(old(self)@.subrange(ts, n) =~= pairs@) by {
+                        assert forall|q: int| 0 <= q < tl implies
+                            old(self)@[ts + q] == pairs@[q] by {}
+                    }
+                    assert(self@.subrange(ts, n).to_multiset()
+                        == old(self)@.subrange(ts, n).to_multiset());
+                    // Uniqueness carries: old region == pairs (unique by requires),
+                    // sort preserves unique, new region == sorted.
+                    assert(crate::diff_compress::unique_idx(pairs@));
+                    assert(crate::diff_compress::unique_idx(sorted@));
+                    assert(crate::diff_compress::unique_idx(self@.subrange(ts, n)));
+                }
+            }
+            _ => {
+                // Unreachable: requires idxs is Runs, and wf gives vals is Plain then.
+                assert(false);
+            }
+        }
     }
 
     /// Capacity-only shrink (production parity). Observably inert. Shrinks the

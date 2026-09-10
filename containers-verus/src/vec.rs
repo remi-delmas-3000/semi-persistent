@@ -750,6 +750,128 @@ pub(crate) proof fn lemma_frame_inv_arm_at<T, I: IndexLike>(
 {
 }
 
+/// `frame_inv_range` is invariant under a PERMUTATION of the diff-log range
+/// `[lo, hi)`: it reads that range only through quantifiers (`forall`/`exists` over
+/// `k in [lo, hi)`), never through `overlay` or a positional index, so it depends on
+/// the multiset of the range, not its order. This is what lets a sorted (reordering)
+/// cold flush preserve the Vec invariant: sorting a just-closed frame's captures
+/// keeps that stratum's write multiset, so its `frame_inv_range` carries. `d2`'s
+/// uniqueness over the range is a hypothesis (the sorted encoder preserves it via
+/// `unique_idx`), so no multiplicity/count reasoning is needed.
+pub(crate) proof fn lemma_frame_inv_range_multiset<T: Copy, I: IndexLike>(
+    above: Seq<T>, d1: Seq<(T, I)>, d2: Seq<(T, I)>, lo: int, hi: int,
+    snap: Seq<T>, saved_len: nat,
+)
+    requires
+        frame_inv_range::<T, I>(above, d1, lo, hi, snap, saved_len),
+        0 <= lo <= hi,
+        hi <= d1.len(),
+        hi <= d2.len(),
+        d1.subrange(lo, hi).to_multiset() == d2.subrange(lo, hi).to_multiset(),
+        forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b ==>
+            (#[trigger] d2[a]).1.as_nat() != (#[trigger] d2[b]).1.as_nat(),
+    ensures
+        frame_inv_range::<T, I>(above, d2, lo, hi, snap, saved_len),
+{
+    let s1 = d1.subrange(lo, hi);
+    let s2 = d2.subrange(lo, hi);
+    // Each entry of one range is present in the other (equal multisets).
+    assert forall|x: (T, I)| s1.contains(x) implies s2.contains(x) by {
+        vstd::seq_lib::to_multiset_contains(s1, x);
+        vstd::seq_lib::to_multiset_contains(s2, x);
+    }
+    assert forall|x: (T, I)| s2.contains(x) implies s1.contains(x) by {
+        vstd::seq_lib::to_multiset_contains(s1, x);
+        vstd::seq_lib::to_multiset_contains(s2, x);
+    }
+    // Index bound: every d2 entry in the range equals some d1 entry in the range.
+    assert forall|k: int| lo <= k < hi implies (#[trigger] d2[k]).1.as_nat() < saved_len by {
+        assert(s2[k - lo] == d2[k]);
+        assert(s2.contains(d2[k]));
+        assert(s1.contains(d2[k]));
+        let m = choose|m: int| 0 <= m < s1.len() && s1[m] == d2[k];
+        assert(s1[m] == d1[lo + m]);
+    }
+    // Per-cell two-arm: captured-in-range and the covering value both transfer by
+    // membership (exists over the range).
+    assert forall|j: int| 0 <= j < saved_len as int implies
+        #[trigger] frame_cell_inv::<T, I>(above, d2, lo, hi, snap, j) by {
+        assert(frame_cell_inv::<T, I>(above, d1, lo, hi, snap, j));
+        // captured_in_range(d2) <==> captured_in_range(d1) via membership.
+        if captured_in_range::<T, I>(d2, lo, hi, j as nat) {
+            let k = choose|k: int| lo <= k < hi && 0 <= k < d2.len()
+                && (#[trigger] d2[k]).1.as_nat() == j as nat;
+            assert(s2[k - lo] == d2[k]);
+            assert(s2.contains(d2[k]));
+            assert(s1.contains(d2[k]));
+            let m = choose|m: int| 0 <= m < s1.len() && s1[m] == d2[k];
+            assert(s1[m] == d1[lo + m]);
+            assert(captured_in_range::<T, I>(d1, lo, hi, j as nat));
+        }
+        if captured_in_range::<T, I>(d1, lo, hi, j as nat) {
+            let k = choose|k: int| lo <= k < hi && 0 <= k < d1.len()
+                && (#[trigger] d1[k]).1.as_nat() == j as nat;
+            assert(s1[k - lo] == d1[k]);
+            assert(s1.contains(d1[k]));
+            assert(s2.contains(d1[k]));
+            let m = choose|m: int| 0 <= m < s2.len() && s2[m] == d1[k];
+            assert(s2[m] == d2[lo + m]);
+            assert(captured_in_range::<T, I>(d2, lo, hi, j as nat));
+        }
+        // Covering value arm: the covering d1 entry is present in d2's range.
+        if captured_in_range::<T, I>(d1, lo, hi, j as nat) {
+            let k1 = choose|k: int| lo <= k < hi
+                && (#[trigger] d1[k]).1.as_nat() == j as nat && d1[k].0 == snap[j];
+            assert(s1[k1 - lo] == d1[k1]);
+            assert(s1.contains(d1[k1]));
+            assert(s2.contains(d1[k1]));
+            let m = choose|m: int| 0 <= m < s2.len() && s2[m] == d1[k1];
+            assert(s2[m] == d2[lo + m]);
+        }
+    }
+}
+
+/// `captured_in_range` (whether some entry in `[lo, hi)` writes index `j`) depends
+/// only on the range's multiset, not its order: it is an existential over the range.
+/// The bridge and no-stray wf clauses read the diff log through this, so they too
+/// survive a within-range permutation.
+pub(crate) proof fn lemma_captured_in_range_multiset<T: Copy, I: IndexLike>(
+    d1: Seq<(T, I)>, d2: Seq<(T, I)>, lo: int, hi: int, j: nat,
+)
+    requires
+        0 <= lo <= hi,
+        hi <= d1.len(),
+        hi <= d2.len(),
+        d1.subrange(lo, hi).to_multiset() == d2.subrange(lo, hi).to_multiset(),
+    ensures
+        captured_in_range::<T, I>(d1, lo, hi, j) == captured_in_range::<T, I>(d2, lo, hi, j),
+{
+    let s1 = d1.subrange(lo, hi);
+    let s2 = d2.subrange(lo, hi);
+    if captured_in_range::<T, I>(d1, lo, hi, j) {
+        let k = choose|k: int| lo <= k < hi && 0 <= k < d1.len()
+            && (#[trigger] d1[k]).1.as_nat() == j;
+        assert(s1[k - lo] == d1[k]);
+        assert(s1.contains(d1[k]));
+        vstd::seq_lib::to_multiset_contains(s1, d1[k]);
+        vstd::seq_lib::to_multiset_contains(s2, d1[k]);
+        let m = choose|m: int| 0 <= m < s2.len() && s2[m] == d1[k];
+        assert(s2[m] == d2[lo + m]);
+        assert(captured_in_range::<T, I>(d2, lo, hi, j));
+    }
+    if captured_in_range::<T, I>(d2, lo, hi, j) {
+        let k = choose|k: int| lo <= k < hi && 0 <= k < d2.len()
+            && (#[trigger] d2[k]).1.as_nat() == j;
+        assert(s2[k - lo] == d2[k]);
+        assert(s2.contains(d2[k]));
+        vstd::seq_lib::to_multiset_contains(s1, d2[k]);
+        vstd::seq_lib::to_multiset_contains(s2, d2[k]);
+        let m = choose|m: int| 0 <= m < s1.len() && s1[m] == d2[k];
+        assert(s1[m] == d1[lo + m]);
+        assert(captured_in_range::<T, I>(d1, lo, hi, j));
+    }
+}
+
 /// The per-stratum bridge: if a diff-log range `[lo, hi)` satisfies the
 /// two-arm `frame_inv` relative to `above` and `snap` (stated directly over
 /// the range), then overlaying that range onto `above` reproduces `snap`
@@ -850,6 +972,17 @@ where
     /// Diff-log length (spec counterpart of `diff_log_len()`).
     pub open(crate) spec fn diff_log_len_spec(&self) -> nat {
         self.diff_log@.len()
+    }
+
+    /// The top (open) frame's `diff_start`, or 0 when no frame is live. The sorted
+    /// index-major fold's alignment: for a run-compressed log compacted at every mark,
+    /// the DiffLog cold region ends exactly here (the tail is the open frame's stratum).
+    pub open(crate) spec fn top_diff_start_spec(&self) -> int {
+        if self.frames@.len() > 0 {
+            self.frames@[(self.frames@.len() - 1) as int].diff_start as int
+        } else {
+            0
+        }
     }
 
     /// Max spine depth ever reached (generation-stamp array length). Public
@@ -1104,6 +1237,118 @@ where
         }
         assert(self.wf_for_snap());
         assert(self.wf());
+    }
+
+    /// `wf` is preserved by a diff-log change that PERMUTES each frame's stratum
+    /// (same per-stratum write multiset, same new per-stratum uniqueness), not just
+    /// an exact-`@` representation change. The Vec invariant reads the diff log only
+    /// through `frame_inv_range` (quantifiers over each stratum) and the bridge's
+    /// `captured_in_range` (existential over the top stratum), both of which depend
+    /// on a stratum's multiset, not its order. This is what a sorted (reordering)
+    /// cold flush needs: `compact_tail_sorted` permutes exactly the just-closed
+    /// stratum while preserving its multiset and uniqueness.
+    #[verifier::rlimit(1000)]
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_diff_log_rep_change_preserves_wf_multiset(&self, old_self: Self)
+        requires
+            old_self.wf(),
+            self.store == old_self.store,
+            self.frames@ == old_self.frames@,
+            self.diff_log.wf(),
+            self.diff_log@.len() == old_self.diff_log@.len(),
+            self.snapshots@ == old_self.snapshots@,
+            self.active_saved_len == old_self.active_saved_len,
+            // Each frame's stratum is permuted: same multiset, and the new stratum is
+            // still unique-indexed.
+            forall|k: int| 0 <= k < self.frames@.len() ==>
+                self.diff_log@.subrange(
+                    #[trigger] self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset()
+                == old_self.diff_log@.subrange(
+                    self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset(),
+            forall|k: int| 0 <= k < self.frames@.len() ==>
+                (forall|a: int, b: int|
+                    #[trigger] self.frames@[k].diff_start as int <= a < self.stratum_end(k)
+                    && self.frames@[k].diff_start as int <= b < self.stratum_end(k)
+                    && a != b
+                    ==> (#[trigger] self.diff_log@[a]).1.as_nat()
+                        != (#[trigger] self.diff_log@[b]).1.as_nat()),
+        ensures
+            self.wf(),
+    {
+        assert(self.view() == old_self.view());
+        assert(self.store.captured() == old_self.store.captured());
+        assert(old_self.wf_for_snap());
+        // Per-frame: frame_inv_range carries under the stratum permutation.
+        assert forall|k: int| 0 <= k < self.frames@.len() implies
+            #[trigger] frame_inv_range::<T, I>(
+                self.layer_above_at(k),
+                self.diff_log@,
+                self.frames@[k].diff_start as int,
+                self.stratum_end(k),
+                self.snapshots@[k],
+                self.frames@[k].saved_len.as_nat())
+        by {
+            let lo = self.frames@[k].diff_start as int;
+            let hi = self.stratum_end(k);
+            old_self.lemma_stratum_bounds(k);
+            assert(self.layer_above_at(k) == old_self.layer_above_at(k));
+            assert(self.stratum_end(k) == old_self.stratum_end(k));
+            assert(frame_inv_range::<T, I>(
+                old_self.layer_above_at(k),
+                old_self.diff_log@,
+                lo, hi,
+                old_self.snapshots@[k],
+                old_self.frames@[k].saved_len.as_nat()));
+            lemma_frame_inv_range_multiset::<T, I>(
+                self.layer_above_at(k),
+                old_self.diff_log@,
+                self.diff_log@,
+                lo, hi,
+                self.snapshots@[k],
+                self.frames@[k].saved_len.as_nat());
+        }
+        assert(self.wf_for_snap());
+        // Bridge: captured_in_range over the top stratum survives the permutation.
+        assert(self.diff_log.wf());
+        if self.frames@.len() > 0 {
+            let top = (self.frames@.len() - 1) as int;
+            assert(self.stratum_end(top) == self.diff_log@.len());
+            assert forall|j: int|
+                0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
+                #[trigger] self.store.captured()[j]
+                    == captured_in_range::<T, I>(
+                        self.diff_log@,
+                        self.frames@[top].diff_start as int,
+                        self.diff_log@.len() as int,
+                        j as nat)
+            by {
+                self.lemma_diff_start_le_n(top);
+                lemma_captured_in_range_multiset::<T, I>(
+                    old_self.diff_log@,
+                    self.diff_log@,
+                    self.frames@[top].diff_start as int,
+                    self.stratum_end(top),
+                    j as nat);
+            }
+        }
+        assert(self.wf());
+    }
+
+    /// `stratum_end(k)` is in range: `diff_start(k) <= stratum_end(k) <= diff_log.len()`.
+    pub(crate) proof fn lemma_stratum_bounds(&self, k: int)
+        requires
+            self.wf_for_snap(),
+            0 <= k < self.frames@.len(),
+        ensures
+            self.frames@[k].diff_start as int <= self.stratum_end(k),
+            self.stratum_end(k) <= self.diff_log@.len(),
+    {
+        if k + 1 < self.frames@.len() {
+            assert(self.frames@[k].diff_start <= self.frames@[k + 1].diff_start);
+            self.lemma_diff_start_le_n(k + 1);
+        } else {
+            self.lemma_diff_start_le_n(k);
+        }
     }
 
     /// Every frame's diff_start is `<= diff_log.len()`. Follows from
@@ -1440,12 +1685,13 @@ where
             // Index-major: the index column is run-coalesced into cold frames at
             // compact_tail (values stay plain); mark_and_compact folds the closed
             // frame's index tail.
-            crate::diff_compress::CompressionMode::IndexRuns =>
+            // Index-major, write-order (mark_and_compact) or sorted (mark_and_compact_sorted):
+            // both use the run-compressed index column; the fold differs at mark.
+            crate::diff_compress::CompressionMode::IndexRuns
+            | crate::diff_compress::CompressionMode::IndexRunsSorted =>
                 crate::diff_log::DiffLog::new_runs(),
-            // Sorted index-major (A3) and per-frame Auto (A4) are not yet integrated
-            // into this in-place log; build a plain top.
-            crate::diff_compress::CompressionMode::IndexRunsSorted
-            | crate::diff_compress::CompressionMode::Auto =>
+            // Per-frame Auto (A4) is not yet integrated into this in-place log.
+            crate::diff_compress::CompressionMode::Auto =>
                 crate::diff_log::DiffLog::new_plain(),
         };
         let v = Vec {
@@ -3774,6 +4020,112 @@ where
         proof { self.lemma_diff_log_rep_change_preserves_wf(pre); }
         t
     }
+
+    /// Sorted index-major `mark`: sort-fold the open top frame's stratum (the strongest
+    /// index-major compression) BEFORE opening the next frame. The fold permutes only
+    /// that stratum while preserving its write multiset, so `Vec::wf` carries via
+    /// `lemma_diff_log_rep_change_preserves_wf_multiset`. Requires the run-compressed
+    /// log's cold region to end exactly at the open frame (`cold_len == diff_start(top)`,
+    /// the alignment a compact-at-every-mark discipline maintains) and that frame's
+    /// indices to be unique (first-write-wins); both hold by construction for an
+    /// `IndexRunsSorted` column driven only through this entry and `push`.
+    #[verifier::rlimit(800)]
+    #[verifier::spinoff_prover]
+    pub(crate) fn mark_and_compact_sorted(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).depth_spec() < u32::MAX,
+            old(self).view().len() < I::max_nat(),
+            old(self).depth_spec() > 0,
+            old(self).diff_log.idxs is Runs,
+            old(self).diff_log.idxs.cold_len_spec() == old(self).top_diff_start_spec(),
+            crate::diff_compress::unique_idx(old(self).diff_log@.subrange(
+                old(self).top_diff_start_spec(), old(self).diff_log@.len() as int)),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            token.frame_idx_spec() == old(self).depth_spec(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+    {
+        let ghost pre = *self;
+        let ghost ts = pre.diff_log.idxs.cold_len_spec() as int;
+        let ghost top = (pre.frames@.len() - 1) as int;
+        self.diff_log.compact_tail_sorted();
+        proof {
+            // The fold permuted exactly the top stratum [ts, n); lift wf to the Vec.
+            let np = pre.diff_log@.len() as int;
+            assert(pre.frames@[top].diff_start as int == ts);
+            assert(pre.stratum_end(top) == np);
+            // Prefix [0, ts) unchanged by the fold.
+            assert(self.diff_log@.subrange(0, ts) == pre.diff_log@.subrange(0, ts));
+            // Per-frame multiset for self.diff_log@ vs pre.diff_log@.
+            assert forall|k: int| 0 <= k < self.frames@.len() implies
+                self.diff_log@.subrange(
+                    #[trigger] self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset()
+                == pre.diff_log@.subrange(
+                    self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset()
+            by {
+                pre.lemma_stratum_bounds(k);
+                let lo = self.frames@[k].diff_start as int;
+                let hi = self.stratum_end(k);
+                if k == top {
+                } else {
+                    // k < top: se(k) = ds(k+1) <= ds(top) = ts, so the stratum is in
+                    // [0, ts) where the fold left @ pointwise-equal.
+                    pre.lemma_diff_start_monotone(k + 1, top);
+                    assert(hi <= ts);
+                    assert(self.diff_log@.subrange(lo, hi) =~= pre.diff_log@.subrange(lo, hi)) by {
+                        assert forall|q: int| 0 <= q < hi - lo implies
+                            self.diff_log@.subrange(lo, hi)[q] == pre.diff_log@.subrange(lo, hi)[q] by {
+                            assert(self.diff_log@[lo + q] == self.diff_log@.subrange(0, ts)[lo + q]);
+                            assert(pre.diff_log@[lo + q] == pre.diff_log@.subrange(0, ts)[lo + q]);
+                        }
+                    }
+                }
+            }
+            // Per-frame new uniqueness.
+            assert forall|k: int| 0 <= k < self.frames@.len() implies
+                (forall|a: int, b: int|
+                    #[trigger] self.frames@[k].diff_start as int <= a < self.stratum_end(k)
+                    && self.frames@[k].diff_start as int <= b < self.stratum_end(k)
+                    && a != b
+                    ==> (#[trigger] self.diff_log@[a]).1.as_nat()
+                        != (#[trigger] self.diff_log@[b]).1.as_nat())
+            by {
+                pre.lemma_stratum_bounds(k);
+                let lo = self.frames@[k].diff_start as int;
+                let hi = self.stratum_end(k);
+                if k == top {
+                    // The folded stratum is unique (compact_tail_sorted ensures it).
+                    assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
+                        implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
+                        assert(self.diff_log@.subrange(lo, hi)[a - lo] == self.diff_log@[a]);
+                        assert(self.diff_log@.subrange(lo, hi)[b - lo] == self.diff_log@[b]);
+                    }
+                } else {
+                    pre.lemma_diff_start_monotone(k + 1, top);
+                    assert(hi <= ts);
+                    assert(pre.wf_for_snap());
+                    assert(frame_inv_range::<T, I>(
+                        pre.layer_above_at(k), pre.diff_log@, lo, hi,
+                        pre.snapshots@[k], pre.frames@[k].saved_len.as_nat()));
+                    // @ unchanged on [lo, hi); pre is unique there ⇒ self is too.
+                    assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
+                        implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
+                        assert(self.diff_log@[a] == self.diff_log@.subrange(0, ts)[a]);
+                        assert(pre.diff_log@[a] == pre.diff_log@.subrange(0, ts)[a]);
+                        assert(self.diff_log@[b] == self.diff_log@.subrange(0, ts)[b]);
+                        assert(pre.diff_log@[b] == pre.diff_log@.subrange(0, ts)[b]);
+                    }
+                }
+            }
+            self.lemma_diff_log_rep_change_preserves_wf_multiset(pre);
+        }
+        let t = self.mark(shrink);
+        t
+    }
 }
 
 // Concrete constructors, mirroring production's two `new()` impls.
@@ -4022,6 +4374,88 @@ mod index_major_compaction_tests {
 
         // Restore into the cold region (deep backtrack through run-decoded indices)
         // and contents must still agree (A2 through the run reconstruction).
+        vc.restore(tc[3]);
+        vp.restore(tp[3]);
+        assert_eq!(read_back(&vc), read_back(&vp), "views diverged after deep restore");
+    }
+}
+
+#[cfg(test)]
+mod index_major_sorted_compaction_tests {
+    // A3 acceptance: an IndexRunsSorted column driven through mark_and_compact_sorted
+    // restores identically to a plain (None) oracle, and its diff-log heap footprint
+    // is strictly smaller on a scattered-but-contiguous-in-range workload (each frame
+    // touches every cell in a shuffled order; sorting coalesces the frame's index
+    // column to ONE run). This is the live-Vec-column differential restore==oracle
+    // test plus the heap check the contract requires for A3, exercising the sorted
+    // (reordering) cold flush and its multiset-based restore.
+    use super::{ShrinkPolicy, Vec};
+    use crate::diff_compress::CompressionMode;
+    use crate::parallel_store::ParallelStore;
+
+    type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
+
+    fn read_back(v: &V) -> std::vec::Vec<u32> {
+        (0..v.len() as usize).map(|i| v.get_index(i as u32)).collect()
+    }
+
+    #[test]
+    fn indexrunssorted_restore_matches_plain_and_compresses() {
+        const N: u32 = 200;
+        const FRAMES: u32 = 24;
+
+        let mut vc = V::new_with_mode(CompressionMode::IndexRunsSorted);
+        let mut vp = V::new_with_mode(CompressionMode::None);
+        for _ in 0..N {
+            vc.push(0);
+            vp.push(0);
+        }
+
+        // gcd(7, 200) == 1, so j = (i*7) % N ranges over a PERMUTATION of 0..N: each
+        // frame writes every cell exactly once (unique indices, first-write-wins) but
+        // in scattered order. The sorted encoder sorts each frame back to the
+        // contiguous run 0..N-1, coalescing it to one run; the write-order encoder
+        // would leave it as N singleton runs. This is the shape sorted index-major
+        // targets and where it beats write-order.
+        let mut tc = std::vec::Vec::new();
+        let mut tp = std::vec::Vec::new();
+
+        // First frame: a plain mark (no open frame to sort-compact yet).
+        tc.push(vc.mark(ShrinkPolicy::Never));
+        tp.push(vp.mark(ShrinkPolicy::Never));
+        for i in 0..N {
+            let j = (i * 7) % N;
+            vc.set(j, 1);
+            vp.set(j, 1);
+        }
+        assert_eq!(read_back(&vc), read_back(&vp), "views diverged in frame 0");
+
+        for k in 1..FRAMES {
+            // Sort-fold the previous frame, open the next.
+            tc.push(vc.mark_and_compact_sorted(ShrinkPolicy::Never));
+            tp.push(vp.mark(ShrinkPolicy::Never));
+            for i in 0..N {
+                let j = (i * 7) % N;
+                vc.set(j, k + 1);
+                vp.set(j, k + 1);
+            }
+            assert_eq!(read_back(&vc), read_back(&vp), "views diverged at frame {k}");
+        }
+        // Fold the last open frame too, so all but the top are sorted-compressed.
+        tc.push(vc.mark_and_compact_sorted(ShrinkPolicy::Never));
+        tp.push(vp.mark(ShrinkPolicy::Never));
+
+        // A3 heap check: each scattered frame's index column is sorted to one run, so
+        // the compressed diff log is strictly smaller than plain.
+        assert!(
+            vc.tracking_bytes() < vp.tracking_bytes(),
+            "sorted index-major diff log {} !< plain {}",
+            vc.tracking_bytes(),
+            vp.tracking_bytes(),
+        );
+
+        // Deep restore through the sorted (reordered) cold region: contents still
+        // agree, because restore depends on the per-frame write multiset, not order.
         vc.restore(tc[3]);
         vp.restore(tp[3]);
         assert_eq!(read_back(&vc), read_back(&vp), "views diverged after deep restore");
