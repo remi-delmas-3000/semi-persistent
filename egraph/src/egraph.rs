@@ -1656,9 +1656,22 @@ where
         }
 
         let mut ac_scratch: Vec<Cfg::C> = Vec::new();
+        // Expand each congruence pair ONCE: the step list is a proof DAG's
+        // edge set, and a premise pair already expanded contributes nothing
+        // new. Without this the loop diverges when a congruence edge's
+        // ORIGINAL-children pair is currently bridged by that edge itself
+        // (original children predate recanonize; their present equality can
+        // route through the very merge the collision produced), which the
+        // forest walk then re-emits forever. Measured on
+        // QF_UF_boolean_backtracking: unbounded step growth past 2M entries.
+        let mut expanded: hashbrown::HashSet<(Cfg::G, Cfg::G)> = hashbrown::HashSet::new();
         let mut i = 0;
         while i < buf.steps.len() {
             if let Justification::Congruence { node_a, node_b } = buf.steps[i].2 {
+                if !expanded.insert((node_a, node_b)) {
+                    i += 1;
+                    continue;
+                }
                 buf.children_a.clear();
                 buf.children_b.clear();
                 self.collect_original_children(node_a, &mut buf.children_a, &mut ac_scratch);
