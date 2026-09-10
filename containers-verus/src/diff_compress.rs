@@ -1262,4 +1262,561 @@ pub fn compress_frame<T: IndexLike, I: IndexFromNat>(
     }
 }
 
+// ===========================================================================
+// RunCol: index-major run column that reconstructs indices via IndexLike
+// arithmetic (checked_add), carrying a ghost of the write pairs. NO IndexFromNat,
+// so it works for opaque id index types (the A2 sidestep). Write-order runs:
+// exact. `run_seq` is nat-space (index-as-nat, value), so no `I` is constructed in
+// spec; the actual `I` values live in the ghost `pairs`, tied to `run_seq` by
+// `as_nat` in `wf`. This mirrors the verified `diff_log::cold_vals` structure.
+// ===========================================================================
+
+/// One run: values at consecutive indices `start, start+1, ...`.
+pub struct RunEntry<T, I> {
+    pub start: I,
+    pub vals: Vec<T>,
+}
+
+/// The (index-as-nat, value) pairs of a run sequence, concatenated in order.
+pub open spec fn run_seq<T: Copy, I: IndexLike>(runs: Seq<RunEntry<T, I>>) -> Seq<(nat, T)>
+    decreases runs.len(),
+{
+    if runs.len() == 0 {
+        Seq::empty()
+    } else {
+        Seq::new(runs[0].vals@.len(),
+            |k: int| ((runs[0].start.as_nat() + k) as nat, runs[0].vals@[k]))
+        + run_seq(runs.subrange(1, runs.len() as int))
+    }
+}
+
+/// Appending a run extends `run_seq` by exactly that run's pairs.
+pub proof fn lemma_run_seq_snoc<T: Copy, I: IndexLike>(runs: Seq<RunEntry<T, I>>, r: RunEntry<T, I>)
+    ensures
+        run_seq(runs.push(r)) == run_seq(runs)
+            + Seq::new(r.vals@.len(), |k: int| ((r.start.as_nat() + k) as nat, r.vals@[k])),
+    decreases runs.len(),
+{
+    reveal_with_fuel(run_seq, 2);
+    if runs.len() == 0 {
+        assert(runs.push(r) =~= seq![r]);
+        assert(run_seq(runs) =~= Seq::<(nat, T)>::empty());
+    } else {
+        let tail = runs.subrange(1, runs.len() as int);
+        lemma_run_seq_snoc(tail, r);
+        assert(runs.push(r)[0] == runs[0]);
+        assert(runs.push(r).subrange(1, runs.push(r).len() as int) =~= tail.push(r));
+        let a = Seq::new(runs[0].vals@.len(),
+            |k: int| ((runs[0].start.as_nat() + k) as nat, runs[0].vals@[k]));
+        let b = run_seq(tail);
+        let c = Seq::new(r.vals@.len(), |k: int| ((r.start.as_nat() + k) as nat, r.vals@[k]));
+        assert(a + (b + c) =~= (a + b) + c);
+    }
+}
+
+/// The pair-seq a single in-progress run contributes: values at `start, start+1, ...`
+/// in `as_nat` space. `run_seq(runs) + cur_pairs(cur_start, cur_vals)` is the
+/// coalescing loop invariant's left side.
+pub open spec fn cur_pairs<T: Copy, I: IndexLike>(start: I, vals: Seq<T>) -> Seq<(nat, T)> {
+    Seq::new(vals.len(), |k: int| ((start.as_nat() + k) as nat, vals[k]))
+}
+
+/// The first `n` write pairs projected to `(index-as-nat, value)`: the abstract
+/// target the write-order run encoder reproduces. `run_seq(compress(d).runs)`
+/// equals `nat_pairs(d, d.len())`.
+pub open spec fn nat_pairs<T: Copy, I: IndexLike>(d: Seq<(T, I)>, n: nat) -> Seq<(nat, T)> {
+    Seq::new(n, |t: int| (d[t].1.as_nat(), d[t].0))
+}
+
+/// `cur_pairs` extends by one at index `start + old_len` when a value is pushed.
+pub proof fn lemma_cur_pairs_push<T: Copy, I: IndexLike>(start: I, vals: Seq<T>, v: T)
+    ensures
+        cur_pairs::<T, I>(start, vals.push(v))
+            == cur_pairs::<T, I>(start, vals)
+                + seq![((start.as_nat() + vals.len()) as nat, v)],
+{
+    assert(cur_pairs::<T, I>(start, vals.push(v))
+        =~= cur_pairs::<T, I>(start, vals)
+            + seq![((start.as_nat() + vals.len()) as nat, v)]);
+}
+
+/// `nat_pairs` extends by one as `n` grows.
+pub proof fn lemma_nat_pairs_push<T: Copy, I: IndexLike>(d: Seq<(T, I)>, n: nat)
+    requires n < d.len(),
+    ensures
+        nat_pairs(d, n + 1) == nat_pairs(d, n) + seq![(d[n as int].1.as_nat(), d[n as int].0)],
+{
+    assert(nat_pairs(d, n + 1)
+        =~= nat_pairs(d, n) + seq![(d[n as int].1.as_nat(), d[n as int].0)]);
+}
+
+/// An index-major run column: the runs plus a ghost of the write pairs it encodes,
+/// tied to the runs by `as_nat` (so no `from_nat`/`IndexFromNat` is needed).
+pub struct RunCol<T, I> {
+    pub runs: Vec<RunEntry<T, I>>,
+    pub pairs: Ghost<Seq<(T, I)>>,
+    /// Cached entry count (`== pairs.len()`). Stored so a cold tier can read a frame's
+    /// length in O(1) without summing run lengths (which would risk `usize` overflow).
+    pub len: usize,
+}
+
+impl<T: Copy, I: IndexLike> RunCol<T, I> {
+    /// The ghost pairs are exactly the runs' reconstruction: same length, same
+    /// value, and each index's `as_nat` is `start + offset` (and in range).
+    pub open spec fn wf(&self) -> bool {
+        let rs = run_seq(self.runs@);
+        &&& self.pairs@.len() == rs.len()
+        &&& self.len == self.pairs@.len()
+        &&& forall|j: int| 0 <= j < rs.len() ==> {
+            &&& (#[trigger] self.pairs@[j]).0 == rs[j].1
+            &&& self.pairs@[j].1.as_nat() == rs[j].0
+            &&& rs[j].0 < I::max_nat()
+        }
+    }
+
+    /// Abstract value: the write pairs (carried as ghost).
+    pub open spec fn decode(&self) -> Seq<(T, I)> {
+        self.pairs@
+    }
+
+    /// Entry count, O(1) from the cached field.
+    pub fn entry_len(&self) -> (n: usize)
+        requires self.wf(),
+        ensures n == self.decode().len(),
+    {
+        self.len
+    }
+
+    /// Encoded footprint (deterministic, length-based): one `start` index per run
+    /// plus the value column. The index column is dropped, so this is below a plain
+    /// `Vec<(T, I)>`'s `len * (size_of::<T>() + size_of::<I>())` whenever runs
+    /// coalesce (fewer starts than entries). The measurement A2's heap check reads.
+    #[verifier::external_body]
+    pub fn byte_len(&self) -> usize {
+        let mut total = self.runs.len() * core::mem::size_of::<I>();
+        for run in self.runs.iter() {
+            total += run.vals.len() * core::mem::size_of::<T>();
+        }
+        total
+    }
+
+    /// Write-order run-coalescing over generic `I` (no `IndexFromNat`): coalesces a
+    /// value into the current run only when its index is `cur_start + cur_vals.len()`
+    /// in `as_nat` space (tested via `as_usize`), so the encoding reproduces the input
+    /// sequence exactly for ANY `diffs`; scattered or descending captures fall back to
+    /// singleton runs. `decode() == diffs@` (via `run_seq == nat_pairs`). This is the
+    /// general A2 encoder; `single_run` is its one-run special case.
+    #[verifier::rlimit(800)]
+    pub fn compress(diffs: &Vec<(T, I)>) -> (r: RunCol<T, I>)
+        ensures
+            r.wf(),
+            r.decode() == diffs@,
+    {
+        proof { reveal(run_seq); }
+        let mut runs: Vec<RunEntry<T, I>> = Vec::new();
+        let mut cur_start: I = <I as IndexLike>::max();  // dummy; overwritten before use
+        let mut cur_vals: Vec<T> = Vec::new();
+        let mut i: usize = 0;
+        while i < diffs.len()
+            invariant
+                i <= diffs@.len(),
+                run_seq(runs@) + cur_pairs::<T, I>(cur_start, cur_vals@)
+                    == nat_pairs(diffs@, i as nat),
+                (cur_vals@.len() == 0) <==> (i == 0),
+                cur_vals@.len() > 0
+                    ==> cur_start.as_nat() == diffs@[i as int - cur_vals@.len()].1.as_nat(),
+                cur_vals@.len() > 0
+                    ==> cur_start.as_nat() + cur_vals@.len() - 1 == diffs@[i as int - 1].1.as_nat(),
+                forall|t: int| 0 <= t < i ==> (#[trigger] diffs@[t].1).as_nat() < I::max_nat(),
+            decreases diffs@.len() - i,
+        {
+            let v = diffs[i].0;
+            let idx = diffs[i].1;
+            proof { idx.lemma_as_nat_bounded(); }
+            let ghost old_runs = runs@;
+            let ghost old_cur_start = cur_start;
+            let ghost old_cur_vals = cur_vals@;
+            if cur_vals.len() == 0 {
+                cur_start = idx;
+                cur_vals.push(v);
+                proof {
+                    lemma_cur_pairs_push::<T, I>(idx, Seq::<T>::empty(), v);
+                    assert(Seq::<T>::empty().push(v) =~= cur_vals@);
+                    assert(cur_pairs::<T, I>(idx, cur_vals@) =~= seq![(idx.as_nat(), v)]);
+                    lemma_nat_pairs_push::<T, I>(diffs@, i as nat);
+                }
+            } else if idx.as_usize() >= cur_start.as_usize()
+                && idx.as_usize() - cur_start.as_usize() == cur_vals.len() {
+                proof { lemma_cur_pairs_push::<T, I>(cur_start, cur_vals@, v); }
+                cur_vals.push(v);
+                proof {
+                    assert(old_cur_vals.push(v) =~= cur_vals@);
+                    assert(cur_start.as_nat() + old_cur_vals.len() == idx.as_nat());
+                    let a = run_seq(runs@);
+                    let b = cur_pairs::<T, I>(cur_start, old_cur_vals);
+                    let c = seq![(idx.as_nat(), v)];
+                    assert(cur_pairs::<T, I>(cur_start, cur_vals@) == b + c);
+                    assert(a + (b + c) =~= (a + b) + c);
+                    lemma_nat_pairs_push::<T, I>(diffs@, i as nat);
+                }
+            } else {
+                let entry = RunEntry { start: cur_start, vals: cur_vals };
+                let ghost gentry = entry;
+                runs.push(entry);
+                cur_start = idx;
+                cur_vals = Vec::new();
+                cur_vals.push(v);
+                proof {
+                    lemma_run_seq_snoc(old_runs, gentry);
+                    lemma_cur_pairs_push::<T, I>(idx, Seq::<T>::empty(), v);
+                    assert(Seq::<T>::empty().push(v) =~= cur_vals@);
+                    assert(cur_pairs::<T, I>(idx, cur_vals@) =~= seq![(idx.as_nat(), v)]);
+                    let a = run_seq(old_runs);
+                    let b = cur_pairs::<T, I>(old_cur_start, old_cur_vals);
+                    let c = seq![(idx.as_nat(), v)];
+                    assert(run_seq(runs@) == a + b);
+                    assert(a + b + c =~= (a + b) + c);
+                    lemma_nat_pairs_push::<T, I>(diffs@, i as nat);
+                }
+            }
+            i += 1;
+        }
+        let ghost pre_runs = runs@;
+        let ghost pre_cur_start = cur_start;
+        let ghost pre_cur_vals = cur_vals@;
+        if cur_vals.len() > 0 {
+            let entry = RunEntry { start: cur_start, vals: cur_vals };
+            let ghost gentry = entry;
+            runs.push(entry);
+            proof {
+                lemma_run_seq_snoc(pre_runs, gentry);
+            }
+        } else {
+            proof {
+                // cur empty ⇒ i == 0 ⇒ diffs empty; current-run term is empty.
+                assert(cur_pairs::<T, I>(cur_start, cur_vals@) =~= Seq::<(nat, T)>::empty());
+            }
+        }
+        let r = RunCol { runs, pairs: Ghost(diffs@), len: diffs.len() };
+        proof {
+            // run_seq(runs) == nat_pairs(diffs, len); wf follows by the as_nat relation.
+            assert(run_seq(r.runs@) == nat_pairs(diffs@, diffs@.len() as nat));
+            let rs = run_seq(r.runs@);
+            assert(rs.len() == diffs@.len());
+            assert forall|j: int| 0 <= j < rs.len() implies {
+                &&& (#[trigger] r.pairs@[j]).0 == rs[j].1
+                &&& r.pairs@[j].1.as_nat() == rs[j].0
+                &&& rs[j].0 < I::max_nat()
+            } by {
+                assert(rs[j] == (diffs@[j].1.as_nat(), diffs@[j].0));
+            }
+        }
+        r
+    }
+
+    /// Reconstruct the write pairs. The index-major payoff: indices are rebuilt from
+    /// each run's `start` via `IndexLike::checked_add` (opaque-id safe, NO IndexFromNat),
+    /// and `decode_exec@ == decode()` is proved from `wf`'s `as_nat` relation plus
+    /// `lemma_as_nat_injective`.
+    pub fn decode_exec(&self) -> (out: Vec<(T, I)>)
+        requires self.wf(),
+        ensures out@ == self.decode(),
+    {
+        proof { reveal(run_seq); }
+        let mut out: Vec<(T, I)> = Vec::new();
+        let mut r: usize = 0;
+        while r < self.runs.len()
+            invariant
+                0 <= r <= self.runs@.len(),
+                self.wf(),
+                out@.len() == run_seq(self.runs@.subrange(0, r as int)).len(),
+                out@ == self.pairs@.subrange(0, out@.len() as int),
+            decreases self.runs@.len() - r,
+        {
+            let ghost base = out@.len();
+            let start = self.runs[r].start;
+            let m = self.runs[r].vals.len();
+            let mut k: usize = 0;
+            while k < m
+                invariant
+                    0 <= r < self.runs@.len(),
+                    self.wf(),
+                    m == self.runs@[r as int].vals@.len(),
+                    start == self.runs@[r as int].start,
+                    base == run_seq(self.runs@.subrange(0, r as int)).len(),
+                    0 <= k <= m,
+                    out@.len() == base + k,
+                    out@ == self.pairs@.subrange(0, out@.len() as int),
+                decreases m - k,
+            {
+                let ghost g = base + k;
+                proof {
+                    // global position g == base + k lands in run r at offset k.
+                    lemma_run_seq_at(self.runs@, r as int, k as int);
+                    start.lemma_as_nat_bounded();
+                    // g is in range: run_seq(runs[0..r+1]).len() == base + m > g.
+                    lemma_run_seq_split(self.runs@, (r + 1) as int);
+                    assert(self.runs@.subrange(0, r + 1)
+                        =~= self.runs@.subrange(0, r as int).push(self.runs@[r as int]));
+                    lemma_run_seq_snoc(self.runs@.subrange(0, r as int), self.runs@[r as int]);
+                    let rs = run_seq(self.runs@);
+                    // run_seq(runs[0..r+1]).len() == base + m, and rs is that prefix plus a
+                    // tail, so g == base + k < base + m <= rs.len().
+                    assert(run_seq(self.runs@.subrange(0, r + 1)).len() == base + m);
+                    assert(g < rs.len());
+                    // rs[g] == (start.as_nat()+k, vals[k]); wf ⇒ rs[g].0 < max_nat (via pairs[g]).
+                    assert(rs[g as int].0 == (start.as_nat() + k) as nat);
+                    assert(self.pairs@[g as int].1.as_nat() == rs[g as int].0);
+                    assert(rs[g as int].0 < I::max_nat());
+                    assert((k as nat) < I::max_nat());
+                }
+                let off = I::try_from_usize(k).unwrap();
+                let idx = crate::index_like::checked_add(start, off).unwrap();
+                proof {
+                    // idx.as_nat() == start.as_nat() + k == run_seq[g].0 == pairs[g].1.as_nat()
+                    // ⇒ idx == pairs[g].1 by injectivity; value matches directly.
+                    let rs = run_seq(self.runs@);
+                    assert(idx.as_nat() == self.pairs@[g as int].1.as_nat());
+                    I::lemma_as_nat_injective(idx, self.pairs@[g as int].1);
+                    assert(self.runs@[r as int].vals@[k as int] == self.pairs@[g as int].0);
+                }
+                out.push((self.runs[r].vals[k], idx));
+                proof {
+                    assert(out@ =~= self.pairs@.subrange(0, out@.len() as int));
+                }
+                k = k + 1;
+            }
+            proof {
+                assert(self.runs@.subrange(0, r + 1)
+                    =~= self.runs@.subrange(0, r as int).push(self.runs@[r as int]));
+                lemma_run_seq_snoc(self.runs@.subrange(0, r as int), self.runs@[r as int]);
+            }
+            r = r + 1;
+        }
+        proof {
+            assert(self.runs@.subrange(0, self.runs@.len() as int) =~= self.runs@);
+            assert(out@ =~= self.pairs@);
+        }
+        out
+    }
+
+    /// Fast index-major restore: apply each run to a destination value column by one
+    /// contiguous `copy_from_slice` (a memcpy), run by run in order. Because a run's
+    /// values sit at consecutive indices, this replaces the pair-by-pair overlay with
+    /// one bulk copy per run: the whole point of the index-major layout. `dst` must
+    /// have a slot for every reconstructed index (`dst.len() > max index`); callers
+    /// size it to the store.
+    ///
+    /// `external_body`: the slice `copy_from_slice` over raw memory is a trusted
+    /// primitive, not the verified surface (trust ledger group B, like the other
+    /// codec leaves). Its contract is that the resulting `dst` equals `dst` with the
+    /// `decode()` pairs applied in order (last write wins). That equivalence to the
+    /// verified `decode_exec` is conformance-checked by `run_col_index_major`.
+    #[verifier::external_body]
+    pub fn restore_runs_into(&self, dst: &mut Vec<T>) {
+        for run in self.runs.iter() {
+            let s = run.start.as_usize();
+            let n = run.vals.len();
+            dst[s..s + n].copy_from_slice(&run.vals);
+        }
+    }
+
+    /// The index column this frame decodes to (the `.1` projection of `decode()`).
+    /// When `RunCol` is used as an index-only cold frame (`T` a zero-size type), this
+    /// is the whole payload: `DiffIdxs`'s cold tier concatenates `idx_seq` across
+    /// frames, mirroring how `DiffVals` concatenates `ValFrame::decode`.
+    pub open spec fn idx_seq(&self) -> Seq<I> {
+        Seq::new(self.decode().len(), |j: int| self.decode()[j].1)
+    }
+
+    /// Random access to just the index at position `i` (`decode_at(i).1`). The read
+    /// accessor an index-only cold frame needs.
+    pub fn idx_at(&self, i: usize) -> (r: I)
+        requires self.wf(), i < self.decode().len(),
+        ensures r == self.idx_seq()[i as int],
+    {
+        self.decode_at(i).1
+    }
+
+    /// Random access to entry `i`, reconstructing its index from the run it lands in
+    /// (`checked_add(run_start, offset)`). O(runs) walk to locate the run; the read
+    /// accessor a cold `RunCol` frame needs so `DiffLog::index` can read a single
+    /// entry without decoding the whole frame. `decode_at(i) == decode()[i]`.
+    pub fn decode_at(&self, i: usize) -> (e: (T, I))
+        requires self.wf(), i < self.decode().len(),
+        ensures e == self.decode()[i as int],
+    {
+        proof { reveal(run_seq); }
+        // Walk runs, carrying the remaining within-frame offset `d == i - prefix_r`.
+        let mut d: usize = i;
+        let mut r: usize = 0;
+        while r < self.runs.len() && self.runs[r].vals.len() <= d
+            invariant
+                0 <= r <= self.runs@.len(),
+                self.wf(),
+                i < run_seq(self.runs@).len(),
+                d + run_seq(self.runs@.subrange(0, r as int)).len() == i,
+            decreases self.runs@.len() - r,
+        {
+            let flen = self.runs[r].vals.len();
+            proof {
+                assert(self.runs@.subrange(0, r + 1)
+                    =~= self.runs@.subrange(0, r as int).push(self.runs@[r as int]));
+                lemma_run_seq_snoc(self.runs@.subrange(0, r as int), self.runs@[r as int]);
+                // prefix_{r+1} == prefix_r + flen; still <= i, so r+1 is a valid run.
+                lemma_run_seq_split(self.runs@, (r + 1) as int);
+            }
+            d = d - flen;
+            r = r + 1;
+        }
+        // Loop exit: r < runs.len() (else i >= total, contradiction) and d < len_r.
+        proof {
+            lemma_run_seq_split(self.runs@, r as int);
+            assert(r < self.runs@.len());
+        }
+        let start = self.runs[r].start;
+        let ghost base = run_seq(self.runs@.subrange(0, r as int)).len();
+        proof {
+            lemma_run_seq_at(self.runs@, r as int, d as int);
+            start.lemma_as_nat_bounded();
+            let rs = run_seq(self.runs@);
+            assert(base + d == i);
+            assert(rs[i as int].0 == (start.as_nat() + d) as nat);
+            assert(self.pairs@[i as int].1.as_nat() == rs[i as int].0);
+            assert(rs[i as int].0 < I::max_nat());
+            assert((d as nat) < I::max_nat());
+        }
+        let off = I::try_from_usize(d).unwrap();
+        let idx = crate::index_like::checked_add(start, off).unwrap();
+        proof {
+            let rs = run_seq(self.runs@);
+            assert(idx.as_nat() == self.pairs@[i as int].1.as_nat());
+            I::lemma_as_nat_injective(idx, self.pairs@[i as int].1);
+            assert(self.runs@[r as int].vals@[d as int] == self.pairs@[i as int].0);
+        }
+        (self.runs[r].vals[d], idx)
+    }
+
+    /// Encode a single contiguous frame (all indices `start, start+1, ...`) as one
+    /// run, dropping the index column. The minimal index-major encoder; multi-run
+    /// coalescing generalizes it. `decode() == diffs@`.
+    pub fn single_run(diffs: &Vec<(T, I)>) -> (r: RunCol<T, I>)
+        requires
+            diffs@.len() > 0,
+            forall|k: int| 0 <= k < diffs@.len()
+                ==> (#[trigger] diffs@[k]).1.as_nat() == diffs@[0].1.as_nat() + k,
+        ensures
+            r.wf(),
+            r.decode() == diffs@,
+    {
+        proof { reveal(run_seq); }
+        let start = diffs[0].1;
+        let mut vals: Vec<T> = Vec::new();
+        let mut i: usize = 0;
+        while i < diffs.len()
+            invariant
+                0 <= i <= diffs@.len(),
+                vals@.len() == i,
+                forall|k: int| 0 <= k < i ==> #[trigger] vals@[k] == diffs@[k].0,
+                forall|k: int| 0 <= k < i
+                    ==> (#[trigger] diffs@[k].1).as_nat() < I::max_nat(),
+            decreases diffs@.len() - i,
+        {
+            let cur = diffs[i].1;
+            proof { cur.lemma_as_nat_bounded(); }
+            vals.push(diffs[i].0);
+            i += 1;
+        }
+        let ghost gvals = vals@;
+        let entry = RunEntry { start, vals };
+        let mut runs: Vec<RunEntry<T, I>> = Vec::new();
+        runs.push(entry);
+        let r = RunCol { runs, pairs: Ghost(diffs@), len: diffs.len() };
+        proof {
+            reveal_with_fuel(run_seq, 2);
+            assert(r.runs@.len() == 1);
+            assert(r.runs@.subrange(1, 1) =~= Seq::<RunEntry<T, I>>::empty());
+            assert(r.runs@[0].start == start);
+            assert(r.runs@[0].vals@ == gvals);
+            let rs = run_seq(r.runs@);
+            // Singleton run: rs[j] == (start.as_nat()+j, gvals[j]).
+            assert(rs =~= Seq::new(gvals.len(),
+                |k: int| ((start.as_nat() + k) as nat, gvals[k])));
+            assert(rs.len() == diffs@.len());
+            assert forall|j: int| 0 <= j < rs.len() implies {
+                &&& (#[trigger] r.pairs@[j]).0 == rs[j].1
+                &&& r.pairs@[j].1.as_nat() == rs[j].0
+                &&& rs[j].0 < I::max_nat()
+            } by {
+                // value: gvals[j] == diffs[j].0; index: diffs[j].1.as_nat() == start+j.
+                assert(rs[j] == ((start.as_nat() + j) as nat, gvals[j]));
+            }
+        }
+        r
+    }
+}
+
+/// `run_seq(runs)[g]` for a global position `g` in run `r` at offset `k`:
+/// `(start_r + k, vals_r[k])`. The random-access bridge `decode_exec` needs.
+pub proof fn lemma_run_seq_at<T: Copy, I: IndexLike>(runs: Seq<RunEntry<T, I>>, r: int, k: int)
+    requires
+        0 <= r < runs.len(),
+        0 <= k < runs[r].vals@.len(),
+    ensures
+        run_seq(runs)[run_seq(runs.subrange(0, r)).len() + k]
+            == ((runs[r].start.as_nat() + k) as nat, runs[r].vals@[k]),
+    decreases runs.len(),
+{
+    reveal_with_fuel(run_seq, 2);
+    let head = runs[0];
+    let rest = runs.subrange(1, runs.len() as int);
+    let hpairs = Seq::new(head.vals@.len(),
+        |j: int| ((head.start.as_nat() + j) as nat, head.vals@[j]));
+    if r == 0 {
+        assert(runs.subrange(0, 0) =~= Seq::<RunEntry<T, I>>::empty());
+        assert(run_seq(runs) == hpairs + run_seq(rest));
+    } else {
+        assert(runs.subrange(0, r).subrange(1, r) =~= rest.subrange(0, r - 1));
+        assert(run_seq(runs.subrange(0, r)) =~= hpairs + run_seq(rest.subrange(0, r - 1)));
+        let base = run_seq(runs.subrange(0, r)).len();
+        let hl = hpairs.len();
+        assert(base == hl + run_seq(rest.subrange(0, r - 1)).len());
+        lemma_run_seq_at(rest, r - 1, k);
+        assert(rest[r - 1] == runs[r]);
+        lemma_run_seq_split(runs, r);
+        assert(run_seq(runs) == hpairs + run_seq(rest));
+    }
+}
+
+/// `run_seq` splits at any run boundary.
+pub proof fn lemma_run_seq_split<T: Copy, I: IndexLike>(runs: Seq<RunEntry<T, I>>, r: int)
+    requires 0 <= r <= runs.len(),
+    ensures
+        run_seq(runs) == run_seq(runs.subrange(0, r))
+            + run_seq(runs.subrange(r, runs.len() as int)),
+    decreases runs.len(),
+{
+    reveal_with_fuel(run_seq, 2);
+    if runs.len() == 0 {
+        assert(runs.subrange(0, r) =~= Seq::<RunEntry<T, I>>::empty());
+        assert(runs.subrange(r, runs.len() as int) =~= Seq::<RunEntry<T, I>>::empty());
+    } else if r == 0 {
+        assert(runs.subrange(0, 0) =~= Seq::<RunEntry<T, I>>::empty());
+        assert(runs.subrange(0, runs.len() as int) =~= runs);
+    } else {
+        let head = runs[0];
+        let rest = runs.subrange(1, runs.len() as int);
+        lemma_run_seq_split(rest, r - 1);
+        let hpairs = Seq::new(head.vals@.len(),
+            |j: int| ((head.start.as_nat() + j) as nat, head.vals@[j]));
+        assert(runs.subrange(0, r).subrange(1, r) =~= rest.subrange(0, r - 1));
+        assert(run_seq(runs.subrange(0, r)) =~= hpairs + run_seq(rest.subrange(0, r - 1)));
+        assert(runs.subrange(r, runs.len() as int) =~= rest.subrange(r - 1, rest.len() as int));
+        let a = hpairs;
+        let b = run_seq(rest.subrange(0, r - 1));
+        let c = run_seq(rest.subrange(r - 1, rest.len() as int));
+        assert(a + (b + c) =~= (a + b) + c);
+    }
+}
+
 } // verus!

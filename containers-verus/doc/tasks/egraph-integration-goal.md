@@ -91,6 +91,76 @@ frames) is noted, not in scope.
   longer requiring a contiguous `idxs` slice for compressed columns (the change that lets a
   column drop its index column), and an `IndexRuns` column integrated end to end. Same
   differential test passes; MEASURED `heap_bytes()` < plain on a contiguous-batch workload.
+  Design decided (optimal-first): the `DiffStore` capture trait is NOT changed. Instead the
+  Vec MATERIALIZES the active/restored frame's index range into an owned `Vec<I>`
+  (`DiffLog::index_range`) and passes its slice to `prepare_mark`/`finish_restore`; the
+  capture machinery only ever needs one frame's indices, so a range copy (idxs-whole) or a
+  run-decode (index-major cold) both satisfy it, and dropping the stored index column becomes
+  invisible to the store interface. Step 1 (BUILT, 692d418): `index_range` + push_frame uses
+  it. Step 2: an index-major cold frame (RunFrame, no idx column) as a DiffVals variant,
+  `idxs` no longer whole; `index_range` run-decodes cold, copies the hot tail. Step 3: the
+  differential + heap_bytes test on a contiguous column.
+  Obstruction found for step 2 (BOUND PROPAGATION, wide): `RunFrame::decode_i` requires
+  `I: IndexFromNat` (reconstruct the dropped indices via `from_nat`), implemented only for the
+  primitive index types (u8/u16/u32/u64/usize), NOT the wrapper id types (`DenseId31/63`,
+  `SparseSetId`, `UseListId`, ...). Because `DiffLog<T,I>`'s `view()`/`wf` must be defined for
+  every variant at the type level, an `IndexRuns` variant whose `view()` run-decodes forces
+  `I: IndexFromNat` to propagate `DiffLog -> Vec -> every column instantiation`. So step 2's
+  real first move is to implement `IndexFromNat` for all id types (from_nat = wrap(from_nat of
+  the inner width) + the round-trip/bounded-value lemmas) and then bump the `DiffLog`/`Vec`
+  index bound: a broad multi-file change, unlike A1's localized diff_log-only proof.
+  Value-major (A1) had no such obstruction because it keeps `idxs` whole and reconstructs no
+  index.
+  NEGATIVE RESULT (measured, attempt reverted): `IndexFromNat` cannot be implemented for the
+  opaque type-invariant id types (DenseId31/63, wrapper ids) as the trait stands. Its
+  `lemma_as_nat_bounded_val(i: Self)` / `lemma_from_as_nat(i: Self)` take a spec-mode param, so
+  `use_type_invariant(&i)` is a mode error ("expression has mode spec, expected proof"), and
+  with empty bodies both postconditions fail (Verus does NOT globally assume a type invariant
+  for a spec value). For DenseId31 the facts `as_nat() < max_nat` and `from_nat(as_nat()) ==
+  self` ARE the invariant (`raw < 2^31`), unreachable from a receiver-free lemma; for a
+  primitive the same bound is structural (`u32 < 2^32`) so the empty proof works. Consequence
+  and decision: index-major on the live path is available only for PRIMITIVE-I columns as the
+  trait stands. Opaque-id columns need either an `IndexFromNat` redesign (receiver-based bound
+  lemmas, which then breaks `RunFrame::decode_i`'s ghost-index callers that read an index from
+  a `Seq` with no tracked receiver) or a trusted broadcast axiom that every id value satisfies
+  its invariant. So A2 proceeds for primitive-I contiguous columns; opaque-id columns stay
+  value-major/plain until the trait question is resolved.
+  UNBLOCK (confirmed sound): drop `IndexFromNat` entirely for the live-path index-major
+  encoder; use a ghost-write-set run column reconstructing indices with IndexLike arithmetic.
+  Design `RunCol<T,I>`: parallel `starts: Vec<I>` + `run_vals: Vec<Vec<T>>` (run r holds values
+  at consecutive indices `starts[r], starts[r]+1, ...`) + ghost `pairs: Seq<(T,I)>` (the write
+  sequence it encodes). `decode() == pairs` (spec). wf ties `pairs` to the runs by `as_nat`
+  ONLY (no `from_nat`): for run r, offset k, `pairs[off(r)+k].0 == run_vals[r][k]` and
+  `pairs[off(r)+k].1.as_nat() == starts[r].as_nat() + k < max_nat`, where `off(r)` is the
+  prefix sum of run lengths (a `cold_vals`-style recursive spec). `decode_exec` reconstructs
+  each index via `index_like::checked_add(starts[r], <I with as_nat k>)` whose ensures give
+  `res.as_nat() == starts[r].as_nat() + k`; with wf's `as_nat` relation and
+  `lemma_as_nat_injective`, `res == pairs[off(r)+k].1`, so `decode_exec@ == pairs == decode()`.
+  This needs only IndexLike (`as_nat`, `checked_add`, injectivity), works for opaque ids, and
+  is a write-order (exact) encoder; `compress` builds runs by capture-order-contiguous indices
+  and sets `pairs = diffs@`. The multiset round-trip and `lemma_multiset_eq_overlay` then give
+  restore-equivalence.
+  STATUS: BUILT and DISCHARGED on the live path (full crate green, commits 38a485d, bcfb9d3,
+  9092fd8, 2c113d9, 4cf605b, f842ef3). `RunCol<T,I>` cold-frame API: `compress` (write-order
+  coalescing, `decode() == diffs@` via `run_seq == nat_pairs`), `decode_exec`, `decode_at`,
+  `idx_seq`/`idx_at`, `restore_runs_into` (the memcpy fast restore), `single_run`, `byte_len`,
+  cached `len`. `DiffIdxs<I>` = `Plain(Vec<I>)` | `Runs { cold: Vec<RunCol<(),I>>, tail }` is
+  the index-major dual of `DiffVals`: `cold_idxs` concatenates each cold frame's `idx_seq`
+  (a `RunCol<(),I>` drops the index column to run starts), with the four lemmas mirroring
+  `cold_vals`. `DiffLog.idxs` is now `DiffIdxs<I>`; `compact_tail` folds the frame's index tail
+  into a cold frame; `index`/`index_range` reconstruct; the two `vec.rs` restore callers use
+  `index_range` (whole-slice `indices()` removed). At most one column compresses (index-major
+  keeps values plain) so `len` reads the plain column in O(1). All ~12 `DiffLog` methods
+  re-proved green. Acceptance: `index_major_compaction_tests::indexruns_restore_matches_plain_
+  and_compresses` drives a live IndexRuns Vec column through 24 `mark_and_compact` frames vs a
+  plain oracle: identical contents every step and after a deep cold restore, `tracking_bytes <
+  plain`. Differential restore==oracle + heap check on a live column: satisfied.
+  FOLLOW-UP (combined mode, user-proposed): index-major runs AND value-dict together for the
+  union-find columns (scattered-but-repetitive: drop the index column with runs AND compress
+  the few distinct values with a dictionary). Requires dropping the current "at most one column
+  compresses" invariant and adding a cached `len` to `DiffLog` (neither column stays plain to
+  read length from). A clean extension of the now-proven enum machinery; folds into A4's
+  per-column selection.
 - A3 (sorted index-major). `cargo verus verify` green with `Vec::restore`'s reconstruction
   re-established over the per-frame write-multiset contract (so a reordering flush is sound),
   and an `IndexRunsSorted` column integrated. Differential test (restore == oracle) passes
@@ -173,6 +243,15 @@ Matrix (each cell one Sundance run):
   in the design docs (G4). Empty or "expected" cells fail this criterion.
 - D4. Every losing configuration is recorded as a negative result with its number, not
   silently dropped.
+- D5. Both use cases are measured against the `main` branch baseline, not only against
+  semper-off: the SMT use case (LIA / tableau EUF subset) and the EqSat use case
+  (equality-saturation workload). Each reports the current branch vs `main` delta.
+- D6. Identify and record every suboptimal algorithmic aspect of diff-frame compression and
+  decompression found while measuring: the O(cold frames) linear frame walk in `index`
+  (a `starts` prefix-offset array would make it O(log)); any redundant re-decode on restore
+  where a memcpy slice-copy applies (`RunCol::restore_runs_into`); allocation churn in
+  `compress`/`decode_exec`; and the per-frame vs recompressed-cold-tail dictionary tradeoff.
+  Each recorded with the measured cost and the proposed fix (or why it was rejected).
 
 Forbidden proxies for Phase D: projecting Sundance numbers from the container microbenches;
 substituting the local `egraph/benches/saturate_bench` for the Sundance benches; leaving any

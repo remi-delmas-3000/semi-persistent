@@ -476,6 +476,47 @@ all contiguity but reordering. Both drop the index column, reconstructing it fro
 `start + offset` via `IndexFromNat::from_nat`; `decode_exec_i` is `external_body`
 against that spec, checked by `run_frame_roundtrip`.
 
+**Index-major with a verified decode (`RunCol`), for opaque id index types.** The
+`from_nat` reconstruction above needs `IndexFromNat`, which the primitive index types
+implement structurally but the opaque id types (`DenseId31`/`DenseId63`) cannot: their
+range bound is a `type_invariant`, and `from_nat` would have to re-establish it from a
+receiver-free spec-mode value, where the invariant is not assumed. Attempting the impl
+failed at exactly that point (empty-body postcondition unproven, `use_type_invariant`
+rejects a spec-mode argument): recorded negative result. `RunCol<T, I>` sidesteps it. It
+stores the same write-order runs but carries a ghost `pairs: Seq<(T, I)>` tied to the
+runs by `as_nat` (`run_seq(runs)[j] == (pairs[j].1.as_nat(), pairs[j].0)`), and its
+`decode_exec` reconstructs each index with `IndexLike::checked_add(start, offset)`,
+which is opaque-id safe. `decode_exec() == decode()` is proved (not `external_body`),
+so `RunCol` removes one trusted leaf relative to `RunFrame::decode_exec_i`. `compress`
+is the general write-order coalescing builder (`decode() == diffs@` via `run_seq ==
+nat_pairs`); `single_run` is its one-run special case for a contiguous frame.
+
+`restore_runs_into` is the fast restore the index-major layout exists for: a run's
+values sit at consecutive indices, so restoring a run is one `copy_from_slice` (a
+memcpy) into `dst[start..start+len]`, run by run in order, replacing the pair-by-pair
+overlay. The slice copy is `external_body` (raw-memory primitive, trust ledger group B);
+its contract, that the resulting column equals `dst` with the `decode()` pairs applied
+in order, is conformance-checked against the verified `decode_exec` by
+`run_col_index_major` (2000 cases). `byte_len` measures the real encoded footprint (one
+`start` per run plus the value column); the same proptest asserts it is below plain
+`len * (size_of::<T>() + size_of::<I>())` for coalescing frames.
+
+**Shipped on the live path.** `DiffIdxs<I>` = `Plain(Vec<I>)` | `Runs { cold:
+Vec<RunCol<(), I>>, tail }` is the index-major dual of `DiffVals`: `cold_idxs`
+concatenates each cold frame's `idx_seq` (a `RunCol<(), I>` stores only run starts,
+so the index column drops to one start per run), with four lemmas mirroring
+`cold_vals` (snoc/at/at_prefix/split). `DiffLog.idxs` is a `DiffIdxs<I>`;
+`compact_tail` folds the closed frame's index tail into a cold frame, `index` and
+`index_range` reconstruct via `RunCol::idx_at`, and the `Vec` restore path
+materializes index ranges through `index_range` (the whole-slice `indices()` is
+gone). At most one column compresses at a time (index-major keeps values plain), so
+`len` reads the plain column in O(1). `index_major_compaction_tests` drives a live
+`IndexRuns` `Vec` column through 24 `mark_and_compact` frames against a plain oracle:
+identical contents at every step and after a deep cold restore, `tracking_bytes <
+plain`. The follow-up combined mode (index-major runs AND value-dict together, for
+the scattered-but-repetitive union-find columns) drops the one-column-at-a-time
+invariant and adds a cached `DiffLog` length; it folds into per-column selection.
+
 **The two-stack contract is the per-frame write multiset.** Because sorting reorders,
 the two-stack (`CompressedStack`/`TwoStackLog`) cannot preserve the flat `cold@ ++
 hot@` sequence. Its contract is `frame_msets(): Seq<Multiset<(T,I)>>` (one multiset

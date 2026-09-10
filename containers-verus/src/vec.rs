@@ -1437,12 +1437,14 @@ where
                 crate::diff_log::DiffLog::new_plain(),
             crate::diff_compress::CompressionMode::ValueDict =>
                 crate::diff_log::DiffLog::new_dict(),
-            // The single-stack Vec's diff_log is either plain or dict-top;
-            // index-major run-coalescing and per-frame Auto selection live in the
-            // two-stack (TwoStackLog), not this in-place log, so both build a
-            // plain top here.
-            crate::diff_compress::CompressionMode::IndexRuns
-            | crate::diff_compress::CompressionMode::IndexRunsSorted
+            // Index-major: the index column is run-coalesced into cold frames at
+            // compact_tail (values stay plain); mark_and_compact folds the closed
+            // frame's index tail.
+            crate::diff_compress::CompressionMode::IndexRuns =>
+                crate::diff_log::DiffLog::new_runs(),
+            // Sorted index-major (A3) and per-frame Auto (A4) are not yet integrated
+            // into this in-place log; build a plain top.
+            crate::diff_compress::CompressionMode::IndexRunsSorted
             | crate::diff_compress::CompressionMode::Auto =>
                 crate::diff_log::DiffLog::new_plain(),
         };
@@ -1536,6 +1538,7 @@ where
     /// keeps the log at most one entry per captured index, so a pop/push loop
     /// cannot grow it (see tests/compat_bounded_pop.rs).
     pub fn diff_log_len(&self) -> (n: usize)
+        requires self.wf(),
         ensures n == self.diff_log_len_spec(),
     {
         self.diff_log.len()
@@ -2783,8 +2786,12 @@ where
         let ghost old_snaps = self.snapshots@;
         let ghost old_view = self.view();
 
-        let prev_suffix = vstd::slice::slice_subrange(
-            self.diff_log.indices(), parent_diff_start, self.diff_log.len());
+        // Materialize the active frame's index range (A2 plumbing: works for a
+        // future index-major log that drops the stored index column). For the
+        // idxs-whole representation this is a range copy; `prev_suffix@` is the same
+        // index projection the old `indices()` slice gave.
+        let prev_suffix_vec = self.diff_log.index_range(parent_diff_start, self.diff_log.len());
+        let prev_suffix = prev_suffix_vec.as_slice();
         proof {
             // Discharge prepare_mark's sparse-clear requires: every set flag
             // is named by a suffix entry. From wf: a set flag j is (no-stray)
@@ -3079,8 +3086,11 @@ where
             // is within the log (wf_for_snap's diff_start bound on old_self).
             old_self.lemma_diff_start_le_n(target_index as int);
         }
-        let replayed_pre = vstd::slice::slice_subrange(
-            self.diff_log.indices(), diff_start, self.diff_log.len());
+        // Materialize the replayed index range (index-major safe: index_range
+        // reconstructs from cold runs when the column is compressed, or copies the
+        // plain slice otherwise). `replayed_pre@[k] == diff_log@[diff_start+k].1`.
+        let replayed_pre_vec = self.diff_log.index_range(diff_start, self.diff_log.len());
+        let replayed_pre = replayed_pre_vec.as_slice();
 
         let ghost base = self.store.data();
         let ghost base_flags = self.store.captured();
@@ -3280,8 +3290,10 @@ where
             let new_top_frame = self.frames[target_index - 1];
             self.active_saved_len = new_top_frame.saved_len;
             let new_top_ds = new_top_frame.diff_start;
-            let surviving = vstd::slice::slice_subrange(
-                self.diff_log.indices(), new_top_ds, self.diff_log.len());
+            // index-major safe: reconstruct the surviving index range from cold runs
+            // (or copy the plain slice). `surviving@[m] == diff_log@[new_top_ds+m].1`.
+            let surviving_vec = self.diff_log.index_range(new_top_ds, self.diff_log.len());
+            let surviving = surviving_vec.as_slice();
             proof {
                 surviving_view = surviving@;
                 new_top_ds_ghost = new_top_ds as int;
@@ -3947,6 +3959,69 @@ mod value_major_compaction_tests {
 
         // Restore both to an early frame (deep backtrack through the cold region) and
         // to a recent one; contents must still agree (A1.2 through the cold decode).
+        vc.restore(tc[3]);
+        vp.restore(tp[3]);
+        assert_eq!(read_back(&vc), read_back(&vp), "views diverged after deep restore");
+    }
+}
+
+#[cfg(test)]
+mod index_major_compaction_tests {
+    // A2 acceptance: an IndexRuns column driven through mark_and_compact restores
+    // identically to a plain (None) oracle, and its diff-log heap footprint is
+    // strictly smaller on a contiguous-index workload (the index column is dropped
+    // to one run start per frame). This is the live-Vec-column differential
+    // restore==oracle test plus the heap check the contract requires for A2.
+    use super::{ShrinkPolicy, Vec};
+    use crate::diff_compress::CompressionMode;
+    use crate::parallel_store::ParallelStore;
+
+    type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
+
+    fn read_back(v: &V) -> std::vec::Vec<u32> {
+        (0..v.len() as usize).map(|i| v.get_index(i as u32)).collect()
+    }
+
+    #[test]
+    fn indexruns_restore_matches_plain_and_compresses() {
+        const N: u32 = 200;
+        const FRAMES: u32 = 24;
+
+        let mut vc = V::new_with_mode(CompressionMode::IndexRuns);
+        let mut vp = V::new_with_mode(CompressionMode::None);
+        for _ in 0..N {
+            vc.push(0);
+            vp.push(0);
+        }
+
+        // Each frame overwrites cells 0..N in order, so the captured index column per
+        // frame is the contiguous run 0,1,...,N-1: write-order coalescing folds it to
+        // ONE run (a single start), the shape index-major targets. Keep the tokens.
+        let mut tc = std::vec::Vec::new();
+        let mut tp = std::vec::Vec::new();
+        for k in 0..FRAMES {
+            tc.push(vc.mark_and_compact(ShrinkPolicy::Never));
+            tp.push(vp.mark(ShrinkPolicy::Never));
+            for i in 0..N {
+                vc.set(i, k + 1);
+                vp.set(i, k + 1);
+            }
+            // Same observable contents at every step (A2 differential).
+            assert_eq!(read_back(&vc), read_back(&vp), "views diverged at frame {k}");
+        }
+
+        // A2 heap check: the index column is dropped to one run start per frame, so
+        // the compressed diff log is strictly smaller than plain (which stores a full
+        // u32 index per captured cell).
+        assert!(
+            vc.tracking_bytes() < vp.tracking_bytes(),
+            "index-major diff log {} !< plain {}",
+            vc.tracking_bytes(),
+            vp.tracking_bytes(),
+        );
+
+        // Restore into the cold region (deep backtrack through run-decoded indices)
+        // and contents must still agree (A2 through the run reconstruction).
         vc.restore(tc[3]);
         vp.restore(tp[3]);
         assert_eq!(read_back(&vc), read_back(&vp), "views diverged after deep restore");
