@@ -492,6 +492,14 @@ where
             if eg.node_flags(gid) & crate::node_types::FLAG_SUBSUMED != 0 {
                 continue;
             }
+            // Class-level e-matching shield (the `matchable` bit): skip every node
+            // of a shielded class, exactly as `FLAG_SUBSUMED` skips one node, so a
+            // shielded class contributes to none of the matcher indexes and the
+            // leapfrog join never enumerates it. `repr` is the class root already
+            // resolved above, so this is a sparse-set lookup + bit read per node.
+            if !eg.is_repr_matchable(repr) {
+                continue;
+            }
 
             let ok = op.to_usize();
             op_keys = op_keys.max(ok + 1);

@@ -65,6 +65,15 @@ pub struct ClassData<L: DenseId, T: DenseId> {
     pub use_list: L,
     pub min_row: Option<<T as DenseId>::Index>,
     pub atomic: bool,
+    /// Whether this class participates in e-matching. `true` by default (a fresh
+    /// singleton matches as today); a client sets it `false` to shield the whole
+    /// class from the matcher (the generic e-matching shield, generalizing the
+    /// node-level `:subsume`). Class-closed: folded survivor ||= absorbed at
+    /// `merge_with`, so a class is shielded only if every member class was. The
+    /// bit lives here so it rolls back with the class payload on `restore`.
+    /// Soundness-free: shielding only removes matches, never adds one, so no wf
+    /// invariant constrains it.
+    pub matchable: bool,
     /// Member-node count of the class, in the node-id family's index type so
     /// the width follows the configuration (the `min_row` pattern). Set to 1
     /// at `add_singleton`, folded survivor += absorbed at `merge_with`,
@@ -88,6 +97,7 @@ impl<L: DenseId, T: DenseId> core::default::Default for ClassData<L, T> {
             use_list: L::default(),
             min_row: None,
             atomic: false,
+            matchable: true,
             size: <T::Index as IndexLike>::min(),
         }
     }
@@ -104,6 +114,7 @@ pub struct ClassDataRepr<LR, I> {
     pub row: I,
     pub present: bool,
     pub atomic: bool,
+    pub matchable: bool,
     pub size: I,
 }
 
@@ -127,6 +138,7 @@ impl<L: DenseId, T: DenseId> Tagged for ClassData<L, T> {
             use_list: L::value_of(r.a),
             min_row: if r.present { Some(r.row) } else { None },
             atomic: r.atomic,
+            matchable: r.matchable,
             size: r.size,
         }
     }
@@ -158,6 +170,7 @@ impl<L: DenseId, T: DenseId> Tagged for ClassData<L, T> {
             row,
             present,
             atomic: self.atomic,
+            matchable: self.matchable,
             size: self.size,
         }
     }
@@ -166,6 +179,7 @@ impl<L: DenseId, T: DenseId> Tagged for ClassData<L, T> {
             use_list: L::from_repr(&r.a),
             min_row: if r.present { Some(r.row) } else { None },
             atomic: r.atomic,
+            matchable: r.matchable,
             size: r.size,
         }
     }
@@ -718,7 +732,7 @@ where
             None => crate::guard::refuse("EClasses::add_singleton: index width below 1"),
         };
         let raw_key = match self.reprs.try_add(ClassData {
-            use_list: list_id, min_row: None, atomic: false, size: one,
+            use_list: list_id, min_row: None, atomic: false, matchable: true, size: one,
         }) {
             Ok(k) => k,
             Err(_) => crate::guard::refuse("EClasses::add_singleton: repr capacity exhausted"),
@@ -777,7 +791,7 @@ where
             assert(self.reprs.contains_spec(raw_key));
             assert(ss_contains(sparse, indices, live, kn));
             assert(ss_value(dense, sparse, kn)
-                == ClassData::<L, T> { use_list: list_id, min_row: None, atomic: false, size: one });
+                == ClassData::<L, T> { use_list: list_id, min_row: None, atomic: false, matchable: true, size: one });
 
             // survivors: old liveness and values carry over, id-for-nat
             assert forall|kk: nat| #[trigger] ss_contains(osparse, oindices, olive, kk)
@@ -1619,6 +1633,13 @@ where
             None => crate::guard::refuse(
                 "EClasses::merge: class size overflows the index width"),
         };
+        // Matchable is class-closed (relevant if any member is): fold survivor
+        // ||= absorbed, so a class stays shielded only if both sides were. This
+        // rides the survivor payload write below; `lemma_merge_wf` constrains the
+        // survivor's use_list/min_row/atomic/size but not matchable, and
+        // `eg_model_wf` reads neither atomic nor matchable, so the fold preserves
+        // wf for free (soundness-free: shielding only removes matches).
+        sdata.matchable = sdata.matchable || data.matchable;
         self.reprs.set_live(raw_skey, sdata);
         let ghost m1 = *self;
         // distinct rings, from W3a: were s and ab on one ring, they would
@@ -2320,6 +2341,19 @@ where
         self.reprs.get_live(raw_key).atomic
     }
 
+    /// Whether class `key` participates in e-matching (the generic e-matching
+    /// shield; `true` by default). Refuses a dead key. Soundness-free: the value
+    /// only removes matches, so no wf invariant constrains it.
+    pub fn matchable(&self, key: K) -> (b: bool)
+        requires self.wf(),
+    {
+        let raw_key = Self::key_index(key);
+        if !self.reprs.contains(raw_key) {
+            crate::guard::refuse("EClasses::matchable: class key is not live");
+        }
+        self.reprs.get_live(raw_key).matchable
+    }
+
     /// The use-list id of class `key`. Refuses a dead key.
     pub fn use_list_id(&self, key: K) -> (l: L)
         requires self.wf(),
@@ -2354,6 +2388,66 @@ where
             return;
         }
         data.atomic = true;
+        self.reprs.set_live(raw_key, data);
+        proof {
+            let dense = self.reprs.dense_view();
+            let sparse = self.reprs.sparse_view();
+            let indices = self.reprs.indices_view();
+            let live = self.reprs.n_spec();
+            let odense = o.reprs.dense_view();
+            let osparse = o.reprs.sparse_view();
+            let oindices = o.reprs.indices_view();
+            assert(sparse == osparse && indices == oindices && live == o.reprs.n_spec());
+            assert forall|kk: nat| #[trigger] ss_contains(sparse, indices, live, kk)
+                implies ss_value(dense, sparse, kk).use_list
+                        == ss_value(odense, osparse, kk).use_list
+                    && ss_value(dense, sparse, kk).min_row
+                        == ss_value(odense, osparse, kk).min_row by {
+                if kk != key.as_nat() {
+                    assert(osparse[kk as int].as_nat()
+                        != osparse[key.as_nat() as int].as_nat()) by {
+                        if osparse[kk as int].as_nat()
+                            == osparse[key.as_nat() as int].as_nat() {
+                            assert(oindices[osparse[kk as int].as_nat() as int]
+                                .as_nat() == kk);
+                        }
+                    }
+                    assert(ss_value(dense, sparse, kk) == ss_value(odense, osparse, kk));
+                }
+            }
+            assert(eg_model_wf::<T, K, L, N>(
+                self.entries.model_view(), self.entries.payload_seq(),
+                self.uf.roots_view(), dense, sparse, indices,
+                self.uses.model_view(), self.uses.nodes_view(),
+                self.min_pool.view(), self.min_width as nat));
+        }
+    }
+
+    /// Set class `key`'s e-matching participation (the generic e-matching
+    /// shield). Settable both ways, unlike `set_atomic` (relevancy un-shields as
+    /// terms become relevant). Refuses a dead key. Soundness-free: the bit only
+    /// removes matches, so no wf invariant constrains it, and the proof is the
+    /// same shape as `set_atomic` — the mutation touches one class's payload and
+    /// leaves every class's `use_list`/`min_row` unchanged, which is all
+    /// `eg_model_wf` reads of the payload column.
+    pub fn set_class_matchable(&mut self, key: K, m: bool)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).n_spec() == old(self).n_spec(),
+            final(self).roots_view() == old(self).roots_view(),
+            final(self).num_classes_spec() == old(self).num_classes_spec(),
+    {
+        let raw_key = Self::key_index(key);
+        if !self.reprs.contains(raw_key) {
+            crate::guard::refuse("EClasses::set_class_matchable: class key is not live");
+        }
+        let ghost o = *old(self);
+        let mut data = self.reprs.get_live(raw_key);
+        if data.matchable == m {
+            return;
+        }
+        data.matchable = m;
         self.reprs.set_live(raw_key, data);
         proof {
             let dense = self.reprs.dense_view();

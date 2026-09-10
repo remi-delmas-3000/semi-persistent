@@ -3063,6 +3063,18 @@ where
         self.classes.find_const(id)
     }
 
+    /// Whether the class whose root is `root` participates in e-matching. Takes
+    /// an already-resolved class root (from [`class_repr`](Self::class_repr)) so
+    /// the matcher's index build avoids a second `find_const` per node. Defaults
+    /// to `true` (matchable) when `root` names no live class. See
+    /// [`set_class_matchable`](Self::set_class_matchable).
+    pub(crate) fn is_repr_matchable(&self, root: Cfg::G) -> bool {
+        match self.classes.repr_id(root) {
+            Some(key) => self.classes.matchable(key),
+            None => true,
+        }
+    }
+
     /// The minimum-monomial node stored for `id`'s class in `id`'s op column (the completion
     /// rule RHS, §9a). Maintained on merge by `fold_min_monomial`. Returns `None` if `id` has
     /// no class or its op has no stored monomial for that class. Read by tests only.
@@ -3177,6 +3189,30 @@ where
     /// indices skip `FLAG_SUBSUMED`). Distinct from AC-collapse — see `FLAG_AC_COLLAPSED`.
     pub fn subsume(&mut self, id: Cfg::G) {
         self.set_node_flag(id, crate::node_types::FLAG_SUBSUMED);
+    }
+
+    /// Whether `id`'s e-class participates in e-matching (the generic e-matching
+    /// shield; `true` by default). `None` if `id` has no class. Class-level
+    /// analogue of the node-level [`is_subsumed`](Self::is_subsumed): where
+    /// `subsume` shields one node, this reports whether a whole class is shielded.
+    pub fn is_class_matchable(&self, id: Cfg::G) -> Option<bool> {
+        let repr = self.classes.repr_id(self.classes.find_const(id))?;
+        Some(self.classes.matchable(repr))
+    }
+
+    /// Shield (`false`) or un-shield (`true`) `id`'s whole e-class from
+    /// e-matching. Resolves `id` to its class root and writes the bit through the
+    /// semi-persistent class store, so it is captured and rolls back on
+    /// `restore`. Both directions are supported (unlike `subsume`, which is
+    /// monotone), because a relevancy client un-shields as terms become relevant.
+    /// Shielded classes still participate fully in congruence and merges; only
+    /// matching is affected — the matcher's index build skips a shielded class's
+    /// nodes (`IndexStore::build`). Soundness-free: shielding only removes
+    /// matches. No-op if `id` has no class.
+    pub fn set_class_matchable(&mut self, id: Cfg::G, matchable: bool) {
+        if let Some(repr) = self.classes.repr_id(self.classes.find_const(id)) {
+            self.classes.set_class_matchable(repr, matchable);
+        }
     }
 
     /// AC-completion collapse: retire `id` from the active AC rule set (its child
