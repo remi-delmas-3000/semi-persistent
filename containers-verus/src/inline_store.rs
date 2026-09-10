@@ -292,6 +292,15 @@ where
             let mut new_r = r;
             T::set_tag(&mut new_r);
             self.data.set(iu, new_r);
+            proof {
+                assert(self.captured_spec()
+                    =~= old(self).captured_spec().update(iu as int, true));
+            }
+        } else {
+            proof {
+                assert(self.captured_spec() =~= old(self).captured_spec());
+                assert(<Self as DiffStore<T, I, TRACK>>::unique_capture_spec());
+            }
         }
     }
 
@@ -311,6 +320,10 @@ where
         T::set_tag(&mut new_r);
         self.data.set(iu, new_r);
     }
+
+    open spec fn unique_capture_spec() -> bool { true }
+
+    fn unique_capture() -> bool { true }
 
     open spec fn needs_replayed_indices_spec() -> bool { true }
 

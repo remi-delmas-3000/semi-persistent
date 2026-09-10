@@ -57,7 +57,7 @@ pub use containers::{DenseId, IdFactory, IndexLike, SparseSet};
 pub use egraph::{
     CompletionOutcome, DEFAULT_COMPLETION_NODE_BUDGET, EGraph, EGraph31, EGraph63, EGraphM16,
     EGraphToken, PAR_NODE_MIN, ProofDumpStats, UnionBy, take_fanout_witness,
-    take_markrestore_profile,
+    take_markrestore_profile, take_restore_member_profile, RESTORE_PROF_MEMBERS,
 };
 
 // Flat re-exports from other modules
@@ -65,4 +65,5 @@ pub use classes::EClasses;
 pub use config::EGraphConfig;
 pub use id::{ENodeId, ENodeKind, OpId, SortId};
 pub use registry::{OpRegistry, SortRegistry};
+pub use node_store::{take_node_restore_profile, NODE_PROF_PARTS};
 pub use union_find::UnionFind;

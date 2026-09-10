@@ -266,6 +266,7 @@ where
                     =~= old(self).captured_spec().update(i.as_nat() as int, true));
             } else {
                 assert(self.captured_spec() =~= old(self).captured_spec());
+                assert(<Self as DiffStore<T, I, TRACK>>::unique_capture_spec());
             }
         }
     }
@@ -286,6 +287,10 @@ where
             assert(self.captured_spec()[i.as_nat() as int] == true);
         }
     }
+
+    open spec fn unique_capture_spec() -> bool { true }
+
+    fn unique_capture() -> bool { true }
 
     open spec fn needs_replayed_indices_spec() -> bool { false }
 

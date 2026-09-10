@@ -553,13 +553,10 @@ pub(crate) proof fn lemma_frame_inv_range_local<T, I: IndexLike>(
     ensures
         frame_inv_range::<T, I>(above, db, lo, hi, snap, saved_len),
 {
-    // Structural conjuncts: index-bound and uniqueness foralls read entries
-    // only in [lo, hi), where da and db agree.
+    // Structural conjunct: the index-bound forall reads entries only in
+    // [lo, hi), where da and db agree.
     assert forall|m: int| lo <= m < hi implies
         (#[trigger] db[m]).1.as_nat() < saved_len by { assert(da[m] == db[m]); }
-    assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b implies
-        (#[trigger] db[a]).1.as_nat() != (#[trigger] db[b]).1.as_nat()
-    by { assert(da[a] == db[a]); assert(da[b] == db[b]); }
     // Per-cell two-arm: frame_cell_inv reads only entries in [lo, hi) plus
     // `above`/`snap` (shared). The named predicate gives a clean function-
     // application trigger that re-assembles into frame_inv_range's forall.
@@ -601,10 +598,18 @@ pub(crate) proof fn lemma_frame_cell_inv_local<T, I: IndexLike>(
         }
     }
     if captured_in_range::<T, I>(db, lo, hi, j as nat) {
-        // carry the witness entry from da to db (same position, equal entry).
+        // Carry the first-hitter witness from da to db: same position, equal
+        // entry, and the miss-everything-below-it forall reads only entries
+        // in [lo, w) where the two sequences agree.
         let w = choose|k: int| lo <= k < hi
-            && (#[trigger] da[k]).1.as_nat() == j as nat && da[k].0 == snap[j];
+            && (#[trigger] da[k]).1.as_nat() == j as nat && da[k].0 == snap[j]
+            && first_hitter::<T, I>(da, lo, k, j as nat);
         assert(da[w] == db[w]);
+        assert forall|q: int| lo <= q < w implies
+            (#[trigger] db[q]).1.as_nat() != j as nat by {
+            assert(da[q] == db[q]);
+        }
+        assert(first_hitter::<T, I>(db, lo, w, j as nat));
     }
 }
 
@@ -696,10 +701,37 @@ pub open(crate) spec fn frame_cell_inv<T, I: IndexLike>(
         &&& (j as nat) < above.len()
         &&& above[j] == snap[j]
     } else {
+        // FIRST-hitter form: the chronologically first entry for `j` in the
+        // stratum holds the snapshot value. Under the unique discipline this
+        // is the old "some entry" form (the one entry is trivially first);
+        // under the chronological (trail) discipline it is the load-bearing
+        // strengthening: `overlay` is first-entry-wins, so reconstruction
+        // needs exactly the FIRST entry pinned, and later duplicates (which
+        // hold intermediate values) are inert.
         exists|k: int| lo <= k < hi
             && (#[trigger] diffs[k]).1.as_nat() == j as nat
             && diffs[k].0 == snap[j]
+            && first_hitter::<T, I>(diffs, lo, k, j as nat)
     }
+}
+
+/// No entry in `[lo, k)` hits `j`: position `k`'s entry is the stratum's
+/// first hitter of `j`. The witness shape `lemma_overlay_lowest` consumes.
+pub open(crate) spec fn first_hitter<T, I: IndexLike>(
+    diffs: Seq<(T, I)>, lo: int, k: int, j: nat,
+) -> bool {
+    forall|q: int| lo <= q < k ==> (#[trigger] diffs[q]).1.as_nat() != j
+}
+
+/// At most one entry per cell in `[lo, hi)`: the unique capture discipline's
+/// per-stratum guarantee. Holds for every stratum of a column whose store
+/// answers `unique_capture_spec()` (a `Vec::wf` clause); the sealing and
+/// reordering paths require it, reconstruction does not.
+pub open(crate) spec fn stratum_unique<T, I: IndexLike>(
+    diffs: Seq<(T, I)>, lo: int, hi: int,
+) -> bool {
+    forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
+        ==> (#[trigger] diffs[a]).1.as_nat() != (#[trigger] diffs[b]).1.as_nat()
 }
 
 /// Range-form of the two-arm frame invariant for one stratum `[lo, hi)`.
@@ -716,8 +748,6 @@ pub open(crate) spec fn frame_inv_range<T, I: IndexLike>(
     &&& snap.len() == saved_len
     &&& (forall|k: int| lo <= k < hi ==>
             (#[trigger] diffs[k]).1.as_nat() < saved_len)
-    &&& (forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b ==>
-            (#[trigger] diffs[a]).1.as_nat() != (#[trigger] diffs[b]).1.as_nat())
     &&& (forall|j: int| 0 <= j < saved_len as int ==>
             #[trigger] frame_cell_inv::<T, I>(above, diffs, lo, hi, snap, j))
 }
@@ -735,6 +765,64 @@ pub(crate) proof fn lemma_frame_inv_arm_at<T, I: IndexLike>(
     ensures
         frame_cell_inv::<T, I>(above, diffs, lo, hi, snap, j),
 {
+}
+
+/// `stratum_unique` transfers between diff logs that agree pointwise on the
+/// stratum `[lo, hi)` (covers both an extension and a truncation whose
+/// surviving prefix contains the stratum).
+pub(crate) proof fn lemma_stratum_unique_local<T, I: IndexLike>(
+    da: Seq<(T, I)>, db: Seq<(T, I)>, lo: int, hi: int,
+)
+    requires
+        0 <= lo <= hi,
+        hi <= da.len(),
+        hi <= db.len(),
+        forall|q: int| lo <= q < hi ==> #[trigger] db[q] == da[q],
+        stratum_unique::<T, I>(da, lo, hi),
+    ensures
+        stratum_unique::<T, I>(db, lo, hi),
+{
+    assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
+        implies (#[trigger] db[a]).1.as_nat() != (#[trigger] db[b]).1.as_nat() by {
+        assert(db[a] == da[a]);
+        assert(db[b] == da[b]);
+        assert(da[a].1.as_nat() != da[b].1.as_nat());
+    }
+}
+
+/// `stratum_unique` for the top stratum extended by ONE appended entry whose
+/// index has no prior hit in the stratum: the unique discipline's wf clause
+/// survives a first-write capture append.
+pub(crate) proof fn lemma_stratum_unique_append<T, I: IndexLike>(
+    da: Seq<(T, I)>, db: Seq<(T, I)>, lo: int, jnew: nat,
+)
+    requires
+        0 <= lo <= da.len(),
+        db.len() == da.len() + 1,
+        db.subrange(0, da.len() as int) == da,
+        db[da.len() as int].1.as_nat() == jnew,
+        !captured_in_range::<T, I>(da, lo, da.len() as int, jnew),
+        stratum_unique::<T, I>(da, lo, da.len() as int),
+    ensures
+        stratum_unique::<T, I>(db, lo, db.len() as int),
+{
+    assert forall|a: int, b: int| lo <= a < db.len() && lo <= b < db.len() && a != b
+        implies (#[trigger] db[a]).1.as_nat() != (#[trigger] db[b]).1.as_nat() by {
+        if a < da.len() && b < da.len() {
+            assert(db.subrange(0, da.len() as int)[a] == db[a]);
+            assert(db.subrange(0, da.len() as int)[b] == db[b]);
+            assert(da[a].1.as_nat() != da[b].1.as_nat());
+        } else if a == da.len() as int {
+            assert(db.subrange(0, da.len() as int)[b] == db[b]);
+            // The appended index has no hit below: a hit at b would witness
+            // captured_in_range on da.
+            assert(da[b].1.as_nat() != jnew);
+        } else {
+            assert(b == da.len() as int);
+            assert(db.subrange(0, da.len() as int)[a] == db[a]);
+            assert(da[a].1.as_nat() != jnew);
+        }
+    }
 }
 
 /// `frame_inv_range` is invariant under a PERMUTATION of the diff-log range
@@ -994,13 +1082,16 @@ pub(crate) proof fn lemma_overlay_eq_snap<T, I: IndexLike>(
             }
             lemma_overlay_uncaptured::<T, I>(above, diffs, lo, hi, j);
         } else {
-            // Captured: pick the witness entry p, show overlay sets snap[j].
+            // Captured: the FIRST hitter holds snap[j], and first-hitter is
+            // exactly the shape lemma_overlay_lowest pins (base-independent,
+            // duplicate-tolerant).
             assert(captured_in_range::<T, I>(diffs, lo, hi, j as nat));
             assert((j as nat) < above.len());  // from saved_len <= above.len()
             let p = choose|k: int| lo <= k < hi
                 && (#[trigger] diffs[k]).1.as_nat() == j as nat
-                && diffs[k].0 == snap[j];
-            lemma_overlay_captured::<T, I>(above, diffs, lo, hi, p, j);
+                && diffs[k].0 == snap[j]
+                && first_hitter::<T, I>(diffs, lo, k, j as nat);
+            lemma_overlay_lowest::<T, I>(above, diffs, lo, hi, p, j);
         }
     }
 }
@@ -1221,9 +1312,16 @@ where
         &&& (TRACK ==> forall|j: int| 0 <= j < self.view().len()
                 && #[trigger] self.store.captured()[j]
                 ==> frames.len() > 0 && j < self.active_saved_len.as_nat())
-        // Fork history (generation stamps) is independent of the snapshot stack;
-        // token depth-range is checked by GenStamps::valid itself (design §0.5).
-        &&& true
+        // The unique capture discipline's per-stratum guarantee, carried as
+        // a wf clause (the reconstruction invariant no longer states it):
+        // sealing, compaction and the sorted flush require it; a
+        // chronological (trail) store's column vacuously skips it.
+        &&& (<S as DiffStore<T, I, TRACK>>::unique_capture_spec()
+                ==> forall|k: int| 0 <= k < self.frames@.len()
+                    ==> #[trigger] stratum_unique::<T, I>(
+                            self.diff_log@,
+                            self.frames@[k].diff_start as int,
+                            self.stratum_end(k)))
     }
 
     /// `wf` is preserved by a change to `forks` alone. Every `wf` conjunct except
@@ -1275,6 +1373,21 @@ where
         assert(self.wf_for_snap());
         // diff_log.wf() transfers by structural equality with old_self.
         assert(self.diff_log.wf());
+        // The discipline-conditional stratum-uniqueness clause transfers:
+        // it reads diff_log@, frames@ and stratum_end, all pinned equal.
+        if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+            assert forall|k: int| 0 <= k < self.frames@.len() implies
+                #[trigger] stratum_unique::<T, I>(
+                    self.diff_log@,
+                    self.frames@[k].diff_start as int,
+                    self.stratum_end(k)) by {
+                assert(self.stratum_end(k) == old_self.stratum_end(k));
+                assert(stratum_unique::<T, I>(
+                    old_self.diff_log@,
+                    old_self.frames@[k].diff_start as int,
+                    old_self.stratum_end(k)));
+            }
+        }
         // wf's captured-bridge and no-stray foralls read store.captured()/view/
         // frames/active/diffs — all pinned, so they carry directly.
         assert(self.wf());
@@ -1323,6 +1436,21 @@ where
                 old_self.frames@[k].saved_len.as_nat()));
         }
         assert(self.wf_for_snap());
+        // The discipline-conditional stratum-uniqueness clause transfers:
+        // it reads diff_log@, frames@ and stratum_end, all pinned equal.
+        if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+            assert forall|k: int| 0 <= k < self.frames@.len() implies
+                #[trigger] stratum_unique::<T, I>(
+                    self.diff_log@,
+                    self.frames@[k].diff_start as int,
+                    self.stratum_end(k)) by {
+                assert(self.stratum_end(k) == old_self.stratum_end(k));
+                assert(stratum_unique::<T, I>(
+                    old_self.diff_log@,
+                    old_self.frames@[k].diff_start as int,
+                    old_self.stratum_end(k)));
+            }
+        }
         assert(self.wf());
     }
 
@@ -1416,6 +1544,20 @@ where
                     self.frames@[top].diff_start as int,
                     self.stratum_end(top),
                     j as nat);
+            }
+        }
+        // Unique-discipline stratum uniqueness: restated directly by the
+        // per-frame uniqueness hypothesis (same quantifier, new trigger).
+        if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+            assert forall|k: int| 0 <= k < self.frames@.len() implies
+                #[trigger] stratum_unique::<T, I>(
+                    self.diff_log@, self.frames@[k].diff_start as int,
+                    self.stratum_end(k)) by {
+                let lo = self.frames@[k].diff_start as int;
+                let hi = self.stratum_end(k);
+                assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
+                    implies (#[trigger] self.diff_log@[a]).1.as_nat()
+                        != (#[trigger] self.diff_log@[b]).1.as_nat() by {}
             }
         }
         assert(self.wf());
@@ -1558,18 +1700,12 @@ where
             // deeper strata [mid, n) sit above). lemma_overlay_lowest pins it.
             let p = choose|q: int| lo <= q < mid
                 && (#[trigger] diffs[q]).1.as_nat() == j as nat
-                && diffs[q].0 == snaps[k][j];
+                && diffs[q].0 == snaps[k][j]
+                && first_hitter::<T, I>(diffs, lo, q, j as nat);
             assert(lo <= p < mid && diffs[p].1.as_nat() == j as nat);
-            assert(forall|q: int| lo <= q < p ==> (#[trigger] diffs[q]).1.as_nat() != j as nat) by {
-                // uniqueness in [lo, mid): a second hitter q != p contradicts.
-                assert forall|q: int| lo <= q < p implies (#[trigger] diffs[q]).1.as_nat() != j as nat by {
-                    if diffs[q].1.as_nat() == j as nat {
-                        // q, p both in [lo, mid), q != p, same index ⇒ violates
-                        // frame_inv_range's uniqueness conjunct.
-                        assert(q != p);
-                    }
-                }
-            }
+            // first_hitter IS "no earlier hitter in [lo, p)" — the exact
+            // hypothesis lemma_overlay_lowest wants, no uniqueness needed.
+            assert(forall|q: int| lo <= q < p ==> (#[trigger] diffs[q]).1.as_nat() != j as nat);
             lemma_overlay_lowest::<T, I>(base, diffs, lo, n, p, j);
         } else {
             // Uncaptured in stratum k. Coverage ⇒ j < layer_above.len() and
@@ -2115,6 +2251,36 @@ where
         }
     }
 
+    /// The index column of the diff-log strata a `restore(token)` would pop:
+    /// entries `[frames[token.frame_idx].diff_start, diff_log.len())`. Each
+    /// returned index names a slot whose content the restore will roll back
+    /// (first-write-wins per stratum under the unique discipline; a
+    /// chronological column may repeat an index). An invalid token returns
+    /// `None` and the empty case (nothing captured since that mark) returns
+    /// an empty vec. Read-only: the column is unchanged.
+    ///
+    /// This is the map-repair enabler: an unverified associate structure
+    /// keyed by slot content (the e-graph's hashcons index) reads this BEFORE
+    /// a restore to remove exactly the entries whose keys are about to change,
+    /// and re-inserts the same ids from restored content AFTER. The diff log
+    /// already carries this set deduplicated, so no separate dirty list is
+    /// needed alongside the column.
+    pub fn pending_restore_indices(&self, token: &VecToken) -> (r: Option<std::vec::Vec<I>>)
+        requires
+            self.wf(),
+        ensures
+            r is Some ==> self.is_restorable_spec(*token),
+    {
+        if !self.is_valid_token(token) {
+            return None;
+        }
+        let ds = self.frames[token.frame_idx].diff_start;
+        proof {
+            self.lemma_diff_start_le_n(token.frame_idx as int);
+        }
+        Some(self.diff_log.index_range(ds, self.diff_log.len()))
+    }
+
     /// The public token-validity check: "restorable now", STRUCTURALLY.
     /// Returns exactly `is_restorable_spec(token)` — true iff `restore(token)`
     /// would succeed at this moment: TRACK on, frame still live (rejects
@@ -2319,6 +2485,19 @@ where
                     }
                 }
             }
+            // Unique-discipline stratum uniqueness: diff log and frames are
+            // unchanged, so each stratum transfers term-by-term (the explicit
+            // old-instance assert fires the old wf forall's trigger).
+            if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                assert forall|k: int| 0 <= k < frames.len() implies
+                    #[trigger] stratum_unique::<T, I>(
+                        self.diff_log@, frames[k].diff_start as int, self.stratum_end(k)) by {
+                    assert(self.stratum_end(k) == old_self.stratum_end(k));
+                    assert(stratum_unique::<T, I>(
+                        old_self.diff_log@, old_self.frames@[k].diff_start as int,
+                        old_self.stratum_end(k)));
+                }
+            }
         }
     }
 
@@ -2435,15 +2614,20 @@ where
             }
             self.store.capture(last_i, active, &mut self.diff_log);
             proof {
-                // capture's first-write-wins outcome at index `last`:
+                // capture's outcome at index `last`, by discipline:
                 //  - if !old.captured[last]: appended (data_last, last_i);
-                //  - else: no-op. Both ways the result diff log relates to
-                //    old_diffs by "append-one-at-index-last or identity".
+                //  - else, unique store: no-op;
+                //  - else, chronological store: appended the duplicate.
+                // All three ways the result diff log relates to old_diffs by
+                // "append-one-at-index-last or identity".
                 if !old_store_captured[last as int] {
                     assert(self.diff_log@ == old_diffs.push((data_last, last_i)));
                     assert(self.diff_log@[old_diffs.len() as int].1.as_nat() == last as nat);
-                } else {
+                } else if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
                     assert(self.diff_log@ == old_diffs);
+                } else {
+                    assert(self.diff_log@ == old_diffs.push((data_last, last_i)));
+                    assert(self.diff_log@[old_diffs.len() as int].1.as_nat() == last as nat);
                 }
                 // capture changes the flag only at `last == len-1`; surface
                 // the SAME-shaped fact both branches will share post-if.
@@ -2517,7 +2701,8 @@ where
                     || (diffs.len() == old_diffs.len() + 1
                         && diffs.subrange(0, old_diffs.len() as int) == old_diffs
                         && diffs[old_diffs.len() as int].1.as_nat() == new_len as nat)) by {
-                    if captured_marked && !old_store_captured[new_len] {
+                    if captured_marked && (!old_store_captured[new_len]
+                        || !<S as DiffStore<T, I, TRACK>>::unique_capture_spec()) {
                         assert(diffs == old_diffs.push((data_last, diffs[old_diffs.len() as int].1)));
                         assert(diffs.subrange(0, old_diffs.len() as int) == old_diffs);
                     }
@@ -2602,9 +2787,14 @@ where
                                 // The cell_inv for j must be the CAPTURED arm:
                                 // exhibit p in [lo,hi) with index j, value snap[j].
                                 if old_store_captured[j] {
-                                    // already captured: capture no-op'd, so
-                                    // diffs == old_diffs and the old captured
-                                    // arm's witness survives.
+                                    // already captured: a unique store no-op'd
+                                    // (diffs == old_diffs); a chronological
+                                    // store appended a duplicate at index j.
+                                    // Either way old_diffs is a prefix of
+                                    // diffs, so the old captured arm's FIRST-
+                                    // hitter witness survives in place
+                                    // (first_hitter constrains only positions
+                                    // below it, which are unchanged).
                                     assert(j < old_view.len());
                                     assert(old(self).store.captured()[j]);  // == old_store_captured[j]
                                     assert(captured_in_range::<T, I>(
@@ -2613,13 +2803,31 @@ where
                                             == captured_in_range::<T, I>(
                                                 old_diffs, lo, old_diffs.len() as int, j as nat));
                                     }
-                                    // old captured arm gives the value witness.
+                                    // old captured arm gives the value + first-hitter witness.
                                     assert(frame_cell_inv::<T, I>(
                                         old_view, old_diffs, lo, old_diffs.len() as int, snap, j));
-                                    assert(diffs == old_diffs);
+                                    assert(diffs.subrange(0, old_diffs.len() as int) == old_diffs) by {
+                                        if diffs == old_diffs {
+                                            assert(diffs.subrange(0, old_diffs.len() as int)
+                                                =~= old_diffs);
+                                        }
+                                    }
                                     let p = choose|p: int| lo <= p < old_diffs.len() as int
                                         && (#[trigger] old_diffs[p]).1.as_nat() == j as nat
-                                        && old_diffs[p].0 == snap[j];
+                                        && old_diffs[p].0 == snap[j]
+                                        && first_hitter::<T, I>(old_diffs, lo, p, j as nat);
+                                    assert(diffs[p] == old_diffs[p]) by {
+                                        assert(diffs.subrange(0, old_diffs.len() as int)[p]
+                                            == diffs[p]);
+                                    }
+                                    assert(first_hitter::<T, I>(diffs, lo, p, j as nat)) by {
+                                        assert forall|q: int| lo <= q < p implies
+                                            (#[trigger] diffs[q]).1.as_nat() != j as nat by {
+                                            assert(diffs.subrange(0, old_diffs.len() as int)[q]
+                                                == diffs[q]);
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
                                     assert(lo <= p < hi && 0 <= p < diffs.len()
                                         && diffs[p].1.as_nat() == j as nat
                                         && diffs[p].0 == snap[j]);
@@ -2648,6 +2856,16 @@ where
                                     assert(diffs[p].0 == data_last);
                                     assert(diffs[p].0 == snap[j]);
                                     assert(lo <= p < hi && 0 <= p < diffs.len());
+                                    // The appended entry is the stratum's first
+                                    // hitter of j: no prior entry hits j (the
+                                    // old bridge said j was uncaptured).
+                                    assert(first_hitter::<T, I>(diffs, lo, p, j as nat)) by {
+                                        assert forall|q: int| lo <= q < p implies
+                                            (#[trigger] diffs[q]).1.as_nat() != j as nat by {
+                                            assert(diffs.subrange(0, p)[q] == diffs[q]);
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
                                     assert(captured_in_range::<T, I>(diffs, lo, hi, j as nat));
                                     assert(frame_cell_inv::<T, I>(self.view(), diffs, lo, hi, snap, j));
                                 }
@@ -2695,6 +2913,51 @@ where
                     lemma_captured_in_range_append_other::<T, I>(
                         old_diffs, diffs, ds_top, j as nat, new_len as nat);
                 }
+
+                // --- unique-discipline stratum uniqueness ---
+                // Inner strata sit in the unchanged prefix; the top stratum
+                // is identity (no capture, or unique-store no-op) or ONE
+                // first-write append at the uncaptured index new_len.
+                if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                    assert forall|k: int| 0 <= k < frames.len() implies
+                        #[trigger] stratum_unique::<T, I>(
+                            diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
+                        let lo = frames[k].diff_start as int;
+                        assert(stratum_unique::<T, I>(
+                            old_diffs, old_frames[k].diff_start as int,
+                            old(self).stratum_end(k)));
+                        if k < top {
+                            assert(self.stratum_end(k) == old(self).stratum_end(k));
+                            old(self).lemma_diff_start_le_n(k + 1);
+                            assert(self.stratum_end(k) <= old_diffs.len());
+                            if diffs != old_diffs {
+                                lemma_stratum_unique_local::<T, I>(
+                                    old_diffs, diffs, lo, self.stratum_end(k));
+                            }
+                        } else {
+                            assert(old(self).stratum_end(k) == old_diffs.len() as int);
+                            assert(self.stratum_end(k) == diffs.len() as int);
+                            if captured_marked && !old_store_captured[new_len] {
+                                assert(!captured_in_range::<T, I>(
+                                    old_diffs, ds_top, old_diffs.len() as int,
+                                    new_len as nat)) by {
+                                    assert(old(self).store.captured()[new_len]
+                                        == captured_in_range::<T, I>(
+                                            old_diffs, ds_top, old_diffs.len() as int,
+                                            new_len as nat));
+                                }
+                                assert(diffs == old_diffs.push((data_last,
+                                    diffs[old_diffs.len() as int].1)));
+                                assert(diffs.subrange(0, old_diffs.len() as int)
+                                    == old_diffs);
+                                lemma_stratum_unique_append::<T, I>(
+                                    old_diffs, diffs, lo, new_len as nat);
+                            } else {
+                                assert(diffs == old_diffs);
+                            }
+                        }
+                    }
+                }
             } else if old_frames.len() > 0 {
                 // old_view empty (so view stays empty): store.pop is a no-op
                 // and the capture branch can't have run (len == 0). So the
@@ -2710,6 +2973,16 @@ where
                 by {
                     assert(old(self).frame_inv_range_holds(k));
                     assert(self.layer_above_at(k) == old(self).layer_above_at(k));
+                }
+                if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                    assert forall|k: int| 0 <= k < frames.len() implies
+                        #[trigger] stratum_unique::<T, I>(
+                            diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
+                        assert(self.stratum_end(k) == old(self).stratum_end(k));
+                        assert(stratum_unique::<T, I>(
+                            old_diffs, old_frames[k].diff_start as int,
+                            old(self).stratum_end(k)));
+                    }
                 }
             }
         }
@@ -2748,8 +3021,13 @@ where
             let active = self.active_saved_len;
             self.store.capture(i, active, &mut self.diff_log);
             proof {
-                // Surface capture's first-write-wins outcome explicitly.
+                // Surface capture's per-discipline outcome explicitly.
                 if iu < active_n as int && !was_captured0 {
+                    assert(self.diff_log@ == old_diffs.push((old_view[iu], i)));
+                    assert(self.store.captured()[iu] == true);
+                } else if iu < active_n as int
+                    && !<S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                    // chronological duplicate: appended, flags unchanged.
                     assert(self.diff_log@ == old_diffs.push((old_view[iu], i)));
                     assert(self.store.captured()[iu] == true);
                 } else {
@@ -2785,7 +3063,10 @@ where
             } else {
                 let top = (frames.len() - 1) as int;
                 let was_captured = was_captured0;
-                let appended = iu < active_n as int && !was_captured0;
+                // "appended" covers both append cases: the first write, and a
+                // chronological store's duplicate on an already-captured slot.
+                let appended = iu < active_n as int && (!was_captured0
+                    || !<S as DiffStore<T, I, TRACK>>::unique_capture_spec());
                 assert(old(self).store.captured()[iu] == was_captured0);
 
                 // capture either no-ops or appends one entry at the end.
@@ -2869,34 +3150,9 @@ where
                                 assert(diffs[m] == (old_view[iu], i));
                             }
                         }
-                        // uniqueness over [ds, hi).
-                        assert forall|a: int, b: int|
-                            ds <= a < hi && ds <= b < hi && a != b implies
-                            (#[trigger] diffs[a]).1.as_nat()
-                                != (#[trigger] diffs[b]).1.as_nat() by {
-                            if a < old_diffs.len() && b < old_diffs.len() {
-                                assert(diffs[a] == old_diffs[a] && diffs[b] == old_diffs[b]);
-                            } else {
-                                // one of them is the new entry at old_diffs.len()
-                                // with index iu; the other is an old entry. The
-                                // bridge says iu was NOT captured ⇒ no old top
-                                // entry has index iu.
-                                assert(appended);
-                                let newpos = old_diffs.len() as int;
-                                assert(diffs[newpos] == (old_view[iu], i));
-                                // old entry at the other position has index != iu
-                                let other = if a == newpos { b } else { a };
-                                assert(ds <= other < old_diffs.len());
-                                assert(diffs[other] == old_diffs[other]);
-                                // bridge: !was_captured ⇒ iu not in old top stratum
-                                assert(!captured_in_range::<T, I>(
-                                    old_diffs, ds, old_diffs.len() as int, iu as nat)) by {
-                                    assert(old(self).store.captured()[iu] == was_captured);
-                                    assert(iu < active_n as int);
-                                }
-                                assert(old_diffs[other].1.as_nat() != iu as nat);
-                            }
-                        }
+                        // (Stratum uniqueness is no longer a frame_inv_range
+                        // conjunct; the unique-discipline wf clause is
+                        // re-established after this loop.)
                         // two-arm, per-cell via frame_cell_inv.
                         assert forall|j: int| 0 <= j < sl as int implies
                             #[trigger] frame_cell_inv::<T, I>(new_view, diffs, ds, hi, snap, j)
@@ -2906,10 +3162,13 @@ where
                                 old_view, old_diffs, ds, old_diffs.len() as int, snap, sl, j);
                             // bridge at j: old captured()[j] iff j in old top stratum.
                             if j == iu {
-                                // j is captured now; find a witness with value snap[iu].
-                                if appended {
-                                    // old uncaptured arm: old_view[iu] == snap[iu]
-                                    // (iu was uncaptured ⇒ not in old top stratum).
+                                // j is captured now; find a FIRST-hitter
+                                // witness with value snap[iu].
+                                if !was_captured {
+                                    // first write: capture appended
+                                    // (old_view[iu], i) at the end, and no
+                                    // earlier stratum entry hits iu (bridge,
+                                    // flag clear) — the append is first.
                                     assert(!captured_in_range::<T, I>(
                                         old_diffs, ds, old_diffs.len() as int, iu as nat)) by {
                                         assert(old(self).store.captured()[iu] == false);
@@ -2920,18 +3179,32 @@ where
                                     assert(diffs[newpos].1.as_nat() == iu as nat);
                                     assert(diffs[newpos].0 == old_view[iu]);
                                     assert(diffs[newpos].0 == snap[iu]);
+                                    assert(first_hitter::<T, I>(diffs, ds, newpos, iu as nat)) by {
+                                        assert forall|q: int| ds <= q < newpos implies
+                                            (#[trigger] diffs[q]).1.as_nat() != iu as nat by {
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
                                 } else {
-                                    // was_captured: old top stratum has an entry
-                                    // (old, iu) with old == snap[iu]; still present
-                                    // (prefix preserved, diffs == old_diffs).
-                                    assert(was_captured);
+                                    // was_captured: the old captured arm's
+                                    // first-hitter witness survives in place
+                                    // (a chronological duplicate lands ABOVE
+                                    // it, so it stays first).
                                     assert(old(self).store.captured()[iu] == true);
                                     assert(captured_in_range::<T, I>(
                                         old_diffs, ds, old_diffs.len() as int, iu as nat));
                                     let p = choose|p: int| ds <= p < old_diffs.len() as int
                                         && (#[trigger] old_diffs[p]).1.as_nat() == iu as nat
-                                        && old_diffs[p].0 == snap[iu];
+                                        && old_diffs[p].0 == snap[iu]
+                                        && first_hitter::<T, I>(old_diffs, ds, p, iu as nat);
                                     assert(diffs[p] == old_diffs[p]);
+                                    assert(first_hitter::<T, I>(diffs, ds, p, iu as nat)) by {
+                                        assert forall|q: int| ds <= q < p implies
+                                            (#[trigger] diffs[q]).1.as_nat() != iu as nat by {
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
+                                    assert(captured_in_range::<T, I>(diffs, ds, hi, iu as nat));
                                 }
                             } else {
                                 // j != iu: capture only may add index iu != j,
@@ -2969,8 +3242,15 @@ where
                                     let p = choose|p: int|
                                         ds <= p < old_diffs.len() as int && 0 <= p < old_diffs.len()
                                         && (#[trigger] old_diffs[p]).1.as_nat() == j as nat
-                                        && old_diffs[p].0 == snap[j];
+                                        && old_diffs[p].0 == snap[j]
+                                        && first_hitter::<T, I>(old_diffs, ds, p, j as nat);
                                     assert(diffs[p] == old_diffs[p]);
+                                    assert(first_hitter::<T, I>(diffs, ds, p, j as nat)) by {
+                                        assert forall|q: int| ds <= q < p implies
+                                            (#[trigger] diffs[q]).1.as_nat() != j as nat by {
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
                                 } else {
                                     // uncaptured: the old uncaptured arm gives
                                     // j < old_view.len() && old_view[j]==snap[j].
@@ -3039,6 +3319,52 @@ where
                                 && 0 <= p < old_diffs.len()
                                 && (#[trigger] old_diffs[p]).1.as_nat() == j as nat;
                             assert(diffs[p] == old_diffs[p]);
+                        }
+                    }
+                }
+
+                // --- unique-discipline stratum uniqueness ---
+                // Inner strata sit in the unchanged prefix; the top stratum
+                // is identity (unique-store no-op) or ONE first-write append
+                // at the uncaptured index iu.
+                if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                    assert forall|k: int| 0 <= k < frames.len() implies
+                        #[trigger] stratum_unique::<T, I>(
+                            diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
+                        let lo = frames[k].diff_start as int;
+                        assert(stratum_unique::<T, I>(
+                            old_diffs, old_frames[k].diff_start as int,
+                            old(self).stratum_end(k)));
+                        if k < top {
+                            assert(self.stratum_end(k) == old(self).stratum_end(k));
+                            old(self).lemma_diff_start_le_n(k + 1);
+                            old(self).lemma_diff_start_monotone(k + 1, top);
+                            assert(self.stratum_end(k) <= old_diffs.len());
+                            if diffs != old_diffs {
+                                assert(diffs.subrange(0, old_diffs.len() as int)
+                                    =~= old_diffs);
+                                lemma_stratum_unique_local::<T, I>(
+                                    old_diffs, diffs, lo, self.stratum_end(k));
+                            }
+                        } else {
+                            assert(old(self).stratum_end(k) == old_diffs.len() as int);
+                            assert(self.stratum_end(k) == diffs.len() as int);
+                            if appended {
+                                // under the unique discipline, appended means
+                                // first write at iu.
+                                assert(!was_captured0);
+                                assert(!captured_in_range::<T, I>(
+                                    old_diffs, lo, old_diffs.len() as int, iu as nat)) by {
+                                    assert(old(self).store.captured()[iu] == was_captured0);
+                                }
+                                assert(diffs == old_diffs.push((old_view[iu], i)));
+                                assert(diffs.subrange(0, old_diffs.len() as int)
+                                    =~= old_diffs);
+                                lemma_stratum_unique_append::<T, I>(
+                                    old_diffs, diffs, lo, iu as nat);
+                            } else {
+                                assert(diffs == old_diffs);
+                            }
                         }
                     }
                 }
@@ -3279,6 +3605,21 @@ where
                     self.layer_above_at(k), diffs, lo, hi, snaps[k],
                     frames[k].saved_len.as_nat()));
             }
+            // Unique-discipline stratum uniqueness: old strata keep their
+            // ranges (the old top's end, diffs.len(), equals the new frame's
+            // diff_start), and the new top stratum [n, n) is empty.
+            if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                assert forall|k: int| 0 <= k < frames.len() implies
+                    #[trigger] stratum_unique::<T, I>(
+                        diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
+                    if k < new_top {
+                        assert(self.stratum_end(k) == old(self).stratum_end(k));
+                        assert(stratum_unique::<T, I>(
+                            old(self).diff_log@, old_frames[k].diff_start as int,
+                            old(self).stratum_end(k)));
+                    }
+                }
+            }
             // Re-establish the store capture-length bridge at the end (it can be lost
             // across the heavy frame_inv_range forall above).
             self.store.lemma_wf_captured_len();
@@ -3338,6 +3679,12 @@ where
         if self.frames.len() == 0 {
             return;
         }
+        if !<S as DiffStore<T, I, TRACK>>::unique_capture() {
+            // A chronological (trail) column's strata carry duplicates, and
+            // every sealed encoding requires the unique-index bound: sealing
+            // is structurally out of the trail discipline's family.
+            return;
+        }
         let top = self.frames.len() - 1;
         let ds = self.frames[top].diff_start;
         proof {
@@ -3352,16 +3699,14 @@ where
             return;
         }
         proof {
-            // The open stratum [ds, n) is unique-indexed: it is the top frame's
-            // range in frame_inv_range (first-write-wins capture).
+            // The open stratum [ds, n) is unique-indexed: the discipline gate
+            // above admits only unique-capture stores, whose wf carries the
+            // per-stratum uniqueness clause.
             let d = self.diff_log@;
             let lo = ds as int;
             let hi = d.len() as int;
             assert(self.stratum_end(top as int) == hi);
-            assert(frame_inv_range::<T, I>(
-                self.layer_above_at(top as int), d, lo, hi,
-                self.snapshots@[top as int],
-                self.frames@[top as int].saved_len.as_nat()));
+            assert(stratum_unique::<T, I>(d, lo, hi));
             let s = d.subrange(lo, hi);
             assert forall|a: int, b: int|
                 0 <= a < s.len() && 0 <= b < s.len() && a != b
@@ -3423,16 +3768,18 @@ where
                 } else {
                     pre.lemma_diff_start_monotone(k + 1, topg);
                     assert(hi <= ts);
-                    assert(pre.wf_for_snap());
-                    assert(frame_inv_range::<T, I>(
-                        pre.layer_above_at(k), pre.diff_log@, lo, hi,
-                        pre.snapshots@[k], pre.frames@[k].saved_len.as_nat()));
+                    // pre's wf carries per-stratum uniqueness (the discipline
+                    // gate at entry admits only unique-capture stores).
+                    assert(pre.frames@[k].diff_start as int == lo);
+                    assert(pre.stratum_end(k) == hi);
+                    assert(stratum_unique::<T, I>(pre.diff_log@, lo, hi));
                     assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
                         implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
                         assert(self.diff_log@[a] == self.diff_log@.subrange(0, ts)[a]);
                         assert(pre.diff_log@[a] == pre.diff_log@.subrange(0, ts)[a]);
                         assert(self.diff_log@[b] == self.diff_log@.subrange(0, ts)[b]);
                         assert(pre.diff_log@[b] == pre.diff_log@.subrange(0, ts)[b]);
+                        assert(pre.diff_log@[a].1.as_nat() != pre.diff_log@[b].1.as_nat());
                     }
                 }
             }
@@ -3886,6 +4233,42 @@ where
                     self.stratum_end(k), snaps[k], frames[k].saved_len.as_nat()));
             }
 
+            // Unique-discipline stratum uniqueness: every surviving stratum
+            // keeps its range and entries (all below diff_start, the
+            // truncation point).
+            if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                assert forall|k: int| 0 <= k < frames.len() implies
+                    #[trigger] stratum_unique::<T, I>(
+                        diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
+                    assert(frames[k] == old_frames[k]);
+                    let lo = frames[k].diff_start as int;
+                    let hi = self.stratum_end(k);
+                    assert(stratum_unique::<T, I>(
+                        old_diffs, old_frames[k].diff_start as int,
+                        old(self).stratum_end(k)));
+                    if k + 1 < frames.len() {
+                        assert(frames[k + 1] == old_frames[k + 1]);
+                        assert(hi == frames[k + 1].diff_start as int);
+                        assert(old(self).stratum_end(k)
+                            == old_frames[k + 1].diff_start as int);
+                    } else {
+                        assert(hi == diffs.len() as int);
+                        assert(old(self).stratum_end(k)
+                            == old_frames[(k + 1) as int].diff_start as int);
+                        assert(old_frames[(k + 1) as int].diff_start as int
+                            == diff_start as int);
+                    }
+                    assert(hi == old(self).stratum_end(k));
+                    assert(hi <= diff_start as int) by {
+                        old(self).lemma_diff_start_le_n(target_index as int);
+                        if k + 1 < frames.len() {
+                            old(self).lemma_diff_start_monotone(k + 1, target_index as int);
+                        }
+                    }
+                    lemma_stratum_unique_local::<T, I>(old_diffs, diffs, lo, hi);
+                }
+            }
+
             // active_saved_len + capture-flag bridge.
             self.store.lemma_wf_captured_len();
             if frames.len() == 0 {
@@ -4176,6 +4559,10 @@ where
         requires
             old(self).wf(),
             TRACK,
+            // Sorting-fold entry: unique discipline only (a chronological
+            // column's inner strata carry duplicates, so the per-frame
+            // uniqueness the fold's wf transfer reads does not hold).
+            <S as DiffStore<T, I, TRACK>>::unique_capture_spec(),
             old(self).depth_spec() < u32::MAX,
             old(self).view().len() < I::max_nat(),
             old(self).depth_spec() > 0,
@@ -4248,10 +4635,11 @@ where
                 } else {
                     pre.lemma_diff_start_monotone(k + 1, top);
                     assert(hi <= ts);
-                    assert(pre.wf_for_snap());
-                    assert(frame_inv_range::<T, I>(
-                        pre.layer_above_at(k), pre.diff_log@, lo, hi,
-                        pre.snapshots@[k], pre.frames@[k].saved_len.as_nat()));
+                    // pre's wf carries per-stratum uniqueness (the unique
+                    // discipline's clause; this entry requires the discipline).
+                    assert(pre.frames@[k].diff_start as int == lo);
+                    assert(pre.stratum_end(k) == hi);
+                    assert(stratum_unique::<T, I>(pre.diff_log@, lo, hi));
                     // @ unchanged on [lo, hi); pre is unique there ⇒ self is too.
                     assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
                         implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
@@ -4259,6 +4647,7 @@ where
                         assert(pre.diff_log@[a] == pre.diff_log@.subrange(0, ts)[a]);
                         assert(self.diff_log@[b] == self.diff_log@.subrange(0, ts)[b]);
                         assert(pre.diff_log@[b] == pre.diff_log@.subrange(0, ts)[b]);
+                        assert(pre.diff_log@[a].1.as_nat() != pre.diff_log@[b].1.as_nat());
                     }
                 }
             }
@@ -4281,6 +4670,9 @@ where
             old(self).depth_spec() < u32::MAX,
             old(self).view().len() < I::max_nat(),
             old(self).depth_spec() > 0,
+            // Per-frame fold entry: unique discipline only (the wf transfer
+            // reads per-stratum uniqueness for the untouched inner strata).
+            <S as DiffStore<T, I, TRACK>>::unique_capture_spec(),
             old(self).diff_log.is_adaptive(),
             old(self).diff_log.idx_cold_len_spec() == old(self).top_diff_start_spec(),
             crate::diff_compress::unique_idx(old(self).diff_log@.subrange(
@@ -4343,16 +4735,18 @@ where
                 } else {
                     pre.lemma_diff_start_monotone(k + 1, top);
                     assert(hi <= ts);
-                    assert(pre.wf_for_snap());
-                    assert(frame_inv_range::<T, I>(
-                        pre.layer_above_at(k), pre.diff_log@, lo, hi,
-                        pre.snapshots@[k], pre.frames@[k].saved_len.as_nat()));
+                    // pre's wf carries per-stratum uniqueness (the unique
+                    // discipline's clause; this entry requires the discipline).
+                    assert(pre.frames@[k].diff_start as int == lo);
+                    assert(pre.stratum_end(k) == hi);
+                    assert(stratum_unique::<T, I>(pre.diff_log@, lo, hi));
                     assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
                         implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
                         assert(self.diff_log@[a] == self.diff_log@.subrange(0, ts)[a]);
                         assert(pre.diff_log@[a] == pre.diff_log@.subrange(0, ts)[a]);
                         assert(self.diff_log@[b] == self.diff_log@.subrange(0, ts)[b]);
                         assert(pre.diff_log@[b] == pre.diff_log@.subrange(0, ts)[b]);
+                        assert(pre.diff_log@[a].1.as_nat() != pre.diff_log@[b].1.as_nat());
                     }
                 }
             }
@@ -4390,18 +4784,20 @@ where
             proof {
                 self.lemma_diff_start_le_n(top as int);
             }
-            if self.diff_log.adaptive_aligned(ds) {
+            // Discipline gate first: a chronological (trail) column never
+            // seals — its strata carry duplicates, outside every fold's
+            // unique-index precondition. It takes the plain mark below.
+            if <S as DiffStore<T, I, TRACK>>::unique_capture()
+                && self.diff_log.adaptive_aligned(ds) {
                 proof {
-                    // The open frame's stratum [ds, n) is unique-indexed: it is the
-                    // top frame's range in frame_inv_range (first-write-wins).
+                    // The open frame's stratum [ds, n) is unique-indexed: the
+                    // gate admits only unique-capture stores, whose wf carries
+                    // the per-stratum uniqueness clause.
                     let d = self.diff_log@;
                     let lo = ds as int;
                     let hi = d.len() as int;
                     assert(self.stratum_end(top as int) == hi);
-                    assert(frame_inv_range::<T, I>(
-                        self.layer_above_at(top as int), d, lo, hi,
-                        self.snapshots@[top as int],
-                        self.frames@[top as int].saved_len.as_nat()));
+                    assert(stratum_unique::<T, I>(d, lo, hi));
                     let s = d.subrange(lo, hi);
                     assert forall|a: int, b: int|
                         0 <= a < s.len() && 0 <= b < s.len() && a != b
@@ -4465,6 +4861,23 @@ where
         ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
     {
         Vec::with_store_mode(crate::inline_store::InlineStore::new(), mode)
+    }
+}
+
+impl<T, I, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, crate::trail_store::TrailStore<T, I>, TRACK, VC>
+where
+    T: Sized + Copy,
+    I: IndexLike,
+{
+    /// Empty tracked vector backed by a `TrailStore` (chronological capture,
+    /// ghost flags only). Always plain-valued: a trail column never seals or
+    /// compresses, so the `SEMPER_COMPRESS` lever does not apply to it.
+    pub fn new() -> (v: Self)
+        ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
+    {
+        Vec::with_store_mode(
+            crate::trail_store::TrailStore::new(),
+            crate::diff_compress::CompressionMode::None)
     }
 }
 

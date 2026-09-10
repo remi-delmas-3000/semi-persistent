@@ -129,6 +129,7 @@ pub mod sparse_set;
 pub mod tagged;
 pub mod two_stack_log;
 pub mod union_find;
+pub mod trail_store;
 pub mod value_compressor;
 pub mod layered;
 pub mod vec;
@@ -190,6 +191,10 @@ pub mod bitset;
 /// Inline capture: flag stolen inside `T::Repr`. Requires `T: Tagged`.
 /// (Production's `VecI` alias, verbatim.)
 pub type VecI<T, I, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression> = Vec<T, I, InlineStore<T, I>, TRACK, VC>;
+
+/// Trail-tracked vector (chronological capture, no runtime flags, plain
+/// diff log): the SMT-search profile. See `trail_store`.
+pub type VecT<T, I, const TRACK: bool = true> = Vec<T, I, crate::trail_store::TrailStore<T, I>, TRACK>;
 
 /// Parallel capture: flag in a packed side bitvector. Works with any
 /// `T: Copy`. Production's `VecP` alias accepted `T: Clone`; the verified

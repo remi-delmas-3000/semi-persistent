@@ -105,3 +105,51 @@ count because every column's stamp array grew in lockstep under
 e-graph suite 1256 tests, 0 failures. Sundance corpus 438 total / 427
 correct / 0 incorrect / 11 timeout, identical with and without
 `SEMPER_COMPRESS=auto`, unchanged through the collapse and H2.
+
+## CORRECTION (2026-09-08, post-close): restore share was understated
+
+The 7.7% figure above divides by the 12-second CAP, not by the solve wall of
+instances that complete. Symmetric trait-boundary probes (`TRAIL_PROF`,
+sundance commit `e1ca8b8`) on uncapped runs of the two most backtrack-heavy
+instances, semper vs the stock backend:
+
+| instance | stock backtrack total | semper backtrack total | per call | wall |
+|---|---|---|---|---|
+| QF_UF_cyclic_scheduler.3 | 6.1ms / 95 calls | 904ms / 94 | 64us vs 9.6ms (~150x) | 0.16s vs 3.19s |
+| QF_UF_reader_writer.3 | 15.8ms / 101 | 724ms / 101 | 156us vs 7.2ms (~46x) | 0.19s vs 3.13s |
+
+Restore is 28% of semper's uncapped wall on the first instance: a real
+co-culprit on backtrack-heavy SMT, not noise. The adapter is exonerated
+(trait-boundary time minus the engine's own restore is ~0.2ms: replay and
+node_to_driver rebuild cost nothing); the expense is inside the engine's
+restore, whose per-column frame machinery and dirty-id repair carry costs
+that do not shrink with the undo delta, against the stock backend's O(delta)
+undo trail. The remaining ~2.1s of the gap is search-side as stated above.
+Next lever: profile inside one 9.6ms restore call to split the ~46-column
+fixed fan cost from delta-insensitive repair work. Reproduce:
+`TRAIL_PROF=1 SEMPER_PROF=1 sundance-smt --infer-triggers <file>`.
+
+### The inside-one-restore profile (the named next lever, answered)
+
+Per-member and per-cache probes (`SEMPER_RESTORE_PROF`, sequential path) on
+the uncapped cyclic_scheduler.3 run:
+
+- 98% of restore is ONE member: the node store (885.3ms of 911.7ms; classes
+  6.2ms, ops 12.3ms, everything else microseconds). The 46-column fan and the
+  Vec columns are not the cost; a dirty-member skip would recover about 2%.
+- Inside the node store, two hashcons caches hold it all: plain2 787.6ms and
+  plain1 96.5ms (the binary and unary node caches; every other part is
+  microseconds).
+- Inside the caches: the arena suffix is EMPTY on every restore (suffix = 0:
+  EUF search interns terms at level 0 and only merges afterwards). The whole
+  cost is RE-KEY repair: 312,903 dirty re-keys summed, 147 of 206 index
+  rebuilds forced by the dirty-list budget overflowing, and the rebuild path
+  re-reads and re-hashes the entire live arena (1,020,417 inserts summed,
+  about 800ns each with the arena read).
+
+So the undo-trail gap is, concretely, the hashcons index repair strategy on
+re-key-heavy backtracks. The direction chosen (additive, per the repo
+doctrine): a new `DiffStore` (`TrailStore`, exact-event tracking, `VecT`
+alias) rather than converting the existing cache repair in place; the cache
+index's own adoption of exact-event undo is a follow-up decision once the
+container-level mode exists.

@@ -516,6 +516,32 @@ where
     }
 
     pub fn restore(&mut self, token: NodeStoreToken) {
+        if node_prof_enabled() {
+            let mut t = std::time::Instant::now();
+            self.routing.restore(token.routing);
+            node_prof_record(0, &mut t);
+            self.plain0.restore(token.plain0);
+            node_prof_record(1, &mut t);
+            self.plain1.restore(token.plain1);
+            node_prof_record(2, &mut t);
+            self.plain2.restore(token.plain2);
+            node_prof_record(3, &mut t);
+            self.plain3.restore(token.plain3);
+            node_prof_record(4, &mut t);
+            self.spair.restore(token.spair);
+            node_prof_record(5, &mut t);
+            self.plain_n.restore(token.plain_n);
+            node_prof_record(6, &mut t);
+            self.seq.restore(token.seq);
+            node_prof_record(7, &mut t);
+            self.mset.restore(token.mset);
+            node_prof_record(8, &mut t);
+            self.set.restore(token.set);
+            node_prof_record(9, &mut t);
+            self.lit.restore(token.lit);
+            node_prof_record(10, &mut t);
+            return;
+        }
         self.routing.restore(token.routing);
         self.plain0.restore(token.plain0);
         self.plain1.restore(token.plain1);
@@ -682,4 +708,43 @@ mod tests {
         );
         assert!(collisions.is_empty());
     }
+}
+
+/// Per-cache restore accounting inside the node store (SEMPER_RESTORE_PROF).
+pub const NODE_PROF_PARTS: [&str; 11] = [
+    "routing", "plain0", "plain1", "plain2", "plain3", "spair", "plain_n",
+    "seq", "mset", "set", "lit",
+];
+static NODE_PROF_NS: [std::sync::atomic::AtomicU64; 11] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+fn node_prof_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SEMPER_RESTORE_PROF").is_some())
+}
+
+fn node_prof_record(part: usize, t: &mut std::time::Instant) {
+    NODE_PROF_NS[part]
+        .fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    *t = std::time::Instant::now();
+}
+
+/// Read and reset, indexed as [`NODE_PROF_PARTS`].
+pub fn take_node_restore_profile() -> [u64; 11] {
+    let mut out = [0u64; 11];
+    for (i, c) in NODE_PROF_NS.iter().enumerate() {
+        out[i] = c.swap(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    out
 }

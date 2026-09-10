@@ -204,8 +204,23 @@ where
             TRACK ==> forall|i: int| 0 <= i < saved_len.as_nat() ==>
                 #[trigger] final(self).captured()[i] == false;
 
-    /// First-write-wins capture. If the slot is in-frame and not yet captured,
-    /// log `(old.data()[i], i)` and flip `captured[i]`.
+    /// Capture discipline: `true` means first-write-wins (one diff entry per
+    /// cell per frame, enforced by runtime capture flags); `false` means
+    /// chronological (every in-frame write appends, duplicates allowed, no
+    /// runtime flags — the trail discipline). The reconstruction model
+    /// (`overlay`, first-entry-wins) is correct for both; only the sealing
+    /// and reordering paths require the unique discipline.
+    spec fn unique_capture_spec() -> bool;
+
+    /// Exec twin of `unique_capture_spec`: the sealing and reordering paths
+    /// gate on it at runtime (a chronological column never seals).
+    fn unique_capture() -> (b: bool)
+        ensures b == Self::unique_capture_spec();
+
+    /// First-write-wins capture (unique discipline) or unconditional append
+    /// (chronological discipline). If the slot is in-frame and not yet
+    /// captured, log `(old.data()[i], i)` and flip `captured[i]`; a
+    /// chronological store also appends when the slot is already captured.
     fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>)
         requires
             old(self).wf(),
@@ -226,12 +241,25 @@ where
                     &&& forall|j: int| 0 <= j < final(self).captured().len() && j != i.as_nat()
                             ==> #[trigger] final(self).captured()[j] == old(self).captured()[j]
                 },
-            // Already captured, out of frame, or untracked: no-op.
-            !(TRACK && i.as_nat() < saved_len.as_nat()
-                && !old(self).captured()[i.as_nat() as int])
+            // Out of frame or untracked: no-op for every discipline.
+            !(TRACK && i.as_nat() < saved_len.as_nat())
                 ==> {
                     &&& final(diff_log)@ == old(diff_log)@
                     &&& (TRACK ==> final(self).captured() == old(self).captured())
+                },
+            // In-frame but already captured: a unique-discipline store
+            // no-ops; a chronological store appends the duplicate (the
+            // reconstruction model is first-entry-wins, so the duplicate is
+            // inert at restore).
+            (TRACK && i.as_nat() < saved_len.as_nat()
+                && old(self).captured()[i.as_nat() as int])
+                ==> {
+                    &&& Self::unique_capture_spec()
+                            ==> final(diff_log)@ == old(diff_log)@
+                    &&& !Self::unique_capture_spec()
+                            ==> final(diff_log)@ == old(diff_log)@.push(
+                                    (old(self).data()[i.as_nat() as int], i))
+                    &&& final(self).captured() == old(self).captured()
                 };
 
     /// Retained unconditional-capture operation. Within-frame: log + set

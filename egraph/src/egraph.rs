@@ -101,6 +101,39 @@ pub fn take_markrestore_profile() -> (u64, u64, u64, u64) {
     )
 }
 
+/// Per-member restore accounting (SEMPER_RESTORE_PROF): which member inside
+/// one `restore` the time goes to. Sequential path only (the fan-out
+/// interleaves members, so per-member walls would not add up).
+static RESTORE_PROF_ON: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os("SEMPER_RESTORE_PROF").is_some());
+pub const RESTORE_PROF_MEMBERS: [&str; 8] =
+    ["classes", "nodes", "sorts", "ops", "rules", "axioms", "lits", "maps"];
+static RESTORE_MEMBER_NS: [std::sync::atomic::AtomicU64; 8] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+fn restore_prof_record(member: usize, t: std::time::Instant) {
+    RESTORE_MEMBER_NS[member]
+        .fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Read and reset the per-member restore nanoseconds, indexed as
+/// [`RESTORE_PROF_MEMBERS`]. All zeros unless `SEMPER_RESTORE_PROF` is set.
+pub fn take_restore_member_profile() -> [u64; 8] {
+    let mut out = [0u64; 8];
+    for (i, c) in RESTORE_MEMBER_NS.iter().enumerate() {
+        out[i] = c.swap(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    out
+}
+
 pub struct EGraph<
     Cfg: EGraphConfig,
     L: LitVal,
@@ -3277,6 +3310,30 @@ where
                     l.restore(lits);
                 });
             });
+        } else if *RESTORE_PROF_ON {
+            // Per-member accounting (SEMPER_RESTORE_PROF): where inside one
+            // restore the time goes, member by member.
+            let t = std::time::Instant::now();
+            self.classes.restore(classes);
+            restore_prof_record(0, t);
+            let t = std::time::Instant::now();
+            self.nodes.restore(nodes);
+            restore_prof_record(1, t);
+            let t = std::time::Instant::now();
+            self.sorts.restore(sorts);
+            restore_prof_record(2, t);
+            let t = std::time::Instant::now();
+            self.ops.restore(ops);
+            restore_prof_record(3, t);
+            let t = std::time::Instant::now();
+            self.rules.restore(rules);
+            restore_prof_record(4, t);
+            let t = std::time::Instant::now();
+            self.axioms.restore(axioms);
+            restore_prof_record(5, t);
+            let t = std::time::Instant::now();
+            self.lits.restore(lits);
+            restore_prof_record(6, t);
         } else {
             self.classes.restore(classes);
             self.nodes.restore(nodes);
@@ -3286,12 +3343,16 @@ where
             self.axioms.restore(axioms);
             self.lits.restore(lits);
         }
+        let t = std::time::Instant::now();
         self.unit_node
             .try_restore(unit_node)
             .expect("restore: token minted by this container's own mark");
         self.inverse_op
             .try_restore(inverse_op)
             .expect("restore: token minted by this container's own mark");
+        if *RESTORE_PROF_ON {
+            restore_prof_record(7, t);
+        }
         // One branch-cut record for the whole set.
         self.history.restore_to(token.group);
         // Roll the outcome back with the graph: the mark-time value describes exactly the
