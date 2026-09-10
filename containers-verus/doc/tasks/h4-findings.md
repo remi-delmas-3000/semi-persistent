@@ -347,3 +347,75 @@ ordering sensitivity of these fragile instances, not correctness. The
 maintained gate (default features, basic backend) passes 2 of 2. Filed as
 its own follow-up: the semper-arithmetic seam, out of scope for the store
 selection work.
+
+### The profile after the campaign: where the time actually goes
+
+Leaf profiling (`sample`, release) on the two regimes, after the hint index,
+the O(1) prechecks and the store-selection work.
+
+**EqSat** (math-microbenchmark, 1.23M nodes; our code is about 95% of the
+process):
+
+| self | function |
+|---|---|
+| 16.7% | `UnionFind::find` |
+| 9.4% | `FixedArityCache::probe_hints` |
+| 9.1% | `LeapfrogJoin::search` |
+| 6.2% | `ListArena::try_prepend` |
+| 5.8% | `child_at` |
+| 5.4% | `ematch::leapfrog_join` |
+
+Inclusive: rule application 47%, e-matching 30%, evaluation 26%. `find` is
+the top cost because path compression writes go through the TRACKED
+`parent.set_index`: every compressed edge pays a capture. That is inherent
+(an uncaptured compression write would corrupt the partition after a restore
+crossing the union that justified it), so the lever is fewer writes, not
+cheaper writes: PATH HALVING is the recorded candidate.
+
+`probe_hints` was measured before being optimized, and the measurement
+killed the obvious idea: over 2,004,019 probes the bucket scan averages
+**1.19 entries** with 5,456 buckets longer than 8. Stale-hint accumulation is
+therefore NOT the cost and move-to-front would buy nothing; the 9.4% is
+fingerprint computation plus the map lookup plus one content compare, so the
+only real lever is caching fingerprints rather than recomputing them.
+
+**SMT, backtrack-heavy** (`eq_diamond18`, 133,961 marks and 133,403
+restores - two orders of magnitude more version churn than the
+cyclic_scheduler instances, and the right benchmark for this engine):
+
+| self | function |
+|---|---|
+| 36.0% | `CaDiCaL::Internal::propagate` (the SAT solver, common to both backends) |
+| ~10% | allocator (`xzm_free`, `xzm_realloc`, `malloc_zone_realloc`, `memmove`) |
+| 3.4% | `probe_hints` (+ its closure) |
+| 2.8% | `assert_equal` |
+| 1.0% | `merge_with` |
+
+`UnionFind::find` does NOT appear in the top fourteen here. So the two EqSat
+levers do not transfer: path halving is an EqSat optimization, and
+fingerprint caching is worth about 3% on this SMT profile. What the profile
+does surface is mark+restore at 1.75s of 8.35s wall (21%) and allocator
+churn at about 10%: those are the SMT levers, and neither was visible on the
+cyclic_scheduler instances whose restores number in the dozens.
+
+### The trail store's first measured win
+
+`--diff-mode trail` against the default frame-diff discipline on
+`eq_diamond18` (two runs each, idle):
+
+| | restore total | wall |
+|---|---|---|
+| inline (frame diffs) | 1.400s / 133,403 calls | 8.35s |
+| trail (chronological) | 1.243s (**11% faster**) | 8.17s (2% faster) |
+
+This is the first workload where `VecT` pays, and it is exactly the shape the
+store was built for: version churn so high that the per-write flag check and
+the per-frame flag maintenance outweigh the bounded-log benefit. Mark is
+unchanged (0.350s vs 0.356s): at 46 columns the mark cost is per-column frame
+push, not flag clearing. Stock on the same instance is 5.70s, so semper is
+1.47x there (against 2.3x and 1.6x on the low-restore instances), and
+mark+restore is where the difference lives. The earlier VecT-is-flat result
+stands for the cyclic_scheduler/reader_writer family and is now qualified
+rather than retracted: the discipline choice is measurable exactly when
+restores are frequent, which is what the runtime `--diff-mode` selector is
+for.

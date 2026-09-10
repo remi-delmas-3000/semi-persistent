@@ -581,7 +581,17 @@ where
         }
     }
 
-    /// Canonical representative of `x`, with two-pass full compression.
+    /// Canonical representative of `x`, with PATH HALVING compression: a
+    /// single pass that points each visited node at its grandparent and then
+    /// advances two levels. Half the writes of two-pass full compression for
+    /// the same inverse-Ackermann amortized bound (Tarjan and van Leeuwen
+    /// 1984), which matters here because a compression write is not a plain
+    /// store: it goes through the TRACKED `parent.set_index`, so it costs a
+    /// capture check, possibly a diff-log entry, that entry's memory for the
+    /// frame's lifetime, and the work of replaying it at restore. Halving the
+    /// writes shrinks all four. Measured lever: `UnionFind::find` was 16.7% of
+    /// EqSat self time (math-microbenchmark) before this change.
+    ///
     /// Total-with-documented-panic: an out-of-range id refuses. The abstract
     /// state (`roots_view`) is unchanged — compression rewrites the cache,
     /// not the partition.
@@ -606,50 +616,8 @@ where
             crate::guard::refuse("UnionFind::find: id out of range");
         }
         let ghost n = old(self).n_spec();
-        // pass 1: locate the root (read-only walk; production's shape).
-        let mut root = x;
-        loop
-            invariant
-                self.wf(),
-                *self == *old(self),
-                self.n_spec() == n,
-                root.id_nat() < n,
-                x.id_nat() < n,
-                self.roots@[root.id_nat() as int] == self.roots@[x.id_nat() as int],
-            ensures
-                *self == *old(self),
-                root.id_nat() < n,
-                self.roots@[root.id_nat() as int] == root.id_nat() as usize,
-                self.roots@[root.id_nat() as int] == self.roots@[x.id_nat() as int],
-            decreases self.dist@[root.id_nat() as int],
-        {
-            let p = self.parent.get_index(root.to_index());
-            proof {
-                assert(p == self.parent_view()[root.id_nat() as int]);
-                assert(p.id_nat() < n);
-            }
-            if p.to_usize() == root.to_usize() {
-                proof {
-                    T::lemma_id_injective(p, root);
-                    crate::opt::lemma_id_nat_fits_usize(root);
-                    assert(parent_self_root_clause(
-                        self.parent_view(), self.roots@, root.id_nat() as int));
-                    assert(self.parent_view()[root.id_nat() as int].id_nat() == root.id_nat());
-                    assert(self.roots@[root.id_nat() as int] == root.id_nat() as usize);
-                }
-                break;
-            }
-            proof { assert(p.id_nat() != root.id_nat()); }
-            root = p;
-        }
-        // pass 2: point every node on the walked path at the root
-        // (production's full compression). Each write lowers the written
-        // node's measure to 1 (the root's is 0), which preserves the strict
-        // decrease into it, and the cursor advances along parents read
-        // before their cell is overwritten.
-        proof { crate::opt::lemma_id_nat_fits_usize(root); }
         let mut cur = x;
-        while cur.to_usize() != root.to_usize()
+        loop
             invariant
                 self.wf(),
                 self.n_spec() == n,
@@ -662,37 +630,74 @@ where
                 self.parent.snapshots_view() == old(self).parent.snapshots_view(),
                 cur.id_nat() < n,
                 x.id_nat() < n,
-                root.id_nat() < n,
+                // The walk preserves the class: cur's root is x's root.
                 self.roots@[cur.id_nat() as int] == self.roots@[x.id_nat() as int],
-                self.roots@[root.id_nat() as int] == root.id_nat() as usize,
-                self.roots@[root.id_nat() as int] == self.roots@[x.id_nat() as int],
+            ensures
+                self.wf(),
+                self.n_spec() == n,
+                self.rank == old(self).rank,
+                self.roots@ == old(self).roots@,
+                self.roots_snapshots@ == old(self).roots_snapshots@,
+                self.dist_snapshots@ == old(self).dist_snapshots@,
+                self.parent.snapshots_view() == old(self).parent.snapshots_view(),
+                cur.id_nat() < n,
+                // Exit condition: cur IS the root of x's class.
+                self.roots@[cur.id_nat() as int] == cur.id_nat() as usize,
+                self.roots@[cur.id_nat() as int] == self.roots@[x.id_nat() as int],
             decreases self.dist@[cur.id_nat() as int],
         {
-            proof {
-                crate::opt::lemma_id_nat_fits_usize(cur);
-                assert(cur.id_nat() != root.id_nat()) by {
-                    if cur.id_nat() == root.id_nat() { T::lemma_id_injective(cur, root); }
-                }
-            }
+            proof { crate::opt::lemma_id_nat_fits_usize(cur); }
             let p = self.parent.get_index(cur.to_index());
             proof {
                 assert(p == self.parent_view()[cur.id_nat() as int]);
                 assert(p.id_nat() < n);
                 crate::opt::lemma_id_nat_fits_usize(p);
-                // cur is not a root: were parent[cur] == cur, roots[cur] == cur,
-                // but roots[cur] == roots[root] == root != cur.
-                assert(parent_self_root_clause(
-                    self.parent_view(), self.roots@, cur.id_nat() as int));
-                assert(self.parent_view()[cur.id_nat() as int].id_nat() != cur.id_nat()) by {
-                    if self.parent_view()[cur.id_nat() as int].id_nat() == cur.id_nat() {
-                        assert(self.roots@[cur.id_nat() as int] == cur.id_nat() as usize);
-                    }
+            }
+            if p.to_usize() == cur.to_usize() {
+                // cur is a root.
+                proof {
+                    T::lemma_id_injective(p, cur);
+                    assert(parent_self_root_clause(
+                        self.parent_view(), self.roots@, cur.id_nat() as int));
+                    assert(self.roots@[cur.id_nat() as int] == cur.id_nat() as usize);
                 }
+                break;
+            }
+            proof {
                 assert(p.id_nat() != cur.id_nat());
+                assert(self.dist@[p.id_nat() as int] < self.dist@[cur.id_nat() as int]);
+                assert(self.roots@[p.id_nat() as int] == self.roots@[cur.id_nat() as int]);
+            }
+            let g = self.parent.get_index(p.to_index());
+            proof {
+                assert(g == self.parent_view()[p.id_nat() as int]);
+                assert(g.id_nat() < n);
+                crate::opt::lemma_id_nat_fits_usize(g);
+                assert(self.roots@[g.id_nat() as int] == self.roots@[p.id_nat() as int]);
+            }
+            if g.to_usize() == p.to_usize() {
+                // p is the root: nothing left to compress, step onto it.
+                proof {
+                    T::lemma_id_injective(g, p);
+                    assert(parent_self_root_clause(
+                        self.parent_view(), self.roots@, p.id_nat() as int));
+                    assert(self.roots@[p.id_nat() as int] == p.id_nat() as usize);
+                }
+                cur = p;
+                break;
+            }
+            // Compress one level: point cur at its grandparent. The measure
+            // for cur becomes dist[g] + 1, which is strictly below cur's old
+            // measure (dist[cur] > dist[p] > dist[g]), so every edge INTO cur
+            // still strictly decreases, and the new edge cur -> g does too.
+            proof {
+                assert(g.id_nat() != p.id_nat());
+                assert(self.dist@[g.id_nat() as int] < self.dist@[p.id_nat() as int]);
             }
             let ghost pre = *self;
-            self.parent.set_index(cur.to_index(), root);
-            self.dist = Ghost(self.dist@.update(cur.id_nat() as int, 1nat));
+            let ghost gdist = self.dist@[g.id_nat() as int];
+            self.parent.set_index(cur.to_index(), g);
+            self.dist = Ghost(self.dist@.update(cur.id_nat() as int, (gdist + 1) as nat));
             proof {
                 let pv = self.parent_view();
                 let opv = pre.parent_view();
@@ -700,24 +705,22 @@ where
                 let dist = self.dist@;
                 let odist = pre.dist@;
                 let ci = cur.id_nat() as int;
-                let ri = root.id_nat() as int;
-                assert(pv == opv.update(ci, root));
-                assert(dist == odist.update(ci, 1nat));
-                // cur is not any element's root value (it is not a root).
+                let gi = g.id_nat() as int;
+                let pi = p.id_nat() as int;
+                assert(pv == opv.update(ci, g));
+                assert(dist == odist.update(ci, (gdist + 1) as nat));
+                assert(odist[gi] < odist[pi] && odist[pi] < odist[ci]);
+                assert(dist[ci] == odist[gi] + 1);
+                assert(dist[ci] < odist[ci]);
+                // cur is not a root (its parent differed), and g != cur (a
+                // 2-cycle would violate the strict measure decrease).
                 assert(roots[ci] != cur.id_nat() as usize);
+                assert(gi != ci);
                 assert forall|i: int| 0 <= i < n implies
                     (#[trigger] roots[i]) != cur.id_nat() as usize by {
                     if roots[i] == cur.id_nat() as usize {
                         assert(roots[ci] == roots[i]);
                     }
-                }
-                // the root has measure 0 and stays a root.
-                assert(roots[ri] == root.id_nat() as usize);
-                assert(odist[ri] == 0);
-                // cur was not a root, so its old measure was at least 1.
-                assert(odist[ci] >= 1) by {
-                    assert(opv[ci].id_nat() != ci as nat);
-                    assert(odist[opv[ci].id_nat() as int] < odist[ci]);
                 }
                 assert forall|i: int| 0 <= i < n implies (#[trigger] pv[i]).id_nat() < n by {
                     if i != ci { assert(pv[i] == opv[i]); }
@@ -728,7 +731,7 @@ where
                         assert(pv[i] == opv[i]);
                         assert(parent_self_root_clause(opv, roots, i));
                     } else {
-                        assert(pv[ci] == root);
+                        assert(pv[ci] == g);
                         assert(pv[ci].id_nat() != ci as nat);
                     }
                 }
@@ -737,7 +740,8 @@ where
                     if i != ci {
                         assert(pv[i] == opv[i]);
                     } else {
-                        assert(roots[ri] == roots[ci]);
+                        assert(roots[gi] == roots[pi]);
+                        assert(roots[pi] == roots[ci]);
                     }
                 }
                 assert forall|i: int| 0 <= i < n implies
@@ -753,15 +757,16 @@ where
                 assert forall|i: int| 0 <= i < n && (#[trigger] pv[i]).id_nat() != i as nat
                     implies dist[pv[i].id_nat() as int] < dist[i] by {
                     if i == ci {
-                        // new edge cur -> root: measure 0 < 1.
-                        assert(dist[ri] == odist[ri]);
-                        assert(dist[ci] == 1);
+                        // new edge cur -> g: dist[g] < dist[g] + 1.
+                        assert(gi != ci);
+                        assert(dist[gi] == odist[gi]);
+                        assert(dist[ci] == odist[gi] + 1);
                     } else if opv[i].id_nat() == cur.id_nat() {
-                        // an edge into cur: its head's measure fell to 1, and
-                        // the tail's was strictly above cur's old (>= 1) one.
-                        assert(dist[ci] == 1);
+                        // an edge into cur: cur's measure only FELL, and the
+                        // tail's was strictly above cur's old one.
                         assert(odist[ci] < odist[i]);
                         assert(dist[i] == odist[i]);
+                        assert(dist[ci] < odist[ci]);
                     } else {
                         assert(pv[i] == opv[i]);
                         assert(dist[pv[i].id_nat() as int]
@@ -771,21 +776,19 @@ where
                 }
                 assert(uf_model_wf(pv, roots, dist));
                 assert(self.parent.snapshots_view() == pre.parent.snapshots_view());
+                // Measure for the next iteration: cur becomes g, whose cell
+                // was not written (g != cur), so its measure is unchanged and
+                // strictly below cur's old one.
+                assert(dist[gi] == odist[gi]);
+                assert(odist[gi] < odist[ci]);
             }
-            proof {
-                // measure: the next cursor's cell is unwritten (it is ahead of
-                // the walk), so its measure is the old one, strictly below.
-                assert(p.id_nat() != cur.id_nat());
-                assert(self.dist@[p.id_nat() as int] == pre.dist@[p.id_nat() as int] || p.id_nat() == cur.id_nat());
-                assert(pre.dist@[p.id_nat() as int] < pre.dist@[cur.id_nat() as int]);
-            }
-            cur = p;
+            cur = g;
         }
         proof {
-            crate::opt::lemma_id_nat_fits_usize(root);
-            assert(root.id_nat() == old(self).roots_view()[x.id_nat() as int] as nat);
+            crate::opt::lemma_id_nat_fits_usize(cur);
+            assert(cur.id_nat() == old(self).roots_view()[x.id_nat() as int] as nat);
         }
-        root
+        cur
     }
 
     /// Attach root `ab`'s class under root `s` (the link step of union).
