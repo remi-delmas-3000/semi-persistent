@@ -1229,6 +1229,37 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
     }
 
     /// Materialize entries `[lo, hi)` as a flat `Vec<(T, I)>`.
+    /// Diagnostic: number of sealed (cold) frames, whichever representation.
+    #[verifier::external_body]
+    pub fn cold_frame_count(&self) -> usize {
+        match self {
+            DiffLog::Cols { idxs, vals } => {
+                let a = match idxs { DiffIdxs::Runs { cold, .. } => cold.len(), _ => 0 };
+                let b = match vals { DiffVals::Dict { cold, .. } => cold.len(), _ => 0 };
+                if a > b { a } else { b }
+            }
+            DiffLog::Adaptive { cold, .. } => cold.len(),
+        }
+    }
+
+    /// Exec probe for the adaptive fast-fold preconditions: is this the adaptive
+    /// representation with its cold tier ending exactly at `ds` (the open frame's
+    /// start)? A `seal` entry branches on this at runtime and falls back to the
+    /// plain fold when it does not hold, so no caller carries the alignment as a
+    /// precondition.
+    pub fn adaptive_aligned(&self, ds: usize) -> (b: bool)
+        requires self.wf(),
+        ensures b == (self.is_adaptive() && self.idx_cold_len_spec() == ds),
+    {
+        match self {
+            DiffLog::Cols { .. } => false,
+            DiffLog::Adaptive { hot, len, .. } => {
+                proof { reveal(cold_adaptive); }
+                *len - hot.len() == ds
+            }
+        }
+    }
+
     /// Backward scattered replay of `[lo, hi)` onto `target` (the `overlay` model,
     /// entry by entry through `index`). The generic baseline every representation
     /// can use; the fast paths in `restore_range_into` replace it frame-wise.

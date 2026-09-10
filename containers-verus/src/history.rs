@@ -24,9 +24,17 @@ verus! {
 /// and the mark depth. Drops `VecToken`'s per-vector `container_id` — one token
 /// names the whole group's version, validated once by `History`.
 #[derive(Clone, Copy)]
-pub(crate) struct GroupToken {
+pub struct GroupToken {
     pub(crate) generation: u64,
     pub(crate) depth: u32,
+}
+
+impl GroupToken {
+    /// The mark depth this token names (public spec accessor; the raw fields stay
+    /// crate-private so a token cannot be forged field-by-field outside).
+    pub open(crate) spec fn depth_spec(&self) -> nat {
+        self.depth as nat
+    }
 }
 
 /// The shared depth-indexed generation stamps and mark depth for a synced group.
@@ -36,7 +44,7 @@ pub(crate) struct GroupToken {
 /// (doc 10). A token minted at depth `d` carries `stamps.stamp_at(d)`; a restore
 /// diverging at `d` bumps the deeper levels, O(1)-invalidating the abandoned
 /// future via `lemma_bump_invalidates`.
-pub(crate) struct History {
+pub struct History {
     pub(crate) stamps: crate::gen_stamps::GenStamps,
     pub(crate) depth: u32,
 }

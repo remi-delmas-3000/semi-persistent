@@ -4297,6 +4297,67 @@ where
         let t = self.mark(shrink);
         t
     }
+
+    /// Genealogy-agnostic seal: close the open frame (compressing it per-frame when
+    /// the column is adaptive and aligned, choosing the mode from the frame's own
+    /// statistics) and open the next. This is the member-side half of a group
+    /// `mark`: the group's `ForkHistory` writes the genealogy once, and each member
+    /// only seals. All fast-fold preconditions are probed at runtime
+    /// (`adaptive_aligned`) with the frame's uniqueness derived from `wf`, so the
+    /// caller carries only the structural bounds.
+    #[verifier::rlimit(600)]
+    #[verifier::spinoff_prover]
+    pub fn seal_frame(&mut self, shrink: ShrinkPolicy)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).depth_spec() < u32::MAX,
+            old(self).view().len() < I::max_nat(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+    {
+        if self.frames.len() > 0 {
+            let top = self.frames.len() - 1;
+            let ds = self.frames[top].diff_start;
+            proof {
+                self.lemma_diff_start_le_n(top as int);
+            }
+            if self.diff_log.adaptive_aligned(ds) {
+                proof {
+                    // The open frame's stratum [ds, n) is unique-indexed: it is the
+                    // top frame's range in frame_inv_range (first-write-wins).
+                    let d = self.diff_log@;
+                    let lo = ds as int;
+                    let hi = d.len() as int;
+                    assert(self.stratum_end(top as int) == hi);
+                    assert(frame_inv_range::<T, I>(
+                        self.layer_above_at(top as int), d, lo, hi,
+                        self.snapshots@[top as int],
+                        self.frames@[top as int].saved_len.as_nat()));
+                    let s = d.subrange(lo, hi);
+                    assert forall|a: int, b: int|
+                        0 <= a < s.len() && 0 <= b < s.len() && a != b
+                        implies (#[trigger] s[a]).1.as_nat() != (#[trigger] s[b]).1.as_nat() by {
+                        assert(s[a] == d[lo + a]);
+                        assert(s[b] == d[lo + b]);
+                    }
+                    assert(crate::diff_compress::unique_idx(s));
+                }
+                // Choose this frame's mode from its own statistics, then fold.
+                let n = self.diff_log.len();
+                let diffs = self.diff_log.subrange_vec(ds, n);
+                let mode = crate::diff_compress::choose_mode(&diffs);
+                let _ = self.mark_and_compact_adaptive(mode, shrink);
+            } else {
+                let _ = self.mark(shrink);
+            }
+        } else {
+            let _ = self.mark(shrink);
+        }
+    }
 }
 
 // Concrete constructors, mirroring production's two `new()` impls.

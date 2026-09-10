@@ -1107,7 +1107,7 @@ pub enum CompressionMode {
 /// choice, only the size does. `R` (run count) is the scatter signal; `D`
 /// (distinct values) is the value-repetition signal.
 #[verifier::external_body]
-pub fn choose_mode<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) -> CompressionMode {
+pub fn choose_mode<T: IndexLike, I: IndexLike>(diffs: &Vec<(T, I)>) -> CompressionMode {
     // One O(N) stats pass (R runs, D distinct; no sort), then the exact-size
     // decision. `external_body` only for the `size_of`/hashset it threads
     // through; the arithmetic lives in the verified `FrameStats::best_mode`.

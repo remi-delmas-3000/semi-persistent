@@ -208,6 +208,25 @@ column from its own numbers.
 
 ### H1 (BUILT, PINNED AFTER F1): `SyncMember` and the owning `ForkHistory`
 
+STATUS: DISCHARGED. `sync_group.rs`: object-safe `SyncMember` (can_seal probe,
+seal_frame with internal per-frame mode choice, restore_frame straight to the live
+column, diagnostics incl. an erased depth-preserving `poke`); `ForkHistory` owns
+`Vec<Box<dyn SyncMember>>` + `History`, sole mark/restore authority, group invariant
+proved through both fan-out loops. One impl covers every tracked id-element `Vec`.
+`fork_history_tests`: three members of different element/index types, six marks each
+observably sealing (cold_frames grows), per-step typed-oracle checksums, deep group
+restore in lockstep, stale-token rejection, ancestor re-restore. H1.1-H1.4 satisfied
+(the per-member view==snapshot equality lives on the typed impl contracts, not the
+erased trait; recorded in the module doc).
+
+### H3 STATUS: DISCHARGED. `mark_parallel`/`restore_parallel`, contracts identical,
+external_body over exactly the rayon fan-out, PAR_MEMBER_MIN threshold.
+`parallel_twins_match_sequential_and_spawn`: differential vs sequential (checksums
+every frame, depths, per-member encoded sizes) + thread-witness proves >1 thread.
+MEASURED (group_parallel_timing, release, 10 members x 100k cells, 4 frames):
+mark seq 125.6 ms vs par 16.9 ms = 7.45x; restore seq 6.06 ms vs par 0.91 ms =
+6.66x. Separate axes as required.
+
 `push_frame(shrink)`, `restore_frame(depth)` and the compact entries mention neither
 `T` nor `I`, so a `SyncMember` trait is object-safe. The history holds
 `Vec<Box<dyn SyncMember>>`, the generation stamps, the depth and the container

@@ -91,7 +91,7 @@ impl FrameStats {
 /// it uses hash sets (unmodeled) and its output feeds a size heuristic, never
 /// correctness. Both counts are exact for the byte formulas above.
 #[verifier::external_body]
-pub fn frame_stats<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) -> FrameStats {
+pub fn frame_stats<T: IndexLike, I: IndexLike>(diffs: &Vec<(T, I)>) -> FrameStats {
     use std::collections::HashSet;
     let n = diffs.len();
     let idx_set: HashSet<usize> = diffs.iter().map(|d| d.1.as_usize()).collect();

@@ -110,6 +110,7 @@ pub mod frame;
 pub mod gen_stamps;
 pub mod guard;
 pub(crate) mod history;
+pub mod sync_group;
 pub mod hasher_spec;
 pub mod id_factory;
 #[macro_use]
