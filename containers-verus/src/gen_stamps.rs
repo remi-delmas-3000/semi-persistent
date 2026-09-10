@@ -132,15 +132,13 @@ impl GenStamps {
     /// A restore diverging at `depth` abandons every future at depth `>= depth`:
     /// bump `levels[depth..]` so their tokens no longer match, while
     /// `levels[0..depth]` (the surviving spine) is untouched. Uses `wrapping_add`,
-    /// which ALWAYS changes a value (`x + 1 != x` for every `u64`, wrap included),
-    /// so a bumped level is guaranteed distinct from its old value with NO overflow
-    /// precondition — the property invalidation needs. `external_body`: the
-    /// distinctness ensures (`!=`) is trusted from `wrapping_add`'s semantics, and
-    /// avoids threading a `< u64::MAX` precondition through the whole container
-    /// hierarchy. The only residue of wrap is ABA after 2^64 restores at ONE depth
-    /// (physically unreachable), and even then frame-liveness backstops it.
-    /// Trust ledger: group B (a pure counter bump, no `unsafe`).
-    #[verifier::external_body]
+    /// which ALWAYS changes a value: `(x + 1) % 2^64 != x` for every `u64`, wrap
+    /// included, PROVED below by the two-case split (no wrap: the successor
+    /// differs; wrap: zero differs from `u64::MAX`). No overflow precondition
+    /// threads through the container hierarchy. The only residue of wrap is ABA
+    /// after 2^64 restores at ONE depth (physically unreachable), and even then
+    /// frame-liveness backstops it. Discharged from the trust ledger 2026-09:
+    /// formerly `external_body` trusting wrapping semantics.
     pub fn bump_from(&mut self, depth: usize)
         ensures
             final(self).levels@.len() == old(self).levels@.len(),
@@ -151,8 +149,35 @@ impl GenStamps {
     {
         let n = self.levels.len();
         let mut d: usize = depth;
-        while d < n {
-            self.levels[d] = self.levels[d].wrapping_add(1);
+        while d < n
+            invariant
+                depth <= d,
+                // A depth past the stamp array is a legal no-op call.
+                d <= n || depth >= n,
+                n == self.levels@.len(),
+                self.levels@.len() == old(self).levels@.len(),
+                forall|k: int| 0 <= k < n && k < depth
+                    ==> self.levels@[k] == old(self).levels@[k],
+                forall|k: int| depth <= k < d
+                    ==> #[trigger] self.levels@[k] != old(self).levels@[k],
+                forall|k: int| d <= k < n
+                    ==> #[trigger] self.levels@[k] == old(self).levels@[k],
+            decreases n - d,
+        {
+            let v = self.levels[d];
+            let bumped = v.wrapping_add(1);
+            proof {
+                // wrapping_add(1) always changes a u64: either the plain
+                // successor (differs by one) or the wrap to zero (differs
+                // from u64::MAX).
+                if v == u64::MAX {
+                    assert(bumped == 0);
+                } else {
+                    assert(bumped == v + 1);
+                }
+                assert(bumped != v);
+            }
+            self.levels.set(d, bumped);
             d += 1;
         }
     }

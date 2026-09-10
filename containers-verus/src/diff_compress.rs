@@ -48,10 +48,25 @@ pub open spec fn packed_code_at(words: Seq<u64>, bits: nat, i: int) -> nat {
     let per_word = 64nat / bits;
     let wi = i / (per_word as int);
     let shift = (i % (per_word as int)) * (bits as int);
-    ((words[wi] >> (shift as u64)) & (((1u64 << (bits as u64)) - 1) as u64)) as nat
+    ((words[wi] >> (shift as u64)) & ((sub(1u64 << (bits as u64), 1)) as u64)) as nat
 }
 
 impl Codes {
+    /// Structural well-formedness of the packed variant: a legal width and
+    /// enough words to cover `len` (so `view` never reads out of range). The
+    /// plain-width variants are unconstrained. Introduced when `pack_codes`/
+    /// `packed_get` were discharged from the trust ledger: the verified
+    /// extractor needs the coverage fact its trusted predecessor assumed.
+    pub open spec fn wf(&self) -> bool {
+        match self {
+            Codes::Packed { words, bits, len } => {
+                &&& (*bits == 1 || *bits == 2 || *bits == 4)
+                &&& (*len as nat) <= words@.len() * (64nat / (*bits as nat))
+            }
+            _ => true,
+        }
+    }
+
     pub open spec fn view(&self) -> Seq<nat> {
         match self {
             Codes::U8(v) => Seq::new(v@.len(), |i: int| v@[i] as nat),
@@ -76,7 +91,9 @@ impl Codes {
     }
 
     pub fn get(&self, i: usize) -> (c: usize)
-        requires i < self.view().len(),
+        requires
+            self.wf(),
+            i < self.view().len(),
         ensures c as nat == self.view()[i as int],
     {
         match self {
@@ -118,6 +135,7 @@ impl Codes {
     pub fn from_usize(codes: &Vec<usize>, dict_len: usize) -> (r: Codes)
         requires forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < dict_len,
         ensures
+            r.wf(),
             r.view().len() == codes@.len(),
             forall|t: int| 0 <= t < codes@.len() ==> #[trigger] r.view()[t] == codes@[t] as nat,
     {
@@ -215,46 +233,250 @@ impl Codes {
     }
 }
 
+/// One packed field is set by OR-ing a shifted code into a zero field, and
+/// every other aligned field of the word is untouched. The two bit-vector
+/// facts the packing loop rests on, quantifier-free per call.
+proof fn lemma_pack_field_set(w: u64, code: u64, bits: u64, shift: u64)
+    by (bit_vector)
+    requires
+        bits == 1 || bits == 2 || bits == 4,
+        shift + bits <= 64,
+        code < (1u64 << bits),
+        (w >> shift) & (sub(1u64 << bits, 1)) == 0,
+    ensures
+        ((w | (code << shift)) >> shift) & (sub(1u64 << bits, 1)) == code,
+{
+}
+
+proof fn lemma_pack_field_other(w: u64, code: u64, bits: u64, shift: u64, shift2: u64)
+    by (bit_vector)
+    requires
+        bits == 1 || bits == 2 || bits == 4,
+        shift + bits <= 64,
+        shift2 + bits <= 64,
+        shift2 + bits <= shift || shift + bits <= shift2,
+        code < (1u64 << bits),
+    ensures
+        ((w | (code << shift)) >> shift2) & (sub(1u64 << bits, 1))
+            == (w >> shift2) & (sub(1u64 << bits, 1)),
+{
+}
+
 /// Bit-pack `codes` at `bits` bits each (1/2/4), `64/bits` per `u64` word with no
-/// cross-word straddle. `external_body`: variable-width bit arithmetic is not a
-/// tractable proof surface, so the pack/`packed_code_at` agreement is trusted and
-/// checked by `packed_codes_roundtrip` (containers-conformance). Trust ledger group
-/// B (shifts/masks, no `unsafe`). The result decodes back to `codes` exactly.
-#[verifier::external_body]
+/// cross-word straddle. VERIFIED: the loop invariant carries "every packed field
+/// below `t` reads back its code, every field at or above `t` is still zero",
+/// maintained by the two field lemmas above (aligned fields of one word are
+/// disjoint intervals). Discharged from the trust ledger 2026-09; the
+/// `packed_codes_roundtrip` proptest stays as a belt.
 pub fn pack_codes(codes: &Vec<usize>, bits: u8) -> (r: Codes)
     requires
         bits == 1 || bits == 2 || bits == 4,
         forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < (1usize << bits),
     ensures
+        r.wf(),
         r.view().len() == codes@.len(),
         forall|t: int| 0 <= t < codes@.len() ==> #[trigger] r.view()[t] == codes@[t] as nat,
 {
     let per_word: usize = 64 / (bits as usize);
+    proof {
+        assert(per_word >= 16) by (nonlinear_arith)
+            requires (bits == 1 || bits == 2 || bits == 4),
+                per_word == 64usize / (bits as usize);
+    }
     let n = codes.len();
     let nwords = if n == 0 { 0 } else { (n - 1) / per_word + 1 };
-    let mut words: std::vec::Vec<u64> = std::vec::from_elem(0u64, nwords);
+    proof {
+        // Coverage: nwords * per_word >= n (exact-division ceiling).
+        if n > 0 {
+            assert(nwords * per_word >= n) by (nonlinear_arith)
+                requires per_word > 0, n > 0,
+                    nwords as int == (n - 1) as int / per_word as int + 1;
+        }
+    }
+    let mut words: Vec<u64> = Vec::new();
+    let mut z: usize = 0;
+    while z < nwords
+        invariant
+            z <= nwords,
+            words@.len() == z,
+            forall|k: int| 0 <= k < z ==> #[trigger] words@[k] == 0u64,
+        decreases nwords - z,
+    {
+        words.push(0u64);
+        z += 1;
+    }
+    let ghost per = per_word as nat;
+    proof {
+        // All-zero words decode to all-zero fields.
+        assert forall|k: int| 0 <= k < nwords * per_word implies
+            #[trigger] packed_code_at(words@, bits as nat, k) == 0 by {
+            let kwi = k / (per as int);
+            assert(0 <= kwi < words@.len()) by (nonlinear_arith)
+                requires per > 0, 0 <= k, (k as nat) < words@.len() * per,
+                    kwi == k / (per as int);
+            assert(words@[kwi] == 0u64);
+            let kshu: u64 = ((k % (per as int)) * (bits as int)) as u64;
+            assert((0u64 >> kshu) & (sub(1u64 << (bits as u64), 1)) == 0u64)
+                by (bit_vector);
+            assert(packed_code_at(words@, bits as nat, k)
+                == ((words@[kwi] >> kshu) & (sub(1u64 << (bits as u64), 1))) as nat
+                || packed_code_at(words@, bits as nat, k) == 0) by {
+                assert(((k % (per as int)) * (bits as int)) as u64 == kshu);
+            }
+        }
+    }
     let mut t: usize = 0;
-    while t < n {
+    while t < n
+        invariant
+            bits == 1 || bits == 2 || bits == 4,
+            per_word == 64usize / (bits as usize),
+            per_word >= 16,
+            per == per_word as nat,
+            n == codes@.len(),
+            words@.len() == nwords,
+            n <= nwords * per_word,
+            forall|k: int| 0 <= k < codes@.len() ==> #[trigger] codes@[k] < (1usize << bits),
+            0 <= t <= n,
+            forall|k: int| 0 <= k < t
+                ==> #[trigger] packed_code_at(words@, bits as nat, k) == codes@[k] as nat,
+            forall|k: int| t <= k < nwords * per_word
+                ==> #[trigger] packed_code_at(words@, bits as nat, k) == 0,
+        decreases n - t,
+    {
         let wi = t / per_word;
-        let shift = ((t % per_word) as u64) * (bits as u64);
-        words[wi] |= (codes[t] as u64) << shift;
+        let f = t % per_word;
+        proof {
+            assert(wi < nwords) by (nonlinear_arith)
+                requires per_word > 0, t < n, n <= nwords * per_word,
+                    wi == t / per_word;
+            assert(f < per_word) by (nonlinear_arith)
+                requires per_word > 0, f == t % per_word;
+            assert((f as u64) * (bits as u64) + (bits as u64) <= 64) by (nonlinear_arith)
+                requires f < per_word, per_word == 64usize / (bits as usize),
+                    (bits == 1 || bits == 2 || bits == 4);
+        }
+        let shift = (f as u64) * (bits as u64);
+        let code = codes[t] as u64;
+        let ghost mask_spec = (((1u64 << (bits as u64)) - 1) as u64);
+        proof {
+            assert(mask_spec == sub(1u64 << (bits as u64), 1)) by (bit_vector)
+                requires bits == 1u8 || bits == 2u8 || bits == 4u8,
+                    mask_spec == (((1u64 << (bits as u64)) - 1) as u64);
+            let cu: usize = codes@[t as int];
+            assert(cu < (1usize << bits));
+            assert(cu < (1usize << bits) && (bits == 1u8 || bits == 2u8 || bits == 4u8)
+                ==> (cu as u64) < (1u64 << (bits as u64))) by (bit_vector);
+            assert(code < (1u64 << (bits as u64)));
+            // The target field is inside coverage and still zero.
+            assert((t as int) < nwords * per_word);
+            assert(packed_code_at(words@, bits as nat, t as int) == 0);
+            assert(t as int / (per as int) == wi as int) by (nonlinear_arith)
+                requires per > 0, wi == t / per_word, per == per_word as nat;
+            assert((t as int % (per as int)) * (bits as int) == shift as int)
+                by (nonlinear_arith)
+                requires per > 0, f == t % per_word, per == per_word as nat,
+                    shift == (f as u64) * (bits as u64);
+        }
+        let old_w = words[wi];
+        proof {
+            assert((old_w >> shift) & (sub(1u64 << (bits as u64), 1)) == 0u64);
+        }
+        let ghost pre_words = words@;
+        let new_w = old_w | (code << shift);
+        words.set(wi, new_w);
+        proof {
+            lemma_pack_field_set(old_w, code, bits as u64, shift);
+            // Position t reads back its code.
+            assert(packed_code_at(words@, bits as nat, t as int) == code as nat);
+            // Every other covered position keeps its previous field value.
+            assert forall|k: int| 0 <= k < nwords * per_word && k != t as int implies
+                #[trigger] packed_code_at(words@, bits as nat, k)
+                    == packed_code_at(pre_words, bits as nat, k) by {
+                let kwi = k / (per as int);
+                let ksh = (k % (per as int)) * (bits as int);
+                if kwi == wi as int {
+                    assert(0 <= ksh && ksh + bits <= 64
+                        && (ksh + bits <= shift as int || shift as int + bits <= ksh))
+                        by (nonlinear_arith)
+                        requires per > 0, 0 <= k, k != t as int,
+                            kwi == k / (per as int), kwi == wi as int,
+                            ksh == (k % (per as int)) * (bits as int),
+                            wi == t / per_word, per == per_word as nat,
+                            f == t % per_word,
+                            shift == (f as u64) * (bits as u64),
+                            (bits == 1 || bits == 2 || bits == 4),
+                            per_word == 64usize / (bits as usize),
+                            t as int / (per as int) == wi as int,
+                            (t as int % (per as int)) * (bits as int) == shift as int;
+                    lemma_pack_field_other(old_w, code, bits as u64, shift, ksh as u64);
+                    assert(words@[kwi] == new_w && pre_words[kwi] == old_w);
+                } else {
+                    assert(words@[kwi] == pre_words[kwi]);
+                }
+            }
+        }
         t += 1;
     }
-    Codes::Packed { words, bits, len: n }
+    let r = Codes::Packed { words, bits, len: n };
+    proof {
+        assert(r.wf()) by (nonlinear_arith)
+            requires n <= nwords * per_word, r == (Codes::Packed { words, bits, len: n }),
+                words@.len() == nwords, per_word == 64usize / (bits as usize),
+                (bits == 1 || bits == 2 || bits == 4);
+        assert forall|k: int| 0 <= k < codes@.len() implies
+            #[trigger] r.view()[k] == codes@[k] as nat by {}
+    }
+    r
 }
 
-/// Extract the code at position `i` from bit-packed `words`. `external_body`, the
-/// exec twin of `packed_code_at` (same shift/mask); trusted to match it, checked by
-/// `packed_codes_roundtrip`. Trust ledger group B.
-#[verifier::external_body]
+/// Extract the code at position `i` from bit-packed `words`. VERIFIED: the
+/// body is the spec expression (`packed_code_at`) rendered in exec operators;
+/// the coverage requires pins the word read in range and the shift below 64.
+/// Discharged from the trust ledger 2026-09.
 pub fn packed_get(words: &Vec<u64>, bits: u8, i: usize) -> (c: usize)
+    requires
+        bits == 1 || bits == 2 || bits == 4,
+        (i as nat) < words@.len() * (64nat / (bits as nat)),
     ensures c as nat == packed_code_at(words@, bits as nat, i as int),
 {
     let per_word: usize = 64 / (bits as usize);
     let wi = i / per_word;
-    let shift = ((i % per_word) as u64) * (bits as u64);
-    let mask = (1u64 << bits) - 1;
-    ((words[wi] >> shift) & mask) as usize
+    let f = i % per_word;
+    proof {
+        assert(f < per_word) by (nonlinear_arith) requires per_word > 0, f == i % per_word;
+        assert((f as u64) * (bits as u64) + (bits as u64) <= 64) by (nonlinear_arith)
+            requires f < per_word, per_word == 64usize / (bits as usize),
+                (bits == 1 || bits == 2 || bits == 4);
+    }
+    let shift = (f as u64) * (bits as u64);
+    proof {
+        let per = per_word as nat;
+        assert(wi < words@.len()) by (nonlinear_arith)
+            requires per_word > 0, (i as nat) < words@.len() * (64nat / (bits as nat)),
+                per == 64nat / (bits as nat), per == per_word as nat, wi == i / per_word;
+        assert(f < per_word) by (nonlinear_arith) requires per_word > 0, f == i % per_word;
+        assert(shift + bits <= 64) by (nonlinear_arith)
+            requires f < per_word, per_word == 64usize / (bits as usize),
+                (bits == 1 || bits == 2 || bits == 4),
+                shift == (f as u64) * (bits as u64);
+        assert(i as int / (per as int) == wi as int) by (nonlinear_arith)
+            requires per > 0, wi == i / per_word, per == per_word as nat;
+        assert((i as int % (per as int)) * (bits as int) == shift as int)
+            by (nonlinear_arith)
+            requires per > 0, f == i % per_word, per == per_word as nat,
+                shift == (f as u64) * (bits as u64);
+        // The extracted field fits usize: it is at most the bits-wide mask.
+        let w0 = words@[wi as int];
+        assert(((w0 >> shift) & (sub(1u64 << (bits as u64), 1))) <= 0xFFFFu64)
+            by (bit_vector)
+            requires bits == 1u8 || bits == 2u8 || bits == 4u8;
+    }
+    proof {
+        assert(1u64 << (bits as u64) >= 1) by (bit_vector)
+            requires bits == 1u8 || bits == 2u8 || bits == 4u8;
+    }
+    let mask = (1u64 << (bits as u64)) - 1;
+    (((words[wi] >> shift) & mask)) as usize
 }
 
 /// An immutable value-only frame: `dict` plus a narrow/bit-packed `codes` column,
@@ -270,10 +492,11 @@ pub struct ValFrame<T> {
 }
 
 impl<T: Copy> ValFrame<T> {
-    /// Every code indexes the dictionary.
+    /// Every code indexes the dictionary, over a structurally sound column.
     pub open spec fn wf(&self) -> bool {
-        forall|t: int| 0 <= t < self.codes.view().len()
-            ==> (#[trigger] self.codes.view()[t]) < self.dict@.len()
+        &&& self.codes.wf()
+        &&& forall|t: int| 0 <= t < self.codes.view().len()
+                ==> (#[trigger] self.codes.view()[t]) < self.dict@.len()
     }
 
     /// The value sequence this frame decodes to. Spec over `dict`/`codes` alone, so
@@ -337,6 +560,7 @@ impl<T: Copy, I: IndexLike> DictFrame<T, I> {
     /// the dictionary. Stated over `codes.view()`, so the code storage width is
     /// invisible here.
     pub open spec fn wf(&self) -> bool {
+        &&& self.codes.wf()
         &&& self.codes.view().len() == self.idxs@.len()
         &&& forall|t: int| 0 <= t < self.codes.view().len()
                 ==> (#[trigger] self.codes.view()[t]) < self.dict@.len()
@@ -400,14 +624,15 @@ impl<T: Copy, I: IndexLike> DictFrame<T, I> {
     }
 }
 
-/// Dedup the value column into a dictionary and per-entry codes, in O(N) via a
-/// hash map keyed on `T::as_usize` (injective, so equal keys are equal values).
-/// `external_body`: the hash map is unmodeled, but the contract it must satisfy —
-/// codes parallel to the input, each indexing the dict, and `dict[codes[t]]`
-/// equal to the original value — is exactly what `compress`'s bijection needs and
-/// what `dict_roundtrip` (containers-conformance) checks. Replaces the former
-/// O(N*D) linear scan (185ms/frame at N=100k) with O(N). Trust ledger: group B.
-#[verifier::external_body]
+/// Assign dictionary codes to a value column: `dict` holds each distinct
+/// value once, `codes[t]` indexes `dict` at `vals[t]`. VERIFIED: a linear
+/// dict scan per value (values compare through `as_usize`, lifted to value
+/// equality by `as_nat` injectivity) replaces the unmodeled std HashMap.
+/// Discharged from the trust ledger 2026-09; `dict_roundtrip` stays as a
+/// belt. Cost is O(n * D) with D the dictionary size - the value-dictionary
+/// mode exists precisely for small-D columns, and the all-distinct
+/// worst case is the recorded upgrade trigger (a verified map, or the
+/// sort-dedup construction, behind this same contract).
 pub fn assign_codes<T: IndexLike>(diffs_vals: &Vec<T>) -> (r: (Vec<T>, Vec<usize>))
     ensures
         r.1@.len() == diffs_vals@.len(),
@@ -417,19 +642,56 @@ pub fn assign_codes<T: IndexLike>(diffs_vals: &Vec<T>) -> (r: (Vec<T>, Vec<usize
 {
     let mut dict: Vec<T> = Vec::new();
     let mut codes: Vec<usize> = Vec::new();
-    let mut map: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-    for v in diffs_vals.iter() {
+    let n = diffs_vals.len();
+    let mut t: usize = 0;
+    while t < n
+        invariant
+            n == diffs_vals@.len(),
+            0 <= t <= n,
+            codes@.len() == t,
+            forall|k: int| 0 <= k < t ==> (#[trigger] codes@[k]) < dict@.len(),
+            forall|k: int| 0 <= k < t
+                ==> dict@[#[trigger] codes@[k] as int] == diffs_vals@[k],
+        decreases n - t,
+    {
+        let v = diffs_vals[t];
         let key = v.as_usize();
-        let code = match map.get(&key) {
-            Some(&c) => c,
-            None => {
-                let c = dict.len();
-                map.insert(key, c);
-                dict.push(*v);
-                c
+        let dlen = dict.len();
+        let mut j: usize = 0;
+        let mut found: bool = false;
+        let mut code: usize = 0;
+        while j < dlen && !found
+            invariant
+                dlen == dict@.len(),
+                0 <= j <= dlen,
+                v == diffs_vals@[t as int],
+                key as nat == v.as_nat(),
+                found ==> code < dict@.len() && dict@[code as int] == v,
+                !found ==> forall|q: int| 0 <= q < j
+                    ==> (#[trigger] dict@[q]) != v,
+            decreases dlen - j + (if found { 0int } else { 1int }),
+        {
+            if dict[j].as_usize() == key {
+                proof {
+                    // as_usize agreement lifts to value equality (as_usize's
+                    // ensures ties it to as_nat; injectivity closes it).
+                    T::lemma_as_nat_injective(dict@[j as int], v);
+                }
+                code = j;
+                found = true;
+            } else {
+                proof {
+                    assert(dict@[j as int] != v);
+                }
+                j += 1;
             }
-        };
+        }
+        if !found {
+            code = dict.len();
+            dict.push(v);
+        }
         codes.push(code);
+        t += 1;
     }
     (dict, codes)
 }
@@ -612,6 +874,50 @@ pub proof fn lemma_expand_runs_snoc<T>(starts: Seq<nat>, vals: Seq<Seq<T>>, s: n
     }
 }
 
+/// `expand_runs` splits at any run boundary: the flat expansion of the whole
+/// list is the expansion of the first `r` runs followed by the expansion of
+/// the rest. The prefix/position bridge the verified run decoder walks.
+pub proof fn lemma_expand_runs_split<T>(starts: Seq<nat>, vals: Seq<Seq<T>>, r: int)
+    requires
+        starts.len() == vals.len(),
+        0 <= r <= starts.len(),
+    ensures
+        expand_runs(starts, vals)
+            == expand_runs(starts.take(r), vals.take(r))
+                + expand_runs(starts.skip(r), vals.skip(r)),
+    decreases r,
+{
+    reveal_with_fuel(expand_runs, 2);
+    if r == 0 {
+        assert(starts.take(0) =~= Seq::<nat>::empty());
+        assert(vals.take(0) =~= Seq::<Seq<T>>::empty());
+        assert(starts.skip(0) =~= starts);
+        assert(vals.skip(0) =~= vals);
+        assert(expand_runs(starts.take(0), vals.take(0)) =~= Seq::<(T, nat)>::empty());
+        assert(expand_runs(starts.take(0), vals.take(0)) + expand_runs(starts, vals)
+            =~= expand_runs(starts, vals));
+    } else {
+        let ts = starts.subrange(1, starts.len() as int);
+        let tv = vals.subrange(1, vals.len() as int);
+        lemma_expand_runs_split(ts, tv, r - 1);
+        // Head-unfold both the whole and the taken prefix.
+        let a = expand_run(starts[0], vals[0]);
+        assert(expand_runs(starts, vals) == a + expand_runs(ts, tv));
+        assert(starts.take(r)[0] == starts[0]);
+        assert(vals.take(r)[0] == vals[0]);
+        assert(starts.take(r).subrange(1, r) =~= ts.take(r - 1));
+        assert(vals.take(r).subrange(1, r) =~= tv.take(r - 1));
+        assert(expand_runs(starts.take(r), vals.take(r))
+            == a + expand_runs(ts.take(r - 1), tv.take(r - 1)));
+        assert(starts.skip(r) =~= ts.skip(r - 1));
+        assert(vals.skip(r) =~= tv.skip(r - 1));
+        let b = expand_runs(ts.take(r - 1), tv.take(r - 1));
+        let c = expand_runs(ts.skip(r - 1), tv.skip(r - 1));
+        assert(expand_runs(ts, tv) == b + c);
+        assert(a + (b + c) =~= (a + b) + c);
+    }
+}
+
 /// Index-major run-coalescing encoding of one finalized frame, proven bijective
 /// against a sorted-strictly-ascending-by-index diff sequence at the `nat` index
 /// level (`Vec` integration materializes `I` from these `usize` starts via
@@ -657,33 +963,142 @@ impl<T: Copy> RunFrame<T> {
         forall|t: int| 0 <= t < self.decode().len() ==> (#[trigger] self.decode()[t].1) < I::max_nat()
     }
 
-    /// Executable decode to `(T, I)`. `external_body`: the verified reference is
-    /// `compress_runs_writeorder`'s bijection (`decode() == mapped_diffs`) plus
-    /// the `decode_i` spec above; this scalar decoder is checked against them by
-    /// the `run_frame_roundtrip` proptest in `containers-conformance` (doc 09:
-    /// verified scalar reference, exec path conformance-checked, not proved). Its
-    /// walk over runs mirrors `expand_runs` exactly, laying each run's values at
-    /// `from_usize(start + offset)`. Trust ledger: group B (a pure representation
-    /// transform, no `unsafe`, deterministic).
-    #[verifier::external_body]
+    /// Executable decode to `(T, I)`, VERIFIED against the `decode_i` spec: the
+    /// outer loop carries "out equals the expansion of the first `r` runs,
+    /// index-mapped", bridged to the full decode by `lemma_expand_runs_split`;
+    /// the inner loop lays one run pointwise via `lemma_expand_run_index`, and
+    /// `fits` discharges both the `from_usize` success and the `start + off`
+    /// non-overflow (`max_nat` fits `usize`). Discharged from the trust ledger
+    /// 2026-09: formerly `external_body` with the `run_frame_roundtrip`
+    /// proptest as its only check; the proptest stays as a belt.
     pub fn decode_exec_i<I: IndexFromNat>(&self) -> (r: Vec<(T, I)>)
         requires self.wf(), self.fits::<I>(),
         ensures r@ == self.decode_i::<I>(),
     {
+        let ghost sn = self.starts_nat();
+        let ghost vv = self.vals_seq();
+        let ghost full = self.decode();
         let mut out: Vec<(T, I)> = Vec::new();
         let nruns = self.starts.len();
         let mut r: usize = 0;
-        while r < nruns {
+        while r < nruns
+            invariant
+                self.wf(),
+                self.fits::<I>(),
+                sn == self.starts_nat(),
+                vv == self.vals_seq(),
+                full == self.decode(),
+                0 <= r <= nruns,
+                nruns == self.starts@.len(),
+                out@.len() == expand_runs(sn.take(r as int), vv.take(r as int)).len(),
+                forall|t: int| 0 <= t < out@.len() ==> {
+                    let pre = expand_runs(sn.take(r as int), vv.take(r as int));
+                    #[trigger] out@[t] == (pre[t].0, I::from_nat(pre[t].1))
+                },
+            decreases nruns - r,
+        {
             let start = self.starts[r];
             let run = &self.vals[r];
+            let ghost base = expand_runs(sn.take(r as int), vv.take(r as int));
+            let ghost rest_head = expand_run(sn[r as int], vv[r as int]);
+            proof {
+                // full == base + (current run's expansion + remainder): the
+                // split at r, then one head-unfold of the skipped part.
+                lemma_expand_runs_split(sn, vv, r as int);
+                reveal_with_fuel(expand_runs, 2);
+                assert(sn.skip(r as int)[0] == sn[r as int]);
+                assert(vv.skip(r as int)[0] == vv[r as int]);
+                assert(sn.skip(r as int).subrange(1, sn.skip(r as int).len() as int)
+                    =~= sn.skip(r as int + 1));
+                assert(vv.skip(r as int).subrange(1, vv.skip(r as int).len() as int)
+                    =~= vv.skip(r as int + 1));
+                assert(expand_runs(sn.skip(r as int), vv.skip(r as int))
+                    == rest_head + expand_runs(sn.skip(r as int + 1), vv.skip(r as int + 1)));
+                lemma_expand_run_index(sn[r as int], vv[r as int]);
+            }
             let mut off: usize = 0;
-            while off < run.len() {
-                let idx = I::from_usize(start + off)
-                    .expect("run index fits I (established by fits)");
+            while off < run.len()
+                invariant
+                    self.wf(),
+                    self.fits::<I>(),
+                    sn == self.starts_nat(),
+                    vv == self.vals_seq(),
+                    full == self.decode(),
+                    0 <= r < nruns,
+                    nruns == self.starts@.len(),
+                    0 <= off <= run@.len(),
+                    run@ == self.vals@[r as int]@,
+                    start == self.starts@[r as int],
+                    base == expand_runs(sn.take(r as int), vv.take(r as int)),
+                    rest_head == expand_run(sn[r as int], vv[r as int]),
+                    full == base + rest_head
+                        + expand_runs(sn.skip(r as int + 1), vv.skip(r as int + 1)),
+                    rest_head.len() == run@.len(),
+                    forall|o: int| 0 <= o < run@.len() ==>
+                        #[trigger] rest_head[o] == (run@[o], (start + o) as nat),
+                    out@.len() == base.len() + off,
+                    forall|t: int| 0 <= t < base.len() ==>
+                        #[trigger] out@[t] == (base[t].0, I::from_nat(base[t].1)),
+                    forall|o: int| 0 <= o < off ==>
+                        #[trigger] out@[base.len() + o]
+                            == (rest_head[o].0, I::from_nat(rest_head[o].1)),
+                decreases run@.len() - off,
+            {
+                proof {
+                    // The global position of this entry inside the full decode
+                    // pins its index below max_nat (fits), which also bounds
+                    // the usize sum.
+                    let gpos = base.len() + off;
+                    assert(full[gpos as int] == rest_head[off as int]);
+                    assert(full[gpos as int].1 == (start + off) as nat);
+                    assert(((start + off) as nat) < I::max_nat());
+                    I::lemma_max_nat_fits_usize();
+                }
+                let idx = match I::from_usize(start + off) {
+                    Some(i) => i,
+                    None => {
+                        proof { assert(false); }
+                        crate::guard::refuse("run index fits I (established by fits)")
+                    }
+                };
                 out.push((run[off], idx));
                 off += 1;
             }
+            proof {
+                // Fold the completed run into the prefix: take(r+1) is
+                // take(r) plus this run, and its expansion appends rest_head.
+                lemma_expand_runs_snoc(
+                    sn.take(r as int), vv.take(r as int), sn[r as int], vv[r as int]);
+                assert(sn.take(r as int + 1) =~= sn.take(r as int).push(sn[r as int]));
+                assert(vv.take(r as int + 1) =~= vv.take(r as int).push(vv[r as int]));
+                assert(expand_runs(sn.take(r as int + 1), vv.take(r as int + 1))
+                    == base + rest_head);
+                // Merge the two pointwise loop facts into the prefix form the
+                // outer invariant states at r + 1 (concat indexing case split).
+                assert forall|t: int| 0 <= t < out@.len() implies {
+                    let pre = expand_runs(sn.take(r as int + 1), vv.take(r as int + 1));
+                    #[trigger] out@[t] == (pre[t].0, I::from_nat(pre[t].1))
+                } by {
+                    let pre = base + rest_head;
+                    if t < base.len() {
+                        assert(pre[t] == base[t]);
+                    } else {
+                        let o = t - base.len();
+                        assert(pre[t] == rest_head[o]);
+                        // Instantiate the inner-loop fact at o via its own
+                        // trigger shape, then rewrite the position.
+                        assert(out@[base.len() + o]
+                            == (rest_head[o].0, I::from_nat(rest_head[o].1)));
+                        assert(base.len() + o == t);
+                    }
+                }
+            }
             r += 1;
+        }
+        proof {
+            assert(sn.take(nruns as int) =~= sn);
+            assert(vv.take(nruns as int) =~= vv);
+            assert(out@ =~= self.decode_i::<I>());
         }
         out
     }
@@ -951,17 +1366,81 @@ pub fn compress_runs_writeorder<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFram
     r
 }
 
-/// Sort a finalized frame ascending by index. The contract is the only thing
-/// callers depend on — the multiset of writes is preserved (a permutation),
-/// the result is ascending, and uniqueness carries over — so the internal
-/// algorithm is swappable behind it (std introsort now; a radix pass later if a
-/// bench shows it matters) without touching a single caller or proof. Soundness
-/// of *using* a sorted frame is separate and already proved
-/// (`vec::lemma_multiset_eq_overlay`): a permuted frame restores identically.
-/// `external_body` because the sort algorithm is not the verified surface — its
-/// contract is, and `sort_frame_roundtrip` (containers-conformance) checks it.
-/// Trust ledger: group B (a permutation + order property, no `unsafe`).
-#[verifier::external_body]
+/// `unique_idx` is invariant under permutation (multiset equality): a
+/// duplicated pair is visible in the multiset, and two distinct pairs sharing
+/// an index in one sequence both occur in the other.
+pub proof fn lemma_unique_idx_multiset<T, I: IndexLike>(s1: Seq<(T, I)>, s2: Seq<(T, I)>)
+    requires
+        s1.to_multiset() == s2.to_multiset(),
+        unique_idx(s1),
+    ensures
+        unique_idx(s2),
+{
+    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+    assert(s1.no_duplicates()) by {
+        assert forall|a: int, b: int| 0 <= a < b < s1.len()
+            implies s1[a] != s1[b] by {
+            assert(s1[a].1.as_nat() != s1[b].1.as_nat());
+        }
+    }
+    s1.lemma_multiset_has_no_duplicates();
+    s2.lemma_multiset_has_no_duplicates_conv();
+    assert(s2.no_duplicates());
+    assert forall|a: int, b: int|
+        0 <= a < s2.len() && 0 <= b < s2.len() && a != b
+        implies (#[trigger] s2[a]).1.as_nat() != (#[trigger] s2[b]).1.as_nat() by {
+        let x = s2[a];
+        let y = s2[b];
+        assert(x != y);
+        if x.1.as_nat() == y.1.as_nat() {
+            assert(s2.contains(x) && s2.contains(y));
+            vstd::seq_lib::to_multiset_contains(s2, x);
+            vstd::seq_lib::to_multiset_contains(s2, y);
+            vstd::seq_lib::to_multiset_contains(s1, x);
+            vstd::seq_lib::to_multiset_contains(s1, y);
+            assert(s1.contains(x) && s1.contains(y));
+            let ia = choose|k: int| 0 <= k < s1.len() && s1[k] == x;
+            let ib = choose|k: int| 0 <= k < s1.len() && s1[k] == y;
+            assert(ia != ib);
+            assert(s1[ia].1.as_nat() != s1[ib].1.as_nat());
+        }
+    }
+}
+
+/// Sorted-and-adjacent-distinct implies globally strict: the little induction
+/// the verified uniqueness scan rests on.
+proof fn lemma_sorted_distinct_strict<T, I: IndexLike>(r: Seq<(T, I)>, a: int, b: int)
+    requires
+        forall|x: int, y: int| 0 <= x < y < r.len()
+            ==> (#[trigger] r[x]).1.as_nat() <= (#[trigger] r[y]).1.as_nat(),
+        forall|x: int| 0 <= x < r.len() - 1
+            ==> (#[trigger] r[x]).1.as_nat() != r[x + 1].1.as_nat(),
+        0 <= a < b < r.len(),
+    ensures
+        r[a].1.as_nat() < r[b].1.as_nat(),
+    decreases b - a,
+{
+    if b == a + 1 {
+        assert(r[a].1.as_nat() != r[a + 1].1.as_nat());
+    } else {
+        lemma_sorted_distinct_strict::<T, I>(r, a, b - 1);
+        assert(r[b - 1].1.as_nat() != r[b].1.as_nat());
+    }
+}
+
+/// Sort one finalized frame ascending by index. VERIFIED insertion sort by
+/// adjacent swaps: each swap is `remove(j).insert(j-1, ..)` at the spec level,
+/// so the multiset is preserved by the vstd lemmas; sortedness is the standard
+/// insertion invariant; uniqueness transfers through the permutation via the
+/// no-duplicates bridge (a duplicate index in the output would need either a
+/// duplicated pair, impossible when the input's pairs are distinct, or two
+/// distinct pairs sharing an index, which the input forbids). Discharged from
+/// the trust ledger 2026-09 (formerly `sort_unstable_by_key` behind a trusted
+/// contract); the `sort_frame_roundtrip` proptest stays as a belt. Insertion
+/// sort is O(n) on the ascending capture order the write path usually
+/// produces; if an adversarial frame profile ever measures the quadratic
+/// worst case, the upgrade path is a verified merge sort behind this same
+/// contract.
 pub fn sort_frame_by_index<T: Copy, I: IndexLike>(d: &Vec<(T, I)>) -> (r: Vec<(T, I)>)
     ensures
         r@.len() == d@.len(),
@@ -970,8 +1449,91 @@ pub fn sort_frame_by_index<T: Copy, I: IndexLike>(d: &Vec<(T, I)>) -> (r: Vec<(T
             ==> (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
         unique_idx(d@) ==> unique_idx(r@),
 {
-    let mut r = d.clone();
-    r.sort_unstable_by_key(|e| e.1.as_usize());
+    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+    let mut r: Vec<(T, I)> = Vec::new();
+    let n = d.len();
+    let mut c: usize = 0;
+    while c < n
+        invariant c <= n, n == d@.len(), r@ =~= d@.subrange(0, c as int),
+        decreases n - c,
+    {
+        r.push(d[c]);
+        c += 1;
+    }
+    proof {
+        assert(r@ =~= d@);
+    }
+    let mut i: usize = if n == 0 { 0 } else { 1 };
+    while i < n
+        invariant
+            n == r@.len(),
+            n == d@.len(),
+            i <= n,
+            n == 0 || 1 <= i,
+            r@.to_multiset() == d@.to_multiset(),
+            forall|a: int, b: int| 0 <= a < b < i
+                ==> (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
+        decreases n - i,
+    {
+        let mut j: usize = i;
+        while j > 0 && r[j - 1].1.as_usize() > r[j].1.as_usize()
+            invariant
+                n == r@.len(),
+                n == d@.len(),
+                0 <= j <= i < n,
+                r@.to_multiset() == d@.to_multiset(),
+                // Ordered among positions [0, i] excluding the hole j.
+                forall|a: int, b: int| 0 <= a < b <= i as int && a != j && b != j
+                    ==> (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
+                // The moving element is below everything after the hole.
+                forall|b: int| j < b <= i as int
+                    ==> r@[j as int].1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
+            decreases j,
+        {
+            let x = r[j - 1];
+            let y = r[j];
+            let ghost pre = r@;
+            r.set(j - 1, y);
+            r.set(j, x);
+            proof {
+                assert(r@ =~= pre.remove(j as int).insert(j as int - 1, pre[j as int]));
+                vstd::seq_lib::to_multiset_remove(pre, j as int);
+                vstd::seq_lib::to_multiset_insert(
+                    pre.remove(j as int), j as int - 1, pre[j as int]);
+                assert(pre.to_multiset().count(pre[j as int]) >= 1) by {
+                    assert(pre.contains(pre[j as int]));
+                    vstd::seq_lib::to_multiset_contains(pre, pre[j as int]);
+                }
+                assert(pre.to_multiset().remove(pre[j as int]).insert(pre[j as int])
+                    =~= pre.to_multiset()) by {
+                    broadcast use vstd::multiset::group_multiset_axioms;
+                }
+            }
+            j -= 1;
+        }
+        proof {
+            // Loop exit: hole at 0, or in-order with its predecessor; either
+            // way [0, i] is fully sorted.
+            assert forall|a: int, b: int| 0 <= a < b <= i as int implies
+                (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat() by {
+                if a == j as int {
+                    // covered by the hole clause
+                } else if b == j as int {
+                    assert(j > 0);
+                    assert(r@[j as int - 1].1.as_nat() <= r@[j as int].1.as_nat());
+                    if a < j as int - 1 {
+                        assert(r@[a].1.as_nat() <= r@[j as int - 1].1.as_nat());
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    proof {
+        if unique_idx(d@) {
+            lemma_unique_idx_multiset(d@, r@);
+        }
+    }
     r
 }
 
@@ -983,22 +1545,68 @@ pub open spec fn unique_idx<T, I: IndexLike>(d: Seq<(T, I)>) -> bool {
             ==> (#[trigger] d[a]).1.as_nat() != (#[trigger] d[b]).1.as_nat()
 }
 
-/// Runtime `unique_idx` check: does the frame write each cell at most once? The
-/// sorted index-major encoder requires it (a duplicate index would let a permuted
-/// frame shadow a different write and change the restore), so `compress_frame`
-/// checks it and falls back to the write-order encoder when it does not hold.
-/// O(N) with a hash set of the seen indices. `external_body`: a membership scan
-/// with no spec content; its `b == unique_idx(diffs@)` contract is the surface,
-/// checked by `unique_idx_check` (containers-conformance). Trust ledger: group B.
-#[verifier::external_body]
+/// Runtime `unique_idx` check: does the frame write each cell at most once?
+/// VERIFIED via the verified sort: sort a copy, scan adjacent indices. An
+/// adjacent equal pair falsifies uniqueness of the sorted copy, which
+/// falsifies the input's by the permutation lemma (contrapositive of the
+/// sort's own transfer clause); an all-distinct scan plus sortedness gives
+/// strict order, hence uniqueness, transferred back the same way. Discharged
+/// from the trust ledger 2026-09 (formerly a trusted HashSet scan); the
+/// `unique_idx_check` proptest stays as a belt. Costs a sort where the old
+/// scan cost a hash pass; the sealing paths sort anyway on the unique branch.
 pub fn is_unique_idx<T: Copy, I: IndexLike>(diffs: &Vec<(T, I)>) -> (b: bool)
     ensures b == unique_idx(diffs@),
 {
-    let mut seen = std::collections::HashSet::with_capacity(diffs.len());
-    for &(_, idx) in diffs.iter() {
-        if !seen.insert(idx.as_usize()) {
+    let sorted = sort_frame_by_index(diffs);
+    let n = sorted.len();
+    if n == 0 {
+        proof {
+            assert(unique_idx(diffs@)) by {
+                assert(diffs@.len() == 0) by {
+                    vstd::seq_lib::to_multiset_len(diffs@);
+                    vstd::seq_lib::to_multiset_len(sorted@);
+                }
+            }
+        }
+        return true;
+    }
+    let mut k: usize = 1;
+    while k < n
+        invariant
+            1 <= k <= n,
+            n == sorted@.len(),
+            sorted@.to_multiset() == diffs@.to_multiset(),
+            unique_idx(diffs@) ==> unique_idx(sorted@),
+            forall|a: int, b: int| 0 <= a < b < sorted@.len()
+                ==> (#[trigger] sorted@[a]).1.as_nat() <= (#[trigger] sorted@[b]).1.as_nat(),
+            forall|x: int| 0 <= x < k - 1
+                ==> (#[trigger] sorted@[x]).1.as_nat() != sorted@[x + 1].1.as_nat(),
+        decreases n - k,
+    {
+        if sorted[k - 1].1.as_usize() == sorted[k].1.as_usize() {
+            proof {
+                assert(!unique_idx(sorted@)) by {
+                    assert(sorted@[k as int - 1].1.as_nat() == sorted@[k as int].1.as_nat());
+                }
+                if unique_idx(diffs@) {
+                    assert(unique_idx(sorted@));
+                }
+            }
             return false;
         }
+        k += 1;
+    }
+    proof {
+        assert forall|a: int, b: int|
+            0 <= a < sorted@.len() && 0 <= b < sorted@.len() && a != b
+            implies (#[trigger] sorted@[a]).1.as_nat() != (#[trigger] sorted@[b]).1.as_nat() by {
+            if a < b {
+                lemma_sorted_distinct_strict::<T, I>(sorted@, a, b);
+            } else {
+                lemma_sorted_distinct_strict::<T, I>(sorted@, b, a);
+            }
+        }
+        lemma_unique_idx_multiset(sorted@, diffs@);
     }
     true
 }
@@ -1642,26 +2250,6 @@ impl<T: Copy, I: IndexLike> RunCol<T, I> {
         out
     }
 
-    /// Fast index-major restore: apply each run to a destination value column by one
-    /// contiguous `copy_from_slice` (a memcpy), run by run in order. Because a run's
-    /// values sit at consecutive indices, this replaces the pair-by-pair overlay with
-    /// one bulk copy per run: the whole point of the index-major layout. `dst` must
-    /// have a slot for every reconstructed index (`dst.len() > max index`); callers
-    /// size it to the store.
-    ///
-    /// `external_body`: the slice `copy_from_slice` over raw memory is a trusted
-    /// primitive, not the verified surface (trust ledger group B, like the other
-    /// codec leaves). Its contract is that the resulting `dst` equals `dst` with the
-    /// `decode()` pairs applied in order (last write wins). That equivalence to the
-    /// verified `decode_exec` is conformance-checked by `run_col_index_major`.
-    #[verifier::external_body]
-    pub fn restore_runs_into(&self, dst: &mut Vec<T>) {
-        for run in self.runs.iter() {
-            let s = run.start.as_usize();
-            let n = run.vals.len();
-            dst[s..s + n].copy_from_slice(&run.vals);
-        }
-    }
 
     /// The index column this frame decodes to (the `.1` projection of `decode()`).
     /// When `RunCol` is used as an index-only cold frame (`T` a zero-size type), this
@@ -2007,16 +2595,87 @@ impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for RunCol<T, I> {
 
     fn decode_at(&self, i: usize) -> (e: (T, I)) { RunCol::decode_at(self, i) }
 
-    #[verifier::external_body]
+    /// VERIFIED per-element run replay: walks runs mirroring `run_seq`,
+    /// writing each in-range entry and skipping out-of-range ones — exactly
+    /// `apply_all`'s per-entry step, carried by `lemma_apply_all_snoc` with
+    /// the position algebra from `lemma_run_seq_at`. Discharged from the
+    /// trust ledger 2026-09: formerly a per-run `copy_from_slice` memcpy
+    /// behind a trusted contract. If the restore benchmarks measure the
+    /// memcpy delta, the recorded upgrade is a trusted memcpy fast path
+    /// behind this same contract with this loop as the verified reference.
     fn restore_to(&self, target: &mut Vec<T>) {
-        for run in self.runs.iter() {
-            let s = run.start.as_usize();
-            let n = run.vals.len();
-            if s < target.len() {
-                let end = if s + n <= target.len() { s + n } else { target.len() };
-                let m = end - s;
-                target[s..end].copy_from_slice(&run.vals[..m]);
+        let ghost base = target@;
+        let ghost pairs = self.pairs@;
+        let nruns = self.runs.len();
+        let mut r: usize = 0;
+        let mut g: usize = 0;
+        while r < nruns
+            invariant
+                self.wf(),
+                pairs == self.pairs@,
+                nruns == self.runs@.len(),
+                0 <= r <= nruns,
+                g == run_seq(self.runs@.subrange(0, r as int)).len(),
+                g <= pairs.len(),
+                target@ == apply_all::<T, I>(base, pairs.subrange(0, g as int)),
+                target@.len() == base.len(),
+            decreases nruns - r,
+        {
+            let run_len = self.runs[r].vals.len();
+            let start = self.runs[r].start;
+            let mut k: usize = 0;
+            while k < run_len
+                invariant
+                    self.wf(),
+                    pairs == self.pairs@,
+                    nruns == self.runs@.len(),
+                    0 <= r < nruns,
+                    run_len == self.runs@[r as int].vals@.len(),
+                    start == self.runs@[r as int].start,
+                    0 <= k <= run_len,
+                    g == run_seq(self.runs@.subrange(0, r as int)).len() + k,
+                    g <= pairs.len(),
+                    target@ == apply_all::<T, I>(base, pairs.subrange(0, g as int)),
+                    target@.len() == base.len(),
+                decreases run_len - k,
+            {
+                proof {
+                    // pairs[g] is this run's entry k: value verbatim, index
+                    // as_nat == start + k, in range of I.
+                    lemma_run_seq_at(self.runs@, r as int, k as int);
+                    assert(g < pairs.len()) by {
+                        // pairs.len == run_seq(all).len == prefix + rest, and
+                        // this run's entry k sits inside rest's head.
+                        lemma_run_seq_split(self.runs@, r as int);
+                        reveal_with_fuel(run_seq, 2);
+                        assert(self.runs@.subrange(r as int, self.runs@.len() as int)[0]
+                            == self.runs@[r as int]);
+                        assert(run_seq(self.runs@.subrange(r as int, self.runs@.len() as int)).len()
+                            >= self.runs@[r as int].vals@.len());
+                    }
+                    assert(pairs[g as int].0 == self.runs@[r as int].vals@[k as int]);
+                    assert(pairs[g as int].1.as_nat() == start.as_nat() + k);
+                    assert(start.as_nat() + k < I::max_nat());
+                    I::lemma_max_nat_fits_usize();
+                    lemma_apply_all_snoc::<T, I>(base, pairs, g as int);
+                }
+                let idx = start.as_usize() + k;
+                if idx < target.len() {
+                    target.set(idx, self.runs[r].vals[k]);
+                }
+                g += 1;
+                k += 1;
             }
+            proof {
+                assert(self.runs@.subrange(0, r as int + 1)
+                    =~= self.runs@.subrange(0, r as int).push(self.runs@[r as int]));
+                lemma_run_seq_snoc(self.runs@.subrange(0, r as int), self.runs@[r as int]);
+            }
+            r += 1;
+        }
+        proof {
+            assert(self.runs@.subrange(0, nruns as int) =~= self.runs@);
+            assert(pairs.subrange(0, g as int) =~= pairs);
         }
     }
 }

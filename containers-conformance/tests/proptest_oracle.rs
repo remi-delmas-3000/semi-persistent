@@ -218,10 +218,19 @@ mod oracle {
             self.on_current_path(t)
         }
 
-        /// Restorable-now under the GENERATION-STAMP model (verus's meaning): the
-        /// frame is live AND the token's depth generation still matches. Coarser
-        /// than the branch model — accepts sibling tokens at the same depth — but
-        /// sound (restoring reconstructs the current frame at that depth).
+        /// Restorable-now under the STRUCTURAL model (verus's post-H2 meaning
+        /// for a RAW container): the frame index is still live. Genealogy
+        /// (generation stamps) moved to the owning group's `History` in H2, so
+        /// a standalone container's `is_valid_token` deliberately accepts a
+        /// sibling-branch token whose frame index is live again — restoring
+        /// reconstructs the frame NOW at that index, which is the documented
+        /// contract (`structural_vec_restore_is_frame_liveness_only`).
+        pub fn is_restorable_structural(&self, t: Tok) -> bool {
+            (t.frame as usize) < self.snaps.len()
+        }
+
+        /// The retired paired meaning (frame live AND depth generation
+        /// matches), kept for harnesses that pair a container with a History.
         pub fn is_restorable_gen(&self, t: Tok) -> bool {
             if (t.frame as usize) >= self.snaps.len() {
                 return false;
@@ -575,8 +584,8 @@ macro_rules! vec_property {
                     );
                     prop_assert_eq!(
                         vv,
-                        o.is_restorable_gen(*to),
-                        "step {}: token {} verus validity={} vs oracle gen-restorable",
+                        o.is_restorable_structural(*to),
+                        "step {}: token {} verus validity={} vs oracle structural",
                         step,
                         j,
                         vv
@@ -797,8 +806,8 @@ macro_rules! aov_property {
                             "step {}: aov token {} prod validity vs oracle on-branch", step, j
                         );
                         prop_assert_eq!(
-                            vv, o.is_restorable_gen(*to),
-                            "step {}: aov token {} verus validity vs oracle restorable", step, j
+                            vv, o.is_restorable_structural(*to),
+                            "step {}: aov token {} verus validity vs oracle structural", step, j
                         );
                         if o.is_restorable(*to) {
                             prop_assert_eq!(vp, vv, "step {}: aov token {} restorable disagreement", step, j);
@@ -959,8 +968,8 @@ macro_rules! map_property {
                             "step {}: map token {} prod validity vs oracle on-branch", step, j
                         );
                         prop_assert_eq!(
-                            vv, o.is_restorable_gen(*to),
-                            "step {}: map token {} verus validity vs oracle restorable", step, j
+                            vv, o.is_restorable_structural(*to),
+                            "step {}: map token {} verus validity vs oracle structural", step, j
                         );
                         if o.is_restorable(*to) {
                             prop_assert_eq!(vp, vv, "step {}: map token {} restorable disagreement", step, j);

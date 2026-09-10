@@ -328,3 +328,22 @@ experiment above: on this corpus the discipline choice is not the
 bottleneck, and the selectable interface exists for the workloads where it
 will be (the EqSat deep-state trade vs the write-hot trade), not because
 this instance family demanded it.
+
+**Trail-mode corpus gate, and a pre-existing semper-arithmetic defect
+surfaced by gating.** The full 438-file corpus swept stock vs semper with
+`--diff-mode trail`: zero non-arithmetic sat/unsat disagreements and no
+instance where trail-mode semper goes unanswered while stock answers
+(`sweep-trail.sh`). Separately, running sundance's own `regression_test`
+under the `semper-egraph` feature with DEFAULT (Z3) arithmetic fails 40
+arithmetic instances (`expected unsat, got sat`), deterministically, at
+every commit of this campaign INCLUDING the pre-campaign goal-close state
+(bisected to `ba1a908^` and beyond on `define_fun/arithmetic.smt2`): the
+semper backend's Nelson-Oppen arithmetic integration is broken
+independently of this campaign's changes, which is consistent with every
+measurement protocol here having disabled arithmetic (`--arithmetic none`)
+from the first sweep onward. One earlier 2-of-2 pass of that harness ran
+against a never-committed intermediate cache variant and is attributed to
+ordering sensitivity of these fragile instances, not correctness. The
+maintained gate (default features, basic backend) passes 2 of 2. Filed as
+its own follow-up: the semper-arithmetic seam, out of scope for the store
+selection work.

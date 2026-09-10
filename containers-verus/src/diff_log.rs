@@ -552,11 +552,11 @@ pub open spec fn adaptive_len<T: Copy, I: IndexLike, VC: crate::value_compressor
 }
 
 /// Exec length of the adaptive tier: the cold frames' entry counts plus the hot pair
-/// tail. `external_body`: the running sum over `usize` frame counts is trusted not to
-/// overflow (the whole log is backed by real `Vec`s, so its length fits `usize`, the
-/// same guarantee `Vec::len` rests on); its `== adaptive_len` contract is the surface
-/// the reconstruction proofs consume.
-#[verifier::external_body]
+/// tail. Verified: the loop carries `total == adaptive_len(prefix)` via the snoc
+/// lemma, and a sum past `usize` takes the crate's documented trap (`refuse`)
+/// instead of threading an overflow precondition through the hierarchy.
+/// Discharged from the trust ledger 2026-09: formerly `external_body` trusting
+/// the running sum.
 pub fn adaptive_len_exec<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
     cold: &Vec<ColdFrame<T, I, VC>>, hot: &Vec<(T, I)>,
 ) -> (n: usize)
@@ -564,8 +564,35 @@ pub fn adaptive_len_exec<T: Copy, I: IndexLike, VC: crate::value_compressor::Val
     ensures n == adaptive_len(cold@, hot@),
 {
     let mut total = hot.len();
-    for f in cold.iter() {
-        total += f.entry_len();
+    let m = cold.len();
+    let mut k: usize = 0;
+    proof {
+        assert(cold@.subrange(0, 0) =~= Seq::<ColdFrame<T, I, VC>>::empty());
+        reveal(cold_adaptive);
+    }
+    while k < m
+        invariant
+            0 <= k <= m,
+            m == cold@.len(),
+            forall|j: int| 0 <= j < cold@.len() ==> (#[trigger] cold@[j]).wf(),
+            total == hot@.len() + cold_adaptive(cold@.subrange(0, k as int)).len(),
+        decreases m - k,
+    {
+        let e = cold[k].entry_len();
+        let next = match total.checked_add(e) {
+            Some(v) => v,
+            None => crate::guard::refuse("diff log length exceeds usize"),
+        };
+        proof {
+            lemma_cold_adaptive_snoc(cold@.subrange(0, k as int), cold@[k as int]);
+            assert(cold@.subrange(0, k as int + 1)
+                =~= cold@.subrange(0, k as int).push(cold@[k as int]));
+        }
+        total = next;
+        k += 1;
+    }
+    proof {
+        assert(cold@.subrange(0, m as int) =~= cold@);
     }
     total
 }

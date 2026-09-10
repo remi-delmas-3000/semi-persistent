@@ -14,7 +14,7 @@
 
 use proptest::prelude::*;
 use semi_persistent_containers_verus as verus;
-use verus::diff_compress::{ColdFrame, CompressionMode, DeltaFrame, HotFrame, RunCol};
+use verus::diff_compress::{ColdFrame, CompressedFrame, CompressionMode, DeltaFrame, HotFrame, RunCol};
 
 /// Reference restore: apply `(value, index)` pairs to a base column in order,
 /// last write wins. The oracle `restore_runs_into`'s memcpy must reproduce.
@@ -102,7 +102,10 @@ proptest! {
         // memcpy restore == pair-by-pair overlay (both onto the same base column).
         let base = vec![0u32; 64];
         let mut memcpy_col = base.clone();
-        col.restore_runs_into(&mut memcpy_col);
+        // restore_runs_into was deleted with its trust marker (dead code once the
+        // trait restore_to became the verified per-element replay); both paths
+        // are now the same verified function.
+        CompressedFrame::restore_to(&col, &mut memcpy_col);
         let overlay_col = apply_pairs(&base, &decoded);
         prop_assert_eq!(memcpy_col, overlay_col);
     }
@@ -221,7 +224,8 @@ proptest! {
 
         // Seal it into the chosen mode; the cold frame restores to the same column
         // (memcpy for Runs, scattered otherwise).
-        let cold = hot.compress(mode);
+        let cold: ColdFrame<u32, u32, verus::value_compressor::NoValueCompression> =
+            hot.compress(mode);
         let mut cold_col = base.clone();
         cold.restore_to(&mut cold_col);
         prop_assert_eq!(&cold_col, &reference);
