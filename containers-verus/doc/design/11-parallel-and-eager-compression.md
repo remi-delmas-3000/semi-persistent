@@ -46,13 +46,6 @@ speedup grows with both column count and frame size, reaching 5.3x at 10 columns
 1000s of writes per column) it sits at or above the crossover. `parallel::
 PAR_THRESHOLD` is set to 4096 total entries.
 
-**Next (not yet built):** verified `_parallel` twins on the aggregates
-(union_find/sparse_set/list/`EClasses`), each an `external_body` method with the SAME
-contract as its sequential method, body = threshold ? rayon fan-out : sequential
-verified path, checked against the oracle by the differential tests. The measurement
-justifies building them; the SMT profile (mode `None`, nothing to compress) never
-crosses the threshold, so it pays nothing.
-
 ## Eager active-frame compression (compress-on-write), measured 2026-09-07
 
 Today the active frame accumulates raw `(value, index)` writes on a plain `Vec` and

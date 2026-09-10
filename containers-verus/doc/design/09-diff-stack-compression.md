@@ -432,6 +432,10 @@ Because these are representation refinements over the *same* abstract model, the
 mark/restore logic and its proofs are reused unchanged; `COMPRESS` selects the
 frame representation behind the abstraction.
 
+A future SIMD encoder, if added, is not verified: the scalar verified encoder is
+its reference specification, and the SIMD path is conformance-tested for
+decode-equivalence against it, not proved.
+
 ## Alternatives considered
 
 - **Per-run `(start, length)` or `(start, value_offset)`**: wastes a field per
@@ -448,329 +452,63 @@ frame representation behind the abstraction.
   needing no bit-structure — see "Value axis". Kept here as a retracted claim so
   it is not re-proposed.)
 
-## Measured: encoder cost and space (2026-09-06)
+## Shipped encoders, per-column decision, and measured space
 
-First numbers, from `containers-conformance/benches/diff_compress_bench.rs`
-(criterion; space is the deterministic byte table it prints, timing is min-of-run
-on the dev machine). `T = I = u32` (union-find id width). Three findings, and
-each changes a decision.
+The value and index axes above are realized and verified. The numbers here are the
+design rationale (which scheme a column gets and why), not a build log.
 
-**The value dictionary as built is a space loss, not a win.** On the union-find
-shape (`N` scattered captures, `D` distinct representatives), the built
-`DictFrame` stores `dict: [u32]`, `codes: [usize]`, and `idxs: [u32]`:
+**Value-major (dictionary + codes).** `DictFrame` stores `dict: [T]` (the `D`
+distinct values), a `codes` column, and the index column verbatim. `Codes` is
+width-adaptive behind a `view: Seq<nat>` contract, so the storage width is invisible
+to the frame bijection: byte-granular `U8`/`U16`/`U32` by `D`, and bit-packed
+`Packed { words, bits, len }` at 1/2/4 bits for `D <= 16`, `64/bits` codes per `u64`
+word with no cross-word straddle. `compress` builds the dictionary with O(N) hashmap
+dedup and narrows codes with `Codes::from_usize`. The bijection `decode() == diffs@`
+is proven and `Codes::get` is proven against the `packed_code_at` extraction formula;
+the two bit-twiddling primitives `pack_codes`/`packed_get` are `external_body` against
+that formula (variable-width shifts/masks are not a tractable proof surface, trust
+ledger group B, no `unsafe`), checked by the `packed_codes_roundtrip` proptest.
+Value-major does not reorder, so it keeps the exact-sequence contract.
 
-| N | D | plain | dict (usize codes) | dict (u32 codes) |
-|---|---|-------|--------------------|-------------------|
-| 100000 | 1000 | 800000 | 1204000 (**1.50x**) | 804000 (**1.00x**) |
-| 100000 | 10000 | 800000 | 1240000 (**1.55x**) | 840000 (**1.05x**) |
+**Index-major.** `compress_runs_writeorder` coalesces capture-order runs and
+preserves the exact sequence; `compress_runs_sorted` sorts by index first, capturing
+all contiguity but reordering. Both drop the index column, reconstructing it from
+`start + offset` via `IndexFromNat::from_nat`; `decode_exec_i` is `external_body`
+against that spec, checked by `run_frame_roundtrip`.
 
-The index column is still stored explicitly (value-major does not drop it for
-scattered indices), and a `usize` code is wider than the `u32` value it replaces.
-Narrowing codes to `u32` only reaches break-even. **Decision:** the value
-dictionary earns its place only with codes bit-packed to `ceil(log2 D)` bits and
-the index column itself compressed; as a plain dict+codes it is not worth
-selecting on a `u32` column. Recorded as a negative result so it is not
-re-proposed at `usize` code width.
+**The two-stack contract is the per-frame write multiset.** Because sorting reorders,
+the two-stack (`CompressedStack`/`TwoStackLog`) cannot preserve the flat `cold@ ++
+hot@` sequence. Its contract is `frame_msets(): Seq<Multiset<(T,I)>>` (one multiset
+per frame, in stack order): `compress_frame` guarantees `decode().to_multiset() ==
+diffs@.to_multiset()` for every mode, `flush_cold` preserves `frame_msets` exactly,
+and the flat `@` survives only as one linearization for `pop_frame`. This is sound
+because a finalized frame writes each cell once, so the restore overlay is determined
+by the write set, not its order (`vec::lemma_multiset_eq_overlay`). Sorting requires
+unique indices; `compress_frame` checks `is_unique_idx` at runtime and falls back to
+the write-order encoder otherwise, so it carries no uniqueness precondition.
 
-**Index run-coalescing is the real space win.** On the contiguous-batch shape
-(`N` captures forming `R` runs), `RunFrame` drops the index column entirely
-(implied by start + offset): 0.51x plain at `R = N/100`, 0.60x at `R = N/10`.
-This is the encoder to reach for first, on any column whose captured indices
-cluster.
-
-**`compress` (value dict) is O(N·D) today; the encoders that matter are linear.**
-`dict_find` is a linear scan, so `compress` is quadratic in practice: 20.6ms at
-`N=100k, D=1000`; 185ms at `D=10000`. That is a per-mark cost that would dominate
-saturation. `compress_runs` is linear and flat in `R` (~80us at `N=100k`), and
-`DictFrame::decode_exec` is linear (~160us at `N=100k`). **Decision:** before the
-value dictionary is wired into `mark`, `dict_find` needs a hash (the bijection
-proof is search-strategy-independent, so this is an exec-only change); until then
-the two-stack ships with `IndexRuns` as the only compressing mode.
-
-## Implemented (2026-09-06)
-
-The two-stack and its policy are built and verified as standalone components,
-independent of `Vec`'s proven mark/restore core (so the ~1700 obligations are
-untouched):
-
-- `compressed_stack::CompressedStack` — the compressed bottom. View is the flat
-  `decode_all(frames)`; `push_frame`/`pop_frame` are the compress/decompress
-  primitives, view-preserving by the encoder bijection plus `lemma_decode_all_snoc`.
-- `compression_config::ColumnConfig` — the per-column object: `scheme` (all three
-  of `None` / `ValueDict` / `IndexRuns`, via `none()`/`value_dict()`/`index_runs()`)
-  plus the `compress_at_percent` size trigger (`should_flush`) and the
-  `keep_hot_frames` LRU floor (`frames_to_compress`).
-- `two_stack_log::TwoStackLog` — the two stacks together. View is `cold@ ++ hot@`.
-  `mark(uncompressed_bytes, base_bytes)` opens a frame and, when the trigger
-  fires, `flush_cold` compresses the cold hot-frames (all but the hot floor) into
-  the bottom, view-preserving. `truncate_hot` is the hot-region restore.
-  `hot_bytes`/`cold_bytes` are the monitoring hooks.
-- `FrameEncoding::decode_exec` / `DictFrame::decode_exec` — executable
-  decompression (verified `r@ == decode()`), used by `pop_frame` and timed by the
-  bench.
-- `CompressionMode::Auto` + `compression_stats` — per-frame exact-size selection
-  and calibrated-adaptive selection. `frame_stats` computes `R` (contiguous runs,
-  scatter) and `D` (distinct values, repetition) in one O(N) pass, no sort;
-  `FrameStats::best_mode` picks the smallest of plain/runs/dict; `choose_mode`
-  delegates to it and `compress_frame`'s `Auto` arm resolves per frame.
-  `CalibrationStats::recommend` names the average winner over a window, and
-  `CalibrationPolicy` runs `Auto` for a calibration window, promotes that winner
-  as a static default, runs it for a period, and re-calibrates — paying the
-  adaptive cost only during the windows. `flush_cold` takes the flush mode as a
-  parameter so a driver feeds it `flush_mode()`.
-
-**Decision uses the sorted run count; the shipped encoder is write-order.**
-(SUPERSEDED 2026-09-07 by "Sorted index-major is selectable through the two-stack"
-below: the sorted encoder is now shipped as `IndexRunsSorted` and the selector
-returns it, so the estimate matches the encoder.)
-`frame_stats` counts `R` from index-set contiguity (`ix-1` absent), i.e. the
-run count a *sorted* index-major encoding would achieve. The shipped
-`compress_runs_writeorder` only coalesces capture-order-consecutive runs, so on a
-shuffled-but-contiguous frame it produces more runs than `R` and under-delivers
-against the `Auto` estimate. Closing the gap means shipping the sorted encoder
-(with the set-level restore-equivalence theorem), which the reorder bench already
-showed is 2-3x smaller and faster to compress and restore — so it is the next
-increment, and it also makes `Auto`'s estimates exact.
-
-End-to-end measurement (`two_stack_bench`, 400 marks x 16 writes, distinct=256,
-flush at 5% with hot floor 4): the mechanism works — under `ValueDict` the trigger
-fires and frames move to the cold stack (hot 65536 -> 32768 bytes, cold 0 ->
-83456). Space is 1.77x the plain baseline, a loss, matching the encoder finding;
-the mark path costs 146us vs 17.7us (the `dict_find` encode). So the plumbing is
-verified and exercised; the space win waits on narrowed dict codes and `IndexRuns`.
-
-**Index-major (`IndexRuns`) is now a live, selectable scheme.** `index_like::
-IndexFromNat` refines `IndexLike` with `from_nat` (`from_nat(n).as_nat() == n` on
-`[0, max_nat)`, plus `from_usize` / round-trip / bounded-value lemmas), primitive
-impls. `compress_runs_writeorder` run-coalesces in write order so it preserves the
-exact flat view (no sort, no permutation), keeping the mark/restore theorems.
-`RunFrame::decode_i<I: IndexFromNat>` reconstructs the dropped index column as
-`from_nat(start + offset)` (spec); `decode_exec_i` is its executable form,
-`external_body` against that spec and the `compress_runs_writeorder` bijection,
-backed by the `run_frame_roundtrip` 2000-case proptest. `FrameEncoding` gained a
-`Runs` arm (so the enum carries `I: IndexFromNat`), and `CompressedStack` /
-`TwoStackLog` are generic over `IndexFromNat`, so `index_runs()` flows end to end.
-Measured (`two_stack_bench`, consecutive-cell workload): the index-runs cold
-footprint is ~half the value-dict cold footprint and compresses faster; total is
-1.15x plain at 16 writes/frame (vs value-dict's 1.77x), the residue being per-frame
-`Vec` headers, so the win scales with frame size.
-
-Remaining: (1) narrowed/bit-packed dict codes (to turn value-dict from a loss into
-a win); (2) a pooled run representation (one flat value pool + run offsets across
-frames) to drop the per-frame `Vec` header overhead the bench exposed; (3)
-materialize-into-cold for deep backtracks (`pop_frame` is the primitive;
-`truncate_hot` covers the hot region); (4) `IndexFromNat` for the wrapper id types,
-needed only when an e-graph column keyed on them selects `IndexRuns`; (5) adoption
-by the e-graph column aggregates.
-
-## Decision: value-major lives (measured 2026-09-06)
-
-Head-to-head across column shapes (`scheme_comparison_bench`; real run counts from
-`compress_runs_writeorder`/`compress_runs_sorted`, computed sizes for the packed
-value-major variants), ratio vs plain:
+**Per-column decision (measured, `scheme_comparison_bench`; ratio vs plain):**
 
 | shape | plain | idx sorted | val usize | val byte | val packed |
 |-------|-------|-----------|-----------|----------|------------|
-| union_find D=64 | 1.00x | 1.37x | 1.50x | **0.63x** | **0.36x** |
-| union_find D=4  | 1.00x | 1.37x | 1.50x | **0.63x** | **0.30x** |
+| union_find D=64 | 1.00x | 1.37x | 1.50x | 0.63x | **0.36x** |
+| union_find D=4  | 1.00x | 1.37x | 1.50x | 0.63x | **0.30x** |
 | contiguous      | 1.00x | **0.51x** | 2.00x | 1.25x | 0.95x |
 | scattered_unique| 1.00x | 1.37x | 2.00x | 1.25x | 0.98x |
 
-**Value-major is NOT retired — it wins decisively on the union-find shape**
-(0.30-0.36x), the memory-critical eq-sat column, where index-major loses (indices
-scattered, ~0.87 runs/entry even sorted). The 1.50x that made it look like a loser
-was entirely the `usize` codes: byte-granular codes (u8/u16/u32 by `D`) already win
-at 0.63x, and bit-packing to `ceil(log2 D)` bits reaches 0.30x. Index-major owns
-the contiguous shape (0.51x); plain wins the scattered-unique shape. So the
-per-column defaults are: union-find `parent`/`rank` -> value-major (packed),
-contiguous batch columns -> index-major, everything else -> plain. Sort-first
-index-major only edges write-order on latent-contiguity frames (1.37x vs 1.50x
-here, both losing); it earns its keep on shuffled-but-contiguous frames, not
-truly-scattered ones.
+Value-major wins the union-find shape (0.30-0.36x packed), the memory-critical eq-sat
+column where index-major loses (indices scattered). Sorted index-major wins the
+contiguous shape (0.51x). Plain wins scattered-unique. So the per-column defaults are:
+union-find `parent`/`rank` value-major (packed), contiguous-batch columns sorted
+index-major, everything else plain. Value-major is retained precisely because it is
+the only scheme that wins the union-find column.
 
-**Build order that follows:** value-major needs packed codes to realize the win.
-Byte-granular codes (0.63x, easy to verify, swappable behind the codec contract)
-first; bit-packed codes (0.30x, a further ~2x, bit-arithmetic proofs) after. Both
-sit behind the round-trip-preserves-the-write-multiset contract, so upgrading the
-code representation touches only the codec, not callers.
+**The selector costs the shipped widths.** `FrameStats::best_mode`/`code_bits` cost
+value-major at the packed bit width and index-major at the sorted run count, so `Auto`
+and calibration compare the sizes that actually ship; the runs winner returned is
+`IndexRunsSorted`.
 
-**Realized (2026-09-06):** byte-granular value-major is built and verified. The
-`Codes` column (`U8`/`U16`/`U32`/`Usize`) sits behind a `view: Seq<nat>` contract;
-`DictFrame` stores `codes: Codes` and its bijection is stated over `codes.view()`,
-so the width is invisible and a future bit-packed variant drops in without
-touching the frame or callers. `compress` narrows codes via `Codes::from_usize`
-(width by dict size), keeping `decode == diffs@` verified — value-major is a
-non-reordering codec, so it keeps the exact contract and needs no two-stack rework.
-The selector is now honest: `FrameStats::best_mode` costs index-major at the
-sorted run count (usize starts) and value-major at the narrow code width
-(`code_width`, computed from D) with indices stored, so `Auto`/calibration compare
-what the encoders actually ship. Consequence, pinned by `choose_mode_criterion`:
-the selector now picks value-major for value-repetitive scattered columns (dict
-2516 < plain 4000 at D=4, N=500) where the usize-code cost wrongly picked plain.
-Still remaining: bit-packed codes (the further 2x), the hashmap dedup (current
-`dict_find` is O(N*D)), sorted-index-major made selectable through a set-level
-two-stack contract, and fork-history reclamation (doc 10).
-
-## Sorted index-major is selectable through the two-stack (2026-09-07)
-
-`IndexRunsSorted` is now a selectable `CompressionMode` (`ColumnConfig::
-index_runs_sorted`), flushed through the two-stack like any other scheme. This
-required moving the two-stack's contract from the flat sequence to the per-frame
-write multiset, because sorting reorders and so cannot preserve `cold@ ++ hot@`.
-
-**Contract: per-frame multiset, not flat sequence.** `compress_frame` now
-guarantees `decode().to_multiset() == diffs@.to_multiset()` for every mode (the
-order-preserving modes still decode to `diffs@` exactly; `IndexRunsSorted` decodes
-to a permutation with the same multiset). `CompressedStack::frame_msets()` and
-`TwoStackLog::frame_msets()` (`Seq<Multiset<(T, I)>>`, one multiset per frame in
-stack order) are the preserved views: `push_frame` extends `frame_msets` by
-`diffs@.to_multiset()`, `open_frame`/`mark` append an empty active frame, and
-`flush_cold` preserves `frame_msets` exactly (the flushed frames' multisets move
-from hot to cold, the concatenation is unchanged). The flat `@` is retained only as
-one linearization (used by `pop_frame` to materialize a frame back); it is NOT
-preserved across a flush that reorders. Soundness: a finalized frame writes each
-cell once (`unique_idx`), so the restore overlay is determined by the per-frame
-write set, not its order (`vec::lemma_multiset_eq_overlay`). Verifies 1828/0.
-
-**Sorting is sound only on unique frames; the fallback covers the rest.**
-`compress_runs_sorted` requires `unique_idx` (a duplicate index would let the
-permutation shadow a different write). `compress_frame` checks it at runtime
-(`is_unique_idx`, O(N) hash set) and falls back to `compress_runs_writeorder`
-(exact, no uniqueness needed) otherwise, so `compress_frame` carries no uniqueness
-precondition and the two-stack needs no per-frame-uniqueness invariant. The
-`compress_frame_sorted` proptests exercise both branches (unique round-trips to the
-sorted multiset; non-unique reproduces the exact write-order sequence);
-`unique_idx_check` pins `is_unique_idx` against the mathematical property.
-
-**The selector is now genuinely honest.** `runs_bytes` costs the sorted (index-set)
-run count, which only the sorted encoder achieves, so `FrameStats::best_mode` and
-`CalibrationStats::recommend` now return `IndexRunsSorted` for the runs winner, not
-the write-order `IndexRuns` (which fragments into more runs and would exceed the
-costed size). The previous "the selector is now honest" note (2026-09-06) was
-premature: it costed the sorted run count but returned `IndexRuns`, so `Auto`
-under-delivered on shuffled-but-contiguous frames. `choose_mode_criterion` and
-`calibration_policy` accept either index-major mode; the honest pick is the sorted
-one.
-
-## Bit-packed dictionary codes (2026-09-07)
-
-`Codes` gains a `Packed { words: Vec<u64>, bits, len }` variant: sub-byte codes at
-1/2/4 bits (for `D <= 2/4/16`), `64/bits` per `u64` word with no cross-word straddle
-(so a code is always within one word, avoiding straddle proofs). This is the
-value-major win below one byte per code: union-find `D <= 4` reaches ~0.30x plain
-(2 bits/code), matching the "val packed" column of the decision table. `from_usize`
-selects the packed width for `D <= 16` and the existing byte widths above it, so the
-representation is invisible to `DictFrame` (its bijection is still stated over
-`Codes::view()`, unchanged) and to every caller.
-
-`view()` for `Packed` is the exact extraction formula (`packed_code_at`: word
-`i/(64/bits)`, field at `(i%(64/bits))*bits`), so it is grounded in the real words.
-`packed_get` (exec extract) and `pack_codes` (exec pack) are `external_body`:
-variable-width bit shifts/masks are not a tractable Verus proof surface, so the
-pack/extract-vs-formula agreement is trusted (trust ledger group B, no `unsafe`) and
-checked by the `packed_codes_roundtrip` proptest across all three widths, the
-field-full boundary, and cross-word packing. `Codes::get` is PROVEN against the
-formula (it just calls `packed_get`, whose ensures is the formula), so only the two
-bit-twiddling primitives are trusted, not the frame or the selector. Verifies
-1832/0.
-
-The selector now costs the packed width honestly: `FrameStats::code_bits` returns
-1/2/4/8/16/32 bits by `D`, and `dict_bytes` charges `ceil(N * code_bits / 8)` for the
-code column, so `Auto`/calibration compare the bit-packed size that actually ships.
-`choose_mode_criterion`'s D=4 case reflects the packed cost (dict 2141 < plain 4000
-at N=500).
-
-This completes the value-major build order (byte-granular 0.63x, then bit-packed
-0.30x); both sit behind the round-trip-preserves-the-write-multiset contract, so the
-code representation changed without touching the frame or callers.
-
-## Benchmark plan
-
-Report peak memory and wall-clock for `mode ∈ {None, ValueDict, IndexRuns}` ×
-`{VecI, VecP}` on the Sundance regression corpus and saturation runs. Expect:
-memory down (proportional to run density and `1/sizeof(T)`), wall-clock
-flat-to-slightly-up (the finalize work). Gate a mode only if memory is the target;
-otherwise keep `None` (the SMT profile).
-Measure the run-length distribution of real finalized frames first — if frames
-are mostly singletons, index-structure compression is not worth the finalize
-cost. Measure the value multiset at the same time: per finalized frame and per
-column, the distinct-value count `D` against the capture count `P`, and the
-index-contiguity within each value group. `D/P` decides whether the value axis
-pays and, with the contiguity, whether value-major (encoder B) beats
-dictionary+codes (encoder A). Expect the union-find `parent`/`rank` columns to
-show `D ≪ P`; expect arbitrary payload columns to show `D ≈ P` and gain nothing
-on the value axis. Because the axes are independent, report the pool term and the
-structure term separately so each encoder's contribution is attributable.
-
-## Implementation plan (code-level)
-
-Grounded in `vec.rs` as it stands (the `Vec<T, I, S, const TRACK: bool = true>`
-at `vec.rs:640`). Compression is a `Vec` concern, not a `DiffStore` one: the base
-data and capture bits live in `S: DiffStore`, but the diff trail (`diff_log:
-Vec<(T, I)>` and `frames: Vec<Frame<I>>`, partitioned by `frames[k].diff_start`)
-lives in `Vec`. So the const generic goes on `Vec`.
-
-**Step 1 — standalone verified encoder module (`diff_compress.rs`), additive.**
-No `Vec` change, cannot touch the existing ~1705 obligations. Contents:
-- The compressed frame representation (index-major run-coalescing first;
-  dictionary+codes for the value axis second; value-major last).
-- `spec fn decode(cf) -> Seq<(T, I)>` and `exec fn compress(&[(T, I)]) -> cf`.
-- The **encode/decode bijection** theorem: on a finalized frame (first-write-wins
-  gives unique indices; take sorted-unique as a `requires`, discharged in step 2
-  by the radix sort), `decode(compress(d)) == d`. Proof risk lives here: the
-  run-coalescing bijection is an inductive sequence-refinement; the dictionary
-  bijection is a pointwise map (`decode[t] = (dict[codes[t]], idx[t])`), which is
-  the lower-risk proof and the value-axis win for `parent`, so land it first.
-  Generic-`T` equality is the friction point for the dictionary dedup: constrain
-  the value column to `T: IndexLike` (node ids) and compare by `as_nat`, or thread
-  a verified `PartialEq`.
-
-**Step 2 — per-instance `mode: CompressionMode` field on `Vec`.** A runtime field
-(default `None`), not a const generic, so one binary serves SMT (`None`) and
-eq-sat (per-column modes) without recompilation. `Vec::new` keeps `None`; a
-`with_mode(mode)` constructor sets it. The compressed store fields always exist
-but stay empty when `mode == None`. `mark`/`restore` branch on `mode`; the
-`None` arm is today's code path, so the `None` proofs are the current proofs plus
-a mode discriminant carried through the invariant (`mode == None ==> compressed
-store empty`). No const-generic proliferation across impl blocks.
-
-**Step 3 — finalize at `mark`.** `mark` (`vec.rs:~1409`) closes the active frame.
-Under `COMPRESS`, replace pushing the raw closing stratum with: radix-sort the
-stratum's `(T, I)` by index (`O(p)`), `compress` it (step 1), and append to a
-compressed store beside `diff_log`. Fuse the capture-bit clear into the same
-sweep. The frame index now points into the compressed store.
-
-**Step 4 — restore.** `restore` reverse-replays compressed frames run by run
-(`decode` a run, write `values[run] -> cells[start..start+len]` as a slice), then
-the uncompressed active frame. The **restore-equivalence** theorem reduces to the
-step-1 bijection plus the existing disjoint-index replay argument, so the
-mark/restore model proofs are reused; `COMPRESS` selects the representation behind
-the same abstract `view()`.
-
-**Step 5 — per-column eligibility.** Distinct-payload columns run index-major
-only; the value axis (dictionary) is enabled only on the value-repetitive columns
-(`parent`, `rank`), per the per-column analysis. Expose this as the column's
-`COMPRESS` scheme selection where each aggregate constructs its vectors.
-
-Order: step 1 (verified, standalone, committable alone) is the safe first
-increment; steps 2-4 are the invasive `Vec` change and land together (the
-`COMPRESS=true` path is not partially meaningful); step 5 is the aggregate wiring.
-
-## Performance: SIMD acceleration under conformance
-
-The finalize/restore encoders are on the hot path (every `mark` and `restore`
-touches them), so once correct they are performance-critical and want SIMD:
-radix-sorting the index stratum, run-coalescing, dictionary dedup, and the
-run-by-run `memcpy` on restore all vectorize. Verus cannot verify SIMD intrinsics
-(they are outside its model), so the verified scalar encoder in `diff_compress`
-is the **reference specification**, and a SIMD implementation is checked for
-equivalence against it — not proved — through the existing `containers-conformance`
-crate (differential + property + Criterion checks between the verified and
-production paths). Concretely: the verified `compress`/`compress_frame`/
-`compress_runs` and their `decode` are the oracle; the SIMD encoder passes iff, on
-proptest-generated frames, its output decodes to the same diff sequence
-(`decode(simd_compress(d)) == d`) and matches the scalar encoder byte-for-byte
-where the representation is canonical. This keeps the soundness guarantee (the
-scalar path is verified; the fast path is conformance-tested against it) without
-forcing SIMD into Verus. Land the scalar verified encoder first; add the SIMD
-path and its conformance checks after, gated in `containers-conformance`.
+**Rejected: plain dict + `usize` codes (negative result, do not re-propose).** As
+first built it is 1.50x plain, a loss: a `usize` code is wider than the `u32` value it
+replaces and the index column is still stored. Byte-granular then bit-packed codes are
+what turn it into the 0.63x / 0.30x win.

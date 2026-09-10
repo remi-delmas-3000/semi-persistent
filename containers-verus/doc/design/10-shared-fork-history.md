@@ -132,86 +132,12 @@ mutable aliasing for Verus to fight. Proof structure:
   not semantics. This lets the per-vector proofs be reused against the shared
   depth/token supplied by `History`.
 
-## Migration path
-
-1. Extract `History`; make `Vec` history-less with `push_frame`/`restore_frame`.
-2. Add the `Solo` wrapper; port existing tests unchanged (green ⇒ semantics
-   preserved).
-3. Add `SyncGroup`; migrate the e-graph aggregates (`EClasses`, `NodeStore`) to
-   hold one `History` and register their vectors as members, replacing the
-   hand-written struct-of-tokens fan-out.
-4. Benchmark: e-graph backtrack-heavy runs (eq_diamond family), reporting
-   wall-clock and peak memory, solo vs synced.
-
 ## Interaction with other work
 
 Independent of diff-stack compression (`09-diff-stack-compression.md`):
 compression changes the *frame representation*, sharing changes *who owns the
 history*. They compose — a `SyncGroup` of `COMPRESS = true` vectors is well
 defined — but ship and measure them separately so each effect is attributable.
-
-## Benchmark plan
-
-Primary metric: wall-clock on the diamond-heavy e-graph benchmarks (the
-backtrack-dominated case where genealogy work is hottest), solo vs synced.
-Secondary: peak memory (the `ForkHistory ×N → ×1` collapse). Prerequisite: the
-differential profile attributing the semper-vs-basic gap across
-{fork-history/validation, per-vector mark/restore, per-assert rebuild, id
-indirection}, so this refactor is pointed at a measured bottleneck rather than a
-presumed one.
-
-## Implementation plan (code-level)
-
-Grounded in the code as it stands. `Vec<T, I, S, const TRACK: bool = true>`
-(`vec.rs:640`) embeds `forks: ForkHistory` (`vec.rs:653`) and `id: ContainerId`.
-`ForkHistory` (`fork_history.rs:34`) is `{ current_branch_id: u32, origins:
-Vec<ForkOrigin> }` with `fh_wf` and the `fork_valid` walk. Token validity
-(`is_token_valid_spec`, `vec.rs:701`) reads `self.forks.origins@`,
-`self.forks.current_branch_id`, and `self.frames@.len()`; `wf` includes
-`self.forks.wf()` (`vec.rs:851`); `mark`/`restore` ensures reference the fork
-state throughout. Consumers that compose `Vec`s and today bundle their tokens:
-`sparse_set.rs`, `circular_list.rs`, `list.rs`, `union_find.rs`, and the
-`eclasses.rs` aggregate over all of them.
-
-**This refactor is atomic, not incremental.** Extracting `ForkHistory` out of
-`Vec` changes the signatures of `mark`/`restore` and the `wf` invariant, which
-breaks every proof in the 3719-line `vec.rs` and every consumer at once. It
-cannot land as a sequence of independently-verifying commits the way the
-`matchable` bit or the compression encoder can. Plan it as one focused effort:
-
-1. **Extract `History` (additive, verifies alone).** A standalone
-   `History { forks: ForkHistory, depth: usize }` with the `ForkHistory`
-   theorems lifted onto it (`fh_wf`, the `fork_valid` walk, headroom). `Vec` is
-   untouched in this step; `History` just exists and verifies. This is the one
-   safe increment and the right first commit.
-2. **History-less `Vec`.** Remove `forks` from `Vec`; add `fn push_frame(&mut
-   self, shrink)` (local `(saved_len, diff_start)` push, no genealogy) and `fn
-   restore_frame(&mut self, tok: GroupToken)` (reverse-replay + truncate this
-   vector to the token's frame). `mark`/`restore`/`is_token_valid_spec`/`wf`
-   drop their fork clauses. Every ensures that named `self.forks.*` is rephrased
-   against a supplied `&History`. `GroupToken { branch_id, depth, frame_idx }`
-   drops `container_id`. This is the breaking change; it and step 3 land together.
-3. **`Solo` and `SyncGroup` wrappers.** `Solo` bundles one `Vec` + one `History`
-   and reproduces today's `mark()`/`restore(token)` bit-for-bit (the migration
-   safety net: existing tests green ⇒ semantics preserved). `SyncGroup` owns one
-   `History` and `N` members: `mark` = one `history.mark()` then `push_frame` on
-   each member; `restore` = one `history.is_valid` then `restore_frame` on each
-   member then `history.restore_to`. `History` is passed `&mut` per call, never
-   stored in a member, so there is no shared mutable aliasing for Verus.
-4. **Group invariant + refinement.** Prove `forall member: member.frames.len()
-   == history.depth` (maintained by mark/restore fanning out), and the
-   refinement theorem that a `SyncGroup` behaves as `N` vectors each carrying an
-   identical private `History` — so the per-vector proofs are reused against the
-   shared depth/token.
-5. **Migrate aggregates.** `EClasses`/`NodeStore` and the composed
-   `sparse_set`/`circular_list`/`list`/`union_find` hold one `History` and
-   register their vectors as `SyncGroup` members, replacing the hand-written
-   struct-of-tokens fan-out.
-
-Because the wall-clock share was measured at 0.4% (the differential profile),
-this is a memory optimization (`ForkHistory ×N → ×1`, unbounded-growth component)
-and should be scheduled when memory is the target or as engine cleanup, not as a
-speed fix.
 
 ## Size and savings estimate (which workload this is for)
 
@@ -248,157 +174,44 @@ that, ~0.36%. Sharing is a memory optimization, not a speed one.
 still grows unboundedly with `R` in the one shared copy. Reclaiming it (below)
 bounds the size to the live spine depth, which for SMT (large `R`, bounded depth)
 is a larger space win than sharing and removes the unbounded-growth-per-session
-problem. `R` per workload is measurable (count restores on a sundance SMT run vs
-an eq-sat saturation) and should be measured before committing either change, per
-the differential-profile prerequisite above.
+problem.
 
-## Reclamation COMPLETE across the whole fork API (2026-09-07)
+## Shipped design: GenStamps reclamation
 
-The branch-model fork history is gone. `fork_history.rs` (the append-only
-`origins` walk, `fork_valid`/`fork_walk`/`reaches`, `current_branch`) is deleted,
-and every fork path uses `GenStamps`: the shared `History` (the e-graph's ×1 copy),
-the standalone `Vec` and `AppendOnlyVec`, and the delegators that thread member
-tokens (`circular_list`, `sparse_set`, `union_find`, `list`, `map`). `VecToken`
-carries `(frame_idx, generation, container_id)`; validity is the O(1)
-`forks.valid(frame_idx, generation)`; `mark` mints via `stamp_at`; `restore`'s
-branch cut is `bump_from(frame_idx+1)`. Verifies containers-verus 1827/0, egraph
-builds, and every test + conformance proptest passes. Live size is O(max depth)
-on every fork path, not O(R): the leak is eliminated, not only for the e-graph.
+The branch-model fork history (`fork_history.rs`: the append-only `origins` walk,
+`fork_valid`/`fork_walk`/`reaches`) is replaced by depth-indexed generation stamps.
+`GenStamps` holds `levels: Vec<u64>`, one generation per depth; a token minted at
+depth `d` carries `levels[d]`; `mark` mints via `stamp_at`; a restore diverging at
+`d` calls `bump_from(d+1)`, and validity is the O(1) read `levels[depth] ==
+generation`. `lemma_bump_invalidates` proves the branch-cut safety: after
+`bump_from(cut)`, every token at `depth >= cut` is rejected and every token at
+`depth < cut` stays valid. Live size is O(max depth), not O(R lifetime restores), on
+every container fork path (`Vec`, `AppendOnlyVec`, and the delegators).
 
-**Measured, not only derived (`gen_stamps_reclamation`, containers-conformance).**
-The AFTER is a runtime measurement: driving 500 and 50000 restore/re-mark cycles at
-a spine depth of 1000 yields identical live size (`GenStamps::heap_bytes`), and the
-array never grows past the deepened depth, so the size is independent of the restore
-count. At depth 1000 the measured live size is 9 KB. The BEFORE is the deleted
-`origins` model's known formula (8 bytes per restore, never reclaimed): at 10^7
-restores it is 80 MB. Only the AFTER can be run (the branch model is deleted); the
-test asserts the ratio is >=1000x (measured 9765x, MB to KB). This is a measurement
-of the reclaimed structure, not an inference from an analogous case.
+`bump_from` is total via `wrapping_add`: invalidation needs only that a bumped level
+becomes distinct from a stale token's stored generation, and `x.wrapping_add(1) != x`
+for every `u64`, so it invalidates with no overflow precondition. It is `external_body`
+(trust group B) with the `!=` ensures read off `wrapping_add`; `lemma_bump_invalidates`
+is stated on `!=`.
 
-**`bump_from` is total (no overflow precondition), via `wrapping_add`.** The
-invalidation a restore needs is only that a bumped level becomes *distinct* from a
-stale token's stored generation, not that it increments: `x.wrapping_add(1) != x`
-for every `u64` (the wrap `u64::MAX -> 0` still changes the value), so
-`bump_from` invalidates the abandoned future with no precondition at all.
-`lemma_bump_invalidates` is restated on `!=` rather than `+1`. `bump_from` is
-`external_body` (trust group B: a pure counter bump, no `unsafe`) so the `!=`
-ensures is read directly off `wrapping_add`'s semantics.
+Rejected alternative: a `< u64::MAX` headroom precondition (`gen_headroom_spec`, the
+u64 analogue of the old u32 `origins.len()+1 <= u32::MAX`). It does not compose:
+`restore` is reached through the delegators, and a `forall` over private `levels`
+cannot be discharged O(1) at each boundary, so threading it broke preconditions across
+six files. `wrapping_add` removes the obligation instead of propagating it. The only
+residue is ABA after 2^64 restores at one depth, physically unreachable and backstopped
+by frame-liveness.
 
-**Rejected alternative: thread a `< u64::MAX` headroom precondition.** The earlier
-design carried `gen_headroom_spec` (a `forall d in (frame_idx, len): levels[d] <
-u64::MAX`) as `restore`'s precondition, the u64 analogue of the old u32
-`origins.len()+1 <= u32::MAX`. It fails to compose: `restore` is reached through
-the delegators (`union_find` -> `parent.restore`, `circular_list` -> `entries.restore`,
-`EClasses::restore` -> five members), and a `forall` over private `levels` cannot
-be discharged O(1) at each boundary the way the old O(1) count check was. Threading
-it produced a cascade of precondition failures across six files. `wrapping_add`
-removes the obligation instead of propagating it. The only residue is ABA: a level
-could wrap back to a stale token's generation after 2^64 restores at one depth,
-which is physically unreachable, and frame-liveness (`frame_idx < depth`) backstops
-it regardless. This is a decision, not a measurement: 2^64 is the bound, not an
-observed value.
+Measured (`gen_stamps_reclamation`): live size is independent of restore count (500 vs
+50000 restore cycles at depth 1000 give identical `heap_bytes`), 9 KB at depth 1000.
+The deleted branch model was 8 bytes per restore, 80 MB at 10^7 restores; the test
+asserts >=1000x reduction (measured 9765x). Only the AFTER runs (the branch model is
+deleted).
 
-## Leak FIXED for the e-graph (2026-09-06)
-
-`history::History` — the shared ×1 fork history the e-graph actually uses — is
-migrated to `GenStamps` (containers-verus 1842/0, egraph + eclasses conformance
-green). `GroupToken` now carries `(generation, depth)`; `valid_spec` is the O(1)
-`stamps.valid(depth, gen)`; `mark` is `stamp_at(depth)`; `restore_to` is
-`bump_from(t.depth+1)`, invalidating the abandoned future (tokens deeper than `t`)
-while `t` and its ancestors stay valid — matching the branch model, sound by
-`lemma_bump_invalidates`. The append-only `origins` is gone from this path.
-
-**Memory (deterministic, from the structure).** Before: `origins` grew one 8-byte
-`ForkOrigin` per restore, never reclaimed — `8·R` bytes for `R` lifetime restores.
-After: `stamps.levels` is one `u64` per depth ever reached — `8·D_max` bytes for
-max spine depth `D_max`. For an SMT run with `R = 10^7` backjumps at depth
-`D_max ≈ 10^3`: **80 MB → 8 KB**, the MB→KB target. The O(R) term is eliminated
-from the e-graph's fork history.
-
-**Remaining:** (SUPERSEDED 2026-09-07 by "Reclamation COMPLETE" above: the
-per-`Vec` migration is done and `fork_history.rs` is deleted.) the per-`Vec`
-branch-model `ForkHistory` (used by the STANDALONE,
-non-e-graph `Vec`/`AppendOnlyVec` fork API) still grows `origins` O(R). Migrating
-it is coupled by the shared `VecToken` (both `Vec` and `AppendOnlyVec` use it), so
-it is a separate atomic step (`VecToken.branch_id/depth -> gen`, `is_token_valid_spec`,
-`mark`, the `restore` branch-cut proof, then delete `fork_walk`/`reaches`). Lower
-priority: the e-graph (the memory-critical path) is now fixed; standalone `Vec`
-fork usage is not the leak the goal targeted.
-
-## Reclamation status: mechanism BUILT, integration is a scoped multi-step redesign
-
-(SUPERSEDED 2026-09-07: integration is COMPLETE, see "Reclamation COMPLETE across
-the whole fork API" above. The blast-radius estimate and stepwise plan below are
-kept as the record of how the migration was scoped and executed.)
-
-Labeling honestly (BUILT = verified code exists; DESIGNED = doc only):
-
-- **BUILT:** `gen_stamps::GenStamps` — the depth-indexed stamp array with
-  `stamp`/`push_level`/`bump_from`/`is_valid` and `lemma_bump_invalidates` (a
-  diverging restore invalidates the abandoned future in O(1), preserves the
-  spine). Verified 1841/0. This is the reclamation *mechanism*.
-- **DESIGNED (not built):** wiring it in to actually bound live memory. Measured
-  blast radius: 154 references to the branch-model validity surface
-  (`VecToken.branch_id`/`depth`, `fork_valid`/`fork_walk`/`reaches`,
-  `fork_count_spec`, `ForkHistory.origins`, `current_branch`) across 6 core files
-  — `vec.rs`, `fork_history.rs`, `append_only_vec.rs` (a parallel fork impl),
-  `history.rs` + `eclasses.rs` (the shared multi-member `History`), and the
-  `fork_count_spec` delegators (`circular_list`/`sparse_set`/`union_find`/`list`).
-  The fork token is a SHARED abstraction across every aggregate, so replacing the
-  branch walk with the stamp array is not localized; it re-proves each container's
-  restore/branch-cut against the new validity model. This is a multi-session
-  redesign, not a single increment.
-
-**Refinement (2026-09-06): `History` is the isolatable first target.** The
-e-graph's shared ×1 fork history is `history::History` (with its own
-`GroupToken { branch_id, depth }`), NOT the per-`Vec` `ForkHistory`: the members
-mark/restore through `EClasses::{mark,restore}_with_history` over the genealogy-free
-`push_frame`/`restore_frame`, so `History` is the sole fork authority for the
-e-graph and the copy that leaks. Its `GroupToken` is separate from `VecToken`, and
-its API is compact (`mark`/`is_valid`/`restore_to`, ~130 lines). So migrating
-`History` to `GenStamps` fixes the e-graph leak in isolation — `GroupToken.branch_id
--> gen`, `valid_spec` = `stamps.valid(depth, gen)`, `mark` = `stamp_at(depth)`,
-`restore_to` = `bump_from(t.depth)` with branch-cut safety from
-`lemma_bump_invalidates` — without disturbing `VecToken`/`vec.rs`. The `Vec`/
-`AppendOnlyVec` migration (coupled by the shared `VecToken`) is a separate later
-step for the standalone (non-e-graph) fork API. Note: `GenStamps`'s `view()` spec
-fn triggers Verus's opaque-field rule for cross-struct spec access; drop/rename it
-and read `stamps.levels@` directly (as `Vec` reads `forks.origins@`).
-
-**Stepwise integration plan (each a green increment):**
-1. Add `GenForkHistory` (new type on `GenStamps`) additively, with `stamp_at(depth)
-   -> gen`, `cut(depth)` (= `bump_from`), `is_valid(depth, gen)` — leaving the
-   branch-model `ForkHistory` in place.
-2. Pilot: migrate `AppendOnlyVec` (self-contained restore) to it — token carries
-   `(frame_idx, gen)`, validity is `is_valid(frame_idx, gen)`, restore does
-   `cut(frame_idx)`; re-prove its branch-cut safety via `lemma_bump_invalidates`.
-   This proves the model end to end on a real container.
-3. Migrate `Vec` (`VecToken.branch_id/depth` -> `gen`, `is_token_valid_spec`,
-   `mark`, the `restore` branch-cut proof, `lemma_forks_change_preserves_wf`,
-   Vec wf gains `stamps.len() >= frames.len()`).
-4. Migrate the shared `History` + `EClasses`.
-5. Delete the branch-model `ForkHistory`/`fork_walk`/`reaches` and the
-   `fork_count_spec` u32-headroom preconditions (the leak-bounded design has no
-   per-restore growth, so that headroom concern disappears).
-
-Invalidation soundness at every step rests on `lemma_bump_invalidates`; the
-per-container work is re-proving restore against `is_valid(depth, gen)` instead of
-the walk. Memory goes O(R) -> O(max depth); measure SMT before/after at step 3.
-
-## Reclamation core built (2026-09-06)
-
-The dense stamp array below is now built and verified as a standalone module
-(`gen_stamps::GenStamps`, containers-verus 1842/0): `levels: Vec<u64>` (one
-generation per depth), `stamp(depth)` mints a token's generation, `bump_from(cut)`
-invalidates the abandoned future by bumping `levels[cut..]`, and `is_valid(depth,
-g)` is the single-read check `levels[depth] == g`. `lemma_bump_invalidates` proves
-the soundness: after `bump_from(cut)`, every token at `depth >= cut` with its old
-stamp is rejected while every token at `depth < cut` keeps its validity — exactly
-what `fork_valid`'s parent-chain walk decides, now O(1) and O(max-depth) space
-instead of O(R). Remaining: wire this into `ForkHistory` (replace the append-only
-`origins` and the `fork_valid`/`reaches` walk with the stamp array, re-proving the
-mark/restore/branch-cut theorems against it, preserving the ×1 sharing), then
-measure the SMT memory before/after.
+Scope: the shared x1 `History` (one genealogy for a synced group) is a verified
+primitive in `containers-verus`, but the e-graph does NOT yet route through it;
+`EGraph31::mark/restore` still marks each member independently. Wiring it in is future
+integration, tracked in the transient task docs, not here.
 
 ## Reclaiming abandoned branches (bounds size to O(spine depth))
 
