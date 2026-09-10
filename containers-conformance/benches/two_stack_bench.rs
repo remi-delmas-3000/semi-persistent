@@ -61,9 +61,12 @@ fn bench_two_stack(c: &mut Criterion) {
     // Flush when the uncompressed top reaches 5% of the live payload, keeping
     // the 4 most-recent frames hot (LRU floor).
     let dict = ColumnConfig::value_dict(5, 4);
+    // Index-major: the workload writes consecutive cells within a frame, so each
+    // frame coalesces to a run and the index column is dropped.
+    let runs = ColumnConfig::index_runs(5, 4);
 
     // Report the final footprints once (space is deterministic given the seed).
-    report_footprints(base_bytes, distinct, none, dict);
+    report_footprints(base_bytes, distinct, none, dict, runs);
 
     let mut g = c.benchmark_group("two_stack/mark_churn");
     g.bench_with_input(BenchmarkId::new("none", "nocompress"), &none, |b, &cfg| {
@@ -72,10 +75,19 @@ fn bench_two_stack(c: &mut Criterion) {
     g.bench_with_input(BenchmarkId::new("valuedict", "compress_5pct_hot4"), &dict, |b, &cfg| {
         b.iter(|| black_box(run(cfg, base_bytes, distinct)))
     });
+    g.bench_with_input(BenchmarkId::new("indexruns", "compress_5pct_hot4"), &runs, |b, &cfg| {
+        b.iter(|| black_box(run(cfg, base_bytes, distinct)))
+    });
     g.finish();
 }
 
-fn report_footprints(base_bytes: usize, distinct: u32, none: ColumnConfig, dict: ColumnConfig) {
+fn report_footprints(
+    base_bytes: usize,
+    distinct: u32,
+    none: ColumnConfig,
+    dict: ColumnConfig,
+    runs: ColumnConfig,
+) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static DONE: AtomicBool = AtomicBool::new(false);
     if DONE.swap(true, Ordering::Relaxed) {
@@ -83,17 +95,23 @@ fn report_footprints(base_bytes: usize, distinct: u32, none: ColumnConfig, dict:
     }
     let (nh, nc) = run(none, base_bytes, distinct);
     let (dh, dc) = run(dict, base_bytes, distinct);
+    let (rh, rc) = run(runs, base_bytes, distinct);
+    let nt = (nh + nc).max(1);
     eprintln!(
-        "\n=== two-stack footprint after {} marks x {} writes (distinct={}) ===",
+        "\n=== two-stack footprint after {} marks x {} writes (distinct={}, consecutive cells) ===",
         MARKS, WRITES_PER_MARK, distinct
     );
-    eprintln!("  {:>12} {:>12} {:>12} {:>12}", "config", "hot_bytes", "cold_bytes", "total");
-    eprintln!("  {:>12} {:>12} {:>12} {:>12}", "none", nh, nc, nh + nc);
-    eprintln!("  {:>12} {:>12} {:>12} {:>12}", "valuedict", dh, dc, dh + dc);
+    eprintln!("  {:>12} {:>12} {:>12} {:>12} {:>8}", "config", "hot_bytes", "cold_bytes", "total", "vs none");
+    eprintln!("  {:>12} {:>12} {:>12} {:>12} {:>8}", "none", nh, nc, nh + nc, "1.00x");
     eprintln!(
-        "  (value-dict total / none total: {:.2}x — <1.0 once codes are narrowed)\n",
-        (dh + dc) as f64 / (nh + nc).max(1) as f64
+        "  {:>12} {:>12} {:>12} {:>12} {:>7.2}x",
+        "valuedict", dh, dc, dh + dc, (dh + dc) as f64 / nt as f64
     );
+    eprintln!(
+        "  {:>12} {:>12} {:>12} {:>12} {:>7.2}x",
+        "indexruns", rh, rc, rh + rc, (rh + rc) as f64 / nt as f64
+    );
+    eprintln!();
 }
 
 criterion_group!(benches, bench_two_stack);

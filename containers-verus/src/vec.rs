@@ -1269,6 +1269,11 @@ where
                 crate::diff_log::DiffLog::new_plain(),
             crate::diff_compress::CompressionMode::ValueDict =>
                 crate::diff_log::DiffLog::new_dict(),
+            // The single-stack Vec's diff_log is either plain or dict-top;
+            // index-major run-coalescing lives in the two-stack (TwoStackLog),
+            // not this in-place log, so IndexRuns builds a plain top here.
+            crate::diff_compress::CompressionMode::IndexRuns =>
+                crate::diff_log::DiffLog::new_plain(),
         };
         let v = Vec {
             store,

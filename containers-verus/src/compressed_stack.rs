@@ -15,14 +15,14 @@
 //! carry across the split.
 
 use vstd::prelude::*;
-use crate::index_like::IndexLike;
+use crate::index_like::{IndexLike, IndexFromNat};
 use crate::diff_compress::{CompressionMode, FrameEncoding, compress_frame};
 
 verus! {
 
 /// Flat decode of a frame sequence: concatenate each frame's `decode()`, in
 /// order. The stack's abstract view.
-pub open spec fn decode_all<T: IndexLike, I: IndexLike>(
+pub open spec fn decode_all<T: IndexLike, I: IndexFromNat>(
     frames: Seq<FrameEncoding<T, I>>,
 ) -> Seq<(T, I)>
     decreases frames.len(),
@@ -38,7 +38,7 @@ pub open spec fn decode_all<T: IndexLike, I: IndexLike>(
 /// The inductive step reassociates the three concrete sub-sequences by hand
 /// (Verus does not reassociate `+` over the recursive subterm on its own),
 /// mirroring `diff_compress::lemma_expand_runs_snoc`.
-pub proof fn lemma_decode_all_snoc<T: IndexLike, I: IndexLike>(
+pub proof fn lemma_decode_all_snoc<T: IndexLike, I: IndexFromNat>(
     frames: Seq<FrameEncoding<T, I>>,
     f: FrameEncoding<T, I>,
 )
@@ -74,14 +74,14 @@ pub struct CompressedStack<T, I> {
     pub frames: Vec<FrameEncoding<T, I>>,
 }
 
-impl<T: IndexLike, I: IndexLike> View for CompressedStack<T, I> {
+impl<T: IndexLike, I: IndexFromNat> View for CompressedStack<T, I> {
     type V = Seq<(T, I)>;
     open spec fn view(&self) -> Seq<(T, I)> {
         decode_all(self.frames@)
     }
 }
 
-impl<T: IndexLike, I: IndexLike> CompressedStack<T, I> {
+impl<T: IndexLike, I: IndexFromNat> CompressedStack<T, I> {
     pub open spec fn wf(&self) -> bool {
         forall|k: int| 0 <= k < self.frames@.len() ==> (#[trigger] self.frames@[k]).wf()
     }
@@ -166,6 +166,13 @@ impl<T: IndexLike, I: IndexLike> CompressedStack<T, I> {
                     d.dict.capacity() * core::mem::size_of::<T>()
                         + d.codes.capacity() * core::mem::size_of::<usize>()
                         + d.idxs.capacity() * core::mem::size_of::<I>()
+                }
+                FrameEncoding::Runs(rf) => {
+                    let mut b = rf.starts.capacity() * core::mem::size_of::<usize>();
+                    for run in rf.vals.iter() {
+                        b += run.capacity() * core::mem::size_of::<T>();
+                    }
+                    b
                 }
             };
         }

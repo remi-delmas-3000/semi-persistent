@@ -496,9 +496,10 @@ untouched):
 - `compressed_stack::CompressedStack` — the compressed bottom. View is the flat
   `decode_all(frames)`; `push_frame`/`pop_frame` are the compress/decompress
   primitives, view-preserving by the encoder bijection plus `lemma_decode_all_snoc`.
-- `compression_config::ColumnConfig` — the per-column object: `scheme` plus the
-  `compress_at_percent` size trigger (`should_flush`) and the `keep_hot_frames`
-  LRU floor (`frames_to_compress`).
+- `compression_config::ColumnConfig` — the per-column object: `scheme` (all three
+  of `None` / `ValueDict` / `IndexRuns`, via `none()`/`value_dict()`/`index_runs()`)
+  plus the `compress_at_percent` size trigger (`should_flush`) and the
+  `keep_hot_frames` LRU floor (`frames_to_compress`).
 - `two_stack_log::TwoStackLog` — the two stacks together. View is `cold@ ++ hot@`.
   `mark(uncompressed_bytes, base_bytes)` opens a frame and, when the trigger
   fires, `flush_cold` compresses the cold hot-frames (all but the hot floor) into
@@ -515,10 +516,29 @@ fires and frames move to the cold stack (hot 65536 -> 32768 bytes, cold 0 ->
 the mark path costs 146us vs 17.7us (the `dict_find` encode). So the plumbing is
 verified and exercised; the space win waits on narrowed dict codes and `IndexRuns`.
 
-Remaining: the `IndexLike` `from_nat` spec inverse + `FrameEncoding` run arm
-(unlocks `IndexRuns`, the measured winner); narrowed/bit-packed dict codes;
-materialize-into-cold for deep backtracks (`pop_frame` is the primitive);
-adoption by the e-graph column aggregates.
+**Index-major (`IndexRuns`) is now a live, selectable scheme.** `index_like::
+IndexFromNat` refines `IndexLike` with `from_nat` (`from_nat(n).as_nat() == n` on
+`[0, max_nat)`, plus `from_usize` / round-trip / bounded-value lemmas), primitive
+impls. `compress_runs_writeorder` run-coalesces in write order so it preserves the
+exact flat view (no sort, no permutation), keeping the mark/restore theorems.
+`RunFrame::decode_i<I: IndexFromNat>` reconstructs the dropped index column as
+`from_nat(start + offset)` (spec); `decode_exec_i` is its executable form,
+`external_body` against that spec and the `compress_runs_writeorder` bijection,
+backed by the `run_frame_roundtrip` 2000-case proptest. `FrameEncoding` gained a
+`Runs` arm (so the enum carries `I: IndexFromNat`), and `CompressedStack` /
+`TwoStackLog` are generic over `IndexFromNat`, so `index_runs()` flows end to end.
+Measured (`two_stack_bench`, consecutive-cell workload): the index-runs cold
+footprint is ~half the value-dict cold footprint and compresses faster; total is
+1.15x plain at 16 writes/frame (vs value-dict's 1.77x), the residue being per-frame
+`Vec` headers, so the win scales with frame size.
+
+Remaining: (1) narrowed/bit-packed dict codes (to turn value-dict from a loss into
+a win); (2) a pooled run representation (one flat value pool + run offsets across
+frames) to drop the per-frame `Vec` header overhead the bench exposed; (3)
+materialize-into-cold for deep backtracks (`pop_frame` is the primitive;
+`truncate_hot` covers the hot region); (4) `IndexFromNat` for the wrapper id types,
+needed only when an e-graph column keyed on them selects `IndexRuns`; (5) adoption
+by the e-graph column aggregates.
 
 ## Benchmark plan
 

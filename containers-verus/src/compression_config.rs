@@ -50,6 +50,17 @@ impl ColumnConfig {
         }
     }
 
+    /// Index-major run-coalescing with an explicit flush policy (eq-sat, on
+    /// columns whose captured indices cluster into contiguous ranges — it drops
+    /// the index column, the measured space win).
+    pub const fn index_runs(compress_at_percent: u32, keep_hot_frames: usize) -> ColumnConfig {
+        ColumnConfig {
+            scheme: CompressionMode::IndexRuns,
+            compress_at_percent,
+            keep_hot_frames,
+        }
+    }
+
     /// Whether this column ever compresses (i.e. is not the `None` scheme).
     pub open spec fn compresses(self) -> bool {
         !matches!(self.scheme, CompressionMode::None)
@@ -68,7 +79,8 @@ impl ColumnConfig {
     {
         match self.scheme {
             CompressionMode::None => false,
-            CompressionMode::ValueDict => {
+            // Both compressing modes share the size-fraction trigger.
+            CompressionMode::ValueDict | CompressionMode::IndexRuns => {
                 // Both products fit u128: `uncompressed_bytes`/`base_bytes` are
                 // usize (< 2^64 here, `global size_of usize == 8`), the percent is
                 // u32 (< 2^32), so each product is < 2^96 << u128::MAX. The
@@ -96,7 +108,7 @@ impl ColumnConfig {
     pub open spec fn should_flush_spec(self, uncompressed_bytes: nat, base_bytes: nat) -> bool {
         match self.scheme {
             CompressionMode::None => false,
-            CompressionMode::ValueDict =>
+            CompressionMode::ValueDict | CompressionMode::IndexRuns =>
                 uncompressed_bytes * 100 >= base_bytes * (self.compress_at_percent as nat),
         }
     }

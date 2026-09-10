@@ -13,7 +13,7 @@
 //! separate encoder.
 
 use vstd::prelude::*;
-use crate::index_like::IndexLike;
+use crate::index_like::{IndexLike, IndexFromNat};
 
 verus! {
 
@@ -219,6 +219,33 @@ pub proof fn lemma_expand_run_push<T>(start: nat, vals: Seq<T>, v: T)
     }
 }
 
+/// `expand_run` lays `vals` at consecutive indices: entry `o` is `(vals[o],
+/// start + o)`, and the length is `vals.len()`. The pointwise fact the run
+/// decoder needs to reconstruct each dropped index from `start + offset`.
+pub proof fn lemma_expand_run_index<T>(start: nat, vals: Seq<T>)
+    ensures
+        expand_run(start, vals).len() == vals.len(),
+        forall|o: int| 0 <= o < vals.len() ==>
+            #[trigger] expand_run(start, vals)[o] == (vals[o], (start + o) as nat),
+    decreases vals.len(),
+{
+    reveal_with_fuel(expand_run, 2);
+    if vals.len() == 0 {
+    } else {
+        let tail = vals.subrange(1, vals.len() as int);
+        lemma_expand_run_index(start + 1, tail);
+        // expand_run(start, vals) == [(vals[0], start)] + expand_run(start+1, tail)
+        assert forall|o: int| 0 <= o < vals.len() implies
+            #[trigger] expand_run(start, vals)[o] == (vals[o], (start + o) as nat) by {
+            if o == 0 {
+            } else {
+                assert(tail[o - 1] == vals[o]);
+                assert(expand_run(start, vals)[o] == expand_run(start + 1, tail)[o - 1]);
+            }
+        }
+    }
+}
+
 /// Appending a whole new run to the end of a run list appends that run's
 /// expansion to the end of the flattened result.
 pub proof fn lemma_expand_runs_snoc<T>(starts: Seq<nat>, vals: Seq<Seq<T>>, s: nat, vs: Seq<T>)
@@ -285,6 +312,53 @@ impl<T: Copy> RunFrame<T> {
 
     pub open spec fn decode(&self) -> Seq<(T, nat)> {
         expand_runs(self.starts_nat(), self.vals_seq())
+    }
+
+    /// Decode to `(T, I)` diffs, reconstructing each dropped index from its `nat`
+    /// via `from_nat`. Well-defined when every decoded index fits `I` (`fits`),
+    /// which holds for any run frame built from real `I` indices.
+    pub open spec fn decode_i<I: IndexFromNat>(&self) -> Seq<(T, I)> {
+        Seq::new(
+            self.decode().len(),
+            |t: int| (self.decode()[t].0, I::from_nat(self.decode()[t].1)),
+        )
+    }
+
+    /// Every decoded index is a valid `I` (below `max_nat`). Established at
+    /// compress time: the indices came from real `I` values.
+    pub open spec fn fits<I: IndexFromNat>(&self) -> bool {
+        forall|t: int| 0 <= t < self.decode().len() ==> (#[trigger] self.decode()[t].1) < I::max_nat()
+    }
+
+    /// Executable decode to `(T, I)`. `external_body`: the verified reference is
+    /// `compress_runs_writeorder`'s bijection (`decode() == mapped_diffs`) plus
+    /// the `decode_i` spec above; this scalar decoder is checked against them by
+    /// the `run_frame_roundtrip` proptest in `containers-conformance` (doc 09:
+    /// verified scalar reference, exec path conformance-checked, not proved). Its
+    /// walk over runs mirrors `expand_runs` exactly, laying each run's values at
+    /// `from_usize(start + offset)`. Trust ledger: group B (a pure representation
+    /// transform, no `unsafe`, deterministic).
+    #[verifier::external_body]
+    pub fn decode_exec_i<I: IndexFromNat>(&self) -> (r: Vec<(T, I)>)
+        requires self.wf(), self.fits::<I>(),
+        ensures r@ == self.decode_i::<I>(),
+    {
+        let mut out: Vec<(T, I)> = Vec::new();
+        let nruns = self.starts.len();
+        let mut r: usize = 0;
+        while r < nruns {
+            let start = self.starts[r];
+            let run = &self.vals[r];
+            let mut off: usize = 0;
+            while off < run.len() {
+                let idx = I::from_usize(start + off)
+                    .expect("run index fits I (established by fits)");
+                out.push((run[off], idx));
+                off += 1;
+            }
+            r += 1;
+        }
+        out
     }
 }
 
@@ -437,29 +511,148 @@ pub fn compress_runs<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFrame<T>)
     r
 }
 
+/// Write-order run-coalescing: coalesces only entries that are consecutive in
+/// BOTH capture order and index (`idx == cur_start + cur_vals.len()`), so it
+/// reproduces the input sequence EXACTLY — no sort, no reorder — hence
+/// `decode(compress_runs_writeorder(d)) == mapped_diffs(d)` for ANY `d`. This is
+/// the encoder the two-stack uses: it preserves the flat view exactly (unlike a
+/// sort-first index-major encoder, which would permute the frame), so the
+/// mark/restore theorems carry. It coalesces a contiguous range only when it was
+/// captured in ascending order; scattered or descending captures fall back to
+/// singleton runs (correct, just uncompressed). The `idx >= cur_start` guard
+/// makes the run-extension test underflow-free without a sortedness precondition.
+#[verifier::rlimit(800)]
+pub fn compress_runs_writeorder<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFrame<T>)
+    ensures
+        r.wf(),
+        r.decode() == mapped_diffs(diffs@, diffs@.len()),
+{
+    let mut starts: Vec<usize> = Vec::new();
+    let mut vals: Vec<Vec<T>> = Vec::new();
+    let mut cur_start: usize = 0;
+    let mut cur_vals: Vec<T> = Vec::new();
+    let mut i: usize = 0;
+    while i < diffs.len()
+        invariant
+            i <= diffs@.len(),
+            starts@.len() == vals@.len(),
+            expand_runs(starts_to_nat(starts@), vals_to_seq(vals@))
+                + expand_run(cur_start as nat, cur_vals@)
+                == mapped_diffs(diffs@, i as nat),
+            (cur_vals@.len() == 0) <==> (i == 0),
+        decreases diffs@.len() - i,
+    {
+        let v = diffs[i].0;
+        let idx = diffs[i].1;
+        let ghost old_starts = starts@;
+        let ghost old_vals = vals@;
+        let ghost old_cur_start = cur_start;
+        let ghost old_cur_vals = cur_vals@;
+        if cur_vals.len() == 0 {
+            cur_start = idx;
+            cur_vals.push(v);
+            proof {
+                lemma_expand_run_push(idx as nat, Seq::<T>::empty(), v);
+                assert(Seq::<T>::empty().push(v) =~= cur_vals@);
+                assert(expand_run(idx as nat, cur_vals@) =~= seq![(v, idx as nat)]);
+                lemma_mapped_push(diffs@, i as nat);
+            }
+        } else if idx >= cur_start && idx - cur_start == cur_vals.len() {
+            proof {
+                lemma_expand_run_push(cur_start as nat, cur_vals@, v);
+            }
+            cur_vals.push(v);
+            proof {
+                assert(old_cur_vals.push(v) =~= cur_vals@);
+                assert(cur_start as nat + old_cur_vals.len() == idx as nat);
+                let a = expand_runs(starts_to_nat(starts@), vals_to_seq(vals@));
+                let b = expand_run(cur_start as nat, old_cur_vals);
+                let c = seq![(v, idx as nat)];
+                assert(expand_run(cur_start as nat, cur_vals@) == b + c);
+                assert(a + (b + c) =~= (a + b) + c);
+                lemma_mapped_push(diffs@, i as nat);
+            }
+        } else {
+            proof {
+                lemma_expand_runs_snoc(starts_to_nat(starts@), vals_to_seq(vals@),
+                    cur_start as nat, cur_vals@);
+            }
+            starts.push(cur_start);
+            vals.push(cur_vals);
+            cur_start = idx;
+            cur_vals = Vec::new();
+            cur_vals.push(v);
+            proof {
+                assert(starts_to_nat(starts@) =~= starts_to_nat(old_starts).push(old_cur_start as nat));
+                assert(vals_to_seq(vals@) =~= vals_to_seq(old_vals).push(old_cur_vals));
+                lemma_expand_run_push(idx as nat, Seq::<T>::empty(), v);
+                assert(Seq::<T>::empty().push(v) =~= cur_vals@);
+                assert(expand_run(idx as nat, cur_vals@) =~= seq![(v, idx as nat)]);
+                let a = expand_runs(starts_to_nat(old_starts), vals_to_seq(old_vals));
+                let b = expand_run(old_cur_start as nat, old_cur_vals);
+                let c = seq![(v, idx as nat)];
+                assert(expand_runs(starts_to_nat(starts@), vals_to_seq(vals@)) == a + b);
+                assert(a + b + c =~= (a + b) + c);
+                lemma_mapped_push(diffs@, i as nat);
+            }
+        }
+        i += 1;
+    }
+    let ghost pre_starts = starts@;
+    let ghost pre_vals = vals@;
+    let ghost pre_cur_start = cur_start;
+    let ghost pre_cur_vals = cur_vals@;
+    if cur_vals.len() > 0 {
+        starts.push(cur_start);
+        vals.push(cur_vals);
+        proof {
+            lemma_expand_runs_snoc(starts_to_nat(pre_starts), vals_to_seq(pre_vals),
+                pre_cur_start as nat, pre_cur_vals);
+            assert(starts_to_nat(starts@) =~= starts_to_nat(pre_starts).push(pre_cur_start as nat));
+            assert(vals_to_seq(vals@) =~= vals_to_seq(pre_vals).push(pre_cur_vals));
+        }
+    } else {
+        proof {
+            assert(expand_run(cur_start as nat, cur_vals@) =~= Seq::<(T, nat)>::empty());
+        }
+    }
+    let r = RunFrame { starts, vals };
+    proof {
+        assert(r.starts_nat() =~= starts_to_nat(r.starts@));
+        assert(r.vals_seq() =~= vals_to_seq(r.vals@));
+    }
+    r
+}
+
 /// Per-instance compression mode, selected at `Vec` construction (not a const
 /// generic): one binary runs SMT with `None` (speed) and equality saturation
-/// with a per-column mode (memory). Extensible; `IndexRuns` (index-major
-/// run-coalescing) lands as a later variant.
+/// with a per-column mode (memory). `ValueDict` is value-major (dictionary +
+/// codes, for value-repetitive columns like union-find `parent`/`rank`);
+/// `IndexRuns` is index-major (write-order run-coalescing, for columns with
+/// contiguous batch updates — it drops the index column).
 #[derive(Clone, Copy)]
 pub enum CompressionMode {
     None,
     ValueDict,
+    IndexRuns,
 }
 
 /// A finalized frame in whichever representation its column's mode selected. The
 /// active frame is always uncompressed; this is what `mark` stores for a closed
-/// frame, and what `restore` decodes.
+/// frame, and what `restore` decodes. The `Runs` arm needs `I: IndexFromNat` to
+/// reconstruct the dropped index column, so the whole enum carries that bound.
 pub enum FrameEncoding<T, I> {
     Plain(Vec<(T, I)>),
     Dict(DictFrame<T, I>),
+    Runs(RunFrame<T>),
 }
 
-impl<T: IndexLike, I: IndexLike> FrameEncoding<T, I> {
+impl<T: IndexLike, I: IndexFromNat> FrameEncoding<T, I> {
     pub open spec fn wf(&self) -> bool {
         match self {
             FrameEncoding::Plain(_) => true,
             FrameEncoding::Dict(d) => d.wf(),
+            FrameEncoding::Runs(rf) => rf.wf() && rf.fits::<I>(),
         }
     }
 
@@ -468,6 +661,7 @@ impl<T: IndexLike, I: IndexLike> FrameEncoding<T, I> {
         match self {
             FrameEncoding::Plain(v) => v@,
             FrameEncoding::Dict(d) => d.decode(),
+            FrameEncoding::Runs(rf) => rf.decode_i::<I>(),
         }
     }
 
@@ -495,6 +689,7 @@ impl<T: IndexLike, I: IndexLike> FrameEncoding<T, I> {
                 copy
             }
             FrameEncoding::Dict(d) => d.decode_exec(),
+            FrameEncoding::Runs(rf) => rf.decode_exec_i::<I>(),
         }
     }
 }
@@ -502,7 +697,7 @@ impl<T: IndexLike, I: IndexLike> FrameEncoding<T, I> {
 /// Encode a finalized frame in the given mode. The bijection holds for every
 /// mode: `decode(compress_frame(d, mode)) == d`, so `mark` may pick any mode per
 /// column at runtime and `restore` reconstructs the same diff regardless.
-pub fn compress_frame<T: IndexLike, I: IndexLike>(
+pub fn compress_frame<T: IndexLike, I: IndexFromNat>(
     diffs: &Vec<(T, I)>,
     mode: CompressionMode,
 ) -> (r: FrameEncoding<T, I>)
@@ -527,6 +722,47 @@ pub fn compress_frame<T: IndexLike, I: IndexLike>(
             FrameEncoding::Plain(copy)
         }
         CompressionMode::ValueDict => FrameEncoding::Dict(compress(diffs)),
+        CompressionMode::IndexRuns => {
+            // Project indices to usize, run-coalesce in write order (exact-view-
+            // preserving), and wrap. decode_i reconstructs each I via from_nat.
+            let mut usized: Vec<(T, usize)> = Vec::new();
+            let mut i: usize = 0;
+            while i < diffs.len()
+                invariant
+                    i <= diffs@.len(),
+                    usized@.len() == i,
+                    forall|t: int| 0 <= t < i ==>
+                        #[trigger] usized@[t].0 == diffs@[t].0
+                        && usized@[t].1 as nat == diffs@[t].1.as_nat(),
+                decreases diffs@.len() - i,
+            {
+                let (v, idx) = diffs[i];
+                usized.push((v, idx.as_usize()));
+                i += 1;
+            }
+            let rf = compress_runs_writeorder(&usized);
+            // rf.decode() == mapped_diffs(usized@) == the (T, nat) projection of
+            // diffs; decode_i maps each nat back to I via from_nat, recovering diffs.
+            proof {
+                assert(usized@.len() == diffs@.len());
+                assert forall|t: int| 0 <= t < diffs@.len() implies
+                    rf.decode()[t] == (diffs@[t].0, diffs@[t].1.as_nat()) by {
+                    assert(rf.decode()[t] == (usized@[t].0, usized@[t].1 as nat));
+                }
+                // fits: every decoded index is some diffs[t].1.as_nat() < max_nat.
+                assert forall|t: int| 0 <= t < rf.decode().len() implies
+                    (#[trigger] rf.decode()[t].1) < I::max_nat() by {
+                    I::lemma_as_nat_bounded_val(diffs@[t].1);
+                }
+                // decode_i recovers diffs: from_nat(diffs[t].1.as_nat()) == diffs[t].1.
+                assert forall|t: int| 0 <= t < diffs@.len() implies
+                    #[trigger] rf.decode_i::<I>()[t] == diffs@[t] by {
+                    I::lemma_from_as_nat(diffs@[t].1);
+                }
+                assert(rf.decode_i::<I>() =~= diffs@);
+            }
+            FrameEncoding::Runs(rf)
+        }
     }
 }
 

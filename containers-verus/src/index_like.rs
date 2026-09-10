@@ -166,6 +166,51 @@ pub trait IndexLike: Sized + Copy + core::cmp::Ord + core::hash::Hash + core::fm
         ensures r == self.le_spec(other);
 }
 
+/// A ghost inverse of `as_nat` on `[0, max_nat())`, refining `IndexLike`. The
+/// index-major run encoder drops the index column and reconstructs each index
+/// from `run_start + offset`, so it needs to materialize an `I` from a `nat`; a
+/// type supports `IndexRuns` compression exactly when it is `IndexFromNat`.
+/// Implemented for the primitive index types (identity `from_nat`); the wrapper
+/// id types can add it when a column keyed on them wants `IndexRuns`.
+pub trait IndexFromNat: IndexLike {
+    /// Ghost inverse of `as_nat`: `from_nat(n).as_nat() == n` for `n < max_nat()`.
+    spec fn from_nat(n: nat) -> Self;
+
+    proof fn lemma_from_nat_round(n: nat)
+        requires n < Self::max_nat()
+        ensures Self::from_nat(n).as_nat() == n;
+
+    /// The other round-trip: `from_nat` recovers the original index from its
+    /// projection. The run decoder relies on this to reconstruct exactly the `I`
+    /// it compressed (`from_nat(i.as_nat()) == i`).
+    proof fn lemma_from_as_nat(i: Self)
+        ensures Self::from_nat(i.as_nat()) == i;
+
+    /// Receiver-free boundedness, so a ghost index (e.g. a diff-log entry read
+    /// out of a `Seq`) can be shown to fit `max_nat` without a tracked receiver —
+    /// which `lemma_as_nat_bounded`'s `tracked self` does not permit. Needed to
+    /// establish `RunFrame::fits` at compress time.
+    proof fn lemma_as_nat_bounded_val(i: Self)
+        ensures i.as_nat() < Self::max_nat();
+
+    /// Executable inverse: `try_from_usize` restated for `IndexFromNat`, so the
+    /// run decoder gets both the value and its `from_nat` identity in one call.
+    fn from_usize(n: usize) -> (r: Option<Self>)
+        ensures
+            r is Some ==> r->Some_0 == Self::from_nat(n as nat),
+            r is Some <==> (n as nat) < Self::max_nat(),
+    {
+        let r = Self::try_from_usize(n);
+        proof {
+            if let Some(i) = r {
+                Self::lemma_from_nat_round(n as nat);
+                Self::lemma_as_nat_injective(i, Self::from_nat(n as nat));
+            }
+        }
+        r
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Checked index arithmetic.
 //
@@ -519,6 +564,39 @@ impl IndexLike for usize {
 
     fn lt(self, other: Self) -> bool { self < other }
     fn le(self, other: Self) -> bool { self <= other }
+}
+
+// IndexFromNat for the primitive index types: `from_nat` is the truncating
+// nat->word cast, exact on `[0, max_nat())`.
+impl IndexFromNat for u8 {
+    open spec fn from_nat(n: nat) -> Self { n as u8 }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
+}
+impl IndexFromNat for u16 {
+    open spec fn from_nat(n: nat) -> Self { n as u16 }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
+}
+impl IndexFromNat for u32 {
+    open spec fn from_nat(n: nat) -> Self { n as u32 }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
+}
+impl IndexFromNat for u64 {
+    open spec fn from_nat(n: nat) -> Self { n as u64 }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
+}
+impl IndexFromNat for usize {
+    open spec fn from_nat(n: nat) -> Self { n as usize }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
 }
 
 } // verus!

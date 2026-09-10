@@ -41,6 +41,10 @@ name = "two_stack_bench"
 harness = false
 
 [[bench]]
+name = "reorder_bench"
+harness = false
+
+[[bench]]
 name = "nested_mark_bench"
 harness = false
 

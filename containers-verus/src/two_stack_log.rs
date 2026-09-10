@@ -16,7 +16,7 @@
 //! or reordered across the boundary.
 
 use vstd::prelude::*;
-use crate::index_like::IndexLike;
+use crate::index_like::{IndexLike, IndexFromNat};
 use crate::diff_log::DiffLog;
 use crate::compressed_stack::CompressedStack;
 use crate::compression_config::ColumnConfig;
@@ -34,14 +34,14 @@ pub struct TwoStackLog<T, I> {
     pub config: ColumnConfig,
 }
 
-impl<T: IndexLike, I: IndexLike> View for TwoStackLog<T, I> {
+impl<T: IndexLike, I: IndexFromNat> View for TwoStackLog<T, I> {
     type V = Seq<(T, I)>;
     open spec fn view(&self) -> Seq<(T, I)> {
         self.cold@ + self.hot@
     }
 }
 
-impl<T: IndexLike, I: IndexLike> TwoStackLog<T, I> {
+impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
     pub open spec fn wf(&self) -> bool {
         &&& self.cold.wf()
         &&& self.hot.wf()
