@@ -1690,9 +1690,9 @@ where
             crate::diff_compress::CompressionMode::IndexRuns
             | crate::diff_compress::CompressionMode::IndexRunsSorted =>
                 crate::diff_log::DiffLog::new_runs(),
-            // Per-frame Auto (A4) is not yet integrated into this in-place log.
+            // Per-frame Auto (A4): the per-frame-adaptive cold tier.
             crate::diff_compress::CompressionMode::Auto =>
-                crate::diff_log::DiffLog::new_plain(),
+                crate::diff_log::DiffLog::new_adaptive(),
         };
         let v = Vec {
             store,
@@ -4038,8 +4038,8 @@ where
             old(self).depth_spec() < u32::MAX,
             old(self).view().len() < I::max_nat(),
             old(self).depth_spec() > 0,
-            old(self).diff_log.idxs is Runs,
-            old(self).diff_log.idxs.cold_len_spec() == old(self).top_diff_start_spec(),
+            old(self).diff_log.is_runs_idx(),
+            old(self).diff_log.idx_cold_len_spec() == old(self).top_diff_start_spec(),
             crate::diff_compress::unique_idx(old(self).diff_log@.subrange(
                 old(self).top_diff_start_spec(), old(self).diff_log@.len() as int)),
         ensures
@@ -4050,7 +4050,7 @@ where
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
         let ghost pre = *self;
-        let ghost ts = pre.diff_log.idxs.cold_len_spec() as int;
+        let ghost ts = pre.diff_log.idx_cold_len_spec() as int;
         let ghost top = (pre.frames@.len() - 1) as int;
         self.diff_log.compact_tail_sorted();
         proof {
@@ -4112,6 +4112,100 @@ where
                         pre.layer_above_at(k), pre.diff_log@, lo, hi,
                         pre.snapshots@[k], pre.frames@[k].saved_len.as_nat()));
                     // @ unchanged on [lo, hi); pre is unique there ⇒ self is too.
+                    assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
+                        implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
+                        assert(self.diff_log@[a] == self.diff_log@.subrange(0, ts)[a]);
+                        assert(pre.diff_log@[a] == pre.diff_log@.subrange(0, ts)[a]);
+                        assert(self.diff_log@[b] == self.diff_log@.subrange(0, ts)[b]);
+                        assert(pre.diff_log@[b] == pre.diff_log@.subrange(0, ts)[b]);
+                    }
+                }
+            }
+            self.lemma_diff_log_rep_change_preserves_wf_multiset(pre);
+        }
+        let t = self.mark(shrink);
+        t
+    }
+
+    /// Per-frame-adaptive `mark`: fold the open top frame in `mode` (the selector's
+    /// per-frame choice) before opening the next. Any mode preserves the folded
+    /// stratum's write multiset, so `Vec::wf` carries via the multiset frame rule.
+    /// Same alignment + uniqueness preconditions as `mark_and_compact_sorted`.
+    #[verifier::rlimit(800)]
+    #[verifier::spinoff_prover]
+    pub(crate) fn mark_and_compact_adaptive(&mut self, mode: crate::diff_compress::CompressionMode, shrink: ShrinkPolicy) -> (token: VecToken)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).depth_spec() < u32::MAX,
+            old(self).view().len() < I::max_nat(),
+            old(self).depth_spec() > 0,
+            old(self).diff_log.is_adaptive(),
+            old(self).diff_log.idx_cold_len_spec() == old(self).top_diff_start_spec(),
+            crate::diff_compress::unique_idx(old(self).diff_log@.subrange(
+                old(self).top_diff_start_spec(), old(self).diff_log@.len() as int)),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            token.frame_idx_spec() == old(self).depth_spec(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+    {
+        let ghost pre = *self;
+        let ghost ts = pre.diff_log.idx_cold_len_spec() as int;
+        let ghost top = (pre.frames@.len() - 1) as int;
+        self.diff_log.compact_adaptive(mode);
+        proof {
+            let np = pre.diff_log@.len() as int;
+            assert(pre.frames@[top].diff_start as int == ts);
+            assert(pre.stratum_end(top) == np);
+            assert(self.diff_log@.subrange(0, ts) == pre.diff_log@.subrange(0, ts));
+            assert forall|k: int| 0 <= k < self.frames@.len() implies
+                self.diff_log@.subrange(
+                    #[trigger] self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset()
+                == pre.diff_log@.subrange(
+                    self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset()
+            by {
+                pre.lemma_stratum_bounds(k);
+                let lo = self.frames@[k].diff_start as int;
+                let hi = self.stratum_end(k);
+                if k == top {
+                } else {
+                    pre.lemma_diff_start_monotone(k + 1, top);
+                    assert(hi <= ts);
+                    assert(self.diff_log@.subrange(lo, hi) =~= pre.diff_log@.subrange(lo, hi)) by {
+                        assert forall|q: int| 0 <= q < hi - lo implies
+                            self.diff_log@.subrange(lo, hi)[q] == pre.diff_log@.subrange(lo, hi)[q] by {
+                            assert(self.diff_log@[lo + q] == self.diff_log@.subrange(0, ts)[lo + q]);
+                            assert(pre.diff_log@[lo + q] == pre.diff_log@.subrange(0, ts)[lo + q]);
+                        }
+                    }
+                }
+            }
+            assert forall|k: int| 0 <= k < self.frames@.len() implies
+                (forall|a: int, b: int|
+                    #[trigger] self.frames@[k].diff_start as int <= a < self.stratum_end(k)
+                    && self.frames@[k].diff_start as int <= b < self.stratum_end(k)
+                    && a != b
+                    ==> (#[trigger] self.diff_log@[a]).1.as_nat()
+                        != (#[trigger] self.diff_log@[b]).1.as_nat())
+            by {
+                pre.lemma_stratum_bounds(k);
+                let lo = self.frames@[k].diff_start as int;
+                let hi = self.stratum_end(k);
+                if k == top {
+                    assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
+                        implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
+                        assert(self.diff_log@.subrange(lo, hi)[a - lo] == self.diff_log@[a]);
+                        assert(self.diff_log@.subrange(lo, hi)[b - lo] == self.diff_log@[b]);
+                    }
+                } else {
+                    pre.lemma_diff_start_monotone(k + 1, top);
+                    assert(hi <= ts);
+                    assert(pre.wf_for_snap());
+                    assert(frame_inv_range::<T, I>(
+                        pre.layer_above_at(k), pre.diff_log@, lo, hi,
+                        pre.snapshots@[k], pre.frames@[k].saved_len.as_nat()));
                     assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
                         implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
                         assert(self.diff_log@[a] == self.diff_log@.subrange(0, ts)[a]);
@@ -4456,6 +4550,98 @@ mod index_major_sorted_compaction_tests {
 
         // Deep restore through the sorted (reordered) cold region: contents still
         // agree, because restore depends on the per-frame write multiset, not order.
+        vc.restore(tc[3]);
+        vp.restore(tp[3]);
+        assert_eq!(read_back(&vc), read_back(&vp), "views diverged after deep restore");
+    }
+}
+
+#[cfg(test)]
+mod adaptive_compaction_tests {
+    // A4 acceptance: an Auto (per-frame-adaptive) column where each frame's mode is
+    // picked by the real selector (choose_mode) restores identically to a plain
+    // oracle across a MIXED workload (frames alternate value-repetitive, favouring
+    // ValueDict, and contiguous-distinct, favouring index-major), and its diff-log
+    // heap footprint is strictly smaller than plain. The cold tier holds a MIX of
+    // per-frame ColdFrame modes; restore is uniform over the mix (per-frame multiset).
+    use super::{ShrinkPolicy, Vec};
+    use crate::diff_compress::{choose_mode, CompressionMode};
+    use crate::parallel_store::ParallelStore;
+
+    type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
+
+    fn read_back(v: &V) -> std::vec::Vec<u32> {
+        (0..v.len() as usize).map(|i| v.get_index(i as u32)).collect()
+    }
+
+    // Pick the just-closed (open top) frame's mode from its actual captured diffs.
+    fn frame_mode(v: &V) -> CompressionMode {
+        let top = v.frames.len() - 1;
+        let ds = v.frames[top].diff_start;
+        let n = v.diff_log.len();
+        let diffs = v.diff_log.subrange_vec(ds, n);
+        choose_mode(&diffs)
+    }
+
+    fn write_frame(vc: &mut V, vp: &mut V, k: u32, n: u32) {
+        if k % 2 == 0 {
+            // Value-repetitive: every cell set to one value (union-find shape).
+            for i in 0..n {
+                vc.set(i, k + 1);
+                vp.set(i, k + 1);
+            }
+        } else {
+            // Contiguous, distinct values (index-major shape).
+            for i in 0..n {
+                vc.set(i, i.wrapping_mul(2).wrapping_add(k));
+                vp.set(i, i.wrapping_mul(2).wrapping_add(k));
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_restore_matches_plain_and_compresses() {
+        const N: u32 = 200;
+        const FRAMES: u32 = 24;
+
+        let mut vc = V::new_with_mode(CompressionMode::Auto);
+        let mut vp = V::new_with_mode(CompressionMode::None);
+        for _ in 0..N {
+            vc.push(0);
+            vp.push(0);
+        }
+
+        let mut tc = std::vec::Vec::new();
+        let mut tp = std::vec::Vec::new();
+
+        // First frame: plain mark (no open frame to fold yet), then its writes.
+        tc.push(vc.mark(ShrinkPolicy::Never));
+        tp.push(vp.mark(ShrinkPolicy::Never));
+        write_frame(&mut vc, &mut vp, 0, N);
+        assert_eq!(read_back(&vc), read_back(&vp), "frame 0 diverged");
+
+        for k in 1..FRAMES {
+            // The selector chooses this frame's mode from its real captured diffs.
+            let mode = frame_mode(&vc);
+            tc.push(vc.mark_and_compact_adaptive(mode, ShrinkPolicy::Never));
+            tp.push(vp.mark(ShrinkPolicy::Never));
+            write_frame(&mut vc, &mut vp, k, N);
+            assert_eq!(read_back(&vc), read_back(&vp), "frame {k} diverged");
+        }
+        // Fold the last open frame too.
+        let mode = frame_mode(&vc);
+        tc.push(vc.mark_and_compact_adaptive(mode, ShrinkPolicy::Never));
+        tp.push(vp.mark(ShrinkPolicy::Never));
+
+        // A4 heap check: per-frame-best encoding beats plain across the mix.
+        assert!(
+            vc.tracking_bytes() < vp.tracking_bytes(),
+            "adaptive diff log {} !< plain {}",
+            vc.tracking_bytes(),
+            vp.tracking_bytes(),
+        );
+
+        // Deep restore through the mixed-mode cold region.
         vc.restore(tc[3]);
         vp.restore(tp[3]);
         assert_eq!(read_back(&vc), read_back(&vp), "views diverged after deep restore");

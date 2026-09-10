@@ -224,6 +224,27 @@ frames) is noted, not in scope.
   workload and asserts (i) restore == oracle, and (ii) the per-frame encodings chosen match
   `best_mode`'s argmin on the same frames (the selector actually drives the choice, not a
   fixed mode).
+  KEY FINDING: meaningful per-frame adaptivity is value-major vs index-major (union-find
+  columns want value-dict; contiguous captures want index-runs). Within index-major,
+  sorting always coalesces at least as well as write-order, so an index-only adaptive would
+  trivially always sort: not a real selector. So A4 needs a UNIFIED per-frame cold tier, not
+  the column-level `DiffVals`/`DiffIdxs` split (which cannot mix value- and index-major across
+  frames in one column). SUBSTRATE BUILT + verified (commit for `ColdFrame`): `ColdFrame<T,I>`
+  = `Plain | Dict(DictFrame) | Runs(RunCol)`, a self-contained per-frame frame with a
+  mode-agnostic `decode()`, `decode_at`, `entry_len`, `byte_len`, and `compress_mode(diffs,
+  mode)` proving `decode().to_multiset() == diffs@.to_multiset()` for every mode; opaque-id
+  safe (Runs via `RunCol`). Conformance `cold_frame_modes_roundtrip` (1000 cases, all four
+  modes). DISCHARGED on the live path. `DiffLog` is now `Cols | Adaptive`; `Adaptive { cold:
+  Vec<ColdFrame>, hot, len }` holds a per-frame mix. `compact_adaptive(mode)` folds the hot
+  frame in the selected mode (multiset-preserving), `mark_and_compact_adaptive` lifts it via
+  the multiset rep-change lemma, `Auto` routes to it. Acceptance:
+  `adaptive_compaction_tests::adaptive_restore_matches_plain_and_compresses` drives an Auto
+  column through 24 mixed-workload frames, each frame's mode picked by the real `choose_mode`
+  on its captured diffs, restoring identically to a plain oracle (every step + deep restore
+  through the mixed cold region) with `tracking_bytes < plain`. PHASE A COMPLETE (A1-A4 all
+  live-discharged). FOLLOW-UP (user-proposed combined index-runs + value-dict): now a single
+  new `ColdFrame` variant (a `DictFrame` whose index column is run-encoded) slotting into the
+  adaptive tier + `choose_mode`.
 
 Forbidden proxies for Phase A: a computed/projected size for any `heap_bytes()` check; a
 `CompressionMode` that silently falls back to plain reported as compression; `external_body`

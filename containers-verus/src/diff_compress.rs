@@ -332,7 +332,7 @@ pub struct DictFrame<T, I> {
     pub idxs: Vec<I>,
 }
 
-impl<T: IndexLike, I: IndexLike> DictFrame<T, I> {
+impl<T: Copy, I: IndexLike> DictFrame<T, I> {
     /// Well-formed: the code/index columns are parallel and every code indexes
     /// the dictionary. Stated over `codes.view()`, so the code storage width is
     /// invisible here.
@@ -348,6 +348,24 @@ impl<T: IndexLike, I: IndexLike> DictFrame<T, I> {
             self.idxs@.len(),
             |t: int| (self.dict@[self.codes.view()[t] as int], self.idxs@[t]),
         )
+    }
+
+    /// Entry count (O(1)): the index column length.
+    pub fn entry_len(&self) -> (n: usize)
+        requires self.wf(),
+        ensures n == self.decode().len(),
+    {
+        self.idxs.len()
+    }
+
+    /// Random access to entry `i` (dictionary lookup through the packed code, plus the
+    /// parallel index). The read a cold `Dict` frame needs for `DiffLog::index`.
+    pub fn decode_at(&self, i: usize) -> (r: (T, I))
+        requires self.wf(), i < self.decode().len(),
+        ensures r == self.decode()[i as int],
+    {
+        let code = self.codes.get(i);
+        (self.dict[code], self.idxs[i])
     }
 
     /// Executable decode: materialize the flat diff sequence. The two-stack
@@ -1528,11 +1546,12 @@ impl<T: Copy, I: IndexLike> RunCol<T, I> {
         ensures
             r.wf(),
             r.decode().to_multiset() == diffs@.to_multiset(),
+            unique_idx(diffs@) ==> unique_idx(r.decode()),
     {
         let s = sort_frame_by_index(diffs);
         let r = RunCol::compress(&s);
-        // r.decode() == s@ (compress), and s@.to_multiset() == diffs@.to_multiset()
-        // (sort is a permutation).
+        // r.decode() == s@ (compress), s@.to_multiset() == diffs@.to_multiset() (sort is
+        // a permutation), and sort preserves unique_idx.
         assert(r.decode().to_multiset() == diffs@.to_multiset());
         r
     }
@@ -1839,6 +1858,385 @@ pub proof fn lemma_run_seq_split<T: Copy, I: IndexLike>(runs: Seq<RunEntry<T, I>
         let b = run_seq(rest.subrange(0, r - 1));
         let c = run_seq(rest.subrange(r - 1, rest.len() as int));
         assert(a + (b + c) =~= (a + b) + c);
+    }
+}
+
+// ===========================================================================
+// ColdFrame: a per-frame-adaptive cold frame. Each finalized frame independently
+// picks the encoding that fits it: plain, value-major (dictionary + codes, keeps a
+// plain index column) for the union-find shape, or index-major runs (opaque-id safe
+// via RunCol, write-order or sorted) for contiguous captures. This is the A4
+// substrate: unlike the column-level `DiffVals`/`DiffIdxs` split, a `Vec<ColdFrame>`
+// cold tier can hold different modes in different frames. `decode()` is mode-agnostic
+// `Seq<(T, I)>`, so the restore reconstruction is uniform across the mix.
+// ===========================================================================
+
+/// One finalized frame in whichever mode fit it. `Runs` uses the verified `RunCol`
+/// (no `IndexFromNat`), so the whole enum stays opaque-id safe.
+/// Writing a frame's `(value, index)` set back onto a live column, in order
+/// (last write wins; out-of-range indices are skipped). A frame's `restore_to`
+/// reproduces this, whether it does it with a sliced memcpy or scattered writes.
+pub open spec fn apply_all<T, I: IndexLike>(base: Seq<T>, d: Seq<(T, I)>) -> Seq<T>
+    decreases d.len(),
+{
+    if d.len() == 0 {
+        base
+    } else {
+        let prev = apply_all(base, d.subrange(0, d.len() - 1));
+        let e = d[d.len() - 1];
+        if e.1.as_nat() < prev.len() {
+            prev.update(e.1.as_nat() as int, e.0)
+        } else {
+            prev
+        }
+    }
+}
+
+/// `apply_all` never changes the column's length (it only overwrites).
+pub proof fn lemma_apply_all_len<T, I: IndexLike>(base: Seq<T>, d: Seq<(T, I)>)
+    ensures apply_all::<T, I>(base, d).len() == base.len(),
+    decreases d.len(),
+{
+    if d.len() == 0 {
+    } else {
+        lemma_apply_all_len::<T, I>(base, d.subrange(0, d.len() - 1));
+    }
+}
+
+/// One more write extends `apply_all` by exactly that write. The step rule a
+/// scattered `restore_to` loop needs.
+pub proof fn lemma_apply_all_snoc<T, I: IndexLike>(base: Seq<T>, d: Seq<(T, I)>, k: int)
+    requires 0 <= k < d.len(),
+    ensures
+        apply_all::<T, I>(base, d.subrange(0, k + 1))
+            == (if d[k].1.as_nat() < apply_all::<T, I>(base, d.subrange(0, k)).len() {
+                    apply_all::<T, I>(base, d.subrange(0, k)).update(d[k].1.as_nat() as int, d[k].0)
+                } else {
+                    apply_all::<T, I>(base, d.subrange(0, k))
+                }),
+{
+    let s = d.subrange(0, k + 1);
+    assert(s.len() == k + 1);
+    assert(s[s.len() - 1] == d[k]);
+    assert(s.subrange(0, s.len() - 1) =~= d.subrange(0, k));
+}
+
+/// A finalized frame in some compressed representation. Abstractly it IS the set of
+/// `(value, index)` writes it holds (`decode()`), so every impl is interchangeable to
+/// a caller: read one entry, or write the whole frame straight back onto a live
+/// column. `restore_to` is the cold-to-live path: an impl whose indices are
+/// contiguous does it with a sliced memcpy, one with scattered indices writes
+/// element by element, and the caller does not care which.
+pub trait CompressedFrame<T: Copy, I: IndexLike>: Sized {
+    spec fn wf(&self) -> bool;
+
+    /// The write set this frame holds.
+    spec fn decode(&self) -> Seq<(T, I)>;
+
+    fn entry_len(&self) -> (n: usize)
+        requires self.wf(),
+        ensures n == self.decode().len();
+
+    fn decode_at(&self, i: usize) -> (e: (T, I))
+        requires self.wf(), i < self.decode().len(),
+        ensures e == self.decode()[i as int];
+
+    /// Write this frame's set back onto a live column (cold to live, no decode
+    /// detour). Sliced or scattered is the impl's choice.
+    fn restore_to(&self, target: &mut Vec<T>)
+        requires self.wf(),
+        ensures final(target)@ == apply_all::<T, I>(old(target)@, self.decode());
+}
+
+/// Value-major frames restore by SCATTERED writes: the index column is stored
+/// verbatim and is generally not contiguous, so each write goes to its own slot.
+impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for DictFrame<T, I> {
+    open spec fn wf(&self) -> bool { DictFrame::wf(self) }
+
+    open spec fn decode(&self) -> Seq<(T, I)> { DictFrame::decode(self) }
+
+    fn entry_len(&self) -> (n: usize) { DictFrame::entry_len(self) }
+
+    fn decode_at(&self, i: usize) -> (e: (T, I)) { DictFrame::decode_at(self, i) }
+
+    fn restore_to(&self, target: &mut Vec<T>) {
+        let ghost base = target@;
+        let n = DictFrame::entry_len(self);
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                0 <= i <= n,
+                n == DictFrame::decode(self).len(),
+                DictFrame::wf(self),
+                target@ == apply_all::<T, I>(base, DictFrame::decode(self).subrange(0, i as int)),
+            decreases n - i,
+        {
+            let (v, idx) = DictFrame::decode_at(self, i);
+            proof { lemma_apply_all_snoc::<T, I>(base, DictFrame::decode(self), i as int); }
+            let u = idx.as_usize();
+            if u < target.len() {
+                target.set(u, v);
+            }
+            i = i + 1;
+        }
+        proof {
+            assert(DictFrame::decode(self).subrange(0, n as int) =~= DictFrame::decode(self));
+        }
+    }
+}
+
+/// Index-major run frames restore by SLICED writes: each run's values are contiguous
+/// in the frame AND land at consecutive indices, so a run is one `copy_from_slice`
+/// (a memcpy) instead of `len` scattered stores. `external_body`: the slice copy is a
+/// raw-memory primitive (trust ledger group B); its `apply_all` contract is
+/// conformance-checked against the scattered reference.
+impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for RunCol<T, I> {
+    open spec fn wf(&self) -> bool { RunCol::wf(self) }
+
+    open spec fn decode(&self) -> Seq<(T, I)> { RunCol::decode(self) }
+
+    fn entry_len(&self) -> (n: usize) { RunCol::entry_len(self) }
+
+    fn decode_at(&self, i: usize) -> (e: (T, I)) { RunCol::decode_at(self, i) }
+
+    #[verifier::external_body]
+    fn restore_to(&self, target: &mut Vec<T>) {
+        for run in self.runs.iter() {
+            let s = run.start.as_usize();
+            let n = run.vals.len();
+            if s < target.len() {
+                let end = if s + n <= target.len() { s + n } else { target.len() };
+                let m = end - s;
+                target[s..end].copy_from_slice(&run.vals[..m]);
+            }
+        }
+    }
+}
+
+pub enum ColdFrame<T, I> {
+    Plain(Vec<(T, I)>),
+    Dict(DictFrame<T, I>),
+    Runs(RunCol<T, I>),
+}
+
+/// An uncompressed (still-open) frame: the plain `(value, index)` write set. Takes
+/// writes one at a time, can be sealed into any `CompressedFrame`, and can restore
+/// itself straight to a live column (hot to live) by scattered writes.
+pub struct HotFrame<T, I> {
+    pub pairs: Vec<(T, I)>,
+}
+
+impl<T: Copy, I: IndexLike> HotFrame<T, I> {
+    pub open spec fn wf(&self) -> bool { true }
+
+    /// The write set, same abstraction as a compressed frame's `decode()`.
+    pub open spec fn decode(&self) -> Seq<(T, I)> { self.pairs@ }
+
+    pub fn new() -> (r: HotFrame<T, I>)
+        ensures r.wf(), r.decode() == Seq::<(T, I)>::empty(),
+    {
+        let r = HotFrame { pairs: Vec::new() };
+        assert(r.decode() =~= Seq::<(T, I)>::empty());
+        r
+    }
+
+    pub fn entry_len(&self) -> (n: usize)
+        ensures n == self.decode().len(),
+    {
+        self.pairs.len()
+    }
+
+    /// Record one write.
+    pub fn add_write(&mut self, value: T, idx: I)
+        ensures final(self).decode() == old(self).decode().push((value, idx)),
+    {
+        self.pairs.push((value, idx));
+    }
+
+    /// Restore this open frame straight to a live column (hot to live), scattered.
+    pub fn restore_to(&self, target: &mut Vec<T>)
+        ensures final(target)@ == apply_all::<T, I>(old(target)@, self.decode()),
+    {
+        let ghost base = target@;
+        let n = self.pairs.len();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                0 <= i <= n,
+                n == self.pairs@.len(),
+                target@ == apply_all::<T, I>(base, self.decode().subrange(0, i as int)),
+            decreases n - i,
+        {
+            let (v, idx) = self.pairs[i];
+            proof { lemma_apply_all_snoc::<T, I>(base, self.decode(), i as int); }
+            let u = idx.as_usize();
+            if u < target.len() {
+                target.set(u, v);
+            }
+            i = i + 1;
+        }
+        proof { assert(self.decode().subrange(0, n as int) =~= self.decode()); }
+    }
+}
+
+impl<T: IndexLike, I: IndexLike> HotFrame<T, I> {
+    /// Seal this frame into a compressed one in the given mode (the per-frame runtime
+    /// choice). Preserves the write set as a multiset.
+    pub fn compress(&self, mode: CompressionMode) -> (r: ColdFrame<T, I>)
+        ensures
+            r.wf(),
+            r.decode().to_multiset() == self.decode().to_multiset(),
+            unique_idx(self.decode()) ==> unique_idx(r.decode()),
+    {
+        ColdFrame::compress_mode(&self.pairs, mode)
+    }
+}
+
+impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
+    pub open spec fn wf(&self) -> bool {
+        match self {
+            ColdFrame::Plain(_) => true,
+            ColdFrame::Dict(d) => d.wf(),
+            ColdFrame::Runs(r) => r.wf(),
+        }
+    }
+
+    /// The flat write sequence this frame decodes to, mode-agnostically.
+    pub open spec fn decode(&self) -> Seq<(T, I)> {
+        match self {
+            ColdFrame::Plain(v) => v@,
+            ColdFrame::Dict(d) => d.decode(),
+            ColdFrame::Runs(r) => r.decode(),
+        }
+    }
+
+    /// Entry count, O(1) in every mode.
+    pub fn entry_len(&self) -> (n: usize)
+        requires self.wf(),
+        ensures n == self.decode().len(),
+    {
+        match self {
+            ColdFrame::Plain(v) => v.len(),
+            ColdFrame::Dict(d) => d.entry_len(),
+            ColdFrame::Runs(r) => r.entry_len(),
+        }
+    }
+
+    /// Random access to entry `i`, mode-agnostically (the read `DiffLog::index` needs).
+    pub fn decode_at(&self, i: usize) -> (e: (T, I))
+        requires self.wf(), i < self.decode().len(),
+        ensures e == self.decode()[i as int],
+    {
+        match self {
+            ColdFrame::Plain(v) => v[i],
+            ColdFrame::Dict(d) => d.decode_at(i),
+            ColdFrame::Runs(r) => r.decode_at(i),
+        }
+    }
+
+    /// Deterministic encoded footprint (for the per-frame size comparison / heap check).
+    #[verifier::external_body]
+    pub fn byte_len(&self) -> usize {
+        match self {
+            ColdFrame::Plain(v) => v.len() * (core::mem::size_of::<T>() + core::mem::size_of::<I>()),
+            ColdFrame::Dict(d) => d.dict.len() * core::mem::size_of::<T>()
+                + d.codes.byte_len()
+                + d.idxs.len() * core::mem::size_of::<I>(),
+            ColdFrame::Runs(r) => r.byte_len(),
+        }
+    }
+
+    /// Restore this frame straight to a live column (cold to live), dispatching on the
+    /// per-frame mode: `Runs` uses the sliced memcpy, `Plain`/`Dict` write scattered.
+    /// Same contract for every mode, so the caller is representation-agnostic.
+    pub fn restore_to(&self, target: &mut Vec<T>)
+        requires self.wf(),
+        ensures final(target)@ == apply_all::<T, I>(old(target)@, self.decode()),
+    {
+        match self {
+            ColdFrame::Plain(v) => {
+                let ghost base = target@;
+                let n = v.len();
+                let mut i: usize = 0;
+                while i < n
+                    invariant
+                        0 <= i <= n,
+                        n == v@.len(),
+                        target@ == apply_all::<T, I>(base, v@.subrange(0, i as int)),
+                    decreases n - i,
+                {
+                    let (val, idx) = v[i];
+                    proof { lemma_apply_all_snoc::<T, I>(base, v@, i as int); }
+                    let u = idx.as_usize();
+                    if u < target.len() {
+                        target.set(u, val);
+                    }
+                    i = i + 1;
+                }
+                proof { assert(v@.subrange(0, n as int) =~= v@); }
+            }
+            ColdFrame::Dict(d) => CompressedFrame::restore_to(d, target),
+            ColdFrame::Runs(r) => CompressedFrame::restore_to(r, target),
+        }
+    }
+}
+
+/// The enum is the runtime-dispatch carrier: `choose_mode` picks a variant per frame,
+/// and this impl makes the whole per-frame mix satisfy one interface, so callers hold
+/// `ColdFrame` and never see which encoding a frame actually uses.
+impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for ColdFrame<T, I> {
+    open spec fn wf(&self) -> bool { ColdFrame::wf(self) }
+
+    open spec fn decode(&self) -> Seq<(T, I)> { ColdFrame::decode(self) }
+
+    fn entry_len(&self) -> (n: usize) { ColdFrame::entry_len(self) }
+
+    fn decode_at(&self, i: usize) -> (e: (T, I)) { ColdFrame::decode_at(self, i) }
+
+    fn restore_to(&self, target: &mut Vec<T>) { ColdFrame::restore_to(self, target) }
+}
+
+impl<T: IndexLike, I: IndexLike> ColdFrame<T, I> {
+    /// Encode a finalized frame, picking the mode. `Plain`, `ValueDict`, `IndexRuns`
+    /// (write-order) and `IndexRunsSorted` (sort-first) all preserve the write
+    /// multiset; `Plain`/`ValueDict`/`IndexRuns` also preserve the exact sequence.
+    /// `decode().to_multiset() == diffs@.to_multiset()` for every mode.
+    pub fn compress_mode(diffs: &Vec<(T, I)>, mode: CompressionMode) -> (r: ColdFrame<T, I>)
+        ensures
+            r.wf(),
+            r.decode().to_multiset() == diffs@.to_multiset(),
+            unique_idx(diffs@) ==> unique_idx(r.decode()),
+    {
+        match mode {
+            CompressionMode::ValueDict => {
+                let d = compress(diffs);
+                ColdFrame::Dict(d)
+            }
+            CompressionMode::IndexRuns => {
+                let rc = RunCol::compress(diffs);
+                assert(rc.decode() == diffs@);
+                ColdFrame::Runs(rc)
+            }
+            CompressionMode::IndexRunsSorted => {
+                let rc = RunCol::compress_sorted(diffs);
+                ColdFrame::Runs(rc)
+            }
+            // None and Auto (which is resolved to a concrete mode before flush) fall
+            // back to a plain copy.
+            _ => {
+                let mut copy: Vec<(T, I)> = Vec::new();
+                let mut i: usize = 0;
+                while i < diffs.len()
+                    invariant i <= diffs@.len(), copy@ == diffs@.subrange(0, i as int),
+                    decreases diffs@.len() - i,
+                {
+                    copy.push(diffs[i]);
+                    i += 1;
+                }
+                assert(copy@ =~= diffs@);
+                ColdFrame::Plain(copy)
+            }
+        }
     }
 }
 

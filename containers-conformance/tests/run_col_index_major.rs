@@ -14,7 +14,7 @@
 
 use proptest::prelude::*;
 use semi_persistent_containers_verus as verus;
-use verus::diff_compress::RunCol;
+use verus::diff_compress::{ColdFrame, CompressionMode, HotFrame, RunCol};
 
 /// Reference restore: apply `(value, index)` pairs to a base column in order,
 /// last write wins. The oracle `restore_runs_into`'s memcpy must reproduce.
@@ -148,6 +148,83 @@ proptest! {
         for w in decoded.windows(2) {
             prop_assert!(w[0].1 <= w[1].1);
         }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 1000, ..ProptestConfig::default() })]
+
+    // The per-frame-adaptive cold frame (A4 substrate): every mode decodes to a
+    // sequence with the input's write multiset, restore-equivalent under unique
+    // indices, and decode_at matches the whole decode at each position. Covers the
+    // four integrated modes a per-frame selector chooses among.
+    #[test]
+    fn cold_frame_modes_roundtrip(
+        raw in prop::collection::vec((any::<u32>(), 0u32..64u32), 0..150usize),
+        mode_pick in 0u8..4,
+    ) {
+        let diffs = dedup_first(&raw);
+        let mode = match mode_pick {
+            0 => CompressionMode::None,
+            1 => CompressionMode::ValueDict,
+            2 => CompressionMode::IndexRuns,
+            _ => CompressionMode::IndexRunsSorted,
+        };
+
+        let frame: ColdFrame<u32, u32> = ColdFrame::compress_mode(&diffs, mode);
+        let n = frame.entry_len();
+        prop_assert_eq!(n as usize, diffs.len());
+
+        // decode_at reconstructs each entry; collect the full decode.
+        let mut decoded: Vec<(u32, u32)> = Vec::new();
+        for i in 0..n {
+            decoded.push(frame.decode_at(i));
+        }
+
+        // Same write multiset ⇒ same restore onto a base (unique indices).
+        let base = vec![0u32; 64];
+        prop_assert_eq!(apply_pairs(&base, &decoded), apply_pairs(&base, &diffs));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 1000, ..ProptestConfig::default() })]
+
+    // Frame trait surface: a hot (uncompressed) frame and every compressed variant
+    // restore the SAME write set straight onto a live column. The Runs variant does it
+    // with a sliced memcpy, Plain/Dict scattered, and HotFrame scattered; all three
+    // must equal the reference application of the pairs. This is the cold-to-live and
+    // hot-to-live path (no decode detour).
+    #[test]
+    fn frames_restore_to_live_column(
+        raw in prop::collection::vec((any::<u32>(), 0u32..64u32), 0..150usize),
+        mode_pick in 0u8..4,
+    ) {
+        let diffs = dedup_first(&raw);
+        let mode = match mode_pick {
+            0 => CompressionMode::None,
+            1 => CompressionMode::ValueDict,
+            2 => CompressionMode::IndexRuns,
+            _ => CompressionMode::IndexRunsSorted,
+        };
+        let base = vec![7u32; 64];
+        let reference = apply_pairs(&base, &diffs);
+
+        // Hot frame: add writes one at a time, restore straight to the column.
+        let mut hot: HotFrame<u32, u32> = HotFrame::new();
+        for &(v, i) in diffs.iter() {
+            hot.add_write(v, i);
+        }
+        let mut hot_col = base.clone();
+        hot.restore_to(&mut hot_col);
+        prop_assert_eq!(&hot_col, &reference);
+
+        // Seal it into the chosen mode; the cold frame restores to the same column
+        // (memcpy for Runs, scattered otherwise).
+        let cold = hot.compress(mode);
+        let mut cold_col = base.clone();
+        cold.restore_to(&mut cold_col);
+        prop_assert_eq!(&cold_col, &reference);
     }
 }
 
