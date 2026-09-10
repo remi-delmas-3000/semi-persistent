@@ -184,7 +184,7 @@ where
     /// `[0, saved_len)`. The `prev_diffs` slice is the diff log of the
     /// outer (parent) frame, used by `InlineStore` to know which inline
     /// tags need clearing; `ParallelStore` ignores it.
-    fn prepare_mark(&mut self, saved_len: I, prev_diffs: &[(T, I)])
+    fn prepare_mark(&mut self, saved_len: I, prev_diffs: &[I])
         requires
             old(self).wf(),
             saved_len.as_nat() <= old(self).data().len(),
@@ -197,7 +197,7 @@ where
             TRACK ==> forall|j: int| 0 <= j < old(self).captured().len()
                 && #[trigger] old(self).captured()[j]
                 ==> exists|k: int| 0 <= k < prev_diffs@.len()
-                        && (#[trigger] prev_diffs@[k]).1.as_nat() == j as nat,
+                        && (#[trigger] prev_diffs@[k]).as_nat() == j as nat,
         ensures
             final(self).wf(),
             final(self).data() == old(self).data(),
@@ -206,12 +206,14 @@ where
 
     /// First-write-wins capture. If the slot is in-frame and not yet captured,
     /// log `(old.data()[i], i)` and flip `captured[i]`.
-    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>)
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>)
         requires
             old(self).wf(),
+            old(diff_log).wf(),
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
+            final(diff_log).wf(),
             final(self).data() == old(self).data(),
             // First-write-wins (all TRACK-conditional; an untracked store's
             // flags are dead and its capture is a no-op — production parity):
@@ -235,12 +237,14 @@ where
     /// Retained unconditional-capture operation. Within-frame: log + set
     /// captured. Out-of-frame: no-op. `Vec` has no call site; marked pops use
     /// conditional `capture` to preserve the one-entry-per-index bound.
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>)
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>)
         requires
             old(self).wf(),
+            old(diff_log).wf(),
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
+            final(diff_log).wf(),
             final(self).data() == old(self).data(),
             (TRACK && i.as_nat() < saved_len.as_nat()) ==> {
                 &&& final(diff_log)@ == old(diff_log)@.push(
@@ -261,13 +265,13 @@ where
     /// hoisting it lets `restore_entry` do NO per-entry bit work — measured
     /// 1.6µs/2048-entry replay). InlineStore: sparse tag-clear over the
     /// named slots, O(replayed) — the same protocol as its `prepare_mark`.
-    fn begin_restore(&mut self, replayed_diffs: &[(T, I)])
+    fn begin_restore(&mut self, replayed_diffs: &[I])
         requires
             old(self).wf(),
             TRACK ==> forall|j: int| 0 <= j < old(self).captured().len()
                 && #[trigger] old(self).captured()[j]
                 ==> exists|k: int| 0 <= k < replayed_diffs@.len()
-                        && (#[trigger] replayed_diffs@[k]).1.as_nat() == j as nat,
+                        && (#[trigger] replayed_diffs@[k]).as_nat() == j as nat,
         ensures
             final(self).wf(),
             final(self).data() == old(self).data(),
@@ -317,7 +321,7 @@ where
     /// The all-clear requires (established by the replay loop via
     /// `restore_entry`'s flag-clearing ensures) is what makes an O(diffs)
     /// set-only implementation sound — production's protocol.
-    fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], saved_len: I)
+    fn finish_restore(&mut self, current_frame_diffs: &[I], saved_len: I)
         requires
             old(self).wf(),
             saved_len.as_nat() <= old(self).data().len(),
@@ -334,7 +338,7 @@ where
             TRACK ==> forall|i: int| 0 <= i < saved_len.as_nat() ==>
                 #[trigger] final(self).captured()[i] == exists|k: int|
                     0 <= k < current_frame_diffs@.len()
-                        && (#[trigger] current_frame_diffs@[k]).1.as_nat() == i;
+                        && (#[trigger] current_frame_diffs@[k]).as_nat() == i;
 
     // -- maintenance ---------------------------------------------------------
 

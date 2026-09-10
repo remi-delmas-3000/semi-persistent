@@ -370,6 +370,53 @@ which is the right trade for one-binary flexibility.
 The choice is orthogonal to `VecI`/`VecP` (compression lives in the frame
 representation, not where the capture stamp lives), so both gain it.
 
+## Configuration object and when to compress
+
+The per-instance `mode` generalizes to a small **configuration object** so an
+aggregate names, per column, both the encoder and the policy in one value:
+
+```
+pub struct ColumnConfig {
+    scheme: CompressionMode,   // None | ValueDict | IndexRuns
+    // Compress the uncompressed top only when it grows past this fraction of the
+    // live payload (0 == compress every mark; None-scheme ignores it).
+    compress_at_fraction: f32, // e.g. 0.25 of the base vector length
+    // Keep this many most-recent frames uncompressed regardless (LRU floor), so
+    // an imminent backtrack pays no decode.
+    keep_hot_frames: usize,
+}
+```
+
+The whole e-graph's compression regime is then a table of `ColumnConfig`, one per
+column, passed at construction: all-`None` for the SMT profile, and per the
+per-column analysis for the eq-sat profile. The object is a value, not a type, for
+the same one-binary reason as the mode field.
+
+**Compress periodically, not every mark.** Finalizing on every `mark` (the
+step-3 plan above) pays the encoder cost on the critical path at every branch,
+and the measured `compress` cost makes that the wrong default. Instead the top
+stack accumulates uncompressed finalized frames and is flushed only when its
+footprint crosses `compress_at_fraction` of the live payload (the base vector
+length times `sizeof(T)`): the diff trail is worth compressing exactly when it is
+becoming a material fraction of what it shadows. This bounds the amortized
+finalize cost (one encode pass per flush, over many marks) and keeps the common
+mark free of encoder work. The trigger reads two sizes already cheap to track:
+the uncompressed diff byte count (running sum) and the base length.
+
+**Keep hot frames uncompressed (LRU).** A restore usually lands near the top of
+the stack (backtrack one or a few levels), and decoding a frame just to
+immediately restore through it is wasted work. So a flush compresses only frames
+older than the `keep_hot_frames` most recent: the hot suffix stays plain and
+restore-cheap, and only the cold prefix — unlikely to be a backtrack target soon
+— is compressed. This is an eviction policy on the frame stack, not on cells;
+"least recently marked" approximates "least likely to be restored to next".
+
+**Monitoring.** The two-stack exposes diagnostics (no spec content, capacity/time
+measurements only), which the policy consults and the benchmark records:
+uncompressed byte count, compressed byte count, cumulative encode and decode time
+(and counts). These are what let the size-fraction trigger fire and what the
+benchmark suite reports as the space saved and the time paid.
+
 ## Verification
 
 Two structural theorems, orthogonal to the existing mark/restore proofs:
@@ -400,6 +447,78 @@ frame representation behind the abstraction.
   wrong: dictionary and value-major encoding compress the pool using `Eq` alone,
   needing no bit-structure — see "Value axis". Kept here as a retracted claim so
   it is not re-proposed.)
+
+## Measured: encoder cost and space (2026-09-06)
+
+First numbers, from `containers-conformance/benches/diff_compress_bench.rs`
+(criterion; space is the deterministic byte table it prints, timing is min-of-run
+on the dev machine). `T = I = u32` (union-find id width). Three findings, and
+each changes a decision.
+
+**The value dictionary as built is a space loss, not a win.** On the union-find
+shape (`N` scattered captures, `D` distinct representatives), the built
+`DictFrame` stores `dict: [u32]`, `codes: [usize]`, and `idxs: [u32]`:
+
+| N | D | plain | dict (usize codes) | dict (u32 codes) |
+|---|---|-------|--------------------|-------------------|
+| 100000 | 1000 | 800000 | 1204000 (**1.50x**) | 804000 (**1.00x**) |
+| 100000 | 10000 | 800000 | 1240000 (**1.55x**) | 840000 (**1.05x**) |
+
+The index column is still stored explicitly (value-major does not drop it for
+scattered indices), and a `usize` code is wider than the `u32` value it replaces.
+Narrowing codes to `u32` only reaches break-even. **Decision:** the value
+dictionary earns its place only with codes bit-packed to `ceil(log2 D)` bits and
+the index column itself compressed; as a plain dict+codes it is not worth
+selecting on a `u32` column. Recorded as a negative result so it is not
+re-proposed at `usize` code width.
+
+**Index run-coalescing is the real space win.** On the contiguous-batch shape
+(`N` captures forming `R` runs), `RunFrame` drops the index column entirely
+(implied by start + offset): 0.51x plain at `R = N/100`, 0.60x at `R = N/10`.
+This is the encoder to reach for first, on any column whose captured indices
+cluster.
+
+**`compress` (value dict) is O(N·D) today; the encoders that matter are linear.**
+`dict_find` is a linear scan, so `compress` is quadratic in practice: 20.6ms at
+`N=100k, D=1000`; 185ms at `D=10000`. That is a per-mark cost that would dominate
+saturation. `compress_runs` is linear and flat in `R` (~80us at `N=100k`), and
+`DictFrame::decode_exec` is linear (~160us at `N=100k`). **Decision:** before the
+value dictionary is wired into `mark`, `dict_find` needs a hash (the bijection
+proof is search-strategy-independent, so this is an exec-only change); until then
+the two-stack ships with `IndexRuns` as the only compressing mode.
+
+## Implemented (2026-09-06)
+
+The two-stack and its policy are built and verified as standalone components,
+independent of `Vec`'s proven mark/restore core (so the ~1700 obligations are
+untouched):
+
+- `compressed_stack::CompressedStack` — the compressed bottom. View is the flat
+  `decode_all(frames)`; `push_frame`/`pop_frame` are the compress/decompress
+  primitives, view-preserving by the encoder bijection plus `lemma_decode_all_snoc`.
+- `compression_config::ColumnConfig` — the per-column object: `scheme` plus the
+  `compress_at_percent` size trigger (`should_flush`) and the `keep_hot_frames`
+  LRU floor (`frames_to_compress`).
+- `two_stack_log::TwoStackLog` — the two stacks together. View is `cold@ ++ hot@`.
+  `mark(uncompressed_bytes, base_bytes)` opens a frame and, when the trigger
+  fires, `flush_cold` compresses the cold hot-frames (all but the hot floor) into
+  the bottom, view-preserving. `truncate_hot` is the hot-region restore.
+  `hot_bytes`/`cold_bytes` are the monitoring hooks.
+- `FrameEncoding::decode_exec` / `DictFrame::decode_exec` — executable
+  decompression (verified `r@ == decode()`), used by `pop_frame` and timed by the
+  bench.
+
+End-to-end measurement (`two_stack_bench`, 400 marks x 16 writes, distinct=256,
+flush at 5% with hot floor 4): the mechanism works — under `ValueDict` the trigger
+fires and frames move to the cold stack (hot 65536 -> 32768 bytes, cold 0 ->
+83456). Space is 1.77x the plain baseline, a loss, matching the encoder finding;
+the mark path costs 146us vs 17.7us (the `dict_find` encode). So the plumbing is
+verified and exercised; the space win waits on narrowed dict codes and `IndexRuns`.
+
+Remaining: the `IndexLike` `from_nat` spec inverse + `FrameEncoding` run arm
+(unlocks `IndexRuns`, the measured winner); narrowed/bit-packed dict codes;
+materialize-into-cold for deep backtracks (`pop_frame` is the primitive);
+adoption by the e-graph column aggregates.
 
 ## Benchmark plan
 

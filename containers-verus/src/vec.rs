@@ -339,6 +339,37 @@ pub(crate) proof fn lemma_captured_subrange<T, I: IndexLike>(
     }
 }
 
+/// Index-column variant of `lemma_captured_subrange`. `idx_sub` is the INDEX
+/// projection of the stratum `diffs[lo..hi]` (what `DiffLog::indices()` slices
+/// out), so its entries are `I`s compared with `.as_nat()`, not `(T, I)` pairs.
+/// Same conclusion: membership in the index slice matches `captured_in_range`.
+pub(crate) proof fn lemma_captured_subrange_idx<T, I: IndexLike>(
+    diffs: Seq<(T, I)>, idx_sub: Seq<I>, lo: int, hi: int, j: nat,
+)
+    requires
+        0 <= lo <= hi <= diffs.len(),
+        idx_sub.len() == hi - lo,
+        forall|m: int| 0 <= m < idx_sub.len() ==> (#[trigger] idx_sub[m]) == diffs[lo + m].1,
+    ensures
+        (exists|kk: int| 0 <= kk < idx_sub.len()
+            && (#[trigger] idx_sub[kk]).as_nat() == j)
+        == captured_in_range::<T, I>(diffs, lo, hi, j),
+{
+    if exists|kk: int| 0 <= kk < idx_sub.len() && (#[trigger] idx_sub[kk]).as_nat() == j {
+        let kk = choose|kk: int| 0 <= kk < idx_sub.len() && (#[trigger] idx_sub[kk]).as_nat() == j;
+        // idx_sub[kk] == diffs[lo + kk].1, and lo <= lo+kk < hi.
+        assert(idx_sub[kk] == diffs[lo + kk].1);
+        assert(lo <= lo + kk < hi);
+    }
+    if captured_in_range::<T, I>(diffs, lo, hi, j) {
+        let k = choose|k: int| lo <= k < hi && 0 <= k < diffs.len()
+            && (#[trigger] diffs[k]).1.as_nat() == j;
+        // idx_sub[k - lo] == diffs[k].1, and 0 <= k-lo < idx_sub.len().
+        assert(idx_sub[k - lo] == diffs[k].1);
+        assert(0 <= k - lo < idx_sub.len());
+    }
+}
+
 /// Appending at most one entry whose index is `bound` (the popped slot) to
 /// the top stratum doesn't change captured-status of any OTHER index `j`
 /// (`j != bound`). Used by `pop` into the marked region: the capture append hits only the
@@ -644,7 +675,7 @@ where
     S: DiffStore<T, I, TRACK>,
 {
     pub(crate) store: S,
-    pub(crate) diff_log: std::vec::Vec<(T, I)>,
+    pub(crate) diff_log: crate::diff_log::DiffLog<T, I>,
     pub(crate) frames: std::vec::Vec<Frame<I>>,
     /// The saved_len of the topmost (active) frame, cached for the hot path.
     /// `I::min()` when the stack is empty. Mirrors production.
@@ -811,6 +842,7 @@ where
         let frames = self.frames@;
         let diffs = self.diff_log@;
 
+        &&& self.diff_log.wf()
         &&& self.wf_for_snap()
         // active_saved_len caches the top frame's saved_len.
         &&& (frames.len() == 0 ==> self.active_saved_len == I::min_spec())
@@ -862,7 +894,9 @@ where
             old_self.wf(),
             self.store == old_self.store,
             self.frames@ == old_self.frames@,
-            self.diff_log@ == old_self.diff_log@,
+            // Full structural equality (not just `@`): `diff_log.wf()` is a wf
+            // conjunct now, and it reads the concrete idxs/vals, not the view.
+            self.diff_log == old_self.diff_log,
             self.snapshots@ == old_self.snapshots@,
             self.active_saved_len == old_self.active_saved_len,
             self.forks.wf(),
@@ -897,6 +931,8 @@ where
                 old_self.frames@[k].saved_len.as_nat()));
         }
         assert(self.wf_for_snap());
+        // diff_log.wf() transfers by structural equality with old_self.
+        assert(self.diff_log.wf());
         // wf's captured-bridge and no-stray foralls read store.captured()/view/
         // frames/active/diffs — all pinned, so they carry directly.
         assert(self.wf());
@@ -1208,10 +1244,35 @@ where
             v.view().len() == 0,
             v.snapshots_view().len() == 0,
     {
+        Self::with_store_mode(store, crate::diff_compress::CompressionMode::None)
+    }
+
+    /// As `with_store`, but selects the diff log's value representation at
+    /// runtime (per instance, not a const generic): `None` keeps the value
+    /// column plain (SMT: no compression overhead); `ValueDict` dictionary-
+    /// encodes it (equality saturation: the union-find columns coalesce equal
+    /// values, at the cost of a `dict_find` per capture). Both start empty and
+    /// well-formed, so the constructor's contract is representation-independent.
+    pub(crate) fn with_store_mode(store: S, mode: crate::diff_compress::CompressionMode)
+        -> (v: Self)
+        requires
+            store.wf(),
+            store.data().len() == 0,
+        ensures
+            v.wf(),
+            v.view().len() == 0,
+            v.snapshots_view().len() == 0,
+    {
         proof { store.lemma_wf_captured_len(); }  // captured().len() == 0
+        let diff_log = match mode {
+            crate::diff_compress::CompressionMode::None =>
+                crate::diff_log::DiffLog::new_plain(),
+            crate::diff_compress::CompressionMode::ValueDict =>
+                crate::diff_log::DiffLog::new_dict(),
+        };
         let v = Vec {
             store,
-            diff_log: std::vec::Vec::new(),
+            diff_log,
             frames: std::vec::Vec::new(),
             active_saved_len: <I as IndexLike>::min(),
             forks: ForkHistory::new(),
@@ -1252,8 +1313,7 @@ where
                 // Production parity: the same overallocation check applies to
                 // the diff log at mark time (shrink-at-mark ratcheting).
                 // Observably inert (contract: element sequence unchanged).
-                crate::parallel_store::shrink_vec_capacity(
-                    &mut self.diff_log, factor, headroom);
+                self.diff_log.shrink_capacity(factor, headroom);
             }
         }
         proof {
@@ -1347,7 +1407,7 @@ where
     /// len-based — this reports the actual allocation footprint.
     #[verifier::external_body]
     pub fn tracking_bytes(&self) -> usize {
-        self.diff_log.capacity() * core::mem::size_of::<(T, I)>()
+        self.diff_log.heap_bytes()
             + self.frames.capacity() * core::mem::size_of::<Frame<I>>()
             + self.forks.heap_bytes()
     }
@@ -2558,7 +2618,7 @@ where
         let ghost old_view = self.view();
 
         let prev_suffix = vstd::slice::slice_subrange(
-            self.diff_log.as_slice(), parent_diff_start, self.diff_log.len());
+            self.diff_log.indices(), parent_diff_start, self.diff_log.len());
         proof {
             // Discharge prepare_mark's sparse-clear requires: every set flag
             // is named by a suffix entry. From wf: a set flag j is (no-stray)
@@ -2573,7 +2633,7 @@ where
                 assert forall|j: int| 0 <= j < self.store.captured().len()
                     && #[trigger] self.store.captured()[j]
                     implies exists|k: int| 0 <= k < prev_suffix@.len()
-                        && (#[trigger] prev_suffix@[k]).1.as_nat() == j as nat by {
+                        && (#[trigger] prev_suffix@[k]).as_nat() == j as nat by {
                     // no-stray: live frame and j < active.
                     assert(self.frames@.len() > 0 && j < self.active_saved_len.as_nat());
                     let top = (self.frames@.len() - 1) as int;
@@ -2592,8 +2652,10 @@ where
                     // prev_suffix == diffs[parent_diff_start..]; parent_diff_start
                     // == top.diff_start, so k0 maps to suffix index k0 - ds.
                     assert(parent_diff_start == self.frames@[top].diff_start);
+                    // prev_suffix is the index column: entry k0 - ds is the
+                    // index of diff_log@[k0] (indices() == idxs, view def).
                     assert(prev_suffix@[k0 - parent_diff_start as int]
-                        == self.diff_log@[k0]);
+                        == self.diff_log@[k0].1);
                 }
             }
         }
@@ -2844,7 +2906,7 @@ where
             old_self.lemma_diff_start_le_n(target_index as int);
         }
         let replayed_pre = vstd::slice::slice_subrange(
-            self.diff_log.as_slice(), diff_start, self.diff_log.len());
+            self.diff_log.indices(), diff_start, self.diff_log.len());
 
         let ghost base = self.store.data();
         let ghost base_flags = self.store.captured();
@@ -2871,7 +2933,7 @@ where
                 assert forall|j: int| 0 <= j < self.store.captured().len()
                     && #[trigger] self.store.captured()[j]
                     implies exists|k: int| 0 <= k < replayed_pre@.len()
-                        && (#[trigger] replayed_pre@[k]).1.as_nat() == j as nat by {
+                        && (#[trigger] replayed_pre@[k]).as_nat() == j as nat by {
                     assert(base_flags[j]);
                     assert(0 <= j < saved_len.as_nat());
                     assert(j < old(self).store.captured().len()
@@ -2891,7 +2953,10 @@ where
                             < pre_diffs.len() as int
                         && (pre_diffs[k]).1.as_nat() == j as nat;
                     assert(diff_start as int <= k0);
-                    assert(replayed_pre@[k0 - diff_start as int] == pre_diffs[k0]);
+                    // replayed_pre is the INDEX column: replayed_pre@[m] ==
+                    // idxs@[diff_start+m] == diff_log@[diff_start+m].1 (view def)
+                    // == pre_diffs[diff_start+m].1.
+                    assert(replayed_pre@[k0 - diff_start as int] == pre_diffs[k0].1);
                 }
             }
         }
@@ -2934,6 +2999,7 @@ where
         while i > diff_start
             invariant
                 self.store.wf(),
+                self.diff_log.wf(),
                 self.diff_log@ == pre_diffs,
                 self.diff_log@.len() == n,
                 self.frames@ == old(self).frames@,
@@ -2957,7 +3023,7 @@ where
             decreases i,
         {
             i -= 1;
-            let (old_val, idx) = self.diff_log[i];
+            let (old_val, idx) = self.diff_log.index(i);
             proof {
                 lemma_overlay_len::<T, I>(base, pre_diffs, (i + 1) as int, n as int);
             }
@@ -3034,17 +3100,26 @@ where
         // data().len() == target's saved_len; this is the present-cell range
         // the bridge cares about, regardless of the new top frame's saved_len.
         let present_len = self.store.len();
-        let ghost surviving_view: Seq<(T, I)> = Seq::empty();
+        // The INDEX column of the surviving top stratum (what `indices()` yields).
+        let ghost surviving_view: Seq<I> = Seq::empty();
         let ghost new_top_ds_ghost: int = 0;
         if target_index > 0 {
             let new_top_frame = self.frames[target_index - 1];
             self.active_saved_len = new_top_frame.saved_len;
             let new_top_ds = new_top_frame.diff_start;
             let surviving = vstd::slice::slice_subrange(
-                self.diff_log.as_slice(), new_top_ds, self.diff_log.len());
+                self.diff_log.indices(), new_top_ds, self.diff_log.len());
             proof {
                 surviving_view = surviving@;
                 new_top_ds_ghost = new_top_ds as int;
+                // Pin the index-column link: surviving_view[m] is the index of
+                // diff entry new_top_ds+m (indices() == idxs, view def gives
+                // diff_log@[k].1 == idxs@[k]). The diff log was already
+                // truncated to diff_start == self.diff_log.len(), so the slice
+                // covers [new_top_ds, diff_log@.len()).
+                assert(surviving_view.len() == self.diff_log@.len() - new_top_ds_ghost);
+                assert forall|m: int| 0 <= m < surviving_view.len() implies
+                    #[trigger] surviving_view[m] == self.diff_log@[new_top_ds_ghost + m].1 by {}
                 // finish_restore's all-clear requires. Loop-exit bookkeeping:
                 // a surviving flag needs base_flags[j] AND no diff entry in
                 // [diff_start, n) naming j. But base_flags is the post-resize
@@ -3233,7 +3308,10 @@ where
                 // entry points at i. The surviving diffs slice IS the top
                 // stratum, so captured_in_range matches.
                 assert(frames[top].diff_start as int == new_top_ds_ghost);
-                assert(surviving_view == diffs.subrange(new_top_ds_ghost, diffs.len() as int));
+                // Index-column link over the surviving stratum (pinned above).
+                assert(surviving_view.len() == diffs.len() - new_top_ds_ghost);
+                assert forall|m: int| 0 <= m < surviving_view.len() implies
+                    #[trigger] surviving_view[m] == diffs[new_top_ds_ghost + m].1 by {}
                 // The wf bridge is gated by j < view.len(); finish_restore
                 // rebuilt captured() over exactly [0, present_len) ==
                 // [0, view.len()), so we prove it on that range (NOT on
@@ -3245,9 +3323,9 @@ where
                         == captured_in_range::<T, I>(
                             diffs, frames[top].diff_start as int, diffs.len() as int, j as nat)
                 by {
-                    // finish_restore: captured()[j] == exists kk, surviving_view[kk].1 == j.
-                    // lemma_captured_subrange: that == captured_in_range over the range.
-                    lemma_captured_subrange::<T, I>(
+                    // finish_restore: captured()[j] == exists kk, surviving_view[kk] == j.
+                    // lemma_captured_subrange_idx: that == captured_in_range over the range.
+                    lemma_captured_subrange_idx::<T, I>(
                         diffs, surviving_view, new_top_ds_ghost, diffs.len() as int, j as nat);
                 }
                 // NO-STRAY: a post-restore flag means a surviving diff entry
@@ -3261,11 +3339,11 @@ where
                         && j < self.active_saved_len.as_nat() by {
                     // finish_restore's iff: pull the surviving witness.
                     assert(exists|kk: int| 0 <= kk < surviving_view.len()
-                        && (#[trigger] surviving_view[kk]).1.as_nat() == j as nat);
+                        && (#[trigger] surviving_view[kk]).as_nat() == j as nat);
                     let kk = choose|kk: int| 0 <= kk < surviving_view.len()
-                        && (#[trigger] surviving_view[kk]).1.as_nat() == j as nat;
-                    // surviving_view == diffs[new_top_ds..n): index into diffs.
-                    assert(surviving_view[kk] == diffs[new_top_ds_ghost + kk]);
+                        && (#[trigger] surviving_view[kk]).as_nat() == j as nat;
+                    // surviving_view is the index column of diffs[new_top_ds..n).
+                    assert(surviving_view[kk] == diffs[new_top_ds_ghost + kk].1);
                     // OLD wf: frame_inv_range holds for the (old) frame at
                     // top (== target_index - 1 survives truncation), whose
                     // in-bounds clause bounds the entry's index.
@@ -3512,6 +3590,13 @@ where
     {
         Vec::with_store(crate::parallel_store::ParallelStore::new())
     }
+
+    /// As `new`, selecting the diff log's value representation per instance.
+    pub fn new_with_mode(mode: crate::diff_compress::CompressionMode) -> (v: Self)
+        ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
+    {
+        Vec::with_store_mode(crate::parallel_store::ParallelStore::new(), mode)
+    }
 }
 
 impl<T, I, const TRACK: bool> Vec<T, I, crate::inline_store::InlineStore<T, I>, TRACK>
@@ -3525,6 +3610,13 @@ where
         ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
     {
         Vec::with_store(crate::inline_store::InlineStore::new())
+    }
+
+    /// As `new`, selecting the diff log's value representation per instance.
+    pub fn new_with_mode(mode: crate::diff_compress::CompressionMode) -> (v: Self)
+        ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
+    {
+        Vec::with_store_mode(crate::inline_store::InlineStore::new(), mode)
     }
 }
 

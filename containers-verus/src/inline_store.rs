@@ -203,7 +203,7 @@ where
         }
     }
 
-    fn prepare_mark(&mut self, _saved_len: I, prev_diffs: &[(T, I)]) {
+    fn prepare_mark(&mut self, _saved_len: I, prev_diffs: &[I]) {
         if !TRACK {
             return;
         }
@@ -226,17 +226,17 @@ where
                 // cleared so far: every slot named by a processed entry.
                 forall|j: int| 0 <= j < self.data@.len()
                     && (exists|kk: int| 0 <= kk < k as int
-                        && (#[trigger] prev_diffs@[kk]).1.as_nat() == j as nat)
+                        && (#[trigger] prev_diffs@[kk]).as_nat() == j as nat)
                     ==> !(#[trigger] T::tag_of(self.data@[j])),
                 // untouched slots keep their old tag.
                 forall|j: int| 0 <= j < self.data@.len()
                     && !(exists|kk: int| 0 <= kk < k as int
-                        && (#[trigger] prev_diffs@[kk]).1.as_nat() == j as nat)
+                        && (#[trigger] prev_diffs@[kk]).as_nat() == j as nat)
                     ==> #[trigger] T::tag_of(self.data@[j])
                         == T::tag_of(old(self).data@[j]),
             decreases (m - k) as int,
         {
-            let idx = prev_diffs[k].1;
+            let idx = prev_diffs[k];
             let iu = idx.as_usize();
             if iu < self.data.len() {
                 let mut r = self.data[iu];
@@ -259,12 +259,12 @@ where
                     assert(old(self).captured_spec()[i]);
                     assert(DiffStore::<T, I, TRACK>::captured(&*old(self))[i]);
                     assert(exists|kk: int| 0 <= kk < prev_diffs@.len()
-                        && (#[trigger] prev_diffs@[kk]).1.as_nat() == i as nat);
+                        && (#[trigger] prev_diffs@[kk]).as_nat() == i as nat);
                     assert(!(T::tag_of(self.data@[i])));
                 } else {
                     // old tag clear: either untouched (keeps false) or cleared.
                     if exists|kk: int| 0 <= kk < m as int
-                        && (#[trigger] prev_diffs@[kk]).1.as_nat() == i as nat {
+                        && (#[trigger] prev_diffs@[kk]).as_nat() == i as nat {
                         assert(!(T::tag_of(self.data@[i])));
                     } else {
                         assert(T::tag_of(self.data@[i])
@@ -276,7 +276,7 @@ where
     }
 
     #[inline(always)]
-    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
         if !TRACK {
             return;
         }
@@ -288,14 +288,14 @@ where
         let r = self.data[iu];
         if !T::tag(&r) {
             let v = T::from_repr(&r);
-            diff_log.push((v, i));
+            diff_log.push(v, i);
             let mut new_r = r;
             T::set_tag(&mut new_r);
             self.data.set(iu, new_r);
         }
     }
 
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
         if !TRACK {
             return;
         }
@@ -306,13 +306,13 @@ where
         }
         let r = self.data[iu];
         let v = T::from_repr(&r);
-        diff_log.push((v, i));
+        diff_log.push(v, i);
         let mut new_r = r;
         T::set_tag(&mut new_r);
         self.data.set(iu, new_r);
     }
 
-    fn begin_restore(&mut self, replayed_diffs: &[(T, I)]) {
+    fn begin_restore(&mut self, replayed_diffs: &[I]) {
         if !TRACK {
             return;
         }
@@ -338,16 +338,16 @@ where
                         == T::value_of(old(self).data@[j]),
                 forall|j: int| 0 <= j < self.data@.len()
                     && (exists|kk: int| 0 <= kk < k as int
-                        && (#[trigger] replayed_diffs@[kk]).1.as_nat() == j as nat)
+                        && (#[trigger] replayed_diffs@[kk]).as_nat() == j as nat)
                     ==> !(#[trigger] T::tag_of(self.data@[j])),
                 forall|j: int| 0 <= j < self.data@.len()
                     && !(exists|kk: int| 0 <= kk < k as int
-                        && (#[trigger] replayed_diffs@[kk]).1.as_nat() == j as nat)
+                        && (#[trigger] replayed_diffs@[kk]).as_nat() == j as nat)
                     ==> #[trigger] T::tag_of(self.data@[j])
                         == T::tag_of(old(self).data@[j]),
             decreases (m - k) as int,
         {
-            let idx = replayed_diffs[k].1;
+            let idx = replayed_diffs[k];
             let iu = idx.as_usize();
             if iu < self.data.len() {
                 let mut r = self.data[iu];
@@ -381,7 +381,7 @@ where
         }
     }
 
-    fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], _saved_len: I) {
+    fn finish_restore(&mut self, current_frame_diffs: &[I], _saved_len: I) {
         if !TRACK {
             return;
         }
@@ -408,11 +408,11 @@ where
                     #[trigger] T::tag_of(self.data@[j])
                         == (T::tag_of(old(self).data@[j])
                             || exists|kk: int| 0 <= kk < k as int
-                                && (#[trigger] current_frame_diffs@[kk]).1.as_nat()
+                                && (#[trigger] current_frame_diffs@[kk]).as_nat()
                                     == j as nat),
             decreases (m - k) as int,
         {
-            let idx = current_frame_diffs[k].1;
+            let idx = current_frame_diffs[k];
             let iu = idx.as_usize();
             if iu < n {
                 let mut r = self.data[iu];
@@ -427,7 +427,7 @@ where
             assert forall|i: int| 0 <= i < _saved_len.as_nat()
                 implies #[trigger] self.captured_spec()[i] == (
                     exists|kk: int| 0 <= kk < current_frame_diffs@.len()
-                        && (#[trigger] current_frame_diffs@[kk]).1.as_nat() == i as nat
+                        && (#[trigger] current_frame_diffs@[kk]).as_nat() == i as nat
                 ) by {
                 // requires (all-clear below saved_len), via the trait view.
                 assert(!(DiffStore::<T, I, TRACK>::captured(&*old(self))[i]));

@@ -231,7 +231,7 @@ where
         }
     }
 
-    fn prepare_mark(&mut self, _saved_len: I, _prev_diffs: &[(T, I)]) {
+    fn prepare_mark(&mut self, _saved_len: I, _prev_diffs: &[I]) {
         if !TRACK {
             return;
         }
@@ -244,7 +244,7 @@ where
     }
 
     #[inline(always)]
-    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
         if !TRACK {
             return;
         }
@@ -255,7 +255,7 @@ where
         }
         if !self.captured.get(iu) {
             let old_val = self.data[iu];
-            diff_log.push((old_val, i));
+            diff_log.push(old_val, i);
             self.captured.set_true(iu, Ghost(self.data@.len() as int));
         }
         proof {
@@ -270,7 +270,7 @@ where
         }
     }
 
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
         if !TRACK {
             return;
         }
@@ -280,14 +280,14 @@ where
             return;
         }
         let old_val = self.data[iu];
-        diff_log.push((old_val, i));
+        diff_log.push(old_val, i);
         self.captured.set_true(iu, Ghost(self.data@.len() as int));
         proof {
             assert(self.captured_spec()[i.as_nat() as int] == true);
         }
     }
 
-    fn begin_restore(&mut self, _replayed_diffs: &[(T, I)]) {
+    fn begin_restore(&mut self, _replayed_diffs: &[I]) {
         if !TRACK {
             return;
         }
@@ -334,7 +334,7 @@ where
         }
     }
 
-    fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], _saved_len: I) {
+    fn finish_restore(&mut self, current_frame_diffs: &[I], _saved_len: I) {
         if !TRACK {
             return;
         }
@@ -368,7 +368,7 @@ where
                     #[trigger] self.captured.flags(n as int)[j] == (
                         exists|kk: int|
                             0 <= kk < k as int
-                                && (#[trigger] current_frame_diffs@[kk]).1.as_nat() == j as nat
+                                && (#[trigger] current_frame_diffs@[kk]).as_nat() == j as nat
                     ),
             decreases (m - k) as int,
         {
@@ -380,13 +380,13 @@ where
                     #[trigger] crate::capture_bits::flags_of(pre_words, n as int)[j] == (
                         exists|kk: int|
                             0 <= kk < k0
-                                && (#[trigger] current_frame_diffs@[kk]).1.as_nat() == j as nat
+                                && (#[trigger] current_frame_diffs@[kk]).as_nat() == j as nat
                     ) by {
                     assert(self.captured.flags(n as int)[j]
                         == crate::capture_bits::flags_of(pre_words, n as int)[j]);
                 }
             }
-            let idx = current_frame_diffs[k].1;
+            let idx = current_frame_diffs[k];
             let iu = idx.as_usize();
             if iu < n {
                 self.captured.set_true(iu, Ghost(n as int));
@@ -400,7 +400,7 @@ where
                     #[trigger] self.captured.flags(n as int)[j] == (
                         exists|kk: int|
                             0 <= kk < k as int
-                                && (#[trigger] current_frame_diffs@[kk]).1.as_nat() == j as nat
+                                && (#[trigger] current_frame_diffs@[kk]).as_nat() == j as nat
                     ) by {
                     // Pointwise flag change from set_true's ensures (or no-op).
                     let flag_now = crate::capture_bits::padded_bit(
@@ -416,27 +416,27 @@ where
                     assert(flag_pre == (
                         exists|kk: int|
                             0 <= kk < k0
-                                && (#[trigger] current_frame_diffs@[kk]).1.as_nat() == j as nat));
+                                && (#[trigger] current_frame_diffs@[kk]).as_nat() == j as nat));
                     if flag_now {
                         // Forward: witness is either the old one or kk == k0.
                         if (iu as int) < n as int && j == iu as int {
-                            assert(current_frame_diffs@[k0].1.as_nat() == j as nat);
+                            assert(current_frame_diffs@[k0].as_nat() == j as nat);
                             assert(0 <= k0 < k as int);
                         } else {
                             let kk0 = choose|kk: int|
                                 0 <= kk < k0
-                                    && (#[trigger] current_frame_diffs@[kk]).1.as_nat()
+                                    && (#[trigger] current_frame_diffs@[kk]).as_nat()
                                         == j as nat;
                             assert(0 <= kk0 < k as int);
                         }
                     } else {
                         // Backward: no witness below k, in particular not k0.
                         assert forall|kk: int| 0 <= kk < k as int implies
-                            (#[trigger] current_frame_diffs@[kk]).1.as_nat() != j as nat by {
+                            (#[trigger] current_frame_diffs@[kk]).as_nat() != j as nat by {
                             if kk == k0 {
                                 // entry k0 pointing at j would have flagged j
                                 // (in-bounds since j < n).
-                                if current_frame_diffs@[kk].1.as_nat() == j as nat {
+                                if current_frame_diffs@[kk].as_nat() == j as nat {
                                     assert(target == j);
                                     assert((iu as int) == target);
                                     assert((iu as int) < n as int);

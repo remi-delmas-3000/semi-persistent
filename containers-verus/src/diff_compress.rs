@@ -42,12 +42,43 @@ impl<T: IndexLike, I: IndexLike> DictFrame<T, I> {
             |t: int| (self.dict@[self.codes@[t] as int], self.idxs@[t]),
         )
     }
+
+    /// Executable decode: materialize the flat diff sequence. The two-stack
+    /// `Vec` integration calls this to bring a compressed frame back to plain
+    /// before a restore lands in it; the benchmark suite times it as the
+    /// decompression cost. `r@ == decode()`, so it is transparent to the
+    /// reconstruction proof.
+    pub fn decode_exec(&self) -> (r: Vec<(T, I)>)
+        requires self.wf(),
+        ensures r@ == self.decode(),
+    {
+        let mut out: Vec<(T, I)> = Vec::new();
+        let n = self.idxs.len();
+        let mut t: usize = 0;
+        while t < n
+            invariant
+                t <= n,
+                n == self.idxs@.len(),
+                self.wf(),
+                out@.len() == t,
+                forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
+            decreases n - t,
+        {
+            let code = self.codes[t];
+            let v = self.dict[code];
+            let idx = self.idxs[t];
+            out.push((v, idx));
+            t += 1;
+        }
+        assert(out@ =~= self.decode());
+        out
+    }
 }
 
 /// Find `v` in `dict` by value, returning its position if present. Linear scan:
 /// finalized frames are small, and a hashset dedup is a later optimization
 /// (the bijection proof is unaffected by the search strategy).
-fn dict_find<T: IndexLike>(dict: &Vec<T>, v: T) -> (r: Option<usize>)
+pub(crate) fn dict_find<T: IndexLike>(dict: &Vec<T>, v: T) -> (r: Option<usize>)
     ensures
         match r {
             Some(c) => c < dict@.len() && dict@[c as int] == v,
@@ -286,9 +317,14 @@ pub proof fn lemma_mapped_push<T>(d: Seq<(T, usize)>, n: nat)
 
 /// Encode a finalized frame (sorted strictly ascending by index) as run-coalesced
 /// runs. The bijection: `decode(compress_runs(d)) == d` at the `nat` index level.
+/// `rlimit` pinned: the run-coalescing invariant carries several `expand_*`
+/// sequence identities whose instantiation is near the default budget (z3-seed
+/// flaky otherwise).
+#[verifier::rlimit(800)]
 pub fn compress_runs<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFrame<T>)
     requires
-        forall|a: int, b: int| 0 <= a < b < diffs@.len() ==> diffs@[a].1 < diffs@[b].1,
+        forall|a: int, b: int| #![trigger diffs@[a].1, diffs@[b].1]
+            0 <= a < b < diffs@.len() ==> diffs@[a].1 < diffs@[b].1,
     ensures
         r.wf(),
         r.decode() == mapped_diffs(diffs@, diffs@.len()),
@@ -310,7 +346,8 @@ pub fn compress_runs<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFrame<T>)
                 ==> cur_start as nat == diffs@[i as int - cur_vals@.len()].1 as nat,
             cur_vals@.len() > 0
                 ==> cur_start as nat + cur_vals@.len() - 1 == diffs@[i as int - 1].1 as nat,
-            forall|a: int, b: int| 0 <= a < b < diffs@.len() ==> diffs@[a].1 < diffs@[b].1,
+            forall|a: int, b: int| #![trigger diffs@[a].1, diffs@[b].1]
+                0 <= a < b < diffs@.len() ==> diffs@[a].1 < diffs@[b].1,
         decreases diffs@.len() - i,
     {
         let v = diffs[i].0;
@@ -431,6 +468,33 @@ impl<T: IndexLike, I: IndexLike> FrameEncoding<T, I> {
         match self {
             FrameEncoding::Plain(v) => v@,
             FrameEncoding::Dict(d) => d.decode(),
+        }
+    }
+
+    /// Executable decode: materialize the flat diff sequence for a finalized
+    /// frame. This is what the two-stack restore calls to bring a compressed
+    /// frame back to plain. `r@ == decode()`.
+    pub fn decode_exec(&self) -> (r: Vec<(T, I)>)
+        requires self.wf(),
+        ensures r@ == self.decode(),
+    {
+        match self {
+            FrameEncoding::Plain(v) => {
+                let mut copy: Vec<(T, I)> = Vec::new();
+                let mut i: usize = 0;
+                while i < v.len()
+                    invariant
+                        i <= v@.len(),
+                        copy@ == v@.subrange(0, i as int),
+                    decreases v@.len() - i,
+                {
+                    copy.push(v[i]);
+                    i += 1;
+                }
+                assert(copy@ =~= v@);
+                copy
+            }
+            FrameEncoding::Dict(d) => d.decode_exec(),
         }
     }
 }

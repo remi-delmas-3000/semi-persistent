@@ -1132,6 +1132,9 @@ where
     /// arena's end — a *larger* index than anything in the list, which the old
     /// index-ordering crutch forbade and is now simply fine), links it to the
     /// old head, and makes it the new model[l][0].
+    // rlimit pinned: borderline against the default budget (z3-seed flaky once
+    // the crate's function count shifts the solver ordering).
+    #[verifier::rlimit(800)]
     pub(crate) fn prepend_raw(&mut self, l: usize, payload: T)
         requires
             old(self).wf(),

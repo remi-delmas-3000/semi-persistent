@@ -33,6 +33,14 @@ name = "tracked_vec_bench"
 harness = false
 
 [[bench]]
+name = "diff_compress_bench"
+harness = false
+
+[[bench]]
+name = "two_stack_bench"
+harness = false
+
+[[bench]]
 name = "nested_mark_bench"
 harness = false
 
