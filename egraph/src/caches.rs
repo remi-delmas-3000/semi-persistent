@@ -289,6 +289,77 @@ impl<
         self.probe_hints_fp(self.fingerprint(op, children), op, children, skip)
     }
 
+    /// `probe_hints_fp` that also promotes the answer to the front of its
+    /// bucket. Bucket order carries no meaning (every candidate is validated
+    /// against arena content), so the swap is free of correctness weight; it
+    /// matters because a search workload re-probes the same terms constantly
+    /// while restores leave content-stale hints in front of them - measured
+    /// 36 to 51 entries scanned per probe on the search benchmarks against
+    /// 1.19 on a saturation-only workload.
+    fn probe_hints_fp_mut(
+        &mut self,
+        fp: Fingerprint,
+        op: &O,
+        children: &[G; K],
+        skip: Option<L>,
+    ) -> Option<G> {
+        let slot = *self.index.get(&FpKey(fp))?;
+        let live = self.nodes.len().as_usize();
+        match slot.as_single() {
+            Some(raw) => {
+                let id = L::from_usize(raw);
+                if Some(id) == skip || raw >= live {
+                    return None;
+                }
+                let n = self.nodes.get(id);
+                (n.op() == *op && n.children == *children).then(|| n.global_id())
+            }
+            None => {
+                let ix = slot.spill_index();
+                // Lazy reclamation of BOUNDS-DEAD hints, during a scan we
+                // are performing anyway, so restore still does no index work.
+                // An id past the live length names a cell the arena has
+                // truncated; nothing can bring that hint back, because a
+                // later intern reusing the id pushes its own fresh hint.
+                //
+                // Content-stale entries are deliberately NOT reclaimed here.
+                // "The content does not match this QUERY" is not the same as
+                // "this hint is dead": two contents can share a fingerprint,
+                // so a node whose current content collides with the query's
+                // fingerprint still needs its hint. Dropping on query
+                // mismatch broke completeness and silently interned 39
+                // duplicate nodes on math-microbenchmark. The correct test is
+                // fingerprint(current content) != fp, which needs a cached
+                // per-node fingerprint to be cheap - see the notes at
+                // FixedArityNode.
+                let mut hit: Option<G> = None;
+                let mut pos: usize = 0;
+                while pos < self.spill[ix].len() {
+                    let id = self.spill[ix][pos];
+                    if id.as_usize() >= live {
+                        self.spill[ix].swap_remove(pos);
+                        continue;
+                    }
+                    if Some(id) == skip {
+                        pos += 1;
+                        continue;
+                    }
+                    let n = self.nodes.get(id);
+                    if n.op() == *op && n.children == *children {
+                        hit = Some(n.global_id());
+                        break;
+                    }
+                    pos += 1;
+                }
+                let gid = hit?;
+                if pos != 0 {
+                    self.spill[ix].swap(0, pos);
+                }
+                Some(gid)
+            }
+        }
+    }
+
     /// `probe_hints` with the fingerprint already in hand: the callers that
     /// need it afterwards (intern, recanonize) compute it once and thread it
     /// rather than hashing the same content twice per operation.
@@ -354,6 +425,16 @@ impl<
         }
         let ix = slot.spill_index();
         let b = &self.spill[ix];
+        // Skip a hint this bucket already carries. Buckets are probed orders
+        // of magnitude more often than they are pushed to (measured 79M
+        // probes against thousands of pushes on the search benchmarks), so
+        // paying a bounded membership scan here to keep every later scan
+        // shorter is the right side of the trade: it removed 40% of bucket
+        // entries on search-portfolio, which were re-hints of a node
+        // returning to content it had held before.
+        if b.iter().any(|e| e.as_usize() == id.as_usize()) {
+            return;
+        }
         if b.len() >= HINT_COMPACT_LEN && b.len().is_power_of_two() {
             let live = self.nodes.len().as_usize();
             let frameless = self.frames.is_empty();
@@ -390,7 +471,7 @@ impl<
         // One fingerprint for the pair of operations: the probe's hash is
         // reused by the insert instead of being recomputed on a miss.
         let fp = self.fingerprint(&op, &children);
-        if let Some(gid) = self.probe_hints_fp(fp, &op, &children, None) {
+        if let Some(gid) = self.probe_hints_fp_mut(fp, &op, &children, None) {
             return InsertResult::Hit { global_id: gid };
         }
         let lid = self.insert_fp(fp, global_id, op, children);
@@ -455,7 +536,7 @@ impl<
         // stays in its bucket (a restore past this point revalidates it), and
         // a self-hint from earlier content is not a collision.
         if let Some(existing_gid) =
-            self.probe_hints_fp(new_fp, &node.op(), &node.children, Some(local_id))
+            self.probe_hints_fp_mut(new_fp, &node.op(), &node.children, Some(local_id))
         {
             collisions.push((gid, existing_gid));
         }
@@ -716,6 +797,16 @@ impl<
         }
         let ix = slot.spill_index();
         let b = &self.spill[ix];
+        // Skip a hint this bucket already carries. Buckets are probed orders
+        // of magnitude more often than they are pushed to (measured 79M
+        // probes against thousands of pushes on the search benchmarks), so
+        // paying a bounded membership scan here to keep every later scan
+        // shorter is the right side of the trade: it removed 40% of bucket
+        // entries on search-portfolio, which were re-hints of a node
+        // returning to content it had held before.
+        if b.iter().any(|e| e.as_usize() == id.as_usize()) {
+            return;
+        }
         if b.len() >= HINT_COMPACT_LEN && b.len().is_power_of_two() {
             let live = self.nodes.len().as_usize();
             let frameless = self.frames.is_empty();
