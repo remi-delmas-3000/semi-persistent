@@ -270,3 +270,31 @@ or unknown under stock too. Regenerate: `sweep3c.sh` against
 `tests/regression/smt_files`. The SMT restore numbers are unchanged by the
 packed slot (cyclic_scheduler.3 restore 25.4ms, boolean_backtracking
 unsat).
+
+### The forward path, and the VecT-in-sundance experiment (closed, negative)
+
+After the hint index, the residual SMT wall gap was forward-path. Leaf
+sampling found 60% of CPU in two per-event O(#ops) registry scans of the
+group-completion machinery, on instances that declare no group operators:
+`inverse_cancel_repair`'s `:inverse` precheck once per repair round, and the
+completion loop's `merged_is_unit` scan once per merge. Replacing both with
+map-population reads (commit `074113f`) took cyclic_scheduler.3 from 0.75s
+to 0.36s wall (stock 0.16s) and reader_writer.3 from 1.18s to 0.31s (stock
+0.20s); the profile is flat afterwards, no function above 10% of leaf
+samples. The per-backtrack gap against the stock undo trail stands at about
+2.3x and 1.6x total wall.
+
+**VecT columns in the SMT backend: measured, no effect.** The trail
+hypothesis (chronological capture on the hot columns closes the remaining
+gap) was tested by switching every cache arena column (fixed and variable
+node arenas, the child pool, the literal arena) from `VecI` to `VecT` and
+rerunning the two profile instances idle: restore 24.1ms vs 25.4ms and wall
+0.36s vs 0.36s on cyclic_scheduler.3, wall 0.31s vs 0.31s on
+reader_writer.3. Flat within noise, consistent with capture branches never
+appearing in any profile round. The experiment is reverted; `VecT` remains
+the verified chronological-capture store with this revisit trigger: a
+profile that shows capture-branch or frame-finalization cost, or a workload
+whose write set per frame is large enough that the unique discipline's flag
+maintenance measures. The store-selection interface (frame vs trail diffs
+from the command line) remains motivated by the EqSat/SMT trade-off, not by
+this instance family.

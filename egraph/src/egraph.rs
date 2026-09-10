@@ -2040,15 +2040,14 @@ where
             // mode did). Sweep the full spliced use list; parents that are already
             // canonical early-return inside recanonize. Rare path (a class becomes a unit
             // class at most once per op), so the scratch collection is acceptable.
+            // Iterate the unit-node map's own entries: its population is the
+            // number of declared `:identity` elements (zero for EUF), where
+            // the op-registry chain scanned every mset and set op per merge.
             let merged_is_unit = {
-                let units = &self.unit_node;
                 let classes = &self.classes;
-                self.ops.mset_ops().chain(self.ops.set_ops()).any(|op| {
-                    units
-                        .get_by_key(&op)
-                        .copied()
-                        .is_some_and(|u| classes.find_const(u) == current_surv)
-                })
+                self.unit_node
+                    .iter()
+                    .any(|(_, u)| classes.find_const(*u) == current_surv)
             };
             if merged_is_unit {
                 let parents: Vec<Cfg::G> = self.classes.uses().iter(surv_list).collect();
@@ -2305,9 +2304,12 @@ where
     /// node and needs no cap. MSet only, mirroring the build path (`add`'s Set arm does not
     /// cancel). Free for a graph with no `:inverse` op.
     fn inverse_cancel_repair(&mut self) -> bool {
-        // O(#ops) precheck, so a program with no group operator pays nothing.
-        let any_inverse = self.ops.mset_ops().any(|op| self.inverse_op(op).is_some());
-        if !any_inverse {
+        // O(1) precheck: the inverse-op map is populated only by `:inverse`
+        // declarations, so a program with no group operator pays two loads.
+        // (This was an O(#ops) registry scan per repair round; measured at
+        // the top of the QF_UF forward-path profile, where rounds run per
+        // rebuild per assertion and no instance declares an inverse.)
+        if self.inverse_op.len() == 0 {
             return false;
         }
         // Collect first, apply second: `add`/`merge` below mutate the node store that
