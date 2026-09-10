@@ -257,6 +257,72 @@ pub fn packed_get(words: &Vec<u64>, bits: u8, i: usize) -> (c: usize)
     ((words[wi] >> shift) & mask) as usize
 }
 
+/// An immutable value-only frame: `dict` plus a narrow/bit-packed `codes` column,
+/// no index column. This is the cold tier of the live-path value-major diff log
+/// (`diff_log.rs`): one such frame per finalized frame, decoding to that frame's
+/// value sequence, while the diff log keeps the index column contiguous and whole.
+/// Unlike `DictFrame` it drops `idxs` (the diff log owns them), so it is the value
+/// axis alone. Built once from a value slice and never appended to, which is what
+/// lets its codes be sub-byte packed.
+pub struct ValFrame<T> {
+    pub dict: Vec<T>,
+    pub codes: Codes,
+}
+
+impl<T: Copy> ValFrame<T> {
+    /// Every code indexes the dictionary.
+    pub open spec fn wf(&self) -> bool {
+        forall|t: int| 0 <= t < self.codes.view().len()
+            ==> (#[trigger] self.codes.view()[t]) < self.dict@.len()
+    }
+
+    /// The value sequence this frame decodes to. Spec over `dict`/`codes` alone, so
+    /// it needs no `IndexLike` bound (the value column consumer, `DiffVals`, is
+    /// generic over `T`).
+    pub open spec fn decode(&self) -> Seq<T> {
+        Seq::new(self.codes.view().len(), |i: int| self.dict@[self.codes.view()[i] as int])
+    }
+
+    pub fn len(&self) -> (n: usize)
+        ensures n == self.decode().len(),
+    {
+        self.codes.len()
+    }
+
+    /// The value at position `i` (dictionary lookup through the packed code).
+    pub fn decode_at(&self, i: usize) -> (v: T)
+        requires self.wf(), i < self.decode().len(),
+        ensures v == self.decode()[i as int],
+    {
+        let c = self.codes.get(i);
+        self.dict[c]
+    }
+
+    /// Length-based byte count (deterministic; for measurement).
+    #[verifier::external_body]
+    pub fn byte_len(&self) -> usize {
+        self.dict.len() * core::mem::size_of::<T>() + self.codes.byte_len()
+    }
+}
+
+impl<T: IndexLike> ValFrame<T> {
+    /// Value-dictionary-encode `vals` into an immutable frame: dedup to a dictionary
+    /// (`assign_codes`, O(N) hash), then narrow the codes to the smallest width that
+    /// fits (`Codes::from_usize`, bit-packed for `D <= 16`). `decode()` reproduces
+    /// `vals` exactly.
+    pub fn compress(vals: &Vec<T>) -> (r: ValFrame<T>)
+        ensures
+            r.wf(),
+            r.decode() == vals@,
+    {
+        let (dict, ucodes) = assign_codes(vals);
+        let codes = Codes::from_usize(&ucodes, dict.len());
+        let r = ValFrame { dict, codes };
+        assert(r.decode() =~= vals@);
+        r
+    }
+}
+
 /// One finalized frame's diffs with the value column dictionary-encoded and the
 /// index column kept verbatim. `codes[t]` indexes `dict` to entry `t`'s value;
 /// `idxs[t]` is entry `t`'s original cell index.

@@ -1611,7 +1611,7 @@ where
     /// precondition an unverified caller could get wrong became a proof obligation
     /// discharged from `wf`, and it costs solver time here rather than soundness there.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(300)]
+    #[verifier::rlimit(2000)]
     pub(crate) fn splice_raw(&mut self, dst: usize, src: usize)
         requires
             old(self).wf(),

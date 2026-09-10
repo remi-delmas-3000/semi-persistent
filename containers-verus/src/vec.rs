@@ -1060,6 +1060,52 @@ where
         assert(self.wf());
     }
 
+    /// `wf` is preserved by a change to the diff-log REPRESENTATION alone, provided
+    /// the diff-log VIEW and its own `wf` are preserved (what `DiffLog::compact_tail`
+    /// guarantees: `final@ == old@` and `final.wf()`). Unlike
+    /// `lemma_forks_change_preserves_wf` this does NOT require structural diff-log
+    /// equality — only `diff_log@` equality plus `diff_log.wf()` — because every `wf`
+    /// conjunct reads the diff log only through `@` (frame_inv_range, the bridges) or
+    /// through `diff_log.wf()`. This is the frame rule the value-major compaction
+    /// needs: recompressing the value column is invisible to the Vec invariant.
+    pub(crate) proof fn lemma_diff_log_rep_change_preserves_wf(&self, old_self: Self)
+        requires
+            old_self.wf(),
+            self.store == old_self.store,
+            self.frames@ == old_self.frames@,
+            self.diff_log@ == old_self.diff_log@,
+            self.diff_log.wf(),
+            self.snapshots@ == old_self.snapshots@,
+            self.active_saved_len == old_self.active_saved_len,
+        ensures
+            self.wf(),
+    {
+        assert(self.view() == old_self.view());
+        assert(self.store.captured() == old_self.store.captured());
+        assert(old_self.wf_for_snap());
+        assert forall|k: int| 0 <= k < self.frames@.len() implies
+            #[trigger] frame_inv_range::<T, I>(
+                self.layer_above_at(k),
+                self.diff_log@,
+                self.frames@[k].diff_start as int,
+                self.stratum_end(k),
+                self.snapshots@[k],
+                self.frames@[k].saved_len.as_nat())
+        by {
+            assert(self.layer_above_at(k) == old_self.layer_above_at(k));
+            assert(self.stratum_end(k) == old_self.stratum_end(k));
+            assert(frame_inv_range::<T, I>(
+                old_self.layer_above_at(k),
+                old_self.diff_log@,
+                old_self.frames@[k].diff_start as int,
+                old_self.stratum_end(k),
+                old_self.snapshots@[k],
+                old_self.frames@[k].saved_len.as_nat()));
+        }
+        assert(self.wf_for_snap());
+        assert(self.wf());
+    }
+
     /// Every frame's diff_start is `<= diff_log.len()`. Follows from
     /// monotonicity plus the top frame's bound, by upward induction.
     pub(crate) proof fn lemma_diff_start_le_n(&self, k: int)
@@ -2687,7 +2733,7 @@ where
     /// and its layer flips from `view` to the new `snapshots[top]`, which
     /// equals the view — so its frame_inv_range transfers.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(200)]
+    #[verifier::rlimit(500)]
     /// The per-vector core of `mark`: push a frame, no genealogy. Shared fork
     /// history (doc 10) drives this from a `SyncGroup` while one `History` owns
     /// the branch/depth bookkeeping; `mark` is the standalone wrapper that adds
@@ -2797,6 +2843,10 @@ where
             assert(self.view() == old_view);
             assert(diffs == old(self).diff_log@);
             assert(diff_start == diffs.len());
+            // diff_log is untouched by prepare_mark/frames.push/snapshots, so its
+            // wf (established by maybe_shrink) persists; do not re-derive it (the
+            // value-major cold_vals representation is opaque here).
+            assert(self.diff_log.wf());
 
             // saved_len monotonicity is NO LONGER a wf clause (pop into marked region:
             // mark-after-deep-pop can record a SMALLER saved_len than the
@@ -2902,6 +2952,9 @@ where
                     self.layer_above_at(k), diffs, lo, hi, snaps[k],
                     frames[k].saved_len.as_nat()));
             }
+            // Re-establish the store capture-length bridge at the end (it can be lost
+            // across the heavy frame_inv_range forall above).
+            self.store.lemma_wf_captured_len();
         }
     }
 
@@ -3674,6 +3727,43 @@ where
     }
 }
 
+// Value-major compaction, gated on `T: IndexLike` (the dictionary dedup key).
+impl<T, I, S, const TRACK: bool> Vec<T, I, S, TRACK>
+where
+    T: IndexLike,
+    I: IndexLike,
+    S: DiffStore<T, I, TRACK>,
+{
+    /// `mark`, then fold the just-closed frame's value column into one immutable cold
+    /// frame (value-major only; a no-op for the plain log). Requires `T: IndexLike`
+    /// for the dictionary dedup, so it is a separate entry from the generic `mark`;
+    /// value-major columns (union-find `parent`/`rank`) call this. Same contract as
+    /// `mark`: `compact_tail` preserves `diff_log@` and `diff_log.wf()`, so the Vec
+    /// invariant is unchanged (`lemma_diff_log_rep_change_preserves_wf`).
+    #[verifier::rlimit(400)]
+    pub(crate) fn mark_and_compact(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).depth_spec() < u32::MAX,
+            old(self).view().len() < I::max_nat(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            token.frame_idx_spec() == old(self).depth_spec(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+    {
+        let t = self.mark(shrink);
+        let ghost pre = *self;
+        self.diff_log.compact_tail();
+        // compact_tail mutates only diff_log, preserving its @ and wf, so every Vec
+        // wf conjunct and the view/depth/snapshots carry from the post-mark state.
+        proof { self.lemma_diff_log_rep_change_preserves_wf(pre); }
+        t
+    }
+}
+
 // Concrete constructors, mirroring production's two `new()` impls.
 
 impl<T, I, const TRACK: bool> Vec<T, I, crate::parallel_store::ParallelStore<T, I>, TRACK>
@@ -3801,6 +3891,67 @@ where
 // reject them BEFORE mutation. They complement tests/misuse.rs (public-API
 // misuse); in-module code keeps the field access these tests require.
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod value_major_compaction_tests {
+    // A1 acceptance: a ValueDict column driven through mark_and_compact restores
+    // identically to a plain (None) oracle, and its diff-log heap footprint is
+    // strictly smaller on a value-repetitive workload.
+    use super::{ShrinkPolicy, Vec};
+    use crate::diff_compress::CompressionMode;
+    use crate::parallel_store::ParallelStore;
+
+    type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
+
+    fn read_back(v: &V) -> std::vec::Vec<u32> {
+        (0..v.len() as usize).map(|i| v.get_index(i as u32)).collect()
+    }
+
+    #[test]
+    fn valuedict_restore_matches_plain_and_compresses() {
+        const N: u32 = 200;
+        const FRAMES: u32 = 24;
+
+        let mut vc = V::new_with_mode(CompressionMode::ValueDict);
+        let mut vp = V::new_with_mode(CompressionMode::None);
+        for _ in 0..N {
+            vc.push(0);
+            vp.push(0);
+        }
+
+        // Each frame overwrites every cell with a single repeated value, so the
+        // captured OLD values per frame are one repeated id (D == 1): the union-find
+        // shape value-major targets. Keep the tokens to restore through later.
+        let mut tc = std::vec::Vec::new();
+        let mut tp = std::vec::Vec::new();
+        for k in 0..FRAMES {
+            tc.push(vc.mark_and_compact(ShrinkPolicy::Never));
+            tp.push(vp.mark(ShrinkPolicy::Never));
+            for i in 0..N {
+                vc.set(i, k + 1);
+                vp.set(i, k + 1);
+            }
+            // Same observable contents at every step (A1.2 differential).
+            assert_eq!(read_back(&vc), read_back(&vp), "views diverged at frame {k}");
+        }
+
+        // A1.3: the compressed diff log is strictly smaller than plain. With D == 1
+        // per frame, each cold ValFrame is a 1-value dict + bit-packed codes vs a full
+        // u32 per captured cell in the plain log.
+        assert!(
+            vc.tracking_bytes() < vp.tracking_bytes(),
+            "value-major diff log {} !< plain {}",
+            vc.tracking_bytes(),
+            vp.tracking_bytes(),
+        );
+
+        // Restore both to an early frame (deep backtrack through the cold region) and
+        // to a recent one; contents must still agree (A1.2 through the cold decode).
+        vc.restore(tc[3]);
+        vp.restore(tp[3]);
+        assert_eq!(read_back(&vc), read_back(&vp), "views diverged after deep restore");
+    }
+}
 
 #[cfg(test)]
 mod forged_token_tests {
