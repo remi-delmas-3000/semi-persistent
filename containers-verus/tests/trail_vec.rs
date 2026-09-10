@@ -193,3 +193,82 @@ proptest! {
         }
     }
 }
+
+/// `VecD`: the runtime-selected store must be observationally identical to
+/// the oracle for EVERY kind, through marks, deep restores, and duplicate
+/// writes (the trail kind) — one op tape, four columns compared in lockstep.
+#[test]
+fn vecd_kinds_match_oracle() {
+    use semi_persistent_containers_verus::{StoreKind, VecD};
+    let kinds = [StoreKind::Inline, StoreKind::Parallel, StoreKind::Trail];
+    let mut cols: Vec<VecD<u32, u32, true>> =
+        kinds.iter().map(|&k| VecD::new_kind(k)).collect();
+    let mut oracle: Vec<u32> = Vec::new();
+    let mut snaps: Vec<(Vec<VecToken>, Vec<u32>)> = Vec::new();
+
+    let mut seed = 0x9e3779b9u32;
+    let mut rng = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    for step in 0..4000u32 {
+        match rng() % 100 {
+            0..=34 => {
+                let v = rng();
+                for c in cols.iter_mut() {
+                    c.try_push(v).unwrap();
+                }
+                oracle.push(v);
+            }
+            35..=74 => {
+                if oracle.is_empty() {
+                    continue;
+                }
+                let i = (rng() as usize) % oracle.len();
+                let v = rng();
+                for c in cols.iter_mut() {
+                    c.set(i as u32, v);
+                }
+                oracle[i] = v;
+            }
+            75..=84 => {
+                let e = oracle.pop();
+                for c in cols.iter_mut() {
+                    assert_eq!(c.pop(), e, "pop mismatch at step {step}");
+                }
+            }
+            85..=92 => {
+                if snaps.len() >= 12 {
+                    continue;
+                }
+                let toks = cols
+                    .iter_mut()
+                    .map(|c| c.try_mark(ShrinkPolicy::Never).unwrap())
+                    .collect();
+                snaps.push((toks, oracle.clone()));
+            }
+            _ => {
+                if snaps.is_empty() {
+                    continue;
+                }
+                let i = (rng() as usize) % snaps.len();
+                let (toks, snap) = snaps[i].clone();
+                for (c, t) in cols.iter_mut().zip(toks) {
+                    c.try_restore(t).unwrap();
+                }
+                oracle = snap;
+                snaps.truncate(i);
+            }
+        }
+        for (k, c) in cols.iter().enumerate() {
+            assert_eq!(c.len() as usize, oracle.len(), "len mismatch kind {k} step {step}");
+        }
+    }
+    for (i, expected) in oracle.iter().enumerate() {
+        for (k, c) in cols.iter().enumerate() {
+            assert_eq!(c.get(i as u32), *expected, "kind {k} final mismatch at {i}");
+        }
+    }
+}

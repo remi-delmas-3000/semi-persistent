@@ -92,6 +92,14 @@ where
             old(self).data().len() + 1 < I::max_nat(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data() == old(self).data().push(value),
             // Flag maintenance is TRACK-conditional: an untracked store may
             // skip it wholesale (production parity — its flags are dead).
@@ -101,6 +109,14 @@ where
         requires old(self).wf(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             old(self).data().len() == 0 ==> {
                 &&& r is None
                 &&& final(self).data() == old(self).data()
@@ -119,6 +135,14 @@ where
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data() == old(self).data().update(i.as_nat() as int, value),
             // TRACK-conditional for the same reason as `push`/`pop` above, and
             // it is a performance contract, not just a modelling nicety.
@@ -138,6 +162,14 @@ where
             len.as_nat() <= old(self).data().len(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data() == old(self).data().subrange(0, len.as_nat() as int),
             TRACK ==> final(self).captured() == old(self).captured().subrange(0, len.as_nat() as int);
 
@@ -151,6 +183,14 @@ where
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data() == old(self).data(),
             TRACK ==> final(self).captured()
                 == old(self).captured().update(i.as_nat() as int, true);
@@ -167,6 +207,14 @@ where
             len.as_nat() < I::max_nat(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data().len() == len.as_nat(),
             // existing prefix preserved
             forall|j: int| 0 <= j < len.as_nat() && j < old(self).data().len()
@@ -200,6 +248,14 @@ where
                         && (#[trigger] prev_diffs@[k]).as_nat() == j as nat,
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data() == old(self).data(),
             TRACK ==> forall|i: int| 0 <= i < saved_len.as_nat() ==>
                 #[trigger] final(self).captured()[i] == false;
@@ -210,12 +266,12 @@ where
     /// runtime flags — the trail discipline). The reconstruction model
     /// (`overlay`, first-entry-wins) is correct for both; only the sealing
     /// and reordering paths require the unique discipline.
-    spec fn unique_capture_spec() -> bool;
+    spec fn unique_capture_spec(&self) -> bool;
 
     /// Exec twin of `unique_capture_spec`: the sealing and reordering paths
     /// gate on it at runtime (a chronological column never seals).
-    fn unique_capture() -> (b: bool)
-        ensures b == Self::unique_capture_spec();
+    fn unique_capture(&self) -> (b: bool)
+        ensures b == self.unique_capture_spec();
 
     /// First-write-wins capture (unique discipline) or unconditional append
     /// (chronological discipline). If the slot is in-frame and not yet
@@ -228,6 +284,14 @@ where
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(diff_log).wf(),
             final(self).data() == old(self).data(),
             // First-write-wins (all TRACK-conditional; an untracked store's
@@ -254,9 +318,9 @@ where
             (TRACK && i.as_nat() < saved_len.as_nat()
                 && old(self).captured()[i.as_nat() as int])
                 ==> {
-                    &&& Self::unique_capture_spec()
+                    &&& old(self).unique_capture_spec()
                             ==> final(diff_log)@ == old(diff_log)@
-                    &&& !Self::unique_capture_spec()
+                    &&& !old(self).unique_capture_spec()
                             ==> final(diff_log)@ == old(diff_log)@.push(
                                     (old(self).data()[i.as_nat() as int], i))
                     &&& final(self).captured() == old(self).captured()
@@ -272,6 +336,14 @@ where
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(diff_log).wf(),
             final(self).data() == old(self).data(),
             (TRACK && i.as_nat() < saved_len.as_nat()) ==> {
@@ -300,23 +372,31 @@ where
     /// measured DOMINATING the frame-wise memcpy restore before this flag existed.
     /// A store that clears sparsely by name (InlineStore) returns true and gets the
     /// real slice.
-    spec fn needs_replayed_indices_spec() -> bool;
+    spec fn needs_replayed_indices_spec(&self) -> bool;
 
-    fn needs_replayed_indices() -> (b: bool)
-        ensures b == Self::needs_replayed_indices_spec();
+    fn needs_replayed_indices(&self) -> (b: bool)
+        ensures b == self.needs_replayed_indices_spec();
 
     fn begin_restore(&mut self, replayed_diffs: &[I])
         requires
             old(self).wf(),
             // The named-slots justification is only owed when the store reads the
             // slice; a wholesale-clearing store establishes all-clear without it.
-            (TRACK && Self::needs_replayed_indices_spec())
+            (TRACK && old(self).needs_replayed_indices_spec())
                 ==> forall|j: int| 0 <= j < old(self).captured().len()
                     && #[trigger] old(self).captured()[j]
                     ==> exists|k: int| 0 <= k < replayed_diffs@.len()
                             && (#[trigger] replayed_diffs@[k]).as_nat() == j as nat,
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data() == old(self).data(),
             TRACK ==> forall|j: int| 0 <= j < final(self).captured().len()
                 ==> !(#[trigger] final(self).captured()[j]);
@@ -340,6 +420,14 @@ where
             lo <= hi <= diff_log@.len(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data() == crate::vec::overlay::<T, I>(
                 old(self).data(), diff_log@, lo as int, hi as int),
             TRACK ==> forall|j: int| 0 <= j < final(self).captured().len()
@@ -363,6 +451,14 @@ where
                 ==> old(self).data().len() + 1 < I::max_nat(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             // In-frame, in-bounds: overwrite.
             (index.as_nat() < target_saved_len.as_nat()
                 && index.as_nat() < old(self).data().len())
@@ -399,6 +495,14 @@ where
                 ==> !(#[trigger] old(self).captured()[j]),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data() == old(self).data(),
             // Within `[0, saved_len)`, captured iff some surviving diff entry
             // points at this index. Above `saved_len`, unspecified (those
@@ -414,6 +518,14 @@ where
         requires old(self).wf(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
             final(self).data() == old(self).data(),
             TRACK ==> final(self).captured() == old(self).captured();
 
@@ -432,6 +544,96 @@ where
     {
         None
     }
+}
+
+/// Definitional broadcasts for the three base stores' constant discipline
+/// answers. The trait's constancy ensures mention `unique_capture_spec` /
+/// `needs_replayed_indices_spec` applications whose open bodies the solver
+/// only unfolds when an occurrence triggers; these pin the constants at every
+/// occurrence. They live here (not in the store modules) so each store module
+/// can `broadcast use` its lemma without a definitional cycle.
+pub broadcast proof fn lemma_inline_discipline<T, I, const TRACK: bool>(
+    s: &crate::inline_store::InlineStore<T, I>,
+)
+where
+    T: crate::tagged::Tagged,
+    I: crate::index_like::IndexLike,
+    ensures
+        #[trigger] <crate::inline_store::InlineStore<T, I> as DiffStore<T, I, TRACK>>
+            ::unique_capture_spec(s) == true,
+        #[trigger] <crate::inline_store::InlineStore<T, I> as DiffStore<T, I, TRACK>>
+            ::needs_replayed_indices_spec(s) == true,
+{
+}
+
+pub broadcast proof fn lemma_parallel_discipline<T, I, const TRACK: bool>(
+    s: &crate::parallel_store::ParallelStore<T, I>,
+)
+where
+    T: Sized + Copy,
+    I: crate::index_like::IndexLike,
+    ensures
+        #[trigger] <crate::parallel_store::ParallelStore<T, I> as DiffStore<T, I, TRACK>>
+            ::unique_capture_spec(s) == true,
+        #[trigger] <crate::parallel_store::ParallelStore<T, I> as DiffStore<T, I, TRACK>>
+            ::needs_replayed_indices_spec(s) == false,
+{
+}
+
+pub broadcast proof fn lemma_trail_discipline<T, I, const TRACK: bool>(
+    s: &crate::trail_store::TrailStore<T, I>,
+)
+where
+    T: Sized + Copy,
+    I: crate::index_like::IndexLike,
+    ensures
+        #[trigger] <crate::trail_store::TrailStore<T, I> as DiffStore<T, I, TRACK>>
+            ::unique_capture_spec(s) == false,
+        #[trigger] <crate::trail_store::TrailStore<T, I> as DiffStore<T, I, TRACK>>
+            ::needs_replayed_indices_spec(s) == false,
+{
+}
+
+/// Definitional broadcast for `DynStore`'s delegated spec views: pins each
+/// view to its variant's, so a caller-supplied fact phrased over the enum
+/// reaches the inner store's precondition (and back) in every proof context
+/// that mentions the application. Lives here for the same no-cycle reason as
+/// the discipline lemmas above.
+pub broadcast proof fn lemma_dyn_views<T, I, const TRACK: bool>(
+    s: &crate::dyn_store::DynStore<T, I>,
+)
+where
+    T: crate::tagged::Tagged,
+    I: crate::index_like::IndexLike,
+    ensures
+        (#[trigger] <crate::dyn_store::DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(s))
+            == match s {
+                crate::dyn_store::DynStore::Inline(inner) =>
+                    <crate::inline_store::InlineStore<T, I> as DiffStore<T, I, TRACK>>::captured(inner),
+                crate::dyn_store::DynStore::Parallel(inner) =>
+                    <crate::parallel_store::ParallelStore<T, I> as DiffStore<T, I, TRACK>>::captured(inner),
+                crate::dyn_store::DynStore::Trail(inner) =>
+                    <crate::trail_store::TrailStore<T, I> as DiffStore<T, I, TRACK>>::captured(inner),
+            },
+        (#[trigger] <crate::dyn_store::DynStore<T, I> as DiffStore<T, I, TRACK>>::data(s))
+            == match s {
+                crate::dyn_store::DynStore::Inline(inner) =>
+                    <crate::inline_store::InlineStore<T, I> as DiffStore<T, I, TRACK>>::data(inner),
+                crate::dyn_store::DynStore::Parallel(inner) =>
+                    <crate::parallel_store::ParallelStore<T, I> as DiffStore<T, I, TRACK>>::data(inner),
+                crate::dyn_store::DynStore::Trail(inner) =>
+                    <crate::trail_store::TrailStore<T, I> as DiffStore<T, I, TRACK>>::data(inner),
+            },
+        (#[trigger] <crate::dyn_store::DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(s))
+            == match s {
+                crate::dyn_store::DynStore::Inline(inner) =>
+                    <crate::inline_store::InlineStore<T, I> as DiffStore<T, I, TRACK>>::wf(inner),
+                crate::dyn_store::DynStore::Parallel(inner) =>
+                    <crate::parallel_store::ParallelStore<T, I> as DiffStore<T, I, TRACK>>::wf(inner),
+                crate::dyn_store::DynStore::Trail(inner) =>
+                    <crate::trail_store::TrailStore<T, I> as DiffStore<T, I, TRACK>>::wf(inner),
+            },
+{
 }
 
 } // verus!

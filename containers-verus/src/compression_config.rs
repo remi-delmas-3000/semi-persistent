@@ -181,4 +181,23 @@ pub fn env_compress_default() -> bool {
     })
 }
 
+/// Experiment/deployment lever: `SEMPER_DIFF=trail|parallel|inline` selects
+/// the store kind for `VecD` columns constructed through
+/// `env_diff_store_kind`. Unset or unrecognized: `Inline` (the historical
+/// default). Read once, cached. `external_body` for the same reason as
+/// `env_compress_default`: environment access with no spec content — every
+/// kind carries the same verified contract, so the flag is
+/// correctness-invisible by construction.
+#[verifier::external_body]
+pub fn env_diff_store_kind() -> crate::dyn_store::StoreKind {
+    static KIND: std::sync::OnceLock<crate::dyn_store::StoreKind> = std::sync::OnceLock::new();
+    *KIND.get_or_init(|| {
+        match std::env::var("SEMPER_DIFF").as_deref().map(str::trim) {
+            Ok(v) if v.eq_ignore_ascii_case("trail") => crate::dyn_store::StoreKind::Trail,
+            Ok(v) if v.eq_ignore_ascii_case("parallel") => crate::dyn_store::StoreKind::Parallel,
+            _ => crate::dyn_store::StoreKind::Inline,
+        }
+    })
+}
+
 } // verus!

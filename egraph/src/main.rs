@@ -21,6 +21,14 @@ struct Cli {
     #[arg(long, default_value = "diff", value_parser = parse_push_pop)]
     push_pop: PushPop,
 
+    /// Diff store for the node-cache columns: "inline" or "parallel"
+    /// (frame diffs: first-write-wins capture, bounded log, composes with
+    /// sealing/compression — the deep-state saturation trade) or "trail"
+    /// (chronological capture: branch-free writes, no frame finalization,
+    /// log grows with total writes — the backtrack-heavy trade).
+    #[arg(long, default_value = "inline", value_parser = ["inline", "parallel", "trail"])]
+    diff_mode: String,
+
     /// Enable proof extraction (records justifications for every merge)
     #[arg(long, default_value_t = false)]
     proofs: bool,
@@ -160,6 +168,11 @@ fn parse_id_bits(s: &str) -> Result<u8, String> {
 fn main() {
     use semi_persistent_egraph::saturate::SaturationStrategy;
     let cli = Cli::parse();
+
+    // The store-kind lever is read once at first cache construction, so it
+    // must be exported before any engine is built.
+    // SAFETY (env mutation): single-threaded startup, before any reader.
+    unsafe { std::env::set_var("SEMPER_DIFF", &cli.diff_mode) };
 
     // Default is naive; --use-semi-naive opts in. The two flags conflict (enforced by
     // clap), so at most one is set.

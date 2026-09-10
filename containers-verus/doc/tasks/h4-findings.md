@@ -298,3 +298,33 @@ whose write set per frame is large enough that the unique discipline's flag
 maintenance measures. The store-selection interface (frame vs trail diffs
 from the command line) remains motivated by the EqSat/SMT trade-off, not by
 this instance family.
+
+### Runtime store selection: one interface over frame diffs and the trail
+
+The discipline moved from the type level to the instance level so it can be
+a command-line choice. `DiffStore::unique_capture_spec` and
+`needs_replayed_indices_spec` are now instance spec functions, and every
+mutating trait method carries a constancy ensures (the discipline is chosen
+at construction and immutable); definitional broadcast lemmas pin each base
+store's constant answers, so the three existing stores prove the new
+contract without body changes. `DynStore` is the verified dispatching enum
+over Inline/Parallel/Trail (per-arm delegation; ghost-bridge proofs connect
+the enum's spec views to the inner store's for the quantified-precondition
+methods), `VecD` the runtime-selected column
+(`VecD::new_kind(StoreKind)`), and the levers are `SEMPER_DIFF` plus
+`--diff-mode inline|parallel|trail` on both the egraph CLI and
+`sundance-smt`. The e-graph's cache arena columns construct through the
+lever; history columns stay `VecI`.
+
+Gates: `cargo verus verify` 2083 verified 0 errors; containers suite 206
+tests 0 failures including a three-kind `VecD` differential (4000 random
+ops in lockstep against an oracle across marks, deep restores and duplicate
+writes); e-graph suite 1257 tests 0 failures in each of inline, trail, and
+trail with SEMPER_COMPRESS=auto. Cost of the indirection: one predicted
+discriminant branch per store operation; the three modes measure
+statistically identical on cyclic_scheduler.3 (0.37 to 0.38s wall, trail
+restore 22.9ms vs inline 23.7ms), consistent with the closed VecT
+experiment above: on this corpus the discipline choice is not the
+bottleneck, and the selectable interface exists for the workloads where it
+will be (the EqSat deep-state trade vs the write-hot trade), not because
+this instance family demanded it.

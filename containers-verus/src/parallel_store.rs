@@ -20,6 +20,7 @@ use crate::index_like::IndexLike;
 
 verus! {
 
+
 /// Parallel-bitset DiffStore.
 ///
 /// Invariant (via `wf`): `data@.len() == captured@.len()`. Push, pop, set,
@@ -106,6 +107,7 @@ where
 
     #[inline(always)]
     fn push(&mut self, value: T) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         // Production parity: ONE line. The abstract captured() extends with
         // `false` for free — the fresh position is beyond the old length,
         // where tail_clear pins every materialized bit to zero and the
@@ -120,6 +122,7 @@ where
 
     #[inline(always)]
     fn pop(&mut self) -> Option<T> {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         let r = self.data.pop();
         if TRACK && r.is_some() {
             // Retire the vanished position's flag so tail_clear holds at the
@@ -156,11 +159,13 @@ where
 
     #[inline(always)]
     fn set_raw(&mut self, i: I, value: T) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         let iu = i.as_usize();
         self.data.set(iu, value);
     }
 
     fn truncate(&mut self, len: I) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         let lu = len.as_usize();
         self.data.truncate(lu);
         if TRACK {
@@ -174,6 +179,7 @@ where
 
     #[inline(always)]
     fn mark_captured(&mut self, i: I) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         if TRACK {
             let iu = i.as_usize();
             self.captured.set_true(iu, Ghost(self.data@.len() as int));
@@ -187,6 +193,7 @@ where
     fn resize_default(&mut self, len: I)
         where T: core::default::Default
     {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         let target = len.as_usize();
         // The data prefix shared with the original: min(old_len, target).
         let ghost shared = if old(self).data@.len() < target as nat {
@@ -232,6 +239,7 @@ where
     }
 
     fn prepare_mark(&mut self, _saved_len: I, _prev_diffs: &[I]) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         if !TRACK {
             return;
         }
@@ -245,6 +253,7 @@ where
 
     #[inline(always)]
     fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         if !TRACK {
             return;
         }
@@ -266,12 +275,12 @@ where
                     =~= old(self).captured_spec().update(i.as_nat() as int, true));
             } else {
                 assert(self.captured_spec() =~= old(self).captured_spec());
-                assert(<Self as DiffStore<T, I, TRACK>>::unique_capture_spec());
             }
         }
     }
 
     fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         if !TRACK {
             return;
         }
@@ -288,15 +297,16 @@ where
         }
     }
 
-    open spec fn unique_capture_spec() -> bool { true }
+    open spec fn unique_capture_spec(&self) -> bool { true }
 
-    fn unique_capture() -> bool { true }
+    fn unique_capture(&self) -> bool { true }
 
-    open spec fn needs_replayed_indices_spec() -> bool { false }
+    open spec fn needs_replayed_indices_spec(&self) -> bool { false }
 
-    fn needs_replayed_indices() -> bool { false }
+    fn needs_replayed_indices(&self) -> bool { false }
 
     fn begin_restore(&mut self, _replayed_diffs: &[I]) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         if !TRACK {
             return;
         }
@@ -312,6 +322,7 @@ where
     // here measures as a no-op. The residual restore delta is register spilling
     // in that loop, not this call.
     fn restore_entry(&mut self, index: I, old_value: &T, target_saved_len: I) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         let iu = index.as_usize();
         let tsl = target_saved_len.as_usize();
         if iu >= tsl {
@@ -349,6 +360,7 @@ where
         lo: usize,
         hi: usize,
     ) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         // The data column holds raw `T` values, so the diff log can write straight
         // into it, frame by frame: whole cold frames apply themselves through
         // `restore_to` (a sliced memcpy for `Runs` frames), the rest scatters. The
@@ -364,6 +376,7 @@ where
     }
 
     fn finish_restore(&mut self, current_frame_diffs: &[I], _saved_len: I) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         if !TRACK {
             return;
         }
@@ -484,6 +497,7 @@ where
     }
 
     fn shrink_if(&mut self, factor: usize, headroom: usize) {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
         // Production formula (containers/src/diff_store.rs:192-197): shrink the
         // data capacity when overallocated by `factor`, keeping `headroom * len`,
         // THEN truncate the capture words to `data.capacity().div_ceil(64)`.

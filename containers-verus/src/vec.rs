@@ -1316,7 +1316,7 @@ where
         // a wf clause (the reconstruction invariant no longer states it):
         // sealing, compaction and the sorted flush require it; a
         // chronological (trail) store's column vacuously skips it.
-        &&& (<S as DiffStore<T, I, TRACK>>::unique_capture_spec()
+        &&& (self.store.unique_capture_spec()
                 ==> forall|k: int| 0 <= k < self.frames@.len()
                     ==> #[trigger] stratum_unique::<T, I>(
                             self.diff_log@,
@@ -1375,7 +1375,7 @@ where
         assert(self.diff_log.wf());
         // The discipline-conditional stratum-uniqueness clause transfers:
         // it reads diff_log@, frames@ and stratum_end, all pinned equal.
-        if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+        if self.store.unique_capture_spec() {
             assert forall|k: int| 0 <= k < self.frames@.len() implies
                 #[trigger] stratum_unique::<T, I>(
                     self.diff_log@,
@@ -1438,7 +1438,7 @@ where
         assert(self.wf_for_snap());
         // The discipline-conditional stratum-uniqueness clause transfers:
         // it reads diff_log@, frames@ and stratum_end, all pinned equal.
-        if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+        if self.store.unique_capture_spec() {
             assert forall|k: int| 0 <= k < self.frames@.len() implies
                 #[trigger] stratum_unique::<T, I>(
                     self.diff_log@,
@@ -1548,7 +1548,7 @@ where
         }
         // Unique-discipline stratum uniqueness: restated directly by the
         // per-frame uniqueness hypothesis (same quantifier, new trigger).
-        if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+        if self.store.unique_capture_spec() {
             assert forall|k: int| 0 <= k < self.frames@.len() implies
                 #[trigger] stratum_unique::<T, I>(
                     self.diff_log@, self.frames@[k].diff_start as int,
@@ -1960,6 +1960,8 @@ where
         requires old(self).wf(),
         ensures
             final(self).wf(),
+            final(self).store.unique_capture_spec()
+                == old(self).store.unique_capture_spec(),
             final(self).view() == old(self).view(),
             final(self).diff_log@ == old(self).diff_log@,
             final(self).frames@ == old(self).frames@,
@@ -2488,7 +2490,7 @@ where
             // Unique-discipline stratum uniqueness: diff log and frames are
             // unchanged, so each stratum transfers term-by-term (the explicit
             // old-instance assert fires the old wf forall's trigger).
-            if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+            if self.store.unique_capture_spec() {
                 assert forall|k: int| 0 <= k < frames.len() implies
                     #[trigger] stratum_unique::<T, I>(
                         self.diff_log@, frames[k].diff_start as int, self.stratum_end(k)) by {
@@ -2623,7 +2625,7 @@ where
                 if !old_store_captured[last as int] {
                     assert(self.diff_log@ == old_diffs.push((data_last, last_i)));
                     assert(self.diff_log@[old_diffs.len() as int].1.as_nat() == last as nat);
-                } else if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                } else if old(self).store.unique_capture_spec() {
                     assert(self.diff_log@ == old_diffs);
                 } else {
                     assert(self.diff_log@ == old_diffs.push((data_last, last_i)));
@@ -2702,7 +2704,7 @@ where
                         && diffs.subrange(0, old_diffs.len() as int) == old_diffs
                         && diffs[old_diffs.len() as int].1.as_nat() == new_len as nat)) by {
                     if captured_marked && (!old_store_captured[new_len]
-                        || !<S as DiffStore<T, I, TRACK>>::unique_capture_spec()) {
+                        || !old(self).store.unique_capture_spec()) {
                         assert(diffs == old_diffs.push((data_last, diffs[old_diffs.len() as int].1)));
                         assert(diffs.subrange(0, old_diffs.len() as int) == old_diffs);
                     }
@@ -2918,7 +2920,7 @@ where
                 // Inner strata sit in the unchanged prefix; the top stratum
                 // is identity (no capture, or unique-store no-op) or ONE
                 // first-write append at the uncaptured index new_len.
-                if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                if self.store.unique_capture_spec() {
                     assert forall|k: int| 0 <= k < frames.len() implies
                         #[trigger] stratum_unique::<T, I>(
                             diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
@@ -2974,7 +2976,7 @@ where
                     assert(old(self).frame_inv_range_holds(k));
                     assert(self.layer_above_at(k) == old(self).layer_above_at(k));
                 }
-                if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                if self.store.unique_capture_spec() {
                     assert forall|k: int| 0 <= k < frames.len() implies
                         #[trigger] stratum_unique::<T, I>(
                             diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
@@ -3026,7 +3028,7 @@ where
                     assert(self.diff_log@ == old_diffs.push((old_view[iu], i)));
                     assert(self.store.captured()[iu] == true);
                 } else if iu < active_n as int
-                    && !<S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                    && !old(self).store.unique_capture_spec() {
                     // chronological duplicate: appended, flags unchanged.
                     assert(self.diff_log@ == old_diffs.push((old_view[iu], i)));
                     assert(self.store.captured()[iu] == true);
@@ -3066,7 +3068,7 @@ where
                 // "appended" covers both append cases: the first write, and a
                 // chronological store's duplicate on an already-captured slot.
                 let appended = iu < active_n as int && (!was_captured0
-                    || !<S as DiffStore<T, I, TRACK>>::unique_capture_spec());
+                    || !old(self).store.unique_capture_spec());
                 assert(old(self).store.captured()[iu] == was_captured0);
 
                 // capture either no-ops or appends one entry at the end.
@@ -3327,7 +3329,7 @@ where
                 // Inner strata sit in the unchanged prefix; the top stratum
                 // is identity (unique-store no-op) or ONE first-write append
                 // at the uncaptured index iu.
-                if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+                if self.store.unique_capture_spec() {
                     assert forall|k: int| 0 <= k < frames.len() implies
                         #[trigger] stratum_unique::<T, I>(
                             diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
@@ -3608,7 +3610,11 @@ where
             // Unique-discipline stratum uniqueness: old strata keep their
             // ranges (the old top's end, diffs.len(), equals the new frame's
             // diff_start), and the new top stratum [n, n) is empty.
-            if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+            if self.store.unique_capture_spec() {
+                // Constancy across maybe_shrink/prepare_mark: the current
+                // discipline equals the entry discipline, so the OLD wf's
+                // conditional uniqueness clause is armed.
+                assert(old(self).store.unique_capture_spec());
                 assert forall|k: int| 0 <= k < frames.len() implies
                     #[trigger] stratum_unique::<T, I>(
                         diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
@@ -3679,7 +3685,7 @@ where
         if self.frames.len() == 0 {
             return;
         }
-        if !<S as DiffStore<T, I, TRACK>>::unique_capture() {
+        if !self.store.unique_capture() {
             // A chronological (trail) column's strata carry duplicates, and
             // every sealed encoding requires the unique-index bound: sealing
             // is structurally out of the trail discipline's family.
@@ -3888,7 +3894,7 @@ where
         // wholesale-clearing store (ParallelStore's bitmap memset) skips the full
         // per-entry decode of a compressed log, which was measured dominating the
         // frame-wise memcpy restore.
-        if S::needs_replayed_indices() {
+        if self.store.needs_replayed_indices() {
             // index-major safe: index_range reconstructs from cold runs when the
             // column is compressed. `replayed_pre@[k] == diff_log@[diff_start+k].1`.
             let replayed_pre_vec = self.diff_log.index_range(diff_start, self.diff_log.len());
@@ -4236,7 +4242,7 @@ where
             // Unique-discipline stratum uniqueness: every surviving stratum
             // keeps its range and entries (all below diff_start, the
             // truncation point).
-            if <S as DiffStore<T, I, TRACK>>::unique_capture_spec() {
+            if self.store.unique_capture_spec() {
                 assert forall|k: int| 0 <= k < frames.len() implies
                     #[trigger] stratum_unique::<T, I>(
                         diffs, frames[k].diff_start as int, self.stratum_end(k)) by {
@@ -4562,7 +4568,7 @@ where
             // Sorting-fold entry: unique discipline only (a chronological
             // column's inner strata carry duplicates, so the per-frame
             // uniqueness the fold's wf transfer reads does not hold).
-            <S as DiffStore<T, I, TRACK>>::unique_capture_spec(),
+            old(self).store.unique_capture_spec(),
             old(self).depth_spec() < u32::MAX,
             old(self).view().len() < I::max_nat(),
             old(self).depth_spec() > 0,
@@ -4672,7 +4678,7 @@ where
             old(self).depth_spec() > 0,
             // Per-frame fold entry: unique discipline only (the wf transfer
             // reads per-stratum uniqueness for the untouched inner strata).
-            <S as DiffStore<T, I, TRACK>>::unique_capture_spec(),
+            old(self).store.unique_capture_spec(),
             old(self).diff_log.is_adaptive(),
             old(self).diff_log.idx_cold_len_spec() == old(self).top_diff_start_spec(),
             crate::diff_compress::unique_idx(old(self).diff_log@.subrange(
@@ -4787,7 +4793,7 @@ where
             // Discipline gate first: a chronological (trail) column never
             // seals — its strata carry duplicates, outside every fold's
             // unique-index precondition. It takes the plain mark below.
-            if <S as DiffStore<T, I, TRACK>>::unique_capture()
+            if self.store.unique_capture()
                 && self.diff_log.adaptive_aligned(ds) {
                 proof {
                     // The open frame's stratum [ds, n) is unique-indexed: the
@@ -4861,6 +4867,24 @@ where
         ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
     {
         Vec::with_store_mode(crate::inline_store::InlineStore::new(), mode)
+    }
+}
+
+impl<T, I, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, crate::dyn_store::DynStore<T, I>, TRACK, VC>
+where
+    T: crate::tagged::Tagged,
+    I: IndexLike,
+{
+    /// Empty tracked vector whose store kind (frame diffs inline/parallel, or
+    /// the chronological trail) is selected at RUNTIME. The discipline is
+    /// fixed for the column's lifetime (the trait's constancy contract); all
+    /// reconstruction theorems hold for every kind, and the sealing paths
+    /// self-gate on `unique_capture()` so a trail-kind column takes the plain
+    /// mark. Honors the `SEMPER_COMPRESS` lever like the static constructors.
+    pub fn new_kind(kind: crate::dyn_store::StoreKind) -> (v: Self)
+        ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
+    {
+        Vec::with_store(crate::dyn_store::DynStore::new_kind::<TRACK>(kind))
     }
 }
 

@@ -25,6 +25,7 @@ use crate::index_like::IndexLike;
 
 verus! {
 
+
 /// Chronological-capture DiffStore. Invariant (via `wf`): the ghost flag
 /// sequence tracks the data length exactly.
 pub struct TrailStore<T, I>
@@ -84,9 +85,9 @@ where
 
     proof fn lemma_wf_captured_len(&self) {}
 
-    open spec fn unique_capture_spec() -> bool { false }
+    open spec fn unique_capture_spec(&self) -> bool { false }
 
-    fn unique_capture() -> bool { false }
+    fn unique_capture(&self) -> bool { false }
 
     #[inline(always)]
     fn is_empty(&self) -> bool {
@@ -109,6 +110,7 @@ where
 
     #[inline(always)]
     fn push(&mut self, value: T) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         self.data.push(value);
         proof {
             self.captured@ = self.captured@.push(false);
@@ -117,6 +119,7 @@ where
 
     #[inline(always)]
     fn pop(&mut self) -> Option<T> {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         let r = self.data.pop();
         proof {
             if r is Some {
@@ -128,11 +131,13 @@ where
 
     #[inline(always)]
     fn set_raw(&mut self, i: I, value: T) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         let iu = i.as_usize();
         self.data.set(iu, value);
     }
 
     fn truncate(&mut self, len: I) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         let lu = len.as_usize();
         self.data.truncate(lu);
         proof {
@@ -142,6 +147,7 @@ where
 
     #[inline(always)]
     fn mark_captured(&mut self, i: I) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         proof {
             self.captured@ = self.captured@.update(i.as_nat() as int, true);
         }
@@ -150,6 +156,7 @@ where
     fn resize_default(&mut self, len: I)
         where T: core::default::Default
     {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         let ghost old_flags = self.captured@;
         let ghost old_len = self.data@.len();
         let target = len.as_usize();
@@ -182,6 +189,7 @@ where
     }
 
     fn prepare_mark(&mut self, _saved_len: I, _prev_diffs: &[I]) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         // Exec no-op: the flags are ghost, so the frame-open clear costs
         // nothing (ParallelStore pays a bitmap memset here).
         proof {
@@ -191,6 +199,7 @@ where
 
     #[inline(always)]
     fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         if !TRACK {
             return;
         }
@@ -215,6 +224,7 @@ where
     }
 
     fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         if !TRACK {
             return;
         }
@@ -230,11 +240,12 @@ where
         }
     }
 
-    open spec fn needs_replayed_indices_spec() -> bool { false }
+    open spec fn needs_replayed_indices_spec(&self) -> bool { false }
 
-    fn needs_replayed_indices() -> bool { false }
+    fn needs_replayed_indices(&self) -> bool { false }
 
     fn begin_restore(&mut self, _replayed_diffs: &[I]) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         // Exec no-op (ghost clear only).
         proof {
             self.captured@ = Seq::new(self.data@.len(), |_j: int| false);
@@ -242,6 +253,7 @@ where
     }
 
     fn restore_entry(&mut self, index: I, old_value: &T, target_saved_len: I) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         let iu = index.as_usize();
         let tsl = target_saved_len.as_usize();
         if iu >= tsl {
@@ -263,6 +275,7 @@ where
         lo: usize,
         hi: usize,
     ) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         let ghost pre_len = self.data@.len();
         diff_log.restore_range_into(lo, hi, &mut self.data);
         proof {
@@ -273,6 +286,7 @@ where
     }
 
     fn finish_restore(&mut self, current_frame_diffs: &[I], _saved_len: I) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         // Exec no-op: the post-restore flag state is defined, not computed
         // (ParallelStore walks the surviving diffs setting bits here).
         proof {
@@ -285,6 +299,7 @@ where
     }
 
     fn shrink_if(&mut self, _factor: usize, _headroom: usize) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         // Capacity reclamation is optional under the contract; the trail
         // store keeps it a no-op (its columns are hot search state).
     }

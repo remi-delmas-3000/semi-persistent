@@ -202,7 +202,7 @@ pub struct FixedArityCache<
     // Value layer: NoValueCompression by measurement (F2.4): the layered RLE
     // candidates cost 7.28/6.84 MB against 5.06 MB plain and 4.62 MB sorted
     // runs on the corpus, zero wins in 39,272 frames. Revisit at EqSat scale.
-    nodes: VecI<FixedArityNode<G, O, K>, L, TRACK>,
+    nodes: crate::containers::VecD<FixedArityNode<G, O, K>, L, TRACK>,
     /// Hint index: fingerprint -> local ids that at some point held content
     /// with that fingerprint. The arena is the source of truth; a probe
     /// validates every candidate against current node content, so restore
@@ -249,7 +249,8 @@ impl<
 {
     pub fn new() -> Self {
         Self {
-            nodes: VecI::new(),
+            nodes: crate::containers::VecD::new_kind(
+                crate::containers::env_diff_store_kind()),
             index: hashbrown::HashMap::with_hasher(PassthroughBuildHasher),
             spill: Vec::new(),
             history: if PROOFS { Some(VecI::new()) } else { None },
@@ -546,12 +547,12 @@ pub struct VariableArityCache<
     /// One entry per node, so `L` (a local node id) is the index width.
     // Same measured demotion as the fixed-arity cache (46.9/42.8 KB layered
     // RLE vs 35.0 KB plain, 33.8 KB sorted runs, zero wins in 537 frames).
-    nodes: VecI<VariableArityNode<G, O>, L, TRACK>,
+    nodes: crate::containers::VecD<VariableArityNode<G, O>, L, TRACK>,
     /// The shared child pool the nodes' spans address. Indexed at `usize`, matching the
     /// `start`/`end` words in [`VariableArityNode`]: its population is `Σ arity` over the
     /// nodes, which neither `L`'s nor `G`'s capacity bounds, so an id-width index here would
     /// be a new cap rather than a narrowing. See [`VariableArityNode::start`].
-    children: VecI<C, usize, TRACK>,
+    children: crate::containers::VecD<C, usize, TRACK>,
     /// Hint index over (op, span contents); see [`FixedArityCache::index`].
     index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
     /// Spilled hint buckets; `HintSlot` values with the spill tag index here.
@@ -591,8 +592,10 @@ impl<
 {
     pub fn new() -> Self {
         Self {
-            nodes: VecI::new(),
-            children: VecI::new(),
+            nodes: crate::containers::VecD::new_kind(
+                crate::containers::env_diff_store_kind()),
+            children: crate::containers::VecD::new_kind(
+                crate::containers::env_diff_store_kind()),
             index: hashbrown::HashMap::with_hasher(PassthroughBuildHasher),
             spill: Vec::new(),
             history_nodes: if PROOFS { Some(VecI::new()) } else { None },
@@ -963,7 +966,7 @@ impl<
 /// `VariableArityCache::fingerprint` on the same content: a slice hash is a
 /// length prefix followed by the elements.
 fn var_children_fingerprint<G, O, C, const TRACK: bool>(
-    children: &VecI<C, usize, TRACK>,
+    children: &crate::containers::VecD<C, usize, TRACK>,
     node: &VariableArityNode<G, O>,
 ) -> Fingerprint
 where
@@ -986,7 +989,7 @@ where
 // ---------------------------------------------------------------------------
 
 pub struct LitCache<G: DenseId, O: DenseId, V: DenseId, L: DenseId, const TRACK: bool = true> {
-    nodes: VecI<LitNode<G, O, V>, L, TRACK>,
+    nodes: crate::containers::VecD<LitNode<G, O, V>, L, TRACK>,
     /// Hint index; see [`FixedArityCache::index`]. Literal content never
     /// changes, so the only staleness here is truncated ids after a restore.
     index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
@@ -1008,7 +1011,8 @@ impl<G: DenseId + Hash, O: DenseId + Hash, V: DenseId + Hash, L: DenseId, const 
 {
     pub fn new() -> Self {
         Self {
-            nodes: VecI::new(),
+            nodes: crate::containers::VecD::new_kind(
+                crate::containers::env_diff_store_kind()),
             index: hashbrown::HashMap::with_hasher(PassthroughBuildHasher),
             spill: Vec::new(),
             frames: Vec::new(),

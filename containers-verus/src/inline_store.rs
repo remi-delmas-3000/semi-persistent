@@ -22,6 +22,7 @@ use crate::tagged::Tagged;
 
 verus! {
 
+
 /// Capture-flag-inline DiffStore.
 ///
 /// Invariants (`wf`): all reprs are well-formed; `data@.len() < I::max_nat()`.
@@ -120,12 +121,14 @@ where
 
     #[inline(always)]
     fn push(&mut self, value: T) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         let r = value.into_repr();
         self.data.push(r);
     }
 
     #[inline(always)]
     fn pop(&mut self) -> Option<T> {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         match self.data.pop() {
             Some(r) => Some(T::from_repr(&r)),
             None => None,
@@ -134,6 +137,7 @@ where
 
     #[inline(always)]
     fn set_raw(&mut self, i: I, value: T) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         let iu = i.as_usize();
         // `TRACK &&` is production's guard verbatim (`diff_store.rs:263`) and it
         // matters: preserving the inline capture flag across a write costs a
@@ -149,12 +153,14 @@ where
     }
 
     fn truncate(&mut self, len: I) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         let lu = len.as_usize();
         self.data.truncate(lu);
     }
 
     #[inline(always)]
     fn mark_captured(&mut self, i: I) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         let iu = i.as_usize();
         let mut r = self.data[iu];
         T::set_tag(&mut r);
@@ -164,6 +170,7 @@ where
     fn resize_default(&mut self, len: I)
         where T: core::default::Default
     {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         let target = len.as_usize();
         let ghost shared = if old(self).data@.len() < target as nat {
             old(self).data@.len()
@@ -204,6 +211,7 @@ where
     }
 
     fn prepare_mark(&mut self, _saved_len: I, prev_diffs: &[I]) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
         }
@@ -277,6 +285,7 @@ where
 
     #[inline(always)]
     fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
         }
@@ -299,12 +308,13 @@ where
         } else {
             proof {
                 assert(self.captured_spec() =~= old(self).captured_spec());
-                assert(<Self as DiffStore<T, I, TRACK>>::unique_capture_spec());
+                assert(<Self as DiffStore<T, I, TRACK>>::unique_capture_spec(self));
             }
         }
     }
 
     fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
         }
@@ -321,15 +331,16 @@ where
         self.data.set(iu, new_r);
     }
 
-    open spec fn unique_capture_spec() -> bool { true }
+    open spec fn unique_capture_spec(&self) -> bool { true }
 
-    fn unique_capture() -> bool { true }
+    fn unique_capture(&self) -> bool { true }
 
-    open spec fn needs_replayed_indices_spec() -> bool { true }
+    open spec fn needs_replayed_indices_spec(&self) -> bool { true }
 
-    fn needs_replayed_indices() -> bool { true }
+    fn needs_replayed_indices(&self) -> bool { true }
 
     fn begin_restore(&mut self, replayed_diffs: &[I]) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
         }
@@ -384,6 +395,7 @@ where
     }
 
     fn restore_entry(&mut self, index: I, old_value: &T, target_saved_len: I) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         let iu = index.as_usize();
         let tsl = target_saved_len.as_usize();
         if iu >= tsl {
@@ -404,6 +416,7 @@ where
         lo: usize,
         hi: usize,
     ) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         // Backward replay of [lo, hi). Inherently per-element for this store: every
         // write re-encodes through `into_repr` (which is also the tag-clear), so a
         // raw memcpy of `T` values would skip the tagging and be WRONG here. The
@@ -455,6 +468,7 @@ where
     }
 
     fn finish_restore(&mut self, current_frame_diffs: &[I], _saved_len: I) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
         }
@@ -510,6 +524,7 @@ where
     }
 
     fn shrink_if(&mut self, factor: usize, headroom: usize) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
         // Production formula: shrink capacity when `cap > factor * len`,
         // keeping `headroom * len` (see the ParallelStore helper's ledger note).
         crate::parallel_store::shrink_vec_capacity(&mut self.data, factor, headroom);
