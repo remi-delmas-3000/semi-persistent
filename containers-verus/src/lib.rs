@@ -21,7 +21,7 @@
 //! - `parallel_store` — `ParallelStore<T,I>` impl + lemmas
 //! - `inline_store`   — `InlineStore<T,I>` impl + lemmas (T: Tagged)
 //! - `frame`          — frame stack
-//! - `fork_history`   — executable branch genealogy + validity characterization
+//! - `gen_stamps`    — depth-indexed generation stamps (reclaimed fork history)
 //! - `container_id`   — opaque per-container identity (atomics, external_body)
 //! - `vec`            — `Vec<T,I,S,TRACK>` with full proofs over the trait specs
 
@@ -106,8 +106,8 @@ pub mod eclasses;
 pub mod error;
 #[cfg(feature = "literal-types")]
 pub mod external_specs;
-pub mod fork_history;
 pub mod frame;
+pub mod gen_stamps;
 pub mod guard;
 pub(crate) mod history;
 pub mod hasher_spec;
@@ -120,6 +120,7 @@ pub mod layered_span_map;
 pub mod list;
 pub mod map;
 pub mod opt;
+pub mod parallel;
 pub mod parallel_store;
 pub mod sorted_cursor;
 pub mod sorted_vec_cursor;
@@ -152,7 +153,7 @@ pub use compression_stats::{CalibrationPolicy, CalibrationStats, FrameStats};
 pub use two_stack_log::TwoStackLog;
 pub use diff_compress::CompressionMode;
 pub use diff_store::DiffStore;
-pub use fork_history::ForkHistory;
+pub use gen_stamps::GenStamps;
 pub use id_factory::{IdFactory, IdRangeError};
 pub use id_macros::ids::{SparseSetId, UseListId, UseNodeId};
 pub use index_like::IndexLike;

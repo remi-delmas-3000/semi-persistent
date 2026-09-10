@@ -520,7 +520,6 @@ where
             old(self).is_token_valid_spec(token),
             token.frame_idx_spec() < old(self).depth_spec(),
             old(self).depth_spec() < u32::MAX,
-            old(self).fork_count_spec() + 1 <= u32::MAX,
         ensures
             final(self).wf(),
             final(self).log_view() == old(self).log_snapshots_view()[token.frame_idx_spec() as int],

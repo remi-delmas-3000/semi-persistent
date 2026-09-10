@@ -3218,7 +3218,6 @@ where
             old(self).min_pool.depth_spec() == old(history).depth_spec(),
             old(history).valid_spec(t),
             (t.depth as nat) < old(history).depth_spec(),
-            old(history).forks.origins@.len() + 1 <= u32::MAX,
         ensures
             final(self).wf(),
             final(history).wf(),

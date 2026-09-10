@@ -281,11 +281,9 @@ where
         &&& self.parent.is_token_valid_spec(token.parent)
         &&& token.parent.frame_idx_spec() < self.parent.depth_spec()
         &&& self.parent.depth_spec() < u32::MAX
-        &&& self.parent.fork_count_spec() + 1 <= u32::MAX
         &&& self.rank.is_token_valid_spec(token.rank)
         &&& token.rank.frame_idx_spec() < self.rank.depth_spec()
         &&& self.rank.depth_spec() < u32::MAX
-        &&& self.rank.fork_count_spec() + 1 <= u32::MAX
     }
 
     pub open(crate) spec fn wf(&self) -> bool {

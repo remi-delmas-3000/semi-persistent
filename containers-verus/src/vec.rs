@@ -24,7 +24,6 @@ verus! {
 
 use crate::container_id::ContainerId;
 use crate::diff_store::DiffStore;
-use crate::fork_history::ForkHistory;
 use crate::frame::Frame;
 use crate::index_like::IndexLike;
 
@@ -56,8 +55,11 @@ pub enum ShrinkPolicy {
 #[derive(Copy, Clone)]
 pub struct VecToken {
     pub(crate) frame_idx: usize,
-    pub(crate) branch_id: u32,
-    pub(crate) depth: u32,
+    /// Generation stamp minted at mark time for this frame's depth (== frame_idx).
+    /// Replaces the branch-model `(branch_id, depth)`: a restore diverging at a
+    /// depth bumps the deeper generations, so a stale token's generation no longer
+    /// matches — O(1) validity, O(max-depth) fork history (no `origins` leak).
+    pub(crate) generation: u64,
     pub(crate) container_id: ContainerId,
 }
 
@@ -811,8 +813,9 @@ where
     /// The saved_len of the topmost (active) frame, cached for the hot path.
     /// `I::min()` when the stack is empty. Mirrors production.
     pub(crate) active_saved_len: I,
-    /// Branching genealogy for token-validity and branch-cut safety.
-    pub(crate) forks: ForkHistory,
+    /// Depth-indexed generation stamps for token-validity and branch-cut safety.
+    /// O(max-depth) (replaces the O(R) append-only `origins`): the leak fix.
+    pub(crate) forks: crate::gen_stamps::GenStamps,
     /// Per-container identity; rejects cross-container token use.
     pub(crate) id: ContainerId,
     pub(crate) phantom: core::marker::PhantomData<(T, I)>,
@@ -849,40 +852,30 @@ where
         self.diff_log@.len()
     }
 
-    /// Lifetime restore count (fork-history origins length). Public contracts
-    /// phrase the `u32` fork headroom through this.
+    /// Max spine depth ever reached (generation-stamp array length). Public
+    /// contracts phrase the fork headroom through this; unlike the old origins
+    /// length it is O(max depth), not O(lifetime restores).
     pub open(crate) spec fn fork_count_spec(&self) -> nat {
-        self.forks.origins@.len()
+        self.forks.levels@.len()
     }
 
-    /// Token validity (design doc §0.6): same container AND on the live branch
-    /// path at a depth within that branch's bound. This is the genealogy precondition
-    /// of `restore` — separate from the structural `frame_idx < frames.len()`
-    /// reconstruction precondition (design §0.5). `current_depth` is the live
-    /// depth `frames.len()`.
+    /// Token validity: same container AND its generation still matches the live
+    /// stamp at its frame depth (O(1)). Separate from the structural
+    /// `frame_idx < frames.len()` reconstruction precondition (design §0.5).
     pub open(crate) spec fn is_token_valid_spec(&self, token: VecToken) -> bool {
         &&& token.container_id.id() == self.id.id()
-        &&& crate::fork_history::fork_valid(
-                self.forks.origins@,
-                self.forks.current_branch_id as nat,
-                self.frames@.len() as nat,
-                token.branch_id as nat,
-                token.depth as nat)
+        &&& self.forks.valid(token.frame_idx as nat, token.generation)
     }
 
-    /// "Restorable now": the full runtime-checkable
-    /// precondition of `restore`. This is what the public `is_valid_token`
-    /// answers — one public notion of validity: "would `restore(token)`
-    /// succeed right now?". Strictly stronger than `is_token_valid_spec`
-    /// (identity + genealogy), adding frame liveness (the consumed-token
-    /// case: a restored token's branch can remain on-path while its frame is
-    /// gone), the TRACK gate, and both counter headrooms.
+    /// "Restorable now": the full runtime-checkable precondition of `restore` —
+    /// identity + generation validity, frame liveness, the TRACK gate, and the
+    /// generation headroom (levels deeper than the target below `u64::MAX`, the
+    /// analogue of the old `origins.len()+1 <= u32::MAX`).
     pub open(crate) spec fn is_restorable_spec(&self, token: VecToken) -> bool {
         &&& TRACK
         &&& self.is_token_valid_spec(token)
         &&& token.frame_idx < self.frames@.len()
         &&& self.frames@.len() < u32::MAX
-        &&& self.forks.origins@.len() + 1 <= u32::MAX
     }
 
     /// The "layer above" frame `k`: snapshots[k+1] for inner frames, or the
@@ -1008,10 +1001,9 @@ where
         &&& (TRACK ==> forall|j: int| 0 <= j < self.view().len()
                 && #[trigger] self.store.captured()[j]
                 ==> frames.len() > 0 && j < self.active_saved_len.as_nat())
-        // Fork history is well-formed (parent-decreasing; current branch a real
-        // branch). Independent of the snapshot stack — validity is a separate
-        // predicate, not a structural snapshot invariant (design §0.5).
-        &&& self.forks.wf()
+        // Fork history (generation stamps) is independent of the snapshot stack;
+        // token depth-range is checked by GenStamps::valid itself (design §0.5).
+        &&& true
     }
 
     /// `wf` is preserved by a change to `forks` alone. Every `wf` conjunct except
@@ -1030,7 +1022,6 @@ where
             self.diff_log == old_self.diff_log,
             self.snapshots@ == old_self.snapshots@,
             self.active_saved_len == old_self.active_saved_len,
-            self.forks.wf(),
         ensures
             self.wf(),
     {
@@ -1405,6 +1396,7 @@ where
             // two-stack (TwoStackLog), not this in-place log, so both build a
             // plain top here.
             crate::diff_compress::CompressionMode::IndexRuns
+            | crate::diff_compress::CompressionMode::IndexRunsSorted
             | crate::diff_compress::CompressionMode::Auto =>
                 crate::diff_log::DiffLog::new_plain(),
         };
@@ -1413,7 +1405,7 @@ where
             diff_log,
             frames: std::vec::Vec::new(),
             active_saved_len: <I as IndexLike>::min(),
-            forks: ForkHistory::new(),
+            forks: crate::gen_stamps::GenStamps::new(0),
             id: ContainerId::new(),
             phantom: core::marker::PhantomData,
             snapshots: Ghost(Seq::empty()),
@@ -1515,12 +1507,11 @@ where
     /// How many more `restore`s this container can accept before the
     /// fork-history branch counter saturates `u32`.
     ///
-    /// Each `restore` appends one (never-reclaimed) fork-history origin, so the
-    /// lifetime restore count is `forks.origins.len()`, capped at `u32::MAX`.
-    /// This returns the remaining headroom (saturating at 0); while it is `> 0`,
-    /// `restore`'s `origins.len() + 1 <= u32::MAX` precondition holds.
-    /// (`u32::MAX ~ 4.29e9`, so this is not a practical concern, but the query
-    /// lets a caller check.)
+    /// Fork history is now reclaimed (generation stamps, O(max depth)), so restores
+    /// no longer accumulate — the only bound is the `u32::MAX` frame depth. This
+    /// returns the remaining depth headroom (`u32::MAX - max_depth`, saturating at
+    /// 0); `fork_count_spec()` is now the stamp-array length (max depth reached),
+    /// not a lifetime restore count. (`u32::MAX ~ 4.29e9` — not a practical limit.)
     pub fn restores_remaining(&self) -> (r: usize)
         requires self.wf(),
         ensures
@@ -1528,7 +1519,7 @@ where
                 r as nat == (u32::MAX - self.fork_count_spec()) as nat,
             self.fork_count_spec() >= u32::MAX ==> r == 0,
     {
-        let used = self.forks.origins.len();
+        let used = self.forks.depth_capacity();
         (u32::MAX as usize).saturating_sub(used)
     }
 
@@ -1759,34 +1750,25 @@ where
         if token.frame_idx >= self.frames.len() {
             return false;
         }
-        // Headrooms (frames.len() < u32::MAX also lets is_on_current_branch's
-        // `as u32` cast be exact).
+        // Headroom (frames.len() < u32::MAX; the frame-liveness check above
+        // guarantees frame_idx < frames.len(), so is_token_valid's depth is live).
         if self.frames.len() >= u32::MAX as usize {
-            return false;
-        }
-        if self.forks.origins.len() >= u32::MAX as usize {
             return false;
         }
         self.is_on_current_branch(token)
     }
 
-    /// Genealogy-only validity (identity assumed checked): the token's branch
-    /// is on the current fork path within its depth bound. Private — the one
+    /// Genealogy-only validity (identity assumed checked): the token's generation
+    /// still matches the live stamp at its frame depth (O(1)). Private — the one
     /// public validity notion is `is_valid_token` ("restorable now").
     fn is_on_current_branch(&self, token: &VecToken) -> (b: bool)
         requires
             self.wf(),
             self.frames@.len() < u32::MAX,
         ensures
-            b == crate::fork_history::fork_valid(
-                self.forks.origins@,
-                self.forks.current_branch_id as nat,
-                self.frames@.len() as nat,
-                token.branch_id as nat,
-                token.depth as nat),
+            b == self.forks.valid(token.frame_idx as nat, token.generation),
     {
-        let cur_depth = self.frames.len() as u32;
-        self.forks.is_valid(token.branch_id, token.depth, cur_depth)
+        self.forks.is_valid(token.frame_idx, token.generation)
     }
 
     #[inline(always)]
@@ -2941,17 +2923,22 @@ where
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
         // Genealogy coordinates, captured before the push (depth = frames below
-        // this one = its frame index; branch = the branch live at mark time).
-        // `push_frame` runs `maybe_shrink`, which preserves `frames` and `forks`,
-        // so capturing here matches capturing after the shrink.
-        let token_branch = self.forks.current_branch();
-        let token_depth = self.frames.len() as u32;
+        // Mint the generation for this frame's depth (== its frame index),
+        // growing the stamp array the first time a depth is reached. Done before
+        // `push_frame` (which does not touch `forks`); the token's `frame_idx`
+        // after the push equals the stamped depth.
+        let token_depth = self.frames.len();
+        let ghost pre = *self;
+        let token_gen = self.forks.stamp_at(token_depth);
+        // `stamp_at` grows `forks.levels` only; every `wf` conjunct reads the
+        // pinned fields (store/frames/diff_log/snapshots/active_saved_len), so
+        // `wf` carries across the forks-only mutation.
+        proof { self.lemma_forks_change_preserves_wf(pre); }
         let token_container = self.id;
         self.push_frame(shrink);
         VecToken {
             frame_idx: self.frames.len() - 1,
-            branch_id: token_branch,
-            depth: token_depth,
+            generation: token_gen,
             container_id: token_container,
         }
     }
@@ -2986,11 +2973,9 @@ where
             final(self).view() == old(self).snapshots_view()[target_index as int],
             final(self).depth_spec() == target_index as nat,
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target_index as int),
-            // Genealogy untouched (the wrapper does the fork): reported in the
-            // `@` form Verus can prove after the reconstruction's `&mut self`
-            // calls — enough for the wrapper's fork() precondition and wf.
-            final(self).forks.origins@ == old(self).forks.origins@,
-            final(self).forks.current_branch_id == old(self).forks.current_branch_id,
+            // Genealogy untouched (the wrapper does the cut): the whole stamp
+            // array is preserved, enough for the wrapper's bump_from headroom and wf.
+            final(self).forks == old(self).forks,
     {
         // Structural guard only (the genealogy/container guards live in the
         // `restore` wrapper): the target frame must be in range before we read
@@ -3014,8 +2999,7 @@ where
         // mutations + the `*self` snapshot below) so the `final.forks == old.forks`
         // postcondition holds. The genealogy validity / fork() itself is the
         // `restore` wrapper's job.
-        let ghost forks_origins0 = self.forks.origins@;
-        let ghost forks_branch0 = self.forks.current_branch_id;
+        let ghost forks0 = self.forks;
 
         // Resize the view to EXACTLY the target's saved_len (truncate, or grow
         // with `T::default()` fillers). After this the base length is
@@ -3029,8 +3013,7 @@ where
         proof {
             saved_len.lemma_as_nat_bounded();
             // Confirm the *self read didn't disturb forks tracking.
-            assert(self.forks.origins@ == forks_origins0);
-            assert(self.forks.current_branch_id == forks_branch0);
+            assert(self.forks == forks0);
         }
         self.store.resize_default(saved_len);
         // Pre-replay flag reset (production's wholesale zero / sparse
@@ -3144,8 +3127,7 @@ where
                 self.snapshots@ == old(self).snapshots@,
                 // forks is untouched by the replay loop (needed for fork()'s
                 // precondition after the loop).
-                self.forks.origins@ == forks_origins0,
-                self.forks.current_branch_id == forks_branch0,
+                self.forks == forks0,
                 diff_start <= i <= n,
                 self.store.data().len() == saved_len.as_nat(),
                 base.len() == saved_len.as_nat(),
@@ -3318,8 +3300,7 @@ where
         // `final.forks == old.forks` postcondition — forks was untouched since
         // entry, so its fields still match the ghosts captured at the top.
         proof {
-            assert(self.forks.origins@ == forks_origins0);
-            assert(self.forks.current_branch_id == forks_branch0);
+            assert(self.forks == forks0);
         }
 
         proof {
@@ -3329,9 +3310,7 @@ where
             // forks untouched by reconstruction, so its fh_wf carries from entry
             // (the wrapper does the fork). fh_wf reads only origins@ + branch id,
             // both pinned to the entry ghosts.
-            assert(self.forks.origins@ == forks_origins0);
-            assert(self.forks.current_branch_id == forks_branch0);
-            assert(self.forks.wf());
+            assert(self.forks == forks0);
 
             // Re-establish wf for the truncated stack [0, target_index).
             let frames = self.frames@;
@@ -3509,7 +3488,6 @@ where
             old(self).is_token_valid_spec(token),
             token.frame_idx_spec() < old(self).depth_spec(),
             old(self).depth_spec() < u32::MAX,
-            old(self).fork_count_spec() + 1 <= u32::MAX,
         ensures
             final(self).wf(),
             final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
@@ -3532,42 +3510,23 @@ where
             "Vec::restore: frame-stack depth would overflow u32",
         );
         crate::guard::check_precondition(
-            self.forks.origins.len() < u32::MAX as usize,
-            "Vec::restore: fork history exhausted (too many restores)",
-        );
-        crate::guard::check_precondition(
             self.is_on_current_branch(&token),
             "invalid restore token (abandoned future)",
         );
-        // fork()'s precondition: a valid token's branch is reachable, hence a
-        // real branch id (<= origins.len()). Established over the pristine forks;
-        // `restore_frame` preserves origins@, so it carries afterward.
-        let ghost forks_origins0 = self.forks.origins@;
-        proof {
-            crate::fork_history::lemma_fork_valid_characterization(
-                self.forks.origins@,
-                self.forks.current_branch_id as nat,
-                self.frames@.len() as nat,
-                token.branch_id as nat,
-                token.depth as nat);
-            crate::fork_history::lemma_reaches_in_range(
-                self.forks.origins@,
-                self.forks.current_branch_id as nat,
-                token.branch_id as nat);
-            assert(token.branch_id as nat <= self.forks.origins@.len());
-        }
+        // `restore_frame` leaves `forks` untouched (genealogy-free), so the
+        // generation headroom carries to the `bump_from` below.
+        let ghost forks0 = self.forks;
         self.restore_frame(token.frame_idx);
-        proof {
-            // restore_frame preserved origins@, so the fork precondition carries.
-            assert(self.forks.origins@ == forks_origins0);
-            assert(token.branch_id as nat <= self.forks.origins@.len());
-        }
-        // wf holds here (restore_frame's postcondition). fork() mutates only
-        // self.forks; the framing lemma re-establishes wf from the unchanged
-        // non-forks state plus fork's self.forks.wf().
+        proof { assert(self.forks == forks0); }
+        // Record the branch cut: bump the generations strictly below the restored
+        // depth, invalidating the abandoned future (tokens deeper than `token`)
+        // while `token` and its ancestors stay valid (`lemma_bump_invalidates`).
+        // `bump_from` touches only `self.forks`; the framing lemma re-establishes
+        // wf from the unchanged non-forks state.
         let ghost old_self = *self;
-        self.forks.fork(token.branch_id, token.depth);
+        self.forks.bump_from(token.frame_idx + 1);
         proof {
+            assert(self.forks.levels@.len() == old_self.forks.levels@.len());
             self.lemma_forks_change_preserves_wf(old_self);
         }
     }
@@ -3769,8 +3728,7 @@ impl core::fmt::Debug for VecToken {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("VecToken")
             .field("frame_idx", &self.frame_idx)
-            .field("branch_id", &self.branch_id)
-            .field("depth", &self.depth)
+            .field("generation", &self.generation)
             .field("container_id", &self.container_id)
             .finish()
     }
@@ -3889,21 +3847,21 @@ mod forged_token_tests {
         assert_eq!(v.len(), 8);
     }
 
-    /// A token with a forged branch id (a branch that never existed): rejected
-    /// by the genealogy walk.
+    /// A token with a forged generation (never minted): rejected by the O(1)
+    /// generation check.
     #[test]
-    fn forged_branch_id_rejected() {
+    fn forged_generation_rejected() {
         let mut v = V::new();
         v.push(1);
         let genuine = v.mark(ShrinkPolicy::Never);
         v.push(2);
         let forged = VecToken {
-            branch_id: genuine.branch_id + 7,
+            generation: genuine.generation + 7,
             ..genuine
         };
         assert!(
             !v.is_valid_token(&forged),
-            "forged branch id must be invalid"
+            "forged generation must be invalid"
         );
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             v.restore(forged);
@@ -3912,19 +3870,19 @@ mod forged_token_tests {
         assert_eq!(v.len(), 2, "rejected restore must not mutate");
     }
 
-    /// A token with a forged depth beyond the branch bound: rejected by the
-    /// genealogy walk even though the frame index is live.
+    /// A token pointing at a frame depth beyond the live stack: rejected (its
+    /// depth has no live stamp).
     #[test]
-    fn forged_depth_rejected() {
+    fn forged_frame_idx_rejected() {
         let mut v = V::new();
         v.push(1);
         let genuine = v.mark(ShrinkPolicy::Never);
         v.push(2);
         let forged = VecToken {
-            depth: genuine.depth + 100,
+            frame_idx: genuine.frame_idx + 100,
             ..genuine
         };
-        assert!(!v.is_valid_token(&forged), "forged depth must be invalid");
+        assert!(!v.is_valid_token(&forged), "forged frame idx must be invalid");
     }
 }
 
@@ -4035,8 +3993,7 @@ impl PartialEq for VecToken {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
         self.frame_idx == other.frame_idx
-            && self.branch_id == other.branch_id
-            && self.depth == other.depth
+            && self.generation == other.generation
             && self.container_id == other.container_id
     }
 }

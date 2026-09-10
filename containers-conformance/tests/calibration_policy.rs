@@ -13,7 +13,11 @@ const T: usize = 4; // u32 value
 const I: usize = 4; // u32 index
 
 fn is_auto(m: CompressionMode) -> bool { matches!(m, CompressionMode::Auto) }
-fn is_runs(m: CompressionMode) -> bool { matches!(m, CompressionMode::IndexRuns) }
+// Index-major family: `recommend` now promotes the sorted encoder (its cost is the
+// sorted run count), so accept either index-major mode.
+fn is_runs(m: CompressionMode) -> bool {
+    matches!(m, CompressionMode::IndexRuns | CompressionMode::IndexRunsSorted)
+}
 
 // A clustered frame: 500 entries in one run, all values distinct — index-major
 // is the exact-size winner.

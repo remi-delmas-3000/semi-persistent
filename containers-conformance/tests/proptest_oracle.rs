@@ -99,12 +99,20 @@ mod oracle {
         depth: u32,
     }
 
-    /// A token as the oracle sees it: a (branch, depth, frame) coordinate.
+    /// A token as the oracle sees it. `branch`/`depth`/`frame` model prod's
+    /// branch-walk validity; `gen` models verus's depth-indexed generation-stamp
+    /// validity (the reclaimed fork history). The two semantics legitimately
+    /// differ on sibling tokens (two marks at the same depth on different
+    /// timelines): the branch model distinguishes them by branch id, the
+    /// generation model cannot (they share a depth level), so it is coarser —
+    /// sound (restoring either reconstructs the same-depth frame) but accepts a
+    /// superset. Each impl is checked against its own model.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Tok {
         pub branch: u32,
         pub depth: u32,
         pub frame: u32,
+        pub generation: u64,
     }
 
     /// Semi-persistence by brute force: the current state plus one full deep
@@ -131,6 +139,10 @@ mod oracle {
         // `ForkHistory`: origins[b-1] is where branch b came from.
         cur_branch: u32,
         origins: Vec<Origin>,
+        // Depth-indexed generation stamps, mirroring verus GenStamps: gen_levels[d]
+        // is the live generation at depth d; a mark at d carries gen_levels[d], a
+        // restore diverging at d bumps gen_levels[d+1..]. Models verus validity.
+        gen_levels: Vec<u64>,
     }
 
     impl<S: Clone + std::fmt::Debug + Default> SnapStack<S> {
@@ -140,6 +152,7 @@ mod oracle {
                 snaps: Vec::new(),
                 cur_branch: 0,
                 origins: Vec::new(),
+                gen_levels: Vec::new(),
             }
         }
     }
@@ -151,10 +164,16 @@ mod oracle {
 
         /// Snapshot: a full clone. O(n), deliberately.
         pub fn mark(&mut self) -> Tok {
+            let d = self.snaps.len();
+            // gen model: grow the stamp array to cover depth d, mint its gen.
+            while self.gen_levels.len() <= d {
+                self.gen_levels.push(1u64);
+            }
             let t = Tok {
                 branch: self.cur_branch,
-                depth: self.snaps.len() as u32,
-                frame: self.snaps.len() as u32,
+                depth: d as u32,
+                frame: d as u32,
+                generation: self.gen_levels[d],
             };
             self.snaps.push(self.cur.clone());
             t
@@ -175,6 +194,13 @@ mod oracle {
                 depth: t.depth,
             });
             self.cur_branch = self.origins.len() as u32;
+            // gen model: bump every level strictly below the restored depth
+            // (invalidating the abandoned future, matching verus bump_from(d+1)).
+            let mut i = (t.depth as usize) + 1;
+            while i < self.gen_levels.len() {
+                self.gen_levels[i] += 1;
+                i += 1;
+            }
         }
 
         /// Restorable now: the frame is still live AND the token's branch is on
@@ -190,6 +216,18 @@ mod oracle {
                 return false;
             }
             self.on_current_path(t)
+        }
+
+        /// Restorable-now under the GENERATION-STAMP model (verus's meaning): the
+        /// frame is live AND the token's depth generation still matches. Coarser
+        /// than the branch model — accepts sibling tokens at the same depth — but
+        /// sound (restoring reconstructs the current frame at that depth).
+        pub fn is_restorable_gen(&self, t: Tok) -> bool {
+            if (t.frame as usize) >= self.snaps.len() {
+                return false;
+            }
+            (t.depth as usize) < self.gen_levels.len()
+                && self.gen_levels[t.depth as usize] == t.generation
         }
 
         /// Genealogy only, ignoring frame liveness. This is the *production*
@@ -537,8 +575,8 @@ macro_rules! vec_property {
                     );
                     prop_assert_eq!(
                         vv,
-                        o.is_restorable(*to),
-                        "step {}: token {} verus validity={} vs oracle restorable",
+                        o.is_restorable_gen(*to),
+                        "step {}: token {} verus validity={} vs oracle gen-restorable",
                         step,
                         j,
                         vv
@@ -759,7 +797,7 @@ macro_rules! aov_property {
                             "step {}: aov token {} prod validity vs oracle on-branch", step, j
                         );
                         prop_assert_eq!(
-                            vv, o.is_restorable(*to),
+                            vv, o.is_restorable_gen(*to),
                             "step {}: aov token {} verus validity vs oracle restorable", step, j
                         );
                         if o.is_restorable(*to) {
@@ -921,7 +959,7 @@ macro_rules! map_property {
                             "step {}: map token {} prod validity vs oracle on-branch", step, j
                         );
                         prop_assert_eq!(
-                            vv, o.is_restorable(*to),
+                            vv, o.is_restorable_gen(*to),
                             "step {}: map token {} verus validity vs oracle restorable", step, j
                         );
                         if o.is_restorable(*to) {

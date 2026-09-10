@@ -61,6 +61,20 @@ impl ColumnConfig {
         }
     }
 
+    /// Sort-first index-major run-coalescing with an explicit flush policy: sorts
+    /// each flushed frame by index before coalescing, capturing all index
+    /// contiguity (not just capture-order runs) for the smallest index-major
+    /// encoding. The two-stack contract is the per-frame write multiset, so the
+    /// reorder is sound; `compress_frame` falls back to write-order for the rare
+    /// frame whose indices are not unique.
+    pub const fn index_runs_sorted(compress_at_percent: u32, keep_hot_frames: usize) -> ColumnConfig {
+        ColumnConfig {
+            scheme: CompressionMode::IndexRunsSorted,
+            compress_at_percent,
+            keep_hot_frames,
+        }
+    }
+
     /// Per-frame automatic scheme selection (exact-size costing): each flushed
     /// frame is encoded in whichever of plain/value-dict/index-runs is smallest
     /// for that frame's own content. Use when a column's frames vary in shape.
@@ -91,7 +105,8 @@ impl ColumnConfig {
         match self.scheme {
             CompressionMode::None => false,
             // All compressing modes share the size-fraction trigger.
-            CompressionMode::ValueDict | CompressionMode::IndexRuns | CompressionMode::Auto => {
+            CompressionMode::ValueDict | CompressionMode::IndexRuns
+            | CompressionMode::IndexRunsSorted | CompressionMode::Auto => {
                 // Both products fit u128: `uncompressed_bytes`/`base_bytes` are
                 // usize (< 2^64 here, `global size_of usize == 8`), the percent is
                 // u32 (< 2^32), so each product is < 2^96 << u128::MAX. The
@@ -119,7 +134,8 @@ impl ColumnConfig {
     pub open spec fn should_flush_spec(self, uncompressed_bytes: nat, base_bytes: nat) -> bool {
         match self.scheme {
             CompressionMode::None => false,
-            CompressionMode::ValueDict | CompressionMode::IndexRuns | CompressionMode::Auto =>
+            CompressionMode::ValueDict | CompressionMode::IndexRuns
+            | CompressionMode::IndexRunsSorted | CompressionMode::Auto =>
                 uncompressed_bytes * 100 >= base_bytes * (self.compress_at_percent as nat),
         }
     }

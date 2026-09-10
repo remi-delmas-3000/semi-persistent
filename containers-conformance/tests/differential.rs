@@ -863,12 +863,17 @@ fn bytes_trace(seed: u64, steps: usize) {
             }
         }
 
-        // Tracking bytes agree exactly (same capacity-based formula over
-        // identically-laid-out element types and identical growth histories).
+        // Diff-stack cost agrees exactly (identical diff-log growth histories).
+        // Fork-history bytes are NO LONGER compared: verus reclaims its fork
+        // history to O(max depth) generation stamps, while prod keeps the
+        // O(lifetime-restores) `origins` Vec — an intentional divergence (the leak
+        // fix, doc 10), so `tracking_bytes` (which includes fork history) need not
+        // match. The diff-log length is the compression-relevant retained cost and
+        // still matches.
         assert_eq!(
-            p.tracking_bytes(),
-            v.tracking_bytes(),
-            "step {step}: tracking_bytes diverged"
+            p.diff_log_len(),
+            v.diff_log_len(),
+            "step {step}: diff_log_len diverged"
         );
 
         // total_bytes formula checks (see the header comment for why exact
@@ -991,17 +996,17 @@ fn class_ring_bytes_trace(seed: u64, steps: usize) {
             }
         }
 
-        // THE claim: identical retained-history cost at every step. Exact
-        // equality is right here for the same reason as `bytes_trace` — both
-        // sides push identical sequences into std::Vecs of identically-sized
-        // elements ((cell, u32) diff entries, {saved_len: u32, diff_start:
-        // usize} frames, (u32, u32) fork origins) and std::Vec's growth is
-        // deterministic.
-        assert_eq!(
-            p.tracking_bytes(),
-            v.tracking_bytes(),
-            "seed {seed} step {step}: ring tracking_bytes diverged"
-        );
+        // Fork-inclusive tracking_bytes parity is retired here BY DESIGN: verus
+        // reclaims its fork history to O(max depth) generation stamps while prod
+        // keeps the O(lifetime-restores) `origins` Vec (the leak fix, doc 10), so
+        // the ring's `tracking_bytes` (which forwards to the entries vec, forks
+        // included) diverges after restores — the intended win. The ring exposes
+        // no forks-excluded byte accessor and prod cannot be changed here, so this
+        // pure fork-allocation microtest keeps only its pre-mark parity (asserted
+        // above) and now serves as a no-panic operation trace. The diff-stack byte
+        // parity (the compression-relevant retained cost) is covered by
+        // `differential_bytes` via `diff_log_len`.
+        let _ = v.tracking_bytes();
     }
 
     // Whole-container footprint: same two-word cell and capacity growth history,

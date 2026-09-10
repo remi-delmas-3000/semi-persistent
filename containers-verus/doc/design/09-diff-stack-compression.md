@@ -520,6 +520,9 @@ untouched):
   parameter so a driver feeds it `flush_mode()`.
 
 **Decision uses the sorted run count; the shipped encoder is write-order.**
+(SUPERSEDED 2026-09-07 by "Sorted index-major is selectable through the two-stack"
+below: the sorted encoder is now shipped as `IndexRunsSorted` and the selector
+returns it, so the estimate matches the encoder.)
 `frame_stats` counts `R` from index-set contiguity (`ix-1` absent), i.e. the
 run count a *sorted* index-major encoding would achieve. The shipped
 `compress_runs_writeorder` only coalesces capture-order-consecutive runs, so on a
@@ -607,6 +610,79 @@ the selector now picks value-major for value-repetitive scattered columns (dict
 Still remaining: bit-packed codes (the further 2x), the hashmap dedup (current
 `dict_find` is O(N*D)), sorted-index-major made selectable through a set-level
 two-stack contract, and fork-history reclamation (doc 10).
+
+## Sorted index-major is selectable through the two-stack (2026-09-07)
+
+`IndexRunsSorted` is now a selectable `CompressionMode` (`ColumnConfig::
+index_runs_sorted`), flushed through the two-stack like any other scheme. This
+required moving the two-stack's contract from the flat sequence to the per-frame
+write multiset, because sorting reorders and so cannot preserve `cold@ ++ hot@`.
+
+**Contract: per-frame multiset, not flat sequence.** `compress_frame` now
+guarantees `decode().to_multiset() == diffs@.to_multiset()` for every mode (the
+order-preserving modes still decode to `diffs@` exactly; `IndexRunsSorted` decodes
+to a permutation with the same multiset). `CompressedStack::frame_msets()` and
+`TwoStackLog::frame_msets()` (`Seq<Multiset<(T, I)>>`, one multiset per frame in
+stack order) are the preserved views: `push_frame` extends `frame_msets` by
+`diffs@.to_multiset()`, `open_frame`/`mark` append an empty active frame, and
+`flush_cold` preserves `frame_msets` exactly (the flushed frames' multisets move
+from hot to cold, the concatenation is unchanged). The flat `@` is retained only as
+one linearization (used by `pop_frame` to materialize a frame back); it is NOT
+preserved across a flush that reorders. Soundness: a finalized frame writes each
+cell once (`unique_idx`), so the restore overlay is determined by the per-frame
+write set, not its order (`vec::lemma_multiset_eq_overlay`). Verifies 1828/0.
+
+**Sorting is sound only on unique frames; the fallback covers the rest.**
+`compress_runs_sorted` requires `unique_idx` (a duplicate index would let the
+permutation shadow a different write). `compress_frame` checks it at runtime
+(`is_unique_idx`, O(N) hash set) and falls back to `compress_runs_writeorder`
+(exact, no uniqueness needed) otherwise, so `compress_frame` carries no uniqueness
+precondition and the two-stack needs no per-frame-uniqueness invariant. The
+`compress_frame_sorted` proptests exercise both branches (unique round-trips to the
+sorted multiset; non-unique reproduces the exact write-order sequence);
+`unique_idx_check` pins `is_unique_idx` against the mathematical property.
+
+**The selector is now genuinely honest.** `runs_bytes` costs the sorted (index-set)
+run count, which only the sorted encoder achieves, so `FrameStats::best_mode` and
+`CalibrationStats::recommend` now return `IndexRunsSorted` for the runs winner, not
+the write-order `IndexRuns` (which fragments into more runs and would exceed the
+costed size). The previous "the selector is now honest" note (2026-09-06) was
+premature: it costed the sorted run count but returned `IndexRuns`, so `Auto`
+under-delivered on shuffled-but-contiguous frames. `choose_mode_criterion` and
+`calibration_policy` accept either index-major mode; the honest pick is the sorted
+one.
+
+## Bit-packed dictionary codes (2026-09-07)
+
+`Codes` gains a `Packed { words: Vec<u64>, bits, len }` variant: sub-byte codes at
+1/2/4 bits (for `D <= 2/4/16`), `64/bits` per `u64` word with no cross-word straddle
+(so a code is always within one word, avoiding straddle proofs). This is the
+value-major win below one byte per code: union-find `D <= 4` reaches ~0.30x plain
+(2 bits/code), matching the "val packed" column of the decision table. `from_usize`
+selects the packed width for `D <= 16` and the existing byte widths above it, so the
+representation is invisible to `DictFrame` (its bijection is still stated over
+`Codes::view()`, unchanged) and to every caller.
+
+`view()` for `Packed` is the exact extraction formula (`packed_code_at`: word
+`i/(64/bits)`, field at `(i%(64/bits))*bits`), so it is grounded in the real words.
+`packed_get` (exec extract) and `pack_codes` (exec pack) are `external_body`:
+variable-width bit shifts/masks are not a tractable Verus proof surface, so the
+pack/extract-vs-formula agreement is trusted (trust ledger group B, no `unsafe`) and
+checked by the `packed_codes_roundtrip` proptest across all three widths, the
+field-full boundary, and cross-word packing. `Codes::get` is PROVEN against the
+formula (it just calls `packed_get`, whose ensures is the formula), so only the two
+bit-twiddling primitives are trusted, not the frame or the selector. Verifies
+1832/0.
+
+The selector now costs the packed width honestly: `FrameStats::code_bits` returns
+1/2/4/8/16/32 bits by `D`, and `dict_bytes` charges `ceil(N * code_bits / 8)` for the
+code column, so `Auto`/calibration compare the bit-packed size that actually ships.
+`choose_mode_criterion`'s D=4 case reflects the packed cost (dict 2141 < plain 4000
+at N=500).
+
+This completes the value-major build order (byte-granular 0.63x, then bit-packed
+0.30x); both sit behind the round-trip-preserves-the-write-multiset contract, so the
+code representation changed without touching the frame or callers.
 
 ## Benchmark plan
 

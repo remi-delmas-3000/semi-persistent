@@ -848,11 +848,9 @@ where
         &&& self.heads.is_token_valid_spec(token.heads)
         &&& token.heads.frame_idx_spec() < self.heads.depth_spec()
         &&& self.heads.depth_spec() < u32::MAX
-        &&& self.heads.fork_count_spec() + 1 <= u32::MAX
         &&& self.nodes.is_token_valid_spec(token.nodes)
         &&& token.nodes.frame_idx_spec() < self.nodes.depth_spec()
         &&& self.nodes.depth_spec() < u32::MAX
-        &&& self.nodes.fork_count_spec() + 1 <= u32::MAX
     }
 
     pub open(crate) spec fn model_view(&self) -> Seq<Seq<usize>> {

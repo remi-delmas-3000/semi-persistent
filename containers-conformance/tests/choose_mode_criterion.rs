@@ -11,7 +11,12 @@ use semi_persistent_containers_verus as verus;
 use verus::CompressionMode;
 use verus::diff_compress::choose_mode;
 
-fn is_runs(m: CompressionMode) -> bool { matches!(m, CompressionMode::IndexRuns) }
+// Either index-major encoder counts as "index-major". The honest selector now
+// returns IndexRunsSorted (its cost is the sorted run count, which the sorted
+// encoder achieves), but the write-order IndexRuns is the same family.
+fn is_runs(m: CompressionMode) -> bool {
+    matches!(m, CompressionMode::IndexRuns | CompressionMode::IndexRunsSorted)
+}
 fn is_dict(m: CompressionMode) -> bool { matches!(m, CompressionMode::ValueDict) }
 fn is_none(m: CompressionMode) -> bool { matches!(m, CompressionMode::None) }
 
@@ -26,11 +31,11 @@ fn clustered_indices_pick_index_major() {
 #[test]
 fn repeated_values_scattered_indices_pick_value_major() {
     // Scattered indices (stride 7, so no runs), only 4 distinct values —
-    // value-major's best case (D=4 << N=500). With the shipped narrow codes (u8
-    // for D<=256), dict bytes = 4*4 + 500*1 codes + 500*4 idxs = 2516 < plain
-    // 4000, so the honest selector picks ValueDict. (At the old usize codes this
-    // was 6016 > plain and it wrongly picked None — the packed-codes fix is
-    // exactly what lets the selector choose value-major here.)
+    // value-major's best case (D=4 << N=500). With the shipped packed codes (2 bits
+    // for D<=4), dict bytes = 4*4 + ceil(500*2/8) codes + 500*4 idxs = 16+125+2000
+    // = 2141 < plain 4000, so the honest selector picks ValueDict. (At the old usize
+    // codes this was 6016 > plain and it wrongly picked None — the packed-codes fix
+    // is exactly what lets the selector choose value-major here.)
     let diffs: Vec<(u32, u32)> =
         (0..500u32).map(|i| ((i % 4) as u32, i.wrapping_mul(7) % 100_000)).collect();
     assert!(

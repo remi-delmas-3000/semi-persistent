@@ -16,6 +16,7 @@
 //! or reordered across the boundary.
 
 use vstd::prelude::*;
+use vstd::multiset::Multiset;
 use crate::index_like::{IndexLike, IndexFromNat};
 use crate::diff_log::DiffLog;
 use crate::compressed_stack::CompressedStack;
@@ -55,12 +56,46 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
                 (#[trigger] self.hot_starts@[a]) <= (#[trigger] self.hot_starts@[b])
     }
 
+    /// The exclusive end of hot frame `j`: the next frame's start, or (for the
+    /// active, last frame) the hot top.
+    pub open spec fn hot_hi(&self, j: int) -> int {
+        if j + 1 < self.hot_starts@.len() {
+            self.hot_starts@[j + 1] as int
+        } else {
+            self.hot@.len() as int
+        }
+    }
+
+    /// The write multiset of hot frame `j` (its slice of `hot@`).
+    pub open spec fn hot_frame_mset(&self, j: int) -> Multiset<(T, I)> {
+        self.hot@.subrange(self.hot_starts@[j] as int, self.hot_hi(j)).to_multiset()
+    }
+
+    /// The per-frame write multisets of the hot (uncompressed) top, in order.
+    pub open spec fn hot_frame_msets(&self) -> Seq<Multiset<(T, I)>> {
+        Seq::new(self.hot_starts@.len(), |j: int| self.hot_frame_mset(j))
+    }
+
+    /// The two-stack's semantic contract: one write multiset per frame, cold frames
+    /// then hot frames, in stack order. Order-insensitive WITHIN a frame (each cell
+    /// is written once in a finalized frame, so the restore overlay is determined by
+    /// the per-frame write set), which is what lets a reordering encoder
+    /// (`IndexRunsSorted`) flush a frame while preserving this view. The flat `@`
+    /// (`cold@ ++ hot@`) is only one linearization and is NOT preserved across a
+    /// flush that reorders; `frame_msets` is.
+    pub open spec fn frame_msets(&self) -> Seq<Multiset<(T, I)>> {
+        self.cold.frame_msets() + self.hot_frame_msets()
+    }
+
     /// An empty two-stack log with the given column configuration. Seeds one
     /// (empty) active frame at offset 0, so `hot_starts` is never empty and its
     /// first element stays 0 (it is only ever extended at the end or rebased to
     /// 0 by a flush).
     pub fn new(config: ColumnConfig) -> (r: TwoStackLog<T, I>)
-        ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
+        ensures
+            r.wf(),
+            r@ == Seq::<(T, I)>::empty(),
+            r.frame_msets() == seq![Multiset::<(T, I)>::empty()],
     {
         let mut hot_starts: Vec<usize> = Vec::new();
         hot_starts.push(0);
@@ -72,6 +107,16 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
         };
         assert(r@ =~= Seq::<(T, I)>::empty());
         assert(r.hot_starts@[0] == 0);
+        // One empty active frame: hot_frame_msets == [empty], cold empty.
+        proof {
+            broadcast use vstd::seq_lib::group_to_multiset_ensures;
+            assert(r.hot_starts@.len() == 1);
+            assert(r.hot_hi(0) == 0);
+            assert(r.hot@.subrange(0, 0) =~= Seq::<(T, I)>::empty());
+            assert(r.hot_frame_mset(0) =~= Multiset::<(T, I)>::empty());
+            assert(r.hot_frame_msets() =~= seq![Multiset::<(T, I)>::empty()]);
+            assert(r.frame_msets() =~= seq![Multiset::<(T, I)>::empty()]);
+        }
         r
     }
 
@@ -80,17 +125,51 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
         self@.len()
     }
 
-    /// Append one diff to the active (top) frame.
+    /// Append one diff to the active (top) frame. The active frame is always the
+    /// last, so its write multiset gains `(t, idx)` and every other frame's is
+    /// unchanged.
     pub fn push(&mut self, t: T, idx: I)
         requires old(self).wf(),
-        ensures final(self).wf(), final(self)@ == old(self)@.push((t, idx)),
+        ensures
+            final(self).wf(),
+            final(self)@ == old(self)@.push((t, idx)),
+            final(self).frame_msets() == old(self).frame_msets().update(
+                old(self).frame_msets().len() - 1,
+                old(self).frame_msets()[old(self).frame_msets().len() - 1].insert((t, idx))),
     {
+        let ghost hot0 = self.hot@;
+        let ghost L = self.hot_starts@.len();
         self.hot.push(t, idx);
         assert(self@ =~= old(self)@.push((t, idx)));
+        assert(self.hot@ =~= hot0.push((t, idx)));
         assert forall|k: int| 0 <= k < self.hot_starts@.len() implies
             (#[trigger] self.hot_starts@[k]) <= self.hot@.len() by {
             assert(self.hot_starts@[k] <= old(self).hot@.len());
         }
+        // The last hot frame's slice grows by (t, idx); every earlier frame's slice
+        // (ending at a fixed start <= old hot len) is unchanged.
+        let ghost active = (L - 1) as int;
+        assert(self.hot_frame_mset(active)
+            == old(self).hot_frame_mset(active).insert((t, idx))) by {
+            let lo = self.hot_starts@[active] as int;
+            assert(self.hot_hi(active) == hot0.len() as int + 1);
+            assert(old(self).hot_hi(active) == hot0.len() as int);
+            assert(self.hot@.subrange(lo, hot0.len() as int + 1)
+                =~= hot0.subrange(lo, hot0.len() as int).push((t, idx)));
+            hot0.subrange(lo, hot0.len() as int).to_multiset_ensures();
+            assert(hot0.subrange(lo, hot0.len() as int).push((t, idx)).to_multiset()
+                =~= hot0.subrange(lo, hot0.len() as int).to_multiset().insert((t, idx)));
+        }
+        assert forall|j: int| 0 <= j < active implies
+            self.hot_frame_mset(j) == old(self).hot_frame_mset(j) by {
+            assert(self.hot_hi(j) == old(self).hot_hi(j));
+            assert(self.hot_hi(j) <= hot0.len());
+            assert(self.hot@.subrange(self.hot_starts@[j] as int, self.hot_hi(j))
+                =~= hot0.subrange(self.hot_starts@[j] as int, self.hot_hi(j)));
+        }
+        assert(self.frame_msets() =~= old(self).frame_msets().update(
+            old(self).frame_msets().len() - 1,
+            old(self).frame_msets()[old(self).frame_msets().len() - 1].insert((t, idx))));
     }
 
     /// Number of hot (uncompressed) frames.
@@ -111,8 +190,14 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
     /// active frame closes; a fresh empty active frame opens.
     pub fn open_frame(&mut self)
         requires old(self).wf(),
-        ensures final(self).wf(), final(self)@ == old(self)@,
+        ensures
+            final(self).wf(),
+            final(self)@ == old(self)@,
+            final(self).frame_msets() == old(self).frame_msets().push(Multiset::empty()),
     {
+        let ghost hot0 = self.hot@;
+        let ghost starts0 = self.hot_starts@;
+        let ghost L = starts0.len();
         let n = self.hot.len();
         self.hot_starts.push(n);
         assert(self@ =~= old(self)@);
@@ -131,6 +216,25 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
                 }
             }
         }
+        // The previously-active frame keeps the same slice (its end was hot.len(),
+        // now pinned as the next start = hot.len()); a fresh empty active frame is
+        // appended. So hot_frame_msets grows by one empty multiset.
+        assert(self.hot_frame_msets() =~= old(self).hot_frame_msets().push(Multiset::empty())) by {
+            assert forall|j: int| 0 <= j < L implies
+                self.hot_frame_mset(j) == old(self).hot_frame_mset(j) by {
+                assert(self.hot_hi(j) == old(self).hot_hi(j));
+            }
+            assert(self.hot_frame_mset(L as int)
+                =~= Multiset::<(T, I)>::empty()) by {
+                broadcast use vstd::seq_lib::group_to_multiset_ensures;
+                assert(self.hot_starts@[L as int] == n);
+                assert(n == hot0.len());
+                assert(self.hot_hi(L as int) == hot0.len() as int);
+                assert(self.hot@.subrange(n as int, hot0.len() as int)
+                    =~= Seq::<(T, I)>::empty());
+            }
+        }
+        assert(self.frame_msets() =~= old(self).frame_msets().push(Multiset::empty()));
     }
 
     /// Compress the first `k` hot frames into the cold bottom and drop them from
@@ -146,16 +250,22 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
             k < old(self).hot_starts@.len(),
         ensures
             final(self).wf(),
-            final(self)@ == old(self)@,
+            final(self).frame_msets() == old(self).frame_msets(),
     {
         let ghost hot0 = self.hot@;
-        let ghost cold0 = self.cold@;
         let ghost starts0 = self.hot_starts@;
-        // Properties of the immutable ghosts, from the entry wf; hoisted so they
-        // remain available in the rebuild loop and the final wf proof.
+        let ghost cold0_msets = self.cold.frame_msets();
+        let ghost L = starts0.len();
+        // `G(j)` is old hot frame j's write multiset (the slice `[starts0[j], hi(j))`
+        // where `hi(j)` is the next start, or `hot0.len()` for the active last
+        // frame). For j < k <= L-1 the next start exists, so the flushed frames'
+        // multisets match what `push_frame` records.
+        // `H(j) == old(self).hot_frame_mset(j)` is old hot frame j's write multiset
+        // (a real spec fn, so it reduces reliably where a local closure would not).
+        // Properties of the immutable ghosts, from the entry wf.
         assert(starts0[0] == 0);
-        assert(forall|j: int| 0 <= j < starts0.len() ==> #[trigger] starts0[j] <= hot0.len());
-        assert(forall|a: int, b: int| 0 <= a <= b < starts0.len() ==>
+        assert(forall|j: int| 0 <= j < L ==> #[trigger] starts0[j] <= hot0.len());
+        assert(forall|a: int, b: int| 0 <= a <= b < L ==>
             #[trigger] starts0[a] <= #[trigger] starts0[b]);
         let mut f: usize = 0;
         while f < k
@@ -165,32 +275,50 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
                 self.hot_starts@ == starts0,
                 self.hot.wf(),
                 starts0[0] == 0,
-                forall|j: int| 0 <= j < starts0.len() ==> #[trigger] starts0[j] <= hot0.len(),
-                forall|a: int, b: int| 0 <= a <= b < starts0.len() ==>
+                L == starts0.len(),
+                forall|j: int| 0 <= j < L ==> #[trigger] starts0[j] <= hot0.len(),
+                forall|a: int, b: int| 0 <= a <= b < L ==>
                     #[trigger] starts0[a] <= #[trigger] starts0[b],
                 0 <= f <= k,
+                k < L,
                 self.cold.wf(),
-                // Processed frames tile the hot prefix `[0, starts0[f])`.
-                self.cold@ == cold0 + hot0.subrange(0, starts0[f as int] as int),
+                // Flushed frames' multisets accumulate onto cold, in order.
+                self.cold.frame_msets() =~= cold0_msets
+                    + Seq::new(f as nat, |j: int| old(self).hot_frame_mset(j)),
             decreases k - f,
         {
             let lo = self.hot_starts[f];
             let hi = self.hot_starts[f + 1];
             assert(lo <= hi <= hot0.len());
             let diffs = self.hot.subrange_vec(lo, hi);
+            // For f < k <= L-1, old hot frame f is exactly this slice's multiset.
+            assert(lo == starts0[f as int]);
+            assert(hi == starts0[f as int + 1]);
+            assert(f as int + 1 < L);
+            assert(old(self).hot_hi(f as int) == hi as int);
+            assert(diffs@ =~= hot0.subrange(lo as int, hi as int));
+            assert(old(self).hot_frame_mset(f as int)
+                == hot0.subrange(lo as int, hi as int).to_multiset());
+            assert(diffs@.to_multiset() == old(self).hot_frame_mset(f as int));
             self.cold.push_frame(&diffs, mode);
             proof {
-                // cold@ == cold0 + hot0[0..lo] + hot0[lo..hi] == cold0 + hot0[0..hi]
-                assert(hot0.subrange(0, lo as int) + hot0.subrange(lo as int, hi as int)
-                    =~= hot0.subrange(0, hi as int));
+                // Seq::new(f+1, H) == Seq::new(f, H).push(H(f)); and (A + B).push(x)
+                // == A + B.push(x).
+                assert(Seq::new((f + 1) as nat, |j: int| old(self).hot_frame_mset(j))
+                    =~= Seq::new(f as nat, |j: int| old(self).hot_frame_mset(j))
+                        .push(old(self).hot_frame_mset(f as int)));
+                assert((cold0_msets + Seq::new(f as nat, |j: int| old(self).hot_frame_mset(j)))
+                        .push(old(self).hot_frame_mset(f as int))
+                    =~= cold0_msets + Seq::new(f as nat, |j: int| old(self).hot_frame_mset(j))
+                        .push(old(self).hot_frame_mset(f as int)));
             }
             f += 1;
         }
-        // After the loop, cold@ == cold0 + hot0[0 .. starts0[k]].
+        // After the loop, cold.frame_msets() == cold0_msets + [H(0)..H(k-1)].
         let m = self.hot_starts[k];
-        assert(self.hot_starts@ == starts0);
         assert(m == starts0[k as int]);
-        assert(self.cold@ == cold0 + hot0.subrange(0, m as int));
+        assert(self.cold.frame_msets()
+            =~= cold0_msets + Seq::new(k as nat, |j: int| old(self).hot_frame_mset(j)));
         self.hot.drop_front(m);
         assert(self.hot@ =~= hot0.subrange(m as int, hot0.len() as int));
 
@@ -226,12 +354,9 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
         self.hot_starts = new_starts;
 
         proof {
-            // View preserved: (cold0 + hot0[0..m]) + hot0[m..] == cold0 + hot0.
-            assert(hot0.subrange(0, m as int) + hot0.subrange(m as int, hot0.len() as int)
-                =~= hot0);
-            assert(self@ =~= old(self)@);
             // wf for the rebuilt hot_starts.
             assert(self.hot@.len() == hot0.len() - m);
+            assert(self.hot_starts@.len() == L - k);
             if self.hot_starts@.len() > 0 {
                 assert(self.hot_starts@[0] == (starts0[k as int] - m) as int);
                 assert(starts0[k as int] == m);
@@ -247,6 +372,39 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
                 assert(self.hot_starts@[b] == (starts0[k + b] - m) as int);
                 assert(starts0[k + a] <= starts0[k + b]);
             }
+            // The surviving hot frames are exactly the old frames [k, L): each new
+            // frame i is old frame k+i (its slice shifted back by m).
+            assert(self.hot_frame_msets()
+                =~= Seq::new((L - k) as nat, |i: int| old(self).hot_frame_mset(k + i))) by {
+                assert forall|i: int| 0 <= i < L - k implies
+                    self.hot_frame_mset(i) == old(self).hot_frame_mset(k + i) by {
+                    let lo_i = self.hot_starts@[i] as int;
+                    assert(lo_i == starts0[k + i] as int - m as int);
+                    // new hot_hi(i) shifts old hot_hi(k+i) back by m.
+                    if i + 1 < L - k {
+                        assert(self.hot_hi(i) == self.hot_starts@[i + 1] as int);
+                        assert(self.hot_hi(i) == starts0[k + i + 1] as int - m as int);
+                        assert(old(self).hot_hi(k + i) == starts0[k + i + 1] as int)
+                            by { assert(k + i + 1 < L); }
+                    } else {
+                        assert(self.hot_hi(i) == self.hot@.len() as int);
+                        assert(self.hot_hi(i) == hot0.len() as int - m as int);
+                        assert(old(self).hot_hi(k + i) == hot0.len() as int)
+                            by { assert(!(k + i + 1 < L)); }
+                    }
+                    // slice shift: hot0[m..].subrange(a-m, b-m) == hot0.subrange(a, b).
+                    assert(self.hot@.subrange(lo_i, self.hot_hi(i))
+                        =~= hot0.subrange(starts0[k + i] as int, old(self).hot_hi(k + i)));
+                }
+            }
+            // Combine: cold gets H[0..k), hot keeps H[k..L); concatenation is the
+            // whole H[0..L) == old hot frame msets, so frame_msets is preserved.
+            assert(Seq::new(k as nat, |j: int| old(self).hot_frame_mset(j))
+                    + Seq::new((L - k) as nat, |i: int| old(self).hot_frame_mset(k + i))
+                =~= Seq::new(L, |j: int| old(self).hot_frame_mset(j)));
+            assert(old(self).hot_frame_msets()
+                =~= Seq::new(L, |j: int| old(self).hot_frame_mset(j)));
+            assert(self.frame_msets() =~= old(self).frame_msets());
         }
     }
 
@@ -257,9 +415,13 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
     /// view is unchanged.
     pub fn mark(&mut self, uncompressed_bytes: usize, base_bytes: usize)
         requires old(self).wf(),
-        ensures final(self).wf(), final(self)@ == old(self)@,
+        ensures
+            final(self).wf(),
+            final(self).frame_msets() == old(self).frame_msets().push(Multiset::empty()),
     {
         self.open_frame();
+        // open_frame appended the empty active frame; flush_cold (if it fires)
+        // preserves frame_msets, so the post-mark contract is the same either way.
         if self.config.should_flush(uncompressed_bytes, base_bytes) {
             let nframes = self.hot_starts.len();
             let want = self.config.frames_to_compress(nframes);

@@ -42,17 +42,26 @@ impl FrameStats {
     pub fn runs_bytes(self, t: usize) -> usize {
         self.runs.saturating_mul(8).saturating_add(self.n.saturating_mul(t))
     }
-    /// The code width the shipped value encoder narrows to (`Codes::from_usize`).
-    pub fn code_width(self) -> usize {
-        if self.distinct <= 256 { 1 } else if self.distinct <= 65536 { 2 } else { 4 }
+    /// The code width in BITS the shipped value encoder narrows to
+    /// (`Codes::from_usize`): 1/2/4 bit-packed for `D <= 2/4/16`, then byte-granular
+    /// 8/16/32 for larger `D`. This is what makes the honest packed cost sub-byte.
+    pub fn code_bits(self) -> usize {
+        if self.distinct <= 2 { 1 }
+        else if self.distinct <= 4 { 2 }
+        else if self.distinct <= 16 { 4 }
+        else if self.distinct <= 256 { 8 }
+        else if self.distinct <= 65536 { 16 }
+        else { 32 }
     }
-    /// Value-major: dict (`D` values of `T`) + codes (`N` at the narrow width) +
-    /// indices (`N` of `I`, still stored — value-major does not drop them).
+    /// Value-major: dict (`D` values of `T`) + codes (`N` at the narrow bit width,
+    /// rounded up to whole bytes) + indices (`N` of `I`, still stored — value-major
+    /// does not drop them).
     #[verifier::external_body]
     pub fn dict_bytes(self, t: usize, i: usize) -> usize {
+        let code_bytes = self.n.saturating_mul(self.code_bits()).saturating_add(7) / 8;
         self.distinct
             .saturating_mul(t)
-            .saturating_add(self.n.saturating_mul(self.code_width()))
+            .saturating_add(code_bytes)
             .saturating_add(self.n.saturating_mul(i))
     }
 
@@ -63,7 +72,12 @@ impl FrameStats {
         let runs = self.runs_bytes(t);
         let dict = self.dict_bytes(t, i);
         if runs <= dict && runs < plain {
-            CompressionMode::IndexRuns
+            // `runs_bytes` costs the sorted (index-set) run count, which is what
+            // `compress_runs_sorted` achieves — so the honest winner is the sorted
+            // encoder, not write-order `IndexRuns` (which fragments into more runs
+            // and would exceed this cost). `compress_frame` falls back to
+            // write-order if a frame's indices are not unique.
+            CompressionMode::IndexRunsSorted
         } else if dict < plain {
             CompressionMode::ValueDict
         } else {
@@ -123,7 +137,9 @@ impl CalibrationStats {
     /// to promote for this column on this class of workload.
     pub fn recommend(&self) -> CompressionMode {
         if self.runs_total <= self.dict_total && self.runs_total < self.plain_total {
-            CompressionMode::IndexRuns
+            // Same honesty point as `best_mode`: the runs totals are sorted-run
+            // counts, so promote the sorted encoder.
+            CompressionMode::IndexRunsSorted
         } else if self.dict_total < self.plain_total {
             CompressionMode::ValueDict
         } else {

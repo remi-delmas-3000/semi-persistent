@@ -252,6 +252,154 @@ problem. `R` per workload is measurable (count restores on a sundance SMT run vs
 an eq-sat saturation) and should be measured before committing either change, per
 the differential-profile prerequisite above.
 
+## Reclamation COMPLETE across the whole fork API (2026-09-07)
+
+The branch-model fork history is gone. `fork_history.rs` (the append-only
+`origins` walk, `fork_valid`/`fork_walk`/`reaches`, `current_branch`) is deleted,
+and every fork path uses `GenStamps`: the shared `History` (the e-graph's ×1 copy),
+the standalone `Vec` and `AppendOnlyVec`, and the delegators that thread member
+tokens (`circular_list`, `sparse_set`, `union_find`, `list`, `map`). `VecToken`
+carries `(frame_idx, generation, container_id)`; validity is the O(1)
+`forks.valid(frame_idx, generation)`; `mark` mints via `stamp_at`; `restore`'s
+branch cut is `bump_from(frame_idx+1)`. Verifies containers-verus 1827/0, egraph
+builds, and every test + conformance proptest passes. Live size is O(max depth)
+on every fork path, not O(R): the leak is eliminated, not only for the e-graph.
+
+**Measured, not only derived (`gen_stamps_reclamation`, containers-conformance).**
+The AFTER is a runtime measurement: driving 500 and 50000 restore/re-mark cycles at
+a spine depth of 1000 yields identical live size (`GenStamps::heap_bytes`), and the
+array never grows past the deepened depth, so the size is independent of the restore
+count. At depth 1000 the measured live size is 9 KB. The BEFORE is the deleted
+`origins` model's known formula (8 bytes per restore, never reclaimed): at 10^7
+restores it is 80 MB. Only the AFTER can be run (the branch model is deleted); the
+test asserts the ratio is >=1000x (measured 9765x, MB to KB). This is a measurement
+of the reclaimed structure, not an inference from an analogous case.
+
+**`bump_from` is total (no overflow precondition), via `wrapping_add`.** The
+invalidation a restore needs is only that a bumped level becomes *distinct* from a
+stale token's stored generation, not that it increments: `x.wrapping_add(1) != x`
+for every `u64` (the wrap `u64::MAX -> 0` still changes the value), so
+`bump_from` invalidates the abandoned future with no precondition at all.
+`lemma_bump_invalidates` is restated on `!=` rather than `+1`. `bump_from` is
+`external_body` (trust group B: a pure counter bump, no `unsafe`) so the `!=`
+ensures is read directly off `wrapping_add`'s semantics.
+
+**Rejected alternative: thread a `< u64::MAX` headroom precondition.** The earlier
+design carried `gen_headroom_spec` (a `forall d in (frame_idx, len): levels[d] <
+u64::MAX`) as `restore`'s precondition, the u64 analogue of the old u32
+`origins.len()+1 <= u32::MAX`. It fails to compose: `restore` is reached through
+the delegators (`union_find` -> `parent.restore`, `circular_list` -> `entries.restore`,
+`EClasses::restore` -> five members), and a `forall` over private `levels` cannot
+be discharged O(1) at each boundary the way the old O(1) count check was. Threading
+it produced a cascade of precondition failures across six files. `wrapping_add`
+removes the obligation instead of propagating it. The only residue is ABA: a level
+could wrap back to a stale token's generation after 2^64 restores at one depth,
+which is physically unreachable, and frame-liveness (`frame_idx < depth`) backstops
+it regardless. This is a decision, not a measurement: 2^64 is the bound, not an
+observed value.
+
+## Leak FIXED for the e-graph (2026-09-06)
+
+`history::History` — the shared ×1 fork history the e-graph actually uses — is
+migrated to `GenStamps` (containers-verus 1842/0, egraph + eclasses conformance
+green). `GroupToken` now carries `(generation, depth)`; `valid_spec` is the O(1)
+`stamps.valid(depth, gen)`; `mark` is `stamp_at(depth)`; `restore_to` is
+`bump_from(t.depth+1)`, invalidating the abandoned future (tokens deeper than `t`)
+while `t` and its ancestors stay valid — matching the branch model, sound by
+`lemma_bump_invalidates`. The append-only `origins` is gone from this path.
+
+**Memory (deterministic, from the structure).** Before: `origins` grew one 8-byte
+`ForkOrigin` per restore, never reclaimed — `8·R` bytes for `R` lifetime restores.
+After: `stamps.levels` is one `u64` per depth ever reached — `8·D_max` bytes for
+max spine depth `D_max`. For an SMT run with `R = 10^7` backjumps at depth
+`D_max ≈ 10^3`: **80 MB → 8 KB**, the MB→KB target. The O(R) term is eliminated
+from the e-graph's fork history.
+
+**Remaining:** (SUPERSEDED 2026-09-07 by "Reclamation COMPLETE" above: the
+per-`Vec` migration is done and `fork_history.rs` is deleted.) the per-`Vec`
+branch-model `ForkHistory` (used by the STANDALONE,
+non-e-graph `Vec`/`AppendOnlyVec` fork API) still grows `origins` O(R). Migrating
+it is coupled by the shared `VecToken` (both `Vec` and `AppendOnlyVec` use it), so
+it is a separate atomic step (`VecToken.branch_id/depth -> gen`, `is_token_valid_spec`,
+`mark`, the `restore` branch-cut proof, then delete `fork_walk`/`reaches`). Lower
+priority: the e-graph (the memory-critical path) is now fixed; standalone `Vec`
+fork usage is not the leak the goal targeted.
+
+## Reclamation status: mechanism BUILT, integration is a scoped multi-step redesign
+
+(SUPERSEDED 2026-09-07: integration is COMPLETE, see "Reclamation COMPLETE across
+the whole fork API" above. The blast-radius estimate and stepwise plan below are
+kept as the record of how the migration was scoped and executed.)
+
+Labeling honestly (BUILT = verified code exists; DESIGNED = doc only):
+
+- **BUILT:** `gen_stamps::GenStamps` — the depth-indexed stamp array with
+  `stamp`/`push_level`/`bump_from`/`is_valid` and `lemma_bump_invalidates` (a
+  diverging restore invalidates the abandoned future in O(1), preserves the
+  spine). Verified 1841/0. This is the reclamation *mechanism*.
+- **DESIGNED (not built):** wiring it in to actually bound live memory. Measured
+  blast radius: 154 references to the branch-model validity surface
+  (`VecToken.branch_id`/`depth`, `fork_valid`/`fork_walk`/`reaches`,
+  `fork_count_spec`, `ForkHistory.origins`, `current_branch`) across 6 core files
+  — `vec.rs`, `fork_history.rs`, `append_only_vec.rs` (a parallel fork impl),
+  `history.rs` + `eclasses.rs` (the shared multi-member `History`), and the
+  `fork_count_spec` delegators (`circular_list`/`sparse_set`/`union_find`/`list`).
+  The fork token is a SHARED abstraction across every aggregate, so replacing the
+  branch walk with the stamp array is not localized; it re-proves each container's
+  restore/branch-cut against the new validity model. This is a multi-session
+  redesign, not a single increment.
+
+**Refinement (2026-09-06): `History` is the isolatable first target.** The
+e-graph's shared ×1 fork history is `history::History` (with its own
+`GroupToken { branch_id, depth }`), NOT the per-`Vec` `ForkHistory`: the members
+mark/restore through `EClasses::{mark,restore}_with_history` over the genealogy-free
+`push_frame`/`restore_frame`, so `History` is the sole fork authority for the
+e-graph and the copy that leaks. Its `GroupToken` is separate from `VecToken`, and
+its API is compact (`mark`/`is_valid`/`restore_to`, ~130 lines). So migrating
+`History` to `GenStamps` fixes the e-graph leak in isolation — `GroupToken.branch_id
+-> gen`, `valid_spec` = `stamps.valid(depth, gen)`, `mark` = `stamp_at(depth)`,
+`restore_to` = `bump_from(t.depth)` with branch-cut safety from
+`lemma_bump_invalidates` — without disturbing `VecToken`/`vec.rs`. The `Vec`/
+`AppendOnlyVec` migration (coupled by the shared `VecToken`) is a separate later
+step for the standalone (non-e-graph) fork API. Note: `GenStamps`'s `view()` spec
+fn triggers Verus's opaque-field rule for cross-struct spec access; drop/rename it
+and read `stamps.levels@` directly (as `Vec` reads `forks.origins@`).
+
+**Stepwise integration plan (each a green increment):**
+1. Add `GenForkHistory` (new type on `GenStamps`) additively, with `stamp_at(depth)
+   -> gen`, `cut(depth)` (= `bump_from`), `is_valid(depth, gen)` — leaving the
+   branch-model `ForkHistory` in place.
+2. Pilot: migrate `AppendOnlyVec` (self-contained restore) to it — token carries
+   `(frame_idx, gen)`, validity is `is_valid(frame_idx, gen)`, restore does
+   `cut(frame_idx)`; re-prove its branch-cut safety via `lemma_bump_invalidates`.
+   This proves the model end to end on a real container.
+3. Migrate `Vec` (`VecToken.branch_id/depth` -> `gen`, `is_token_valid_spec`,
+   `mark`, the `restore` branch-cut proof, `lemma_forks_change_preserves_wf`,
+   Vec wf gains `stamps.len() >= frames.len()`).
+4. Migrate the shared `History` + `EClasses`.
+5. Delete the branch-model `ForkHistory`/`fork_walk`/`reaches` and the
+   `fork_count_spec` u32-headroom preconditions (the leak-bounded design has no
+   per-restore growth, so that headroom concern disappears).
+
+Invalidation soundness at every step rests on `lemma_bump_invalidates`; the
+per-container work is re-proving restore against `is_valid(depth, gen)` instead of
+the walk. Memory goes O(R) -> O(max depth); measure SMT before/after at step 3.
+
+## Reclamation core built (2026-09-06)
+
+The dense stamp array below is now built and verified as a standalone module
+(`gen_stamps::GenStamps`, containers-verus 1842/0): `levels: Vec<u64>` (one
+generation per depth), `stamp(depth)` mints a token's generation, `bump_from(cut)`
+invalidates the abandoned future by bumping `levels[cut..]`, and `is_valid(depth,
+g)` is the single-read check `levels[depth] == g`. `lemma_bump_invalidates` proves
+the soundness: after `bump_from(cut)`, every token at `depth >= cut` with its old
+stamp is rejected while every token at `depth < cut` keeps its validity — exactly
+what `fork_valid`'s parent-chain walk decides, now O(1) and O(max-depth) space
+instead of O(R). Remaining: wire this into `ForkHistory` (replace the append-only
+`origins` and the `fork_valid`/`reaches` walk with the stamp array, re-proving the
+mark/restore/branch-cut theorems against it, preserving the ×1 sharing), then
+measure the SMT memory before/after.
+
 ## Reclaiming abandoned branches (bounds size to O(spine depth))
 
 `origins` grows one entry per restore and is never reclaimed because `branch_id`

@@ -187,8 +187,9 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
         requires old(self).wf(),
         ensures final(self).wf(), final(self)@ == old(self)@,
     {
-        let mut dict: Vec<T> = Vec::new();
-        let mut codes: Vec<usize> = Vec::new();
+        // Extract the value column, then dedup it in O(N) (shared with the
+        // frame encoder's assign_codes).
+        let mut vals: Vec<T> = Vec::new();
         let n = self.len();
         let mut i: usize = 0;
         while i < n
@@ -196,25 +197,16 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
                 i <= n,
                 n == self@.len(),
                 self.wf(),
-                codes@.len() == i,
-                forall|t: int| 0 <= t < i ==> (#[trigger] codes@[t]) < dict@.len(),
-                forall|t: int| 0 <= t < i ==> dict@[#[trigger] codes@[t] as int] == self@[t].0,
+                vals@.len() == i,
+                forall|t: int| 0 <= t < i ==> #[trigger] vals@[t] == self@[t].0,
             decreases n - i,
         {
-            let (v, _idx) = self.index(i);
-            let code = match crate::diff_compress::dict_find(&dict, v) {
-                Some(c) => c,
-                None => {
-                    let c = dict.len();
-                    dict.push(v);
-                    c
-                }
-            };
-            codes.push(code);
+            vals.push(self.index(i).0);
             i += 1;
         }
-        // `idxs` is untouched, so the index column is preserved; the new value
-        // column reproduces every original value at the same position.
+        let (dict, codes) = crate::diff_compress::assign_codes(&vals);
+        // assign_codes: codes parallel to vals, each < dict.len(), dict[codes[t]]
+        // == vals[t] == self@[t].0. `idxs` untouched, so the view is preserved.
         self.vals = DiffVals::Dict { dict, codes };
         assert(self@ =~= old(self)@);
     }

@@ -233,6 +233,7 @@ version = "0.3.0"
 dependencies = [
  "criterion",
  "proptest",
+ "rayon",
  "semi-persistent-containers",
  "semi-persistent-containers-verus",
  "vstd",
@@ -906,6 +907,7 @@ dependencies = [
  "num-rational",
  "ordered-float",
  "proptest",
+ "rayon",
  "vstd",
 ]
 

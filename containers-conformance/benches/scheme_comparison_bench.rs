@@ -13,7 +13,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 
 use semi_persistent_containers_verus as verus;
-use verus::diff_compress::{compress_runs_sorted, compress_runs_writeorder};
+use verus::diff_compress::{compress, compress_runs_sorted, compress_runs_writeorder};
 
 struct XorShift(u64);
 impl XorShift {
@@ -117,6 +117,11 @@ fn report(shape: &str, d: &[(u32, u32)]) {
     let vm_byte = dict + codes_byte + idxs_full;
     let vm_packed = dict + codes_packed + idxs_packed;
 
+    // REAL value-major, from the shipped verified encoder (narrow codes):
+    // dict + codes.byte_len() + idxs, so this is a realized size, not a formula.
+    let df = compress::<u32, u32>(&d.to_vec());
+    let vm_real = df.dict.len() * t + df.codes.byte_len() + df.idxs.len() * i;
+
     let r = |x: usize| x as f64 / plain as f64;
     eprintln!("  [{shape}] N={n} D={dc} maxidx={maxidx}");
     eprintln!("    plain            {plain:>9}  1.00x");
@@ -124,6 +129,7 @@ fn report(shape: &str, d: &[(u32, u32)]) {
     eprintln!("    idx-major sorted {idx_so:>9}  {:.2}x  ({so_runs} runs)", r(idx_so));
     eprintln!("    val-major usize  {vm_usize:>9}  {:.2}x", r(vm_usize));
     eprintln!("    val-major byte   {vm_byte:>9}  {:.2}x", r(vm_byte));
+    eprintln!("    val-major REAL   {vm_real:>9}  {:.2}x  (shipped encoder)", r(vm_real));
     eprintln!("    val-major packed {vm_packed:>9}  {:.2}x  (codes {} bits, idx {} bits)",
         r(vm_packed), bits_for(dc), bits_for(maxidx + 1));
 }

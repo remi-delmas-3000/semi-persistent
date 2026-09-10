@@ -15,6 +15,7 @@
 //! carry across the split.
 
 use vstd::prelude::*;
+use vstd::multiset::Multiset;
 use crate::index_like::{IndexLike, IndexFromNat};
 use crate::diff_compress::{CompressionMode, FrameEncoding, compress_frame};
 
@@ -86,13 +87,28 @@ impl<T: IndexLike, I: IndexFromNat> CompressedStack<T, I> {
         forall|k: int| 0 <= k < self.frames@.len() ==> (#[trigger] self.frames@[k]).wf()
     }
 
+    /// The per-frame write multiset: one `Multiset` per compressed frame, in stack
+    /// order. This is the order-insensitive contract the reordering encoders
+    /// (`IndexRunsSorted`) satisfy where the flat `@` cannot: within a finalized
+    /// frame each cell is written once, so the restore overlay depends only on the
+    /// per-frame write set, not its linearization. `decode_all`/`@` remains a valid
+    /// flat linearization (used by `pop_frame` to materialize a frame back), but
+    /// `frame_msets` is what `push_frame`/`flush_cold` preserve for every mode.
+    pub open spec fn frame_msets(&self) -> Seq<Multiset<(T, I)>> {
+        Seq::new(self.frames@.len(), |k: int| self.frames@[k].decode().to_multiset())
+    }
+
     /// An empty compressed stack (the state when compression is off, or before
     /// the first flush).
     pub fn new() -> (r: CompressedStack<T, I>)
-        ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
+        ensures
+            r.wf(),
+            r@ == Seq::<(T, I)>::empty(),
+            r.frame_msets() == Seq::<Multiset<(T, I)>>::empty(),
     {
         let r = CompressedStack { frames: Vec::new() };
         assert(r@ =~= Seq::<(T, I)>::empty());
+        assert(r.frame_msets() =~= Seq::<Multiset<(T, I)>>::empty());
         r
     }
 
@@ -104,16 +120,18 @@ impl<T: IndexLike, I: IndexFromNat> CompressedStack<T, I> {
     }
 
     /// Compress `diffs` in `mode` and push it as the new top compressed frame.
-    /// Extends the flat view by exactly `diffs@` (encoder bijection + snoc).
+    /// Extends `frame_msets` by exactly `diffs@`'s write multiset (encoder multiset
+    /// contract + snoc). The flat `@` also extends, by the frame's own `decode()`
+    /// (which is `diffs@` for the order-preserving modes and a permutation of it for
+    /// `IndexRunsSorted`); the per-frame multiset is the mode-independent guarantee.
     pub fn push_frame(&mut self, diffs: &Vec<(T, I)>, mode: CompressionMode)
         requires old(self).wf(),
         ensures
             final(self).wf(),
-            final(self)@ == old(self)@ + diffs@,
+            final(self).frame_msets() == old(self).frame_msets().push(diffs@.to_multiset()),
     {
         let f = compress_frame(diffs, mode);
         let ghost fg = f;
-        proof { lemma_decode_all_snoc(self.frames@, fg); }
         self.frames.push(f);
         assert(self.frames@ =~= old(self).frames@.push(fg));
         assert forall|k: int| 0 <= k < self.frames@.len()
@@ -124,7 +142,15 @@ impl<T: IndexLike, I: IndexFromNat> CompressedStack<T, I> {
                 assert(self.frames@[k] == fg);
             }
         }
-        assert(self@ == old(self)@ + diffs@);
+        // frame_msets extends by fg.decode().to_multiset() == diffs@.to_multiset().
+        assert(fg.decode().to_multiset() == diffs@.to_multiset());
+        assert(self.frame_msets() =~= old(self).frame_msets().push(diffs@.to_multiset())) by {
+            assert(self.frame_msets().len() == old(self).frame_msets().len() + 1);
+            assert forall|k: int| 0 <= k < old(self).frames@.len() implies
+                self.frame_msets()[k] == old(self).frame_msets()[k] by {
+                assert(self.frames@[k] == old(self).frames@[k]);
+            }
+        }
     }
 
     /// Decode and remove the top compressed frame, returning its flat diffs.

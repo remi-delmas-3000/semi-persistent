@@ -14,55 +14,57 @@
 #![allow(dead_code)]
 
 use vstd::prelude::*;
-use crate::fork_history::ForkHistory;
 use crate::index_like::IndexLike;
 use crate::diff_store::DiffStore;
 use crate::vec::Vec as SpVec;
 
 verus! {
 
-/// A version token for a synced group: the branch live at mark time and the mark
-/// depth. Drops `VecToken`'s per-vector `container_id` — one token names the
-/// whole group's version, validated once by `History`.
+/// A version token for a synced group: the generation stamp minted at mark time
+/// and the mark depth. Drops `VecToken`'s per-vector `container_id` — one token
+/// names the whole group's version, validated once by `History`.
 #[derive(Clone, Copy)]
 pub(crate) struct GroupToken {
-    pub(crate) branch_id: u32,
+    pub(crate) generation: u64,
     pub(crate) depth: u32,
 }
 
-/// The shared genealogy and mark depth for a synced group. One instance backs
-/// all members, so the `ForkHistory` (which grows one origin per restore and is
-/// never reclaimed) is held `×1` instead of `×N`.
+/// The shared depth-indexed generation stamps and mark depth for a synced group.
+/// One instance backs all members, so the fork history is held `×1` instead of
+/// `×N` — and, unlike the old append-only `origins` (which grew one entry per
+/// restore, never reclaimed, O(R)), the stamp array is O(max depth): the leak fix
+/// (doc 10). A token minted at depth `d` carries `stamps.stamp_at(d)`; a restore
+/// diverging at `d` bumps the deeper levels, O(1)-invalidating the abandoned
+/// future via `lemma_bump_invalidates`.
 pub(crate) struct History {
-    pub(crate) forks: ForkHistory,
+    pub(crate) stamps: crate::gen_stamps::GenStamps,
     pub(crate) depth: u32,
 }
 
 impl History {
+    /// Every live depth has a stamp level (so a live token's depth is in range).
     pub open(crate) spec fn wf(self) -> bool {
-        self.forks.wf()
+        self.stamps.levels@.len() >= self.depth as nat
     }
 
     pub open(crate) spec fn depth_spec(self) -> nat {
         self.depth as nat
     }
 
-    /// Validity of `t` against the live branch and depth — the shared analogue of
-    /// `Vec::is_token_valid_spec`, minus the container check (one history, one
-    /// group).
+    /// Validity of `t`: its generation still matches the live stamp at its depth
+    /// (O(1)). The shared analogue of `Vec::is_token_valid_spec`, minus the
+    /// container check (one history, one group).
     pub open(crate) spec fn valid_spec(self, t: GroupToken) -> bool {
-        crate::fork_history::fork_valid(self.forks.origins@,
-            self.forks.current_branch_id as nat,
-            self.depth as nat, t.branch_id as nat, t.depth as nat)
+        self.stamps.valid(t.depth as nat, t.generation)
     }
 
     pub(crate) fn new() -> (r: History)
         ensures
             r.wf(),
             r.depth == 0,
-            r.forks.origins@.len() == 0,
+            r.stamps.levels@.len() == 0,
     {
-        History { forks: ForkHistory::new(), depth: 0 }
+        History { stamps: crate::gen_stamps::GenStamps::new(0), depth: 0 }
     }
 
     pub(crate) fn depth(&self) -> (d: u32)
@@ -71,9 +73,9 @@ impl History {
         self.depth
     }
 
-    /// Open a new mark: the token records the branch live now and the current
-    /// depth, then depth advances by one. `O(1)`, no genealogy write — the one
-    /// genealogy write per group operation happens at `restore`, not `mark`.
+    /// Open a new mark: mint the generation for the current depth (growing the
+    /// stamp array the first time a depth is reached), then depth advances by one.
+    /// The token is immediately valid.
     pub(crate) fn mark(&mut self) -> (t: GroupToken)
         requires
             old(self).wf(),
@@ -81,50 +83,39 @@ impl History {
         ensures
             final(self).wf(),
             final(self).depth == old(self).depth + 1,
-            final(self).forks == old(self).forks,
             t.depth == old(self).depth,
-            t.branch_id == old(self).forks.current_branch_id,
+            final(self).valid_spec(t),
     {
-        let t = GroupToken { branch_id: self.forks.current_branch(), depth: self.depth };
-        self.depth = self.depth + 1;
-        t
+        let d = self.depth;
+        let g = self.stamps.stamp_at(d as usize);
+        self.depth = d + 1;
+        GroupToken { generation: g, depth: d }
     }
 
-    /// Is `t` valid against the live branch and depth? Computed once for the
-    /// whole group (versus `N` identical walks today).
+    /// Is `t` valid — does its generation still match the live stamp at its depth?
+    /// Computed once for the whole group (versus `N` identical walks today), O(1).
     pub(crate) fn is_valid(&self, t: GroupToken) -> (r: bool)
         requires self.wf(),
         ensures r == self.valid_spec(t),
     {
-        self.forks.is_valid(t.branch_id, t.depth, self.depth)
+        self.stamps.is_valid(t.depth as usize, t.generation)
     }
 
-    /// Restore to `t`: record the branch cut in the genealogy and set the depth
-    /// to the token's. The single genealogy write per group restore (versus `N`).
+    /// Restore to `t`: bump the levels strictly below `t.depth` (invalidating the
+    /// abandoned future — every token at depth `> t.depth` — while `t` and its
+    /// ancestors stay valid), and set the depth to the token's. O(1) amortized;
+    /// no per-restore growth. No overflow precondition: `bump_from` uses
+    /// `wrapping_add`, which changes a level unconditionally.
     pub(crate) fn restore_to(&mut self, t: GroupToken)
         requires
             old(self).wf(),
             old(self).valid_spec(t),
             t.depth < old(self).depth,
-            old(self).forks.origins@.len() + 1 <= u32::MAX,
         ensures
             final(self).wf(),
             final(self).depth == t.depth,
     {
-        proof {
-            // Validity ⇒ `t.branch` is reachable from the current branch ⇒ it is
-            // a real branch id (`<= origins.len()`), which discharges `fork`'s
-            // precondition. Same chain `Vec::restore` uses.
-            crate::fork_history::lemma_fork_valid_characterization(
-                self.forks.origins@, self.forks.current_branch_id as nat,
-                self.depth as nat, t.branch_id as nat, t.depth as nat);
-            assert(crate::fork_history::reaches(self.forks.origins@,
-                self.forks.current_branch_id as nat, t.branch_id as nat));
-            crate::fork_history::lemma_reaches_in_range(
-                self.forks.origins@, self.forks.current_branch_id as nat,
-                t.branch_id as nat);
-        }
-        self.forks.fork(t.branch_id, t.depth);
+        self.stamps.bump_from((t.depth + 1) as usize);
         self.depth = t.depth;
     }
 }
@@ -191,7 +182,6 @@ where
             TRACK,
             old(self).history.valid_spec(t),
             (t.depth as nat) < old(self).history.depth_spec(),
-            old(self).history.forks.origins@.len() + 1 <= u32::MAX,
         ensures
             final(self).wf(),
             final(self).view() == old(self).vec.snapshots_view()[t.depth as int],
@@ -264,7 +254,6 @@ where
             TRACK,
             old(self).history.valid_spec(t),
             (t.depth as nat) < old(self).history.depth_spec(),
-            old(self).history.forks.origins@.len() + 1 <= u32::MAX,
         ensures
             final(self).wf(),
             final(self).a.view() == old(self).a.snapshots_view()[t.depth as int],

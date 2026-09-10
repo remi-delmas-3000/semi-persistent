@@ -29,6 +29,26 @@ pub enum Codes {
     U16(Vec<u16>),
     U32(Vec<u32>),
     Usize(Vec<usize>),
+    /// Sub-byte bit-packed codes: `bits` bits per code (1/2/4, for `D <= 2/4/16`),
+    /// packed `64 / bits` codes per `u64` word with no cross-word straddle (so a
+    /// code is always within one word). `len` codes total. This is the value-major
+    /// win below one byte per code (union-find `D <= 4` reaches ~0.30x plain). The
+    /// pack/extract pair is `external_body` (variable-width bit arithmetic is not a
+    /// tractable proof surface) with `view()` the exact extraction formula and the
+    /// round-trip checked by `packed_codes_roundtrip` (containers-conformance);
+    /// trust ledger group B (bit shifts/masks, no `unsafe`).
+    Packed { words: Vec<u64>, bits: u8, len: usize },
+}
+
+/// The code extracted from bit-packed `words` at position `i`: word `i / (64/bits)`,
+/// then the `bits`-wide field at offset `(i % (64/bits)) * bits`. The abstract value
+/// of a `Packed` column; `bits` is 1/2/4 so `64/bits` is exact and a code never
+/// straddles a word.
+pub open spec fn packed_code_at(words: Seq<u64>, bits: nat, i: int) -> nat {
+    let per_word = 64nat / bits;
+    let wi = i / (per_word as int);
+    let shift = (i % (per_word as int)) * (bits as int);
+    ((words[wi] >> (shift as u64)) & (((1u64 << (bits as u64)) - 1) as u64)) as nat
 }
 
 impl Codes {
@@ -38,6 +58,8 @@ impl Codes {
             Codes::U16(v) => Seq::new(v@.len(), |i: int| v@[i] as nat),
             Codes::U32(v) => Seq::new(v@.len(), |i: int| v@[i] as nat),
             Codes::Usize(v) => Seq::new(v@.len(), |i: int| v@[i] as nat),
+            Codes::Packed { words, bits, len } =>
+                Seq::new(*len as nat, |i: int| packed_code_at(words@, *bits as nat, i)),
         }
     }
 
@@ -49,6 +71,7 @@ impl Codes {
             Codes::U16(v) => v.len(),
             Codes::U32(v) => v.len(),
             Codes::Usize(v) => v.len(),
+            Codes::Packed { len, .. } => *len,
         }
     }
 
@@ -61,6 +84,7 @@ impl Codes {
             Codes::U16(v) => v[i] as usize,
             Codes::U32(v) => v[i] as usize,
             Codes::Usize(v) => v[i],
+            Codes::Packed { words, bits, .. } => packed_get(words, *bits, i),
         }
     }
 
@@ -72,6 +96,20 @@ impl Codes {
             Codes::U16(v) => v.capacity() * 2,
             Codes::U32(v) => v.capacity() * 4,
             Codes::Usize(v) => v.capacity() * 8,
+            Codes::Packed { words, .. } => words.capacity() * 8,
+        }
+    }
+
+    /// Length-based byte count (deterministic; for measurement/comparison, unlike
+    /// capacity-based `heap_bytes`).
+    #[verifier::external_body]
+    pub fn byte_len(&self) -> usize {
+        match self {
+            Codes::U8(v) => v.len(),
+            Codes::U16(v) => v.len() * 2,
+            Codes::U32(v) => v.len() * 4,
+            Codes::Usize(v) => v.len() * 8,
+            Codes::Packed { words, .. } => words.len() * 8,
         }
     }
 
@@ -83,7 +121,25 @@ impl Codes {
             r.view().len() == codes@.len(),
             forall|t: int| 0 <= t < codes@.len() ==> #[trigger] r.view()[t] == codes@[t] as nat,
     {
-        if dict_len <= 256 {
+        // Sub-byte bit-packing for small dictionaries: 1/2/4 bits per code covers
+        // D <= 2/4/16, the value-major win below one byte per code. Each code fits
+        // in `bits` because `codes[t] < dict_len <= 2^bits`.
+        if dict_len <= 2 {
+            assert(forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < (1usize << 1u8)) by {
+                assert((1usize << 1u8) == 2) by (bit_vector);
+            }
+            pack_codes(codes, 1)
+        } else if dict_len <= 4 {
+            assert(forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < (1usize << 2u8)) by {
+                assert((1usize << 2u8) == 4) by (bit_vector);
+            }
+            pack_codes(codes, 2)
+        } else if dict_len <= 16 {
+            assert(forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < (1usize << 4u8)) by {
+                assert((1usize << 4u8) == 16) by (bit_vector);
+            }
+            pack_codes(codes, 4)
+        } else if dict_len <= 256 {
             let mut v: Vec<u8> = Vec::new();
             let mut t: usize = 0;
             while t < codes.len()
@@ -159,6 +215,48 @@ impl Codes {
     }
 }
 
+/// Bit-pack `codes` at `bits` bits each (1/2/4), `64/bits` per `u64` word with no
+/// cross-word straddle. `external_body`: variable-width bit arithmetic is not a
+/// tractable proof surface, so the pack/`packed_code_at` agreement is trusted and
+/// checked by `packed_codes_roundtrip` (containers-conformance). Trust ledger group
+/// B (shifts/masks, no `unsafe`). The result decodes back to `codes` exactly.
+#[verifier::external_body]
+pub fn pack_codes(codes: &Vec<usize>, bits: u8) -> (r: Codes)
+    requires
+        bits == 1 || bits == 2 || bits == 4,
+        forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < (1usize << bits),
+    ensures
+        r.view().len() == codes@.len(),
+        forall|t: int| 0 <= t < codes@.len() ==> #[trigger] r.view()[t] == codes@[t] as nat,
+{
+    let per_word: usize = 64 / (bits as usize);
+    let n = codes.len();
+    let nwords = if n == 0 { 0 } else { (n - 1) / per_word + 1 };
+    let mut words: std::vec::Vec<u64> = std::vec::from_elem(0u64, nwords);
+    let mut t: usize = 0;
+    while t < n {
+        let wi = t / per_word;
+        let shift = ((t % per_word) as u64) * (bits as u64);
+        words[wi] |= (codes[t] as u64) << shift;
+        t += 1;
+    }
+    Codes::Packed { words, bits, len: n }
+}
+
+/// Extract the code at position `i` from bit-packed `words`. `external_body`, the
+/// exec twin of `packed_code_at` (same shift/mask); trusted to match it, checked by
+/// `packed_codes_roundtrip`. Trust ledger group B.
+#[verifier::external_body]
+pub fn packed_get(words: &Vec<u64>, bits: u8, i: usize) -> (c: usize)
+    ensures c as nat == packed_code_at(words@, bits as nat, i as int),
+{
+    let per_word: usize = 64 / (bits as usize);
+    let wi = i / per_word;
+    let shift = ((i % per_word) as u64) * (bits as u64);
+    let mask = (1u64 << bits) - 1;
+    ((words[wi] >> shift) & mask) as usize
+}
+
 /// One finalized frame's diffs with the value column dictionary-encoded and the
 /// index column kept verbatim. `codes[t]` indexes `dict` to entry `t`'s value;
 /// `idxs[t]` is entry `t`'s original cell index.
@@ -218,32 +316,38 @@ impl<T: IndexLike, I: IndexLike> DictFrame<T, I> {
     }
 }
 
-/// Find `v` in `dict` by value, returning its position if present. Linear scan:
-/// finalized frames are small, and a hashset dedup is a later optimization
-/// (the bijection proof is unaffected by the search strategy).
-pub(crate) fn dict_find<T: IndexLike>(dict: &Vec<T>, v: T) -> (r: Option<usize>)
+/// Dedup the value column into a dictionary and per-entry codes, in O(N) via a
+/// hash map keyed on `T::as_usize` (injective, so equal keys are equal values).
+/// `external_body`: the hash map is unmodeled, but the contract it must satisfy —
+/// codes parallel to the input, each indexing the dict, and `dict[codes[t]]`
+/// equal to the original value — is exactly what `compress`'s bijection needs and
+/// what `dict_roundtrip` (containers-conformance) checks. Replaces the former
+/// O(N*D) linear scan (185ms/frame at N=100k) with O(N). Trust ledger: group B.
+#[verifier::external_body]
+pub fn assign_codes<T: IndexLike>(diffs_vals: &Vec<T>) -> (r: (Vec<T>, Vec<usize>))
     ensures
-        match r {
-            Some(c) => c < dict@.len() && dict@[c as int] == v,
-            None => forall|j: int| 0 <= j < dict@.len() ==> dict@[j] != v,
-        },
+        r.1@.len() == diffs_vals@.len(),
+        forall|t: int| 0 <= t < diffs_vals@.len() ==> (#[trigger] r.1@[t]) < r.0@.len(),
+        forall|t: int| 0 <= t < diffs_vals@.len()
+            ==> r.0@[#[trigger] r.1@[t] as int] == diffs_vals@[t],
 {
-    let mut i: usize = 0;
-    while i < dict.len()
-        invariant
-            i <= dict@.len(),
-            forall|j: int| 0 <= j < i ==> dict@[j] != v,
-        decreases dict@.len() - i,
-    {
-        let a = dict[i].as_usize();
-        let b = v.as_usize();
-        if a == b {
-            proof { T::lemma_as_nat_injective(dict@[i as int], v); }
-            return Some(i);
-        }
-        i += 1;
+    let mut dict: Vec<T> = Vec::new();
+    let mut codes: Vec<usize> = Vec::new();
+    let mut map: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for v in diffs_vals.iter() {
+        let key = v.as_usize();
+        let code = match map.get(&key) {
+            Some(&c) => c,
+            None => {
+                let c = dict.len();
+                map.insert(key, c);
+                dict.push(*v);
+                c
+            }
+        };
+        codes.push(code);
     }
-    None
+    (dict, codes)
 }
 
 /// Compress a finalized frame's diffs by value-dictionary encoding.
@@ -253,44 +357,35 @@ pub fn compress<T: IndexLike, I: IndexLike>(diffs: &Vec<(T, I)>) -> (r: DictFram
         r.wf(),
         r.decode() == diffs@,
 {
-    let mut dict: Vec<T> = Vec::new();
-    let mut codes: Vec<usize> = Vec::new();
+    // Split into value and index columns (indices kept verbatim).
+    let mut vals: Vec<T> = Vec::new();
     let mut idxs: Vec<I> = Vec::new();
     let mut i: usize = 0;
     while i < diffs.len()
         invariant
             i <= diffs@.len(),
-            codes@.len() == i,
+            vals@.len() == i,
             idxs@.len() == i,
-            forall|t: int| 0 <= t < i ==> (#[trigger] codes@[t]) < dict@.len(),
-            forall|t: int| 0 <= t < i ==> dict@[#[trigger] codes@[t] as int] == diffs@[t].0,
+            forall|t: int| 0 <= t < i ==> #[trigger] vals@[t] == diffs@[t].0,
             forall|t: int| 0 <= t < i ==> #[trigger] idxs@[t] == diffs@[t].1,
         decreases diffs@.len() - i,
     {
-        let v = diffs[i].0;
-        let idx = diffs[i].1;
-        let code = match dict_find(&dict, v) {
-            Some(c) => c,
-            None => {
-                let c = dict.len();
-                dict.push(v);
-                c
-            }
-        };
-        codes.push(code);
-        idxs.push(idx);
+        vals.push(diffs[i].0);
+        idxs.push(diffs[i].1);
         i += 1;
     }
-    // Narrow the codes to the smallest width that indexes `dict` (the value-major
-    // space win); `Codes::from_usize` reproduces the code sequence exactly.
+    // O(N) dedup, then narrow codes to the smallest width indexing the dict.
+    let (dict, codes) = assign_codes(&vals);
     let dict_len = dict.len();
     let packed = Codes::from_usize(&codes, dict_len);
     let r = DictFrame { dict, codes: packed, idxs };
     proof {
         assert forall|t: int| 0 <= t < diffs@.len()
             implies r.decode()[t] == diffs@[t] by {
-            assert(r.codes.view()[t] == codes@[t] as nat);
-            assert(r.decode()[t] == (diffs@[t].0, diffs@[t].1));
+            assert(r.codes.view()[t] == codes@[t] as nat);      // from_usize
+            assert(r.dict@[codes@[t] as int] == vals@[t]);      // assign_codes
+            assert(vals@[t] == diffs@[t].0);                    // split loop
+            assert(r.idxs@[t] == diffs@[t].1);
         }
         assert(r.decode() =~= diffs@);
     }
@@ -803,6 +898,26 @@ pub open spec fn unique_idx<T, I: IndexLike>(d: Seq<(T, I)>) -> bool {
             ==> (#[trigger] d[a]).1.as_nat() != (#[trigger] d[b]).1.as_nat()
 }
 
+/// Runtime `unique_idx` check: does the frame write each cell at most once? The
+/// sorted index-major encoder requires it (a duplicate index would let a permuted
+/// frame shadow a different write and change the restore), so `compress_frame`
+/// checks it and falls back to the write-order encoder when it does not hold.
+/// O(N) with a hash set of the seen indices. `external_body`: a membership scan
+/// with no spec content; its `b == unique_idx(diffs@)` contract is the surface,
+/// checked by `unique_idx_check` (containers-conformance). Trust ledger: group B.
+#[verifier::external_body]
+pub fn is_unique_idx<T: Copy, I: IndexLike>(diffs: &Vec<(T, I)>) -> (b: bool)
+    ensures b == unique_idx(diffs@),
+{
+    let mut seen = std::collections::HashSet::with_capacity(diffs.len());
+    for &(_, idx) in diffs.iter() {
+        if !seen.insert(idx.as_usize()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Sort-first index-major encoding: sort the frame by index, then run-coalesce.
 /// Because sorting captures ALL index contiguity (not just capture-order runs),
 /// this is the strongest index-major compressor. It is a REORDERING codec, so it
@@ -884,6 +999,15 @@ pub enum CompressionMode {
     None,
     ValueDict,
     IndexRuns,
+    /// Sort-first index-major: sort the frame by index, then run-coalesce
+    /// (`compress_runs_sorted`). Captures ALL index contiguity, not just
+    /// capture-order runs, so it is the strongest index-major compressor for
+    /// scattered writes that land in a contiguous set. It REORDERS, so it
+    /// preserves only the write multiset, not the sequence; `compress_frame`
+    /// applies it only when the frame's indices are unique (checked at runtime)
+    /// and falls back to `IndexRuns` (write-order, exact) otherwise. Selectable
+    /// through the two-stack, whose contract is the per-frame write multiset.
+    IndexRunsSorted,
     /// Choose per frame by exact-size costing (`choose_mode`): compute the plain,
     /// run, and dictionary sizes for this frame and pick the smallest. Lets one
     /// column carry a mix of schemes — value-major frames where a value repeats,
@@ -965,18 +1089,74 @@ impl<T: IndexLike, I: IndexFromNat> FrameEncoding<T, I> {
     }
 }
 
-/// Encode a finalized frame in the given mode. The bijection holds for every
-/// mode: `decode(compress_frame(d, mode)) == d`, so `mark` may pick any mode per
-/// column at runtime and `restore` reconstructs the same diff regardless.
+/// Write-order index-major frame: project indices to `usize`, run-coalesce in
+/// capture order (exact-view-preserving), and wrap. `decode_i` reconstructs each
+/// `I` via `from_nat`, so the frame decodes back to `diffs@` exactly. Factored out
+/// of `compress_frame` because it is both the `IndexRuns` encoding and the
+/// fallback the `IndexRunsSorted` arm uses when a frame's indices are not unique.
+pub fn runs_writeorder_frame<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) -> (r: FrameEncoding<T, I>)
+    ensures
+        r.wf(),
+        r.decode() == diffs@,
+{
+    let mut usized: Vec<(T, usize)> = Vec::new();
+    let mut i: usize = 0;
+    while i < diffs.len()
+        invariant
+            i <= diffs@.len(),
+            usized@.len() == i,
+            forall|t: int| 0 <= t < i ==>
+                #[trigger] usized@[t].0 == diffs@[t].0
+                && usized@[t].1 as nat == diffs@[t].1.as_nat(),
+        decreases diffs@.len() - i,
+    {
+        let (v, idx) = diffs[i];
+        usized.push((v, idx.as_usize()));
+        i += 1;
+    }
+    let rf = compress_runs_writeorder(&usized);
+    // rf.decode() == mapped_diffs(usized@) == the (T, nat) projection of
+    // diffs; decode_i maps each nat back to I via from_nat, recovering diffs.
+    proof {
+        assert(usized@.len() == diffs@.len());
+        assert forall|t: int| 0 <= t < diffs@.len() implies
+            rf.decode()[t] == (diffs@[t].0, diffs@[t].1.as_nat()) by {
+            assert(rf.decode()[t] == (usized@[t].0, usized@[t].1 as nat));
+        }
+        // fits: every decoded index is some diffs[t].1.as_nat() < max_nat.
+        assert forall|t: int| 0 <= t < rf.decode().len() implies
+            (#[trigger] rf.decode()[t].1) < I::max_nat() by {
+            I::lemma_as_nat_bounded_val(diffs@[t].1);
+        }
+        // decode_i recovers diffs: from_nat(diffs[t].1.as_nat()) == diffs[t].1.
+        assert forall|t: int| 0 <= t < diffs@.len() implies
+            #[trigger] rf.decode_i::<I>()[t] == diffs@[t] by {
+            I::lemma_from_as_nat(diffs@[t].1);
+        }
+        assert(rf.decode_i::<I>() =~= diffs@);
+    }
+    FrameEncoding::Runs(rf)
+}
+
+/// Encode a finalized frame in the given mode. Every mode preserves the frame's
+/// write MULTISET: `decode(compress_frame(d, mode)).to_multiset() == d.to_multiset()`.
+/// The order-preserving modes (`None`/`ValueDict`/`IndexRuns`) decode back to `d`
+/// exactly; `IndexRunsSorted` reorders (sorts by index) so it preserves only the
+/// multiset, which is the whole contract: within a finalized frame each cell is
+/// written at most once, so the restore overlay is determined by the write set,
+/// not its order (`vec::lemma_multiset_eq_overlay`). `IndexRunsSorted` needs unique
+/// indices for the sort to be sound; `compress_frame` checks that at runtime and
+/// falls back to the write-order encoder otherwise, so it carries no uniqueness
+/// precondition of its own.
 pub fn compress_frame<T: IndexLike, I: IndexFromNat>(
     diffs: &Vec<(T, I)>,
     mode: CompressionMode,
 ) -> (r: FrameEncoding<T, I>)
     ensures
         r.wf(),
-        r.decode() == diffs@,
+        r.decode().to_multiset() == diffs@.to_multiset(),
 {
-    // Resolve Auto to a concrete scheme per frame; the bijection below holds for
+    // Resolve Auto to a concrete scheme per frame; the contract below holds for
     // whichever concrete mode is chosen, so the choice is size-only.
     let mode = match mode {
         CompressionMode::Auto => choose_mode(diffs),
@@ -1000,46 +1180,18 @@ pub fn compress_frame<T: IndexLike, I: IndexFromNat>(
             FrameEncoding::Plain(copy)
         }
         CompressionMode::ValueDict => FrameEncoding::Dict(compress(diffs)),
-        CompressionMode::IndexRuns => {
-            // Project indices to usize, run-coalesce in write order (exact-view-
-            // preserving), and wrap. decode_i reconstructs each I via from_nat.
-            let mut usized: Vec<(T, usize)> = Vec::new();
-            let mut i: usize = 0;
-            while i < diffs.len()
-                invariant
-                    i <= diffs@.len(),
-                    usized@.len() == i,
-                    forall|t: int| 0 <= t < i ==>
-                        #[trigger] usized@[t].0 == diffs@[t].0
-                        && usized@[t].1 as nat == diffs@[t].1.as_nat(),
-                decreases diffs@.len() - i,
-            {
-                let (v, idx) = diffs[i];
-                usized.push((v, idx.as_usize()));
-                i += 1;
+        CompressionMode::IndexRuns => runs_writeorder_frame(diffs),
+        CompressionMode::IndexRunsSorted => {
+            // Sort-first is sound only when indices are unique (a duplicate index
+            // would let the permutation shadow a different write). Check at runtime;
+            // fall back to the exact write-order encoder when it does not hold.
+            if is_unique_idx(diffs) {
+                let rf = compress_runs_sorted(diffs);
+                // FrameEncoding::Runs(rf).decode() == rf.decode_i(), multiset == diffs.
+                FrameEncoding::Runs(rf)
+            } else {
+                runs_writeorder_frame(diffs)
             }
-            let rf = compress_runs_writeorder(&usized);
-            // rf.decode() == mapped_diffs(usized@) == the (T, nat) projection of
-            // diffs; decode_i maps each nat back to I via from_nat, recovering diffs.
-            proof {
-                assert(usized@.len() == diffs@.len());
-                assert forall|t: int| 0 <= t < diffs@.len() implies
-                    rf.decode()[t] == (diffs@[t].0, diffs@[t].1.as_nat()) by {
-                    assert(rf.decode()[t] == (usized@[t].0, usized@[t].1 as nat));
-                }
-                // fits: every decoded index is some diffs[t].1.as_nat() < max_nat.
-                assert forall|t: int| 0 <= t < rf.decode().len() implies
-                    (#[trigger] rf.decode()[t].1) < I::max_nat() by {
-                    I::lemma_as_nat_bounded_val(diffs@[t].1);
-                }
-                // decode_i recovers diffs: from_nat(diffs[t].1.as_nat()) == diffs[t].1.
-                assert forall|t: int| 0 <= t < diffs@.len() implies
-                    #[trigger] rf.decode_i::<I>()[t] == diffs@[t] by {
-                    I::lemma_from_as_nat(diffs@[t].1);
-                }
-                assert(rf.decode_i::<I>() =~= diffs@);
-            }
-            FrameEncoding::Runs(rf)
         }
     }
 }

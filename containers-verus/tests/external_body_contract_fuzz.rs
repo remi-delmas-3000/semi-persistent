@@ -214,20 +214,24 @@ fn push_overflow_traps_for_small_index() {
     );
 }
 
-// `restores_remaining()` reports the fork-history headroom and drops by exactly
-// one per `restore` (each restore appends one never-reclaimed fork origin).
+// `restores_remaining()` now reports depth headroom (u32::MAX - max spine depth),
+// NOT a lifetime restore count: the fork history is reclaimed to O(max depth)
+// generation stamps (doc 10), so restores no longer consume headroom. This is the
+// leak fix — the old "drops by one per restore" behavior is gone by design.
 #[test]
-fn restores_remaining_tracks_fork_history() {
+fn restores_remaining_tracks_depth_not_restore_count() {
     type V = SpVec<u32, u32, ParallelStore<u32, u32>, true>;
     let mut v = V::new();
     v.try_push(1).expect("push: within index word");
     v.try_push(2).expect("push: within index word");
 
-    // Fresh container: no restores taken yet, so full u32 headroom.
+    // Fresh container: max depth 0, so full u32 headroom.
     let start = v.restores_remaining();
     assert_eq!(start, u32::MAX as usize);
 
-    // Each restore consumes exactly one unit of headroom.
+    // Repeatedly mark-at-depth-0, push, restore-to-depth-0. Max depth reached is
+    // 1 throughout, so headroom settles at u32::MAX - 1 and does NOT drop per
+    // restore — restores are now unbounded (the reclamation win).
     for k in 1..=5usize {
         let t = v
             .try_mark(ShrinkPolicy::Never)
@@ -236,8 +240,8 @@ fn restores_remaining_tracks_fork_history() {
         v.try_restore(t).expect("restore: own token");
         assert_eq!(
             v.restores_remaining(),
-            start - k,
-            "restores_remaining must drop by one per restore (after {k})"
+            u32::MAX as usize - 1,
+            "restores must NOT consume headroom (reclaimed fork history); after {k}"
         );
     }
 }

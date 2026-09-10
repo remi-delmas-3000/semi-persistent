@@ -140,15 +140,12 @@ where
         &&& self.dense.is_token_valid_spec(token.dense)
         &&& token.dense_frame_idx_spec() < self.dense.depth_spec()
         &&& self.dense.depth_spec() < u32::MAX
-        &&& self.dense.fork_count_spec() + 1 <= u32::MAX
         &&& self.sparse.is_token_valid_spec(token.sparse)
         &&& token.sparse_frame_idx_spec() < self.sparse.depth_spec()
         &&& self.sparse.depth_spec() < u32::MAX
-        &&& self.sparse.fork_count_spec() + 1 <= u32::MAX
         &&& self.indices.is_token_valid_spec(token.indices)
         &&& token.indices_frame_idx_spec() < self.indices.depth_spec()
         &&& self.indices.depth_spec() < u32::MAX
-        &&& self.indices.fork_count_spec() + 1 <= u32::MAX
     }
 
     /// The three column snapshots a token names (spec counterpart for restore's
