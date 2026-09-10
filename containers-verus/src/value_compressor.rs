@@ -118,9 +118,13 @@ impl<T: Copy> ValueCompressor<T> for NoValueCompression {
         c[i]
     }
 
-    #[verifier::external_body]
     fn byte_len(c: &Vec<T>) -> usize {
-        c.len() * core::mem::size_of::<T>()
+        // Saturating: a diagnostic must never trap. vstd models both
+        // `size_of` and `checked_mul`, so this needs no trust.
+        match c.len().checked_mul(core::mem::size_of::<T>()) {
+            Some(n) => n,
+            None => usize::MAX,
+        }
     }
 
     fn enabled() -> bool {
@@ -376,9 +380,11 @@ impl<T: Copy + EqSpec> ValueCompressor<T> for ValueRle {
         RleVals::decode_at(c, i)
     }
 
-    #[verifier::external_body]
     fn byte_len(c: &RleVals<T>) -> usize {
-        c.runs.len() * (core::mem::size_of::<T>() + core::mem::size_of::<usize>())
+        crate::compression_stats::sat_mul(
+            c.runs.len(),
+            crate::compression_stats::sat_add(
+                core::mem::size_of::<T>(), core::mem::size_of::<usize>()))
     }
 
     fn enabled() -> bool {
@@ -598,10 +604,12 @@ impl<T: IndexLike> ValueCompressor<T> for ValueDelta {
         cur
     }
 
-    #[verifier::external_body]
     fn byte_len(c: &DeltaVals<T>) -> usize {
-        c.first.len() * core::mem::size_of::<T>()
-            + c.steps.len() * (1 + core::mem::size_of::<usize>())
+        crate::compression_stats::sat_add(
+            crate::compression_stats::sat_mul(c.first.len(), core::mem::size_of::<T>()),
+            crate::compression_stats::sat_mul(
+                c.steps.len(),
+                crate::compression_stats::sat_add(1, core::mem::size_of::<usize>())))
     }
 
     fn enabled() -> bool {

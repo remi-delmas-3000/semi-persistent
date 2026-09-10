@@ -573,15 +573,13 @@ impl<T: Copy, I: IndexLike, VC: ValueCompressor<T>> LayeredFrame<T, I, VC> {
     }
 
     /// Length-based encoded byte count: index layer + value layer.
-    #[verifier::external_body]
     pub fn byte_len(&self) -> usize {
         let idx_bytes = match &self.idx {
-            IdxCol::Plain(v) => v.len() * core::mem::size_of::<I>(),
-            IdxCol::Runs(rs) => {
-                rs.len() * (core::mem::size_of::<I>() + core::mem::size_of::<usize>())
-            }
+            IdxCol::Plain(v) => crate::compression_stats::sat_mul(v.len(), core::mem::size_of::<I>()),
+            IdxCol::Runs(rs) => crate::compression_stats::sat_mul(rs.len(),
+                crate::compression_stats::sat_add(core::mem::size_of::<I>(), core::mem::size_of::<usize>())),
         };
-        idx_bytes + VC::byte_len(&self.vals)
+        crate::compression_stats::sat_add(idx_bytes, VC::byte_len(&self.vals))
     }
 }
 

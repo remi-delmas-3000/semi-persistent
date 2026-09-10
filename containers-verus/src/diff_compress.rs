@@ -119,14 +119,13 @@ impl Codes {
 
     /// Length-based byte count (deterministic; for measurement/comparison, unlike
     /// capacity-based `heap_bytes`).
-    #[verifier::external_body]
     pub fn byte_len(&self) -> usize {
         match self {
             Codes::U8(v) => v.len(),
-            Codes::U16(v) => v.len() * 2,
-            Codes::U32(v) => v.len() * 4,
-            Codes::Usize(v) => v.len() * 8,
-            Codes::Packed { words, .. } => words.len() * 8,
+            Codes::U16(v) => crate::compression_stats::sat_mul(v.len(), 2),
+            Codes::U32(v) => crate::compression_stats::sat_mul(v.len(), 4),
+            Codes::Usize(v) => crate::compression_stats::sat_mul(v.len(), 8),
+            Codes::Packed { words, .. } => crate::compression_stats::sat_mul(words.len(), 8),
         }
     }
 
@@ -522,9 +521,10 @@ impl<T: Copy> ValFrame<T> {
     }
 
     /// Length-based byte count (deterministic; for measurement).
-    #[verifier::external_body]
     pub fn byte_len(&self) -> usize {
-        self.dict.len() * core::mem::size_of::<T>() + self.codes.byte_len()
+        crate::compression_stats::sat_add(
+            crate::compression_stats::sat_mul(self.dict.len(), core::mem::size_of::<T>()),
+            self.codes.byte_len())
     }
 }
 
@@ -2018,11 +2018,16 @@ impl<T: Copy, I: IndexLike> RunCol<T, I> {
     /// plus the value column. The index column is dropped, so this is below a plain
     /// `Vec<(T, I)>`'s `len * (size_of::<T>() + size_of::<I>())` whenever runs
     /// coalesce (fewer starts than entries). The measurement A2's heap check reads.
-    #[verifier::external_body]
     pub fn byte_len(&self) -> usize {
-        let mut total = self.runs.len() * core::mem::size_of::<I>();
-        for run in self.runs.iter() {
-            total += run.vals.len() * core::mem::size_of::<T>();
+        let mut total = crate::compression_stats::sat_mul(self.runs.len(), core::mem::size_of::<I>());
+        let n = self.runs.len();
+        let mut r: usize = 0;
+        while r < n
+            invariant 0 <= r <= n, n == self.runs@.len(),
+            decreases n - r,
+        {
+            total = crate::compression_stats::sat_add(total, crate::compression_stats::sat_mul(self.runs[r].vals.len(), core::mem::size_of::<T>()));
+            r += 1;
         }
         total
     }
@@ -2464,9 +2469,11 @@ pub proof fn lemma_run_seq_split<T: Copy, I: IndexLike>(runs: Seq<RunEntry<T, I>
 /// Bytes of a plain frame of `n` entries (the demotion comparison's baseline).
 /// `external_body`: saturating size arithmetic with no spec content; the demotion
 /// it feeds is correctness-invisible (both branches carry the same contract).
-#[verifier::external_body]
 pub fn plain_frame_bytes<T, I>(n: usize) -> usize {
-    n.saturating_mul(core::mem::size_of::<T>() + core::mem::size_of::<I>())
+    crate::compression_stats::sat_mul(
+        n,
+        crate::compression_stats::sat_add(
+            core::mem::size_of::<T>(), core::mem::size_of::<I>()))
 }
 
 /// Writing a frame's `(value, index)` set back onto a live column, in order
@@ -2843,10 +2850,11 @@ impl<T: IndexLike, I: IndexLike> DeltaFrame<T, I> {
     }
 
     /// Deterministic encoded footprint: the index column plus the exception list.
-    #[verifier::external_body]
     pub fn byte_len(&self) -> usize {
-        self.idxs.len() * core::mem::size_of::<I>()
-            + self.exceptions.len() * (core::mem::size_of::<usize>() + core::mem::size_of::<T>())
+        crate::compression_stats::sat_add(
+            crate::compression_stats::sat_mul(self.idxs.len(), core::mem::size_of::<I>()),
+            crate::compression_stats::sat_mul(self.exceptions.len(),
+                crate::compression_stats::sat_add(core::mem::size_of::<usize>(), core::mem::size_of::<T>())))
     }
 }
 
@@ -3093,13 +3101,13 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Col
     }
 
     /// Deterministic encoded footprint (for the per-frame size comparison / heap check).
-    #[verifier::external_body]
     pub fn byte_len(&self) -> usize {
         match self {
-            ColdFrame::Plain(v) => v.len() * (core::mem::size_of::<T>() + core::mem::size_of::<I>()),
-            ColdFrame::Dict(d) => d.dict.len() * core::mem::size_of::<T>()
-                + d.codes.byte_len()
-                + d.idxs.len() * core::mem::size_of::<I>(),
+            ColdFrame::Plain(v) => crate::compression_stats::sat_mul(v.len(),
+                crate::compression_stats::sat_add(core::mem::size_of::<T>(), core::mem::size_of::<I>())),
+            ColdFrame::Dict(d) => crate::compression_stats::sat_add(
+                crate::compression_stats::sat_add(crate::compression_stats::sat_mul(d.dict.len(), core::mem::size_of::<T>()), d.codes.byte_len()),
+                crate::compression_stats::sat_mul(d.idxs.len(), core::mem::size_of::<I>())),
             ColdFrame::Runs(r) => r.byte_len(),
             ColdFrame::Layered(l) => l.byte_len(),
         }

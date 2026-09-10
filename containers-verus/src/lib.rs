@@ -130,6 +130,7 @@ pub mod tagged;
 pub mod two_stack_log;
 pub mod union_find;
 pub mod dyn_store;
+pub mod hinted_arena;
 pub mod trail_store;
 pub mod value_compressor;
 pub mod layered;

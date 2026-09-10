@@ -29,18 +29,17 @@ pub struct FrameStats {
 impl FrameStats {
     /// Bytes this frame would occupy under each scheme, given the element widths
     /// (`t`/`i`) and the code width (`c`, `usize` today). Saturating, so a huge
-    /// frame never wraps the comparison. `external_body` only because Verus does
-    /// not model `saturating_*`; these are size heuristics, not correctness.
-    #[verifier::external_body]
+    /// frame never wraps the comparison. Verified via the crate's `sat_mul`/
+    /// `sat_add` (discharged 2026-09; formerly `external_body` for
+    /// `saturating_*`, which Verus does not model).
     pub fn plain_bytes(self, t: usize, i: usize) -> usize {
-        self.n.saturating_mul(t.saturating_add(i))
+        sat_mul(self.n, sat_add(t, i))
     }
     /// Index-major (sort-first): run `starts` are `usize`, values are `T`. `runs`
     /// is the sorted run count (contiguous-run starts), which is what
     /// `compress_runs_sorted` achieves — the honest, not optimistic, count.
-    #[verifier::external_body]
     pub fn runs_bytes(self, t: usize) -> usize {
-        self.runs.saturating_mul(8).saturating_add(self.n.saturating_mul(t))
+        sat_add(sat_mul(self.runs, 8), sat_mul(self.n, t))
     }
     /// The code width in BITS the shipped value encoder narrows to
     /// (`Codes::from_usize`): 1/2/4 bit-packed for `D <= 2/4/16`, then byte-granular
@@ -56,13 +55,9 @@ impl FrameStats {
     /// Value-major: dict (`D` values of `T`) + codes (`N` at the narrow bit width,
     /// rounded up to whole bytes) + indices (`N` of `I`, still stored — value-major
     /// does not drop them).
-    #[verifier::external_body]
     pub fn dict_bytes(self, t: usize, i: usize) -> usize {
-        let code_bytes = self.n.saturating_mul(self.code_bits()).saturating_add(7) / 8;
-        self.distinct
-            .saturating_mul(t)
-            .saturating_add(code_bytes)
-            .saturating_add(self.n.saturating_mul(i))
+        let code_bytes = sat_add(sat_mul(self.n, self.code_bits()), 7) / 8;
+        sat_add(sat_add(sat_mul(self.distinct, t), code_bytes), sat_mul(self.n, i))
     }
 
     /// The cheapest scheme for this frame, never worse than plain — costed at the
@@ -404,6 +399,24 @@ pub fn mode_name(mode: crate::diff_compress::CompressionMode) -> &'static str {
         crate::diff_compress::CompressionMode::IndexRuns => "IndexRuns",
         crate::diff_compress::CompressionMode::IndexRunsSorted => "IndexRunsSorted",
         crate::diff_compress::CompressionMode::Auto => "Auto",
+    }
+}
+
+/// Saturating byte arithmetic for the diagnostic counters. Verified (vstd
+/// models `checked_mul`/`checked_add`), so a byte count can never trap and
+/// never needs a trust marker. Introduced 2026-09 when the counters were
+/// discharged from the trust ledger.
+pub fn sat_mul(a: usize, b: usize) -> usize {
+    match a.checked_mul(b) {
+        Some(v) => v,
+        None => usize::MAX,
+    }
+}
+
+pub fn sat_add(a: usize, b: usize) -> usize {
+    match a.checked_add(b) {
+        Some(v) => v,
+        None => usize::MAX,
     }
 }
 
