@@ -179,5 +179,39 @@ is available if cross-container distinctness is ever wanted as a proved rather
 than trusted property. See [Chapter 2](02-trust-boundary.md) for the trust
 boundary `ContainerId` sits in.
 
+## 6. Ownership inversion: the history owns the members (decided 2026-09-08)
+
+The layered design above leaves each `Vec` owning its own `GenStamps` and
+`ContainerId`; a synchronized group (`SyncPair`) adds a shared `History` on top,
+so genealogy state is duplicated per member and two authorities can advance a
+depth. The decided replacement inverts ownership: one `ForkHistory` holds
+`Vec<Box<dyn SyncMember>>` plus the stamps, the depth and one group
+`ContainerId`, and is the only type with `mark`/`restore`. `Vec` loses `forks`
+and `id` entirely and keeps only the genealogy-free cores (`seal_frame`,
+`restore_frame`); standalone use is a group of one, so no second mechanism
+survives.
+
+Three facts make the inversion sound and cheap:
+
+- The cores mention neither `T` nor `I`, so `SyncMember` is object-safe, and a
+  probe (2026-09-07, negative-control-checked) showed Verus verifies contracts
+  through `Box<dyn Trait>` including a heterogeneous `Vec<Box<dyn Member>>`
+  fan-out under a group invariant. Dynamic dispatch, not a fixed-arity macro,
+  is therefore the group representation.
+- `mark` = one stamp write, then a per-member `seal_frame` fan-out (hot frame
+  compressed to a cold frame, per the compression design in
+  [Chapter 9 of doc 09](09-diff-stack-compression.md)); `restore` = one token
+  validation, a per-member `restore_frame` fan-out applying frames directly to
+  each live column, then one branch-cut record. The genealogy is written only
+  outside the fan-out.
+- Each member owns its store, diff log and frame stack, so the fan-out's `&mut`
+  borrows are disjoint: the parallel twins (`mark_parallel`/`restore_parallel`,
+  rayon, `external_body` with identical contracts) parallelize exactly the
+  fan-out and nothing else.
+
+Signatures, bounds and acceptance criteria:
+`doc/tasks/forkhistory-and-frame-compression-goal.md`, Phase H and the
+interface appendix.
+
 ---
 [← Table of Contents](00-table-of-contents.md)

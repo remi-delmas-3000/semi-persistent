@@ -1349,7 +1349,7 @@ where
     /// The disjointness quantifier is isolated in
     /// `lemma_insert_fresh_disjoint`; the enclosing proof still exceeds the
     /// default solver budget, so this function carries an explicit margin.
-    #[verifier::rlimit(60)]
+    #[verifier::rlimit(300)]
     pub(crate) fn append_raw(&mut self, l: usize, payload: T)
         requires
             old(self).wf(),

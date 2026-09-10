@@ -287,6 +287,10 @@ where
         }
     }
 
+    open spec fn needs_replayed_indices_spec() -> bool { false }
+
+    fn needs_replayed_indices() -> bool { false }
+
     fn begin_restore(&mut self, _replayed_diffs: &[I]) {
         if !TRACK {
             return;
@@ -331,6 +335,26 @@ where
             // Data write only (production parity): the bitmap was zeroed in
             // begin_restore and data writes never touch it.
             self.data.set(iu, *old_value);
+        }
+    }
+
+    fn restore_overlay(
+        &mut self,
+        diff_log: &crate::diff_log::DiffLog<T, I>,
+        lo: usize,
+        hi: usize,
+    ) {
+        // The data column holds raw `T` values, so the diff log can write straight
+        // into it, frame by frame: whole cold frames apply themselves through
+        // `restore_to` (a sliced memcpy for `Runs` frames), the rest scatters. The
+        // bitmap is untouched (zeroed by begin_restore; data writes never grow the
+        // column, so the padded flag view is unchanged).
+        let ghost pre_len = self.data@.len();
+        diff_log.restore_range_into(lo, hi, &mut self.data);
+        proof {
+            crate::vec::lemma_overlay_len::<T, I>(
+                old(self).data@, diff_log@, lo as int, hi as int);
+            assert(self.data@.len() == pre_len);
         }
     }
 

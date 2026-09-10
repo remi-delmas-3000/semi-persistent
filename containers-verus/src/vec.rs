@@ -872,6 +872,104 @@ pub(crate) proof fn lemma_captured_in_range_multiset<T: Copy, I: IndexLike>(
     }
 }
 
+/// One write applied to a column: overwrite in range, drop out of range. The shared
+/// step of `overlay` (which folds it backward) and `apply_all` (forward).
+pub open(crate) spec fn write_step<T, I: IndexLike>(x: Seq<T>, e: (T, I)) -> Seq<T> {
+    if e.1.as_nat() < x.len() {
+        x.update(e.1.as_nat() as int, e.0)
+    } else {
+        x
+    }
+}
+
+/// `apply_all` peels one element off the FRONT when the sequence has unique indices:
+/// the front write touches an index no later write touches, so applying it first or
+/// last is the same column. The bridge between forward and backward application.
+pub(crate) proof fn lemma_apply_all_front<T, I: IndexLike>(base: Seq<T>, s: Seq<(T, I)>)
+    requires
+        s.len() > 0,
+        crate::diff_compress::unique_idx(s),
+    ensures
+        crate::diff_compress::apply_all::<T, I>(base, s)
+            == write_step::<T, I>(
+                crate::diff_compress::apply_all::<T, I>(base, s.subrange(1, s.len() as int)),
+                s[0]),
+    decreases s.len(),
+{
+    let n = s.len() as int;
+    if n == 1 {
+        assert(s.subrange(0, 0) =~= Seq::<(T, I)>::empty());
+        assert(s.subrange(1, 1) =~= Seq::<(T, I)>::empty());
+    } else {
+        let last = s[n - 1];
+        let front = s.subrange(0, n - 1);
+        // apply_all(s) == step(apply_all(front), last) by definition.
+        assert(front[0] == s[0]);
+        // front is unique (a subrange of a unique sequence).
+        assert(crate::diff_compress::unique_idx(front)) by {
+            assert forall|a: int, b: int|
+                0 <= a < front.len() && 0 <= b < front.len() && a != b
+                implies (#[trigger] front[a]).1.as_nat() != (#[trigger] front[b]).1.as_nat() by {
+                assert(front[a] == s[a]);
+                assert(front[b] == s[b]);
+            }
+        }
+        lemma_apply_all_front::<T, I>(base, front);
+        let mid = front.subrange(1, n - 1);
+        let am = crate::diff_compress::apply_all::<T, I>(base, mid);
+        // apply_all(s) == step(step(apply_all(mid), s[0]), last); the two writes hit
+        // distinct indices (unique_idx), and write_step preserves length, so they
+        // commute.
+        crate::diff_compress::lemma_apply_all_len::<T, I>(base, mid);
+        assert(s[0].1.as_nat() != last.1.as_nat());
+        assert(write_step::<T, I>(write_step::<T, I>(am, s[0]), last)
+            =~= write_step::<T, I>(write_step::<T, I>(am, last), s[0]));
+        // Re-fold the right-hand side: step(apply_all(mid), last) == apply_all(s[1..]).
+        let tail = s.subrange(1, n);
+        assert(tail.subrange(0, tail.len() - 1) =~= mid);
+        assert(tail[tail.len() - 1] == last);
+    }
+}
+
+/// A frame with unique indices applies the same FORWARD (`apply_all`, what
+/// `restore_to` implements) as BACKWARD (`overlay`, what the restore replay model
+/// uses): order within the frame cannot matter when no index repeats. Stated over
+/// the enclosing log's range so the caller needs no subrange re-shift.
+pub(crate) proof fn lemma_apply_all_eq_overlay<T, I: IndexLike>(
+    base: Seq<T>, d: Seq<(T, I)>, lo: int, hi: int,
+)
+    requires
+        0 <= lo <= hi <= d.len(),
+        crate::diff_compress::unique_idx(d.subrange(lo, hi)),
+    ensures
+        crate::diff_compress::apply_all::<T, I>(base, d.subrange(lo, hi))
+            == overlay::<T, I>(base, d, lo, hi),
+    decreases hi - lo,
+{
+    let s = d.subrange(lo, hi);
+    if lo >= hi {
+        assert(s =~= Seq::<(T, I)>::empty());
+    } else {
+        // overlay peels the front: overlay(lo, hi) == step(overlay(lo+1, hi), d[lo]).
+        // apply_all peels the front too under uniqueness (lemma above); the tails
+        // agree by induction.
+        let tail_unique = d.subrange(lo + 1, hi);
+        assert(s.subrange(1, s.len() as int) =~= tail_unique);
+        assert(crate::diff_compress::unique_idx(tail_unique)) by {
+            assert forall|a: int, b: int|
+                0 <= a < tail_unique.len() && 0 <= b < tail_unique.len() && a != b
+                implies (#[trigger] tail_unique[a]).1.as_nat()
+                    != (#[trigger] tail_unique[b]).1.as_nat() by {
+                assert(tail_unique[a] == s[a + 1]);
+                assert(tail_unique[b] == s[b + 1]);
+            }
+        }
+        lemma_apply_all_front::<T, I>(base, s);
+        lemma_apply_all_eq_overlay::<T, I>(base, d, lo + 1, hi);
+        assert(s[0] == d[lo]);
+    }
+}
+
 /// The per-stratum bridge: if a diff-log range `[lo, hi)` satisfies the
 /// two-arm `frame_inv` relative to `above` and `snap` (stated directly over
 /// the range), then overlaying that range onto `above` reproduces `snap`
@@ -3332,12 +3430,6 @@ where
             // is within the log (wf_for_snap's diff_start bound on old_self).
             old_self.lemma_diff_start_le_n(target_index as int);
         }
-        // Materialize the replayed index range (index-major safe: index_range
-        // reconstructs from cold runs when the column is compressed, or copies the
-        // plain slice otherwise). `replayed_pre@[k] == diff_log@[diff_start+k].1`.
-        let replayed_pre_vec = self.diff_log.index_range(diff_start, self.diff_log.len());
-        let replayed_pre = replayed_pre_vec.as_slice();
-
         let ghost base = self.store.data();
         let ghost base_flags = self.store.captured();
         proof {
@@ -3353,44 +3445,63 @@ where
                         == (j < old(self).store.captured().len()
                             && old(self).store.captured()[j]));
                 }
-                // begin_restore's requires: every post-resize flag is named
-                // by a replayed entry. Chain: post-resize flag ⟹ pre-restore
-                // flag ⟹ (old no-stray) below old active with a live frame ⟹
-                // (old bridge) captured_in_range over the old top stratum
-                // [old_top.ds, n) ⊆ [diff_start, n) (diff_start monotone) —
-                // the replayed slice.
-                self.store.lemma_wf_captured_len();
-                assert forall|j: int| 0 <= j < self.store.captured().len()
-                    && #[trigger] self.store.captured()[j]
-                    implies exists|k: int| 0 <= k < replayed_pre@.len()
-                        && (#[trigger] replayed_pre@[k]).as_nat() == j as nat by {
-                    assert(base_flags[j]);
-                    assert(0 <= j < saved_len.as_nat());
-                    assert(j < old(self).store.captured().len()
-                        && old(self).store.captured()[j]);
-                    assert(old(self).frames@.len() > 0
-                        && j < old(self).active_saved_len.as_nat());
-                    let old_top = (old(self).frames@.len() - 1) as int;
-                    assert(j < old(self).view().len());
-                    assert(captured_in_range::<T, I>(
-                        pre_diffs,
-                        old(self).frames@[old_top].diff_start as int,
-                        pre_diffs.len() as int, j as nat));
-                    old(self).lemma_diff_start_monotone(
-                        target_index as int, old_top);
-                    let k0 = choose|k: int| #![trigger (pre_diffs[k])]
-                        old(self).frames@[old_top].diff_start as int <= k
-                            < pre_diffs.len() as int
-                        && (pre_diffs[k]).1.as_nat() == j as nat;
-                    assert(diff_start as int <= k0);
-                    // replayed_pre is the INDEX column: replayed_pre@[m] ==
-                    // idxs@[diff_start+m] == diff_log@[diff_start+m].1 (view def)
-                    // == pre_diffs[diff_start+m].1.
-                    assert(replayed_pre@[k0 - diff_start as int] == pre_diffs[k0].1);
-                }
             }
         }
-        self.store.begin_restore(replayed_pre);
+        // Pre-replay flag clear. The replayed index column is materialized ONLY for
+        // a store that actually reads it (InlineStore's sparse tag-clear); a
+        // wholesale-clearing store (ParallelStore's bitmap memset) skips the full
+        // per-entry decode of a compressed log, which was measured dominating the
+        // frame-wise memcpy restore.
+        if S::needs_replayed_indices() {
+            // index-major safe: index_range reconstructs from cold runs when the
+            // column is compressed. `replayed_pre@[k] == diff_log@[diff_start+k].1`.
+            let replayed_pre_vec = self.diff_log.index_range(diff_start, self.diff_log.len());
+            let replayed_pre = replayed_pre_vec.as_slice();
+            proof {
+                if TRACK {
+                    // begin_restore's requires: every post-resize flag is named
+                    // by a replayed entry. Chain: post-resize flag ⟹ pre-restore
+                    // flag ⟹ (old no-stray) below old active with a live frame ⟹
+                    // (old bridge) captured_in_range over the old top stratum
+                    // [old_top.ds, n) ⊆ [diff_start, n) (diff_start monotone) —
+                    // the replayed slice.
+                    self.store.lemma_wf_captured_len();
+                    assert forall|j: int| 0 <= j < self.store.captured().len()
+                        && #[trigger] self.store.captured()[j]
+                        implies exists|k: int| 0 <= k < replayed_pre@.len()
+                            && (#[trigger] replayed_pre@[k]).as_nat() == j as nat by {
+                        assert(base_flags[j]);
+                        assert(0 <= j < saved_len.as_nat());
+                        assert(j < old(self).store.captured().len()
+                            && old(self).store.captured()[j]);
+                        assert(old(self).frames@.len() > 0
+                            && j < old(self).active_saved_len.as_nat());
+                        let old_top = (old(self).frames@.len() - 1) as int;
+                        assert(j < old(self).view().len());
+                        assert(captured_in_range::<T, I>(
+                            pre_diffs,
+                            old(self).frames@[old_top].diff_start as int,
+                            pre_diffs.len() as int, j as nat));
+                        old(self).lemma_diff_start_monotone(
+                            target_index as int, old_top);
+                        let k0 = choose|k: int| #![trigger (pre_diffs[k])]
+                            old(self).frames@[old_top].diff_start as int <= k
+                                < pre_diffs.len() as int
+                            && (pre_diffs[k]).1.as_nat() == j as nat;
+                        assert(diff_start as int <= k0);
+                        // replayed_pre is the INDEX column: replayed_pre@[m] ==
+                        // idxs@[diff_start+m] == diff_log@[diff_start+m].1 (view def)
+                        // == pre_diffs[diff_start+m].1.
+                        assert(replayed_pre@[k0 - diff_start as int] == pre_diffs[k0].1);
+                    }
+                }
+            }
+            self.store.begin_restore(replayed_pre);
+        } else {
+            // Wholesale clear: the requires' named-slots clause is vacuous.
+            let empty_idx: std::vec::Vec<I> = std::vec::Vec::new();
+            self.store.begin_restore(empty_idx.as_slice());
+        }
         let n = self.diff_log.len();
 
         // Flat central lemma: overlaying the whole tail [diff_start, n) onto
@@ -3421,62 +3532,28 @@ where
             }
         }
 
-        // Replay [diff_start, n) backward over the resized base. Each
-        // restore_entry overwrites in-range / drops out-of-range; the push
-        // (regrow) branch is dead because data().len() == saved_len throughout
-        // and every in-range idx (< saved_len) is < data().len().
-        let mut i: usize = n;
-        while i > diff_start
-            invariant
-                self.store.wf(),
-                self.diff_log.wf(),
-                self.diff_log@ == pre_diffs,
-                self.diff_log@.len() == n,
-                self.frames@ == old(self).frames@,
-                self.snapshots@ == old(self).snapshots@,
-                // forks is untouched by the replay loop (needed for fork()'s
-                // precondition after the loop).
-                self.forks == forks0,
-                diff_start <= i <= n,
-                self.store.data().len() == saved_len.as_nat(),
-                base.len() == saved_len.as_nat(),
-                // Work done so far == overlay of the applied suffix [i, n).
-                forall|j: int| 0 <= j < saved_len.as_nat() ==>
-                    #[trigger] self.store.data()[j]
-                        == overlay::<T, I>(base, pre_diffs, i as int, n as int)[j],
-                // All flags clear through the replay: begin_restore's
-                // all-clear start, preserved by restore_entry's
-                // decrease-only clause.
-                TRACK ==> forall|j: int| 0 <= j < self.store.captured().len()
-                    ==> !(#[trigger] self.store.captured()[j]),
-            decreases i,
-        {
-            i -= 1;
-            let (old_val, idx) = self.diff_log.index(i);
-            proof {
-                lemma_overlay_len::<T, I>(base, pre_diffs, (i + 1) as int, n as int);
-            }
-            self.store.restore_entry(idx, &old_val, saved_len);
-            proof {
-                if TRACK {
-                    // all-clear preserved: decrease-only from an all-false
-                    // state leaves all-false.
-                    assert forall|j: int| 0 <= j < self.store.captured().len()
-                        implies !(#[trigger] self.store.captured()[j]) by {
-                        if self.store.captured()[j] {
-                            // decrease-only: flag implies pre-entry flag —
-                            // contradicting the invariant.
-                            assert(false);
-                        }
+        // Replay [diff_start, n) backward over the resized base, in ONE batched
+        // store call. The store applies the whole range itself (restore_overlay,
+        // overlay contract), so a representation whose frames are contiguous can
+        // restore by sliced memcpy instead of scattered per-entry writes; out-of-
+        // range indices drop exactly as overlay's model says, and the regrow-push
+        // branch of the old per-entry path is gone because data().len() ==
+        // saved_len throughout.
+        self.store.restore_overlay(&self.diff_log, diff_start, n);
+        proof {
+            // Flags stayed all-clear: begin_restore's all-clear start plus
+            // restore_overlay's decrease-only.
+            if TRACK {
+                assert forall|j: int| 0 <= j < self.store.captured().len()
+                    implies !(#[trigger] self.store.captured()[j]) by {
+                    if self.store.captured()[j] {
+                        assert(false);
                     }
                 }
             }
-        }
-
-        proof {
-            // After loop: i == diff_start, so data == overlay(base, diffs,
-            // diff_start, n) on [0, saved_len), which == snap_target by the
-            // flat lemma above.
+            // data == overlay(base, diffs, diff_start, n) == snap_target on
+            // [0, saved_len) by the flat lemma above.
+            lemma_overlay_len::<T, I>(base, pre_diffs, diff_start as int, n as int);
             assert forall|j: int| 0 <= j < saved_len.as_nat() implies
                 #[trigger] self.store.data()[j] == snap_target[j] by {}
         }
@@ -4645,6 +4722,78 @@ mod adaptive_compaction_tests {
         vc.restore(tc[3]);
         vp.restore(tp[3]);
         assert_eq!(read_back(&vc), read_back(&vp), "views diverged after deep restore");
+    }
+}
+
+#[cfg(test)]
+mod restore_memcpy_timing {
+    // F1.3 measurement: the frame-wise memcpy restore (Auto column, contiguous
+    // frames -> Runs cold frames -> copy_from_slice) against the scattered
+    // per-entry replay (plain column, restore_scatter: the pre-change path's
+    // behavior) on an identical workload. Run in release for the recorded number:
+    //   cargo test -p semi-persistent-containers-verus --release \
+    //     restore_memcpy_timing -- --nocapture
+    // The assertion is deliberately weak (memcpy not slower by more than 2x) so a
+    // debug run stays green; the RECORDED comparison is the release print.
+    use super::{ShrinkPolicy, Vec};
+    use crate::diff_compress::{choose_mode, CompressionMode};
+    use crate::parallel_store::ParallelStore;
+
+    type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
+
+    fn drive(mode: CompressionMode, n: u32, frames: u32) -> (V, std::vec::Vec<super::VecToken>) {
+        let mut v = V::new_with_mode(mode);
+        for _ in 0..n {
+            v.push(0);
+        }
+        let mut ts = std::vec::Vec::new();
+        ts.push(v.mark(ShrinkPolicy::Never));
+        for k in 0..frames {
+            for i in 0..n {
+                v.set(i, i.wrapping_add(k));
+            }
+            if matches!(mode, CompressionMode::Auto) {
+                let top = v.frames.len() - 1;
+                let ds = v.frames[top].diff_start;
+                let nn = v.diff_log.len();
+                let diffs = v.diff_log.subrange_vec(ds, nn);
+                let m = choose_mode(&diffs);
+                ts.push(v.mark_and_compact_adaptive(m, ShrinkPolicy::Never));
+            } else {
+                ts.push(v.mark(ShrinkPolicy::Never));
+            }
+        }
+        (v, ts)
+    }
+
+    #[test]
+    fn memcpy_vs_scattered_restore() {
+        const N: u32 = 100_000;
+        const FRAMES: u32 = 8;
+
+        let (mut vp, tp) = drive(CompressionMode::None, N, FRAMES);
+        let (mut va, ta) = drive(CompressionMode::Auto, N, FRAMES);
+
+        let t0 = std::time::Instant::now();
+        vp.restore(tp[0]);
+        let scattered = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        va.restore(ta[0]);
+        let memcpy = t1.elapsed();
+
+        println!(
+            "restore over {FRAMES} frames x {N} cells: scattered(plain) {:?}  \
+             frame-wise memcpy(auto) {:?}  speedup {:.2}x",
+            scattered,
+            memcpy,
+            scattered.as_secs_f64() / memcpy.as_secs_f64().max(1e-12),
+        );
+
+        // Same result either way.
+        let a: std::vec::Vec<u32> = (0..va.len() as usize).map(|i| va.get_index(i as u32)).collect();
+        let p: std::vec::Vec<u32> = (0..vp.len() as usize).map(|i| vp.get_index(i as u32)).collect();
+        assert_eq!(a, p, "restore results diverged");
     }
 }
 

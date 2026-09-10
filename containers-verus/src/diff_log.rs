@@ -616,6 +616,13 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
             DiffLog::Adaptive { cold, hot, len } => {
                 &&& (forall|k: int| 0 <= k < cold@.len() ==> (#[trigger] cold@[k]).wf())
                 &&& *len == adaptive_len(cold@, hot@)
+                // Every sealed frame has unique indices (first-write-wins capture;
+                // compact_adaptive requires it of the folded region and every mode
+                // preserves it). This is what lets the restore fast path apply a
+                // frame FORWARD (`restore_to`) where the replay model applies it
+                // backward: order within a unique-index frame cannot matter.
+                &&& (forall|k: int| 0 <= k < cold@.len()
+                        ==> crate::diff_compress::unique_idx((#[trigger] cold@[k]).decode()))
             }
         }
     }
@@ -1222,6 +1229,197 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
     }
 
     /// Materialize entries `[lo, hi)` as a flat `Vec<(T, I)>`.
+    /// Backward scattered replay of `[lo, hi)` onto `target` (the `overlay` model,
+    /// entry by entry through `index`). The generic baseline every representation
+    /// can use; the fast paths in `restore_range_into` replace it frame-wise.
+    pub fn restore_scatter(&self, lo: usize, hi: usize, target: &mut Vec<T>)
+        requires
+            self.wf(),
+            lo <= hi <= self@.len(),
+        ensures
+            final(target)@ == crate::vec::overlay::<T, I>(
+                old(target)@, self@, lo as int, hi as int),
+    {
+        let ghost base = target@;
+        let mut i: usize = hi;
+        while i > lo
+            invariant
+                lo <= i <= hi,
+                hi <= self@.len(),
+                self.wf(),
+                target@.len() == base.len(),
+                target@ == crate::vec::overlay::<T, I>(base, self@, i as int, hi as int),
+            decreases i,
+        {
+            i -= 1;
+            let (v, idx) = self.index(i);
+            proof {
+                crate::vec::lemma_overlay_len::<T, I>(base, self@, (i + 1) as int, hi as int);
+            }
+            let iu = idx.as_usize();
+            if iu < target.len() {
+                target.set(iu, v);
+            }
+            proof {
+                assert(target@ =~= crate::vec::overlay::<T, I>(
+                    base, self@, i as int, hi as int));
+            }
+        }
+    }
+
+    /// Apply the range `[lo, hi)` onto `target` under the `overlay` model, using the
+    /// frame-wise fast path where the representation allows it: for the adaptive
+    /// tier, each whole cold frame inside the range restores itself via
+    /// `restore_to` (a sliced memcpy for `Runs` frames), sound because a sealed
+    /// frame has unique indices so forward and backward application agree
+    /// (`lemma_apply_all_eq_overlay`); the hot region and any partial frame fall
+    /// back to the scattered baseline.
+    pub fn restore_range_into(&self, lo: usize, hi: usize, target: &mut Vec<T>)
+        requires
+            self.wf(),
+            lo <= hi <= self@.len(),
+        ensures
+            final(target)@ == crate::vec::overlay::<T, I>(
+                old(target)@, self@, lo as int, hi as int),
+    {
+        match self {
+            DiffLog::Cols { .. } => {
+                self.restore_scatter(lo, hi, target);
+            }
+            DiffLog::Adaptive { cold, hot, len } => {
+                // The fast path decomposes a SUFFIX [lo, len) frame by frame; a
+                // proper sub-suffix (hi < len) only arises off the restore path, so
+                // it takes the scattered baseline.
+                if hi < *len {
+                    self.restore_scatter(lo, hi, target);
+                    return;
+                }
+                proof { reveal(cold_adaptive); }
+                let ghost base = target@;
+                let ghost d = self@;
+                let cold_total = *len - hot.len();
+                assert(cold_total == cold_adaptive(cold@).len());
+                // 1. Hot region: scattered (small, and its uniqueness is not in wf).
+                let hot_lo = if lo > cold_total { lo } else { cold_total };
+                self.restore_scatter(hot_lo, hi, target);
+                proof {
+                    crate::vec::lemma_overlay_len::<T, I>(base, d, hot_lo as int, hi as int);
+                }
+                if lo >= cold_total {
+                    return;
+                }
+                // 2. Cold frames from the last down: each whole frame inside the
+                //    range applies itself (memcpy for Runs); a partial frame at the
+                //    bottom falls back to scattered.
+                let mut end: usize = cold_total;
+                let mut k: usize = cold.len();
+                proof {
+                    assert(cold@.subrange(0, cold@.len() as int) =~= cold@);
+                }
+                while k > 0 && end > lo
+                    invariant
+                        self.wf(),
+                        self is Adaptive,
+                        base == old(target)@,
+                        cold@ == self->Adaptive_cold@,
+                        hot@ == self->Adaptive_hot@,
+                        hi <= d.len(),
+                        d == self@,
+                        hi as int == d.len(),
+                        0 <= k <= cold@.len(),
+                        lo < cold_total,
+                        cold_total == cold_adaptive(cold@).len(),
+                        cold_total <= hi,
+                        end as int == cold_adaptive(cold@.subrange(0, k as int)).len(),
+                        end <= cold_total,
+                        target@.len() == base.len(),
+                        target@ == crate::vec::overlay::<T, I>(
+                            base, d, if end > lo { end as int } else { lo as int }, hi as int),
+                    decreases k,
+                {
+                    proof {
+                        // Link the match binding back to self so wf's per-frame
+                        // foralls (frame wf + unique indices) instantiate on it.
+                        assert(self->Adaptive_cold@ == cold@);
+                        assert(cold@[(k - 1) as int].wf());
+                        assert(crate::diff_compress::unique_idx(
+                            cold@[(k - 1) as int].decode()));
+                    }
+                    let flen = cold[k - 1].entry_len();
+                    proof {
+                        assert(cold@.subrange(0, k as int)
+                            =~= cold@.subrange(0, (k - 1) as int).push(cold@[(k - 1) as int]));
+                        lemma_cold_adaptive_snoc(
+                            cold@.subrange(0, (k - 1) as int), cold@[(k - 1) as int]);
+                    }
+                    let start = end - flen;
+                    if start >= lo {
+                        // Whole frame inside the range: frame-wise application.
+                        let ghost fr = cold@[(k - 1) as int];
+                        proof {
+                            // Prefix length below this frame is exactly `start`.
+                            assert(cold_adaptive(cold@.subrange(0, (k - 1) as int)).len()
+                                == start as nat);
+                            // d[start, end) IS this frame's decode: each position maps
+                            // through the view into the cold concatenation at this
+                            // frame's offset.
+                            assert forall|q: int| 0 <= q < flen implies
+                                d[start + q] == fr.decode()[q] by {
+                                lemma_cold_adaptive_at(cold@, (k - 1) as int, start + q);
+                                assert(cold_adaptive(cold@)[start + q] == fr.decode()[q]);
+                                assert(start + q < cold_adaptive(cold@).len());
+                                assert(d[start + q]
+                                    == adaptive_at(cold@, hot@, start + q));
+                            }
+                            assert(d.subrange(start as int, end as int) =~= fr.decode());
+                            // unique indices (wf) => forward == backward application.
+                            assert(crate::diff_compress::unique_idx(fr.decode()));
+                            assert(crate::diff_compress::unique_idx(
+                                d.subrange(start as int, end as int)));
+                            crate::vec::lemma_apply_all_eq_overlay::<T, I>(
+                                target@, d, start as int, end as int);
+                            // Peel this frame off the overlay via the split lemma.
+                            crate::vec::lemma_overlay_split::<T, I>(
+                                base, d, start as int, end as int, hi as int);
+                        }
+                        cold[k - 1].restore_to(target);
+                        proof {
+                            assert(target@ == crate::vec::overlay::<T, I>(
+                                base, d, start as int, hi as int));
+                            crate::vec::lemma_overlay_len::<T, I>(
+                                base, d, start as int, hi as int);
+                        }
+                        end = start;
+                        k -= 1;
+                    } else {
+                        // Partial frame at the bottom: scattered for [lo, end), done.
+                        proof {
+                            crate::vec::lemma_overlay_split::<T, I>(
+                                base, d, lo as int, end as int, hi as int);
+                        }
+                        self.restore_scatter(lo, end, target);
+                        proof {
+                            assert(target@ == crate::vec::overlay::<T, I>(
+                                base, d, lo as int, hi as int));
+                        }
+                        return;
+                    }
+                }
+                proof {
+                    // Loop exit: end <= lo, and end steps on frame boundaries with
+                    // start >= lo in the taken branch, so end == lo; or k == 0 with
+                    // end == 0 <= lo. Either way the overlay range is [lo, hi).
+                    if end > lo {
+                        assert(k == 0);
+                        assert(cold@.subrange(0, 0) =~= Seq::<ColdFrame<T, I>>::empty());
+                        assert(end == 0);
+                        assert(false);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn subrange_vec(&self, lo: usize, hi: usize) -> (r: Vec<(T, I)>)
         requires self.wf(), lo <= hi <= self@.len(),
         ensures r@ == self@.subrange(lo as int, hi as int),

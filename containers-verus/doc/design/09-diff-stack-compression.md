@@ -336,6 +336,48 @@ value-axis win. Recorded so it is not confused with the `parent` case.
 | history memory | `P·(T+I) + F·usize` | `P·T` + near-entropy structure |
 | VecP mark clear | `O(N/64)` whole bitmap | `O(runs + touched/64)` |
 
+## The ValueCompressor strategy (decided 2026-09-08, supersedes mode-only selection)
+
+**The value bound lives on the codec, not on the column.** The dictionary encoder
+calls `T::as_usize` and the delta encoder does value arithmetic, so both need
+`T: IndexLike`; the node caches and the class-data `dense` column hold structs where
+only verbatim storage or equality-RLE applies. Bounding `Vec`/`DiffLog` methods by
+`T: IndexLike` would either exclude struct columns from index compression or force a
+silent fallback. Instead the value layer is a strategy parameter:
+
+```
+pub trait ValueCompressor<T: Copy> {
+    type Compressed;
+    spec fn decode(c: &Self::Compressed) -> Seq<T>;
+    fn compress(vals: &Vec<T>) -> (c: Self::Compressed)
+        ensures Self::decode(&c) == vals@;
+    fn decode_at(c: &Self::Compressed, i: usize) -> (v: T);
+    fn byte_len(c: &Self::Compressed) -> usize;
+}
+```
+
+Impl ladder, each carrying its own bound: `NoValueCompression` (any `T: Copy`,
+identity), `ValueRle` (`T: Copy + PartialEq`, equality runs; structs included),
+`ValueDictC` (`T: IndexLike`, dictionary + bit-packed codes), `ValueDelta`
+(`T: IndexLike`, value minus cell index, arithmetic verified in range). The column
+type is `Vec<T, I, S, VC: ValueCompressor<T>, TRACK>` with `NoValueCompression` the
+default; the parameter sits on `Vec`/`DiffLog`, not on `DiffStore`, because the store
+is the live column plus capture flags and never holds compressed bytes.
+
+What this buys, stated as properties: an illegal column/codec pairing fails to
+typecheck, so there is no runtime fallback to forbid; the index layers (runs, sorted
+runs) stay a closed enum available to every column because `I` is always `IndexLike`;
+per-frame adaptivity ranges over index layer x { apply VC, plain } within the
+column's fixed value family; and a new codec is one new impl with no change to
+`Vec`, `DiffLog` or the frame types. The earlier alternative — two member impls
+split by bound (`Vec` / `OpaqueVec`) — was rejected because it duplicated the member
+surface and moved the capability decision from the type to every call site.
+
+Index and value layers compose on one frame (an index-run frame whose run values are
+dict-coded), replacing the previous mutually-exclusive mode set; the seven composed
+modes and their measured comparison are the F2/F5 items of
+`doc/tasks/forkhistory-and-frame-compression-goal.md`.
+
 ## Runtime selection (per-instance mode, not a const generic)
 
 Compression mode is a **per-instance runtime field**, chosen at construction, not

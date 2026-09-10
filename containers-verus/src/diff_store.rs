@@ -265,18 +265,58 @@ where
     /// hoisting it lets `restore_entry` do NO per-entry bit work — measured
     /// 1.6µs/2048-entry replay). InlineStore: sparse tag-clear over the
     /// named slots, O(replayed) — the same protocol as its `prepare_mark`.
+    /// Whether `begin_restore` actually READS the replayed-indices slice. A store
+    /// that clears flags wholesale (ParallelStore's bitmap memset) never touches it,
+    /// so its caller can skip materializing the index column entirely: on a
+    /// compressed log that materialization is a full per-entry decode, and it was
+    /// measured DOMINATING the frame-wise memcpy restore before this flag existed.
+    /// A store that clears sparsely by name (InlineStore) returns true and gets the
+    /// real slice.
+    spec fn needs_replayed_indices_spec() -> bool;
+
+    fn needs_replayed_indices() -> (b: bool)
+        ensures b == Self::needs_replayed_indices_spec();
+
     fn begin_restore(&mut self, replayed_diffs: &[I])
         requires
             old(self).wf(),
-            TRACK ==> forall|j: int| 0 <= j < old(self).captured().len()
-                && #[trigger] old(self).captured()[j]
-                ==> exists|k: int| 0 <= k < replayed_diffs@.len()
-                        && (#[trigger] replayed_diffs@[k]).as_nat() == j as nat,
+            // The named-slots justification is only owed when the store reads the
+            // slice; a wholesale-clearing store establishes all-clear without it.
+            (TRACK && Self::needs_replayed_indices_spec())
+                ==> forall|j: int| 0 <= j < old(self).captured().len()
+                    && #[trigger] old(self).captured()[j]
+                    ==> exists|k: int| 0 <= k < replayed_diffs@.len()
+                            && (#[trigger] replayed_diffs@[k]).as_nat() == j as nat,
         ensures
             final(self).wf(),
             final(self).data() == old(self).data(),
             TRACK ==> forall|j: int| 0 <= j < final(self).captured().len()
                 ==> !(#[trigger] final(self).captured()[j]);
+
+    /// Apply the diff-log range `[lo, hi)` BACKWARD onto the live data in one call
+    /// (pure overwrite; an index at or beyond `data().len()` is dropped), replacing
+    /// the per-entry `restore_entry` replay loop. The point of the batching: the
+    /// store applies a whole frame at once, so a representation whose frame is
+    /// contiguous can use a sliced memcpy instead of scattered per-entry writes.
+    /// Capture flags only decrease (a replay write never sets one), so an all-clear
+    /// state stays all-clear through the call.
+    fn restore_overlay(
+        &mut self,
+        diff_log: &crate::diff_log::DiffLog<T, I>,
+        lo: usize,
+        hi: usize,
+    )
+        requires
+            old(self).wf(),
+            diff_log.wf(),
+            lo <= hi <= diff_log@.len(),
+        ensures
+            final(self).wf(),
+            final(self).data() == crate::vec::overlay::<T, I>(
+                old(self).data(), diff_log@, lo as int, hi as int),
+            TRACK ==> forall|j: int| 0 <= j < final(self).captured().len()
+                && #[trigger] final(self).captured()[j]
+                ==> j < old(self).captured().len() && old(self).captured()[j];
 
     /// Rewind a single slot to `old_value`. Within `[0, target_saved_len)`,
     /// either overwrites the existing slot (`index < data.len()`) or pushes

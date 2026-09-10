@@ -312,6 +312,10 @@ where
         self.data.set(iu, new_r);
     }
 
+    open spec fn needs_replayed_indices_spec() -> bool { true }
+
+    fn needs_replayed_indices() -> bool { true }
+
     fn begin_restore(&mut self, replayed_diffs: &[I]) {
         if !TRACK {
             return;
@@ -378,6 +382,56 @@ where
             self.data.push(new_r);
         } else {
             self.data.set(iu, new_r);
+        }
+    }
+
+    fn restore_overlay(
+        &mut self,
+        diff_log: &crate::diff_log::DiffLog<T, I>,
+        lo: usize,
+        hi: usize,
+    ) {
+        // Backward replay of [lo, hi). Inherently per-element for this store: every
+        // write re-encodes through `into_repr` (which is also the tag-clear), so a
+        // raw memcpy of `T` values would skip the tagging and be WRONG here. The
+        // batched entry still removes the per-entry dispatch from the Vec.
+        let ghost base = self.data_spec();
+        let mut i: usize = hi;
+        while i > lo
+            invariant
+                lo <= i <= hi,
+                hi <= diff_log@.len(),
+                diff_log.wf(),
+                self.wf_spec(),
+                self.data@.len() == base.len(),
+                self.data_spec() == crate::vec::overlay::<T, I>(
+                    base, diff_log@, i as int, hi as int),
+                forall|j: int| 0 <= j < self.captured_spec().len()
+                    && #[trigger] self.captured_spec()[j]
+                    ==> old(self).captured_spec()[j],
+            decreases i,
+        {
+            i -= 1;
+            let (v, idx) = diff_log.index(i);
+            proof {
+                crate::vec::lemma_overlay_len::<T, I>(base, diff_log@, (i + 1) as int, hi as int);
+            }
+            let ghost pre_caps = self.captured_spec();
+            let iu = idx.as_usize();
+            if iu < self.data.len() {
+                self.data.set(iu, v.into_repr());
+            }
+            proof {
+                assert(self.data_spec() =~= crate::vec::overlay::<T, I>(
+                    base, diff_log@, i as int, hi as int));
+                // Tag-clear write: the touched slot's flag is now false, every other
+                // slot is unchanged, so decrease-only chains through the iteration.
+                assert forall|j: int| 0 <= j < self.captured_spec().len()
+                    && #[trigger] self.captured_spec()[j]
+                    implies old(self).captured_spec()[j] by {
+                    assert(pre_caps[j]);
+                }
+            }
         }
     }
 

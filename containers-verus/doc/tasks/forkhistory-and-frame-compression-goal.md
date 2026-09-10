@@ -83,6 +83,18 @@ one is incomplete. If blocked, stop and state the exact blocker.
 
 ### F1 (BUILT, PINNED FIRST): `Vec::restore` restores through `restore_to`
 
+STATUS: DISCHARGED. `restore_frame` replays through one `DiffStore::restore_overlay`
+call; ParallelStore delegates to `DiffLog::restore_range_into`, which applies whole
+adaptive cold frames via `CompressedFrame::restore_to` (memcpy for Runs) under the
+verified forward/backward equivalence (`lemma_apply_all_eq_overlay`, per-frame
+unique indices now in wf). MEASURED (restore_memcpy_timing, release, 8x100k
+contiguous): scattered 1.88 ms vs frame-wise memcpy 69.25 us = 27.1x. NEGATIVE
+RESULT recorded: the first measurement was 0.61x (slower) because `restore_frame`
+materialized the whole replayed index column for `begin_restore` even though
+ParallelStore's wholesale bitmap memset never reads it; `needs_replayed_indices`
+now skips that decode, and InlineStore (sparse tag-clear) still receives the real
+slice.
+
 The reconstruction currently walks decoded pairs and overlays them one at a time.
 Replace that with a per-frame `restore_to` call so a contiguous frame restores by
 memcpy. The hot frame restores itself the same way (hot to live), with no
@@ -99,18 +111,31 @@ cold to hot to live detour.
   memcpy path faster than the pre-change scattered path, with both numbers recorded.
   A projected speedup does not count.
 
-### F2 (BUILT): the layered encoder, seven modes
+### F2 (BUILT): the layered encoder, seven modes over `ValueCompressor`
 
 An index layer and a value layer compose on one frame instead of excluding each
-other. Index layer: none, write-order runs, sorted runs. Value layer: none, value
-runs (RLE within an index run), value runs plus dictionary. The seven modes to
-support are: `ValueDict`, `IndexRuns`, `IndexRuns+ValueRuns`,
+other. Index layer: none, write-order runs, sorted runs (closed enum; `I` is always
+`IndexLike`). Value layer: a `ValueCompressor<T>` strategy carrying its own bound on
+`T` (see the appendix), so struct columns get the index layers with
+`NoValueCompression` and id columns additionally get RLE, dictionary and delta. The
+seven modes to compare are: `ValueDict`, `IndexRuns`, `IndexRuns+ValueRuns`,
 `IndexRuns+ValueRuns+ValueDict`, `IndexRunsSorted`, `IndexRunsSorted+ValueRuns`,
 `IndexRunsSorted+ValueRuns+ValueDict`.
 
+- F2.0. The `ValueCompressor` trait and its four impls (`NoValueCompression`,
+  `ValueRle`, `ValueDictC`, `ValueDelta`) exist as specified in the appendix, with
+  the exact-decode contract on each; `Vec`/`DiffLog` take the strategy parameter and
+  an illegal column/codec combination fails to typecheck (shown by a compile-fail
+  test or a doc-comment example).
 - F2.1. `cargo verus verify` green with each mode a `CompressedFrame` impl proving
   `decode().to_multiset() == input.to_multiset()`, and the exact-sequence contract
   `decode() == input` for every non-sorting mode.
+- F2.1b. Run encoders self-demote to plain when runs do not coalesce: after
+  counting runs (post-sort for the sorted mode), the encoder compares the encoded
+  size against plain and emits the plain frame when runs would be larger. The
+  contract is the same for both outputs, so the demotion is invisible to the
+  caller's proof. A run frame larger than its plain equivalent in the F4 logs is a
+  bug against this item.
 - F2.2. A conformance proptest (>= 1000 cases) round-trips every mode and asserts
   each restores a live column to the same contents as the reference application of
   the pairs.
@@ -316,56 +341,75 @@ pass" fails the audit.
 Signatures are the contract. Anything below that changes during the build is recorded
 here with the reason.
 
-### Value-type capability, and why there are two member impls
+### The `ValueCompressor` strategy: the value bound lives on the compressor
 
-The dictionary layer calls `T::as_usize` to key its hash map, and the delta layer does
-arithmetic on values, so both require `T: IndexLike`. The index layers (runs, sorted
-runs) and plain move values verbatim and need only `T: Copy`. The e-graph mixes both
-kinds of column in one synchronized set: the union-find parent column has `T` a node
-id (`IndexLike`, full mode set), while the node caches and the class-data `dense`
-column hold structs (`Copy` only, index layers and plain only).
-
-One `impl` cannot cover both, and a silent dict-to-plain fallback is a forbidden
-proxy. The resolution is two concrete member types implementing one object-safe
-trait, which `dyn` then unifies:
+Indices are always `I: IndexLike`, so the index layers (runs, sorted runs) are
+universally available and stay a closed enum. The VALUE layer is the open extension
+point: the dictionary calls `T::as_usize` and delta does value arithmetic, so those
+need `T: IndexLike`, while the node caches and the class-data `dense` column hold
+structs where only verbatim (or equality-RLE) applies. Instead of bounding `Vec`'s
+methods by what `T` can do, the value codec is a strategy parameter and the bound
+lives on the strategy impl:
 
 ```rust
-// Full mode set: plain, index runs (write-order and sorted), value runs,
-// dictionary, delta.
-impl<T, I, S, const TRACK: bool> SyncMember for Vec<T, I, S, TRACK>
-where T: IndexLike + Default, I: IndexLike, S: DiffStore<T, I, TRACK> { .. }
+/// Strategy for one column's value layer. Whatever bound a codec needs sits on ITS
+/// impl, never on Vec / DiffLog / the frames.
+pub trait ValueCompressor<T: Copy> {
+    type Compressed;
 
-// Opaque values (structs): plain, index runs, sorted index runs, value runs.
-// No dictionary, no delta. A newtype so the two impls do not overlap.
-pub struct OpaqueVec<T, I, S, const TRACK: bool>(Vec<T, I, S, TRACK>);
+    spec fn decode(c: &Self::Compressed) -> Seq<T>;
 
-impl<T, I, S, const TRACK: bool> SyncMember for OpaqueVec<T, I, S, TRACK>
-where T: Sized + Copy + Default, I: IndexLike, S: DiffStore<T, I, TRACK> { .. }
-```
+    fn compress(vals: &Vec<T>) -> (c: Self::Compressed)
+        ensures Self::decode(&c) == vals@;
 
-`ColdFrame` splits its constructor along the same line:
+    fn decode_at(c: &Self::Compressed, i: usize) -> (v: T)
+        requires i < Self::decode(c).len(),
+        ensures v == Self::decode(c)[i as int];
 
-```rust
-impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
-    // Plain / IndexRuns / IndexRunsSorted / +ValueRuns. Values move verbatim.
-    pub fn compress_mode_copy(diffs: &Vec<(T, I)>, mode: CompressionMode)
-        -> (r: ColdFrame<T, I>)
-        requires mode.is_value_opaque(),
-        ensures r.wf(), r.decode().to_multiset() == diffs@.to_multiset();
+    fn byte_len(c: &Self::Compressed) -> usize;
 }
 
-impl<T: IndexLike, I: IndexLike> ColdFrame<T, I> {
-    // The above plus ValueDict and Delta.
-    pub fn compress_mode(diffs: &Vec<(T, I)>, mode: CompressionMode)
-        -> (r: ColdFrame<T, I>)
-        ensures r.wf(), r.decode().to_multiset() == diffs@.to_multiset(),
-                unique_idx(diffs@) ==> unique_idx(r.decode());
-}
+/// Identity: any T: Copy. What struct columns use.
+pub struct NoValueCompression;
+impl<T: Copy> ValueCompressor<T> for NoValueCompression { type Compressed = Vec<T>; }
+
+/// Equality RLE: T: Copy + PartialEq (structs included).
+pub struct ValueRle;
+impl<T: Copy + PartialEq> ValueCompressor<T> for ValueRle { .. }
+
+/// Dictionary + bit-packed codes: T: IndexLike.
+pub struct ValueDictC;
+impl<T: IndexLike> ValueCompressor<T> for ValueDictC { type Compressed = ValFrame<T>; }
+
+/// Delta against the cell index: T: IndexLike (F3, arithmetic proved in range).
+pub struct ValueDelta;
+impl<T: IndexLike> ValueCompressor<T> for ValueDelta { .. }
 ```
 
-`CompressionMode::is_value_opaque()` is the spec-level predicate naming the modes that
-need no `IndexLike` on `T`. Calling `compress_mode_copy` with a dict or delta mode is
-a precondition violation, not a runtime fallback.
+The column type becomes `Vec<T, I, S, VC: ValueCompressor<T>, TRACK>`, defaulting to
+`NoValueCompression`. The parameter sits on `Vec`/`DiffLog`, NOT on `DiffStore`: the
+store is the live column plus capture flags and never sees compressed bytes; frames
+do. Consequences, each an acceptance-relevant fact:
+
+- An illegal combination does not typecheck: a struct column instantiated with
+  `ValueDictC` is a compile error, so no runtime fallback exists to forbid.
+- The union-find parent column is `Vec<NodeId, _, _, ValueDictC>`; a node cache is
+  `Vec<CacheEntry, _, _, NoValueCompression>`; both erase behind
+  `Box<dyn SyncMember>` and the `ForkHistory` cannot tell them apart.
+- `VC` fixes the column's value FAMILY at its type; per-frame adaptivity (A4's
+  selector) ranges over index layer x { apply VC, plain } within that family, chosen
+  from the frame's own statistics.
+- New codecs (varint if it ever wins, entropy coding, a struct field-wise codec) are
+  new `ValueCompressor` impls with zero changes to `Vec`, `DiffLog` or the frames.
+- Decompression stays universal at `T: Copy`: `restore_to` and `decode_at` need no
+  `IndexLike`, so a frame HOLDING a dict-coded column still restores under the
+  weakest bound; only building one requires the capability.
+
+One `SyncMember` impl covers every column
+(`impl<T, I, S, VC, ..> SyncMember for Vec<T, I, S, VC, ..>`); the earlier
+two-impl/`OpaqueVec` resolution is superseded by this design and recorded here as the
+rejected alternative (it duplicated the member impl and pushed the capability
+decision to call sites instead of the type).
 
 ### The layered mode
 
