@@ -1231,6 +1231,113 @@ where
         }
     }
 
+    // --------------------------------------------------------------------
+    // Shared-history variants (doc 10): the parent/rank (+ optional proof)
+    // columns driven by one external History via push_frame/restore_frame, so
+    // the branch genealogy lives once. Additive — the UnionFindToken mark/restore
+    // above and their theorems are untouched. The roots/dist and proof archives
+    // are maintained by the same proof blocks (push_frame/restore_frame share the
+    // per-column snapshot ensures). The synced-depth invariant (all columns and
+    // the history at one depth) is carried explicitly; under PROOFS it extends to
+    // the two proof columns.
+    #[allow(dead_code)]
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).parent_depth_spec() < u32::MAX,
+            old(self).rank_depth_spec() < u32::MAX,
+            old(self).parent_depth_spec() == old(self).rank_depth_spec(),
+            PROOFS ==> old(self).parent_proof->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            PROOFS ==> old(self).justification->Some_0.depth_spec() == old(self).parent_depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).parent_view() == old(self).parent_view(),
+            final(self).rank_view() == old(self).rank_view(),
+            final(self).roots_view() == old(self).roots_view(),
+            final(self).parent_depth_spec() == old(self).parent_depth_spec() + 1,
+            final(self).parent_depth_spec() == final(self).rank_depth_spec(),
+            final(self).roots_snapshots_view()
+                == old(self).roots_snapshots_view().push(old(self).roots_view()),
+            final(self).parent_snapshots_view()
+                == old(self).parent_snapshots_view().push(old(self).parent_view()),
+    {
+        self.parent.push_frame(shrink);
+        self.rank.push_frame(shrink);
+        match &mut self.parent_proof {
+            Some(pp) => pp.push_frame(shrink),
+            None => (),
+        }
+        match &mut self.justification {
+            Some(j) => j.push_frame(shrink),
+            None => (),
+        }
+        self.roots_snapshots = Ghost(self.roots_snapshots@.push(self.roots@));
+        self.dist_snapshots = Ghost(self.dist_snapshots@.push(self.dist@));
+        proof {
+            reveal(uf_archive_agrees);
+            assert(uf_archive_agrees(old(self).roots_snapshots@, old(self).dist_snapshots@,
+                old(self).parent.snapshots_view(), old(self).rank.snapshots_view()));
+            let k_new = self.roots_snapshots@.len() - 1;
+            assert(self.parent.snapshots_view()[k_new] == old(self).parent_view());
+            assert(self.rank.snapshots_view()[k_new] == old(self).rank_view());
+            assert(uf_model_wf(self.parent.snapshots_view()[k_new],
+                self.roots_snapshots@[k_new], self.dist_snapshots@[k_new]));
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies uf_model_wf(#[trigger] self.parent.snapshots_view()[k],
+                    self.roots_snapshots@[k], self.dist_snapshots@[k]) by {
+                if k < k_new {
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                    assert(self.roots_snapshots@[k] == old(self).roots_snapshots@[k]);
+                    assert(self.dist_snapshots@[k] == old(self).dist_snapshots@[k]);
+                }
+            }
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies (#[trigger] self.rank.snapshots_view()[k]).len()
+                    == self.parent.snapshots_view()[k].len() by {
+                if k < k_new {
+                    assert(self.rank.snapshots_view()[k]
+                        == old(self).rank.snapshots_view()[k]);
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                }
+            }
+            assert(uf_archive_agrees(self.roots_snapshots@, self.dist_snapshots@,
+                self.parent.snapshots_view(), self.rank.snapshots_view()));
+        }
+        proof {
+            if PROOFS {
+                reveal(uf_proof_archive_agrees);
+                let opps = old(self).parent_proof->Some_0.snapshots_view();
+                let ojs = old(self).justification->Some_0.snapshots_view();
+                assert(uf_proof_archive_agrees(old(self).parent.snapshots_view(), opps, ojs));
+                let pps = self.parent_proof->Some_0.snapshots_view();
+                let js = self.justification->Some_0.snapshots_view();
+                let k_new = self.parent.snapshots_view().len() - 1;
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] pps[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    if k < k_new {
+                        assert(pps[k] == opps[k]);
+                        assert(self.parent.snapshots_view()[k]
+                            == old(self).parent.snapshots_view()[k]);
+                    }
+                }
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] js[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    if k < k_new {
+                        assert(js[k] == ojs[k]);
+                        assert(self.parent.snapshots_view()[k]
+                            == old(self).parent.snapshots_view()[k]);
+                    }
+                }
+                assert(uf_proof_archive_agrees(self.parent.snapshots_view(), pps, js));
+            }
+        }
+    }
+
     /// Total mark (the composite of the two columns' `can_mark`).
     pub fn try_mark(&mut self, shrink: ShrinkPolicy)
         -> (r: Result<UnionFindToken, crate::error::ContainerError>)
@@ -1375,6 +1482,115 @@ where
                 let js = self.justification->Some_0.snapshots_view();
                 // restored views are frame f's; the archive equates their
                 // lengths with the fast parent's at every frame.
+                assert(self.parent_proof->Some_0.view() == opps[f]);
+                assert(self.justification->Some_0.view() == ojs[f]);
+                assert(opps[f].len() == old(self).parent.snapshots_view()[f].len());
+                assert(ojs[f].len() == old(self).parent.snapshots_view()[f].len());
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] pps[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    assert(pps[k] == opps[k]);
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                }
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] js[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    assert(js[k] == ojs[k]);
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                }
+                assert(uf_proof_archive_agrees(
+                    self.parent.snapshots_view(), pps, js));
+            }
+            reveal(uf_archive_agrees);
+            assert(uf_model_wf(old(self).parent.snapshots_view()[f], snap_roots, snap_dist));
+            assert(self.parent_view() == old(self).parent.snapshots_view()[f]);
+            assert(self.rank_view() == old(self).rank.snapshots_view()[f]);
+            assert(self.parent.snapshots_view()
+                =~= old(self).parent.snapshots_view().subrange(0, f));
+            assert(self.rank.snapshots_view()
+                =~= old(self).rank.snapshots_view().subrange(0, f));
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies uf_model_wf(#[trigger] self.parent.snapshots_view()[k],
+                    self.roots_snapshots@[k], self.dist_snapshots@[k]) by {
+                assert(self.parent.snapshots_view()[k]
+                    == old(self).parent.snapshots_view()[k]);
+                assert(self.roots_snapshots@[k] == old(self).roots_snapshots@[k]);
+                assert(self.dist_snapshots@[k] == old(self).dist_snapshots@[k]);
+            }
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies (#[trigger] self.rank.snapshots_view()[k]).len()
+                    == self.parent.snapshots_view()[k].len() by {
+                assert(self.rank.snapshots_view()[k] == old(self).rank.snapshots_view()[k]);
+                assert(self.parent.snapshots_view()[k]
+                    == old(self).parent.snapshots_view()[k]);
+            }
+            assert(uf_archive_agrees(self.roots_snapshots@, self.dist_snapshots@,
+                self.parent.snapshots_view(), self.rank.snapshots_view()));
+        }
+    }
+
+    /// Shared-history restore: reconstruct parent/rank (+ optional proof columns)
+    /// to frame `t.depth` via `restore_frame`, recover the roots/dist archive, and
+    /// record the branch cut once in `History`. The archive proofs are the same as
+    /// `restore` with `f = t.depth`. Additive; `restore`'s API + theorems untouched.
+    #[allow(dead_code)]
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        where T: core::default::Default, J: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).parent_depth_spec() == old(self).rank_depth_spec(),
+            PROOFS ==> old(self).parent_proof->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            PROOFS ==> old(self).justification->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            (target as nat) < old(self).parent_depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).parent_view()
+                == old(self).parent_snapshots_view()[target as int],
+            final(self).rank_view()
+                == old(self).rank_snapshots_view()[target as int],
+            final(self).roots_view()
+                == old(self).roots_snapshots_view()[target as int],
+            final(self).roots_snapshots_view() == old(self).roots_snapshots_view()
+                .subrange(0, target as int),
+            final(self).parent_snapshots_view() == old(self).parent_snapshots_view()
+                .subrange(0, target as int),
+            final(self).parent_depth_spec() == target as nat,
+            final(self).parent_depth_spec() == final(self).rank_depth_spec(),
+    {
+        let ghost f = target as int;
+        let ghost snap_roots = self.roots_snapshots@[f];
+        let ghost snap_dist = self.dist_snapshots@[f];
+        proof {
+            reveal(uf_archive_agrees);
+            assert(uf_archive_agrees(old(self).roots_snapshots@, old(self).dist_snapshots@,
+                old(self).parent.snapshots_view(), old(self).rank.snapshots_view()));
+        }
+        self.parent.restore_frame(target);
+        self.rank.restore_frame(target);
+        match &mut self.parent_proof {
+            Some(pp) => pp.restore_frame(target),
+            None => (),
+        }
+        match &mut self.justification {
+            Some(j) => j.restore_frame(target),
+            None => (),
+        }
+        self.roots = Ghost(snap_roots);
+        self.dist = Ghost(snap_dist);
+        self.roots_snapshots = Ghost(self.roots_snapshots@.subrange(0, f));
+        self.dist_snapshots = Ghost(self.dist_snapshots@.subrange(0, f));
+        proof {
+            if PROOFS {
+                reveal(uf_proof_archive_agrees);
+                let opps = old(self).parent_proof->Some_0.snapshots_view();
+                let ojs = old(self).justification->Some_0.snapshots_view();
+                assert(uf_proof_archive_agrees(
+                    old(self).parent.snapshots_view(), opps, ojs));
+                let pps = self.parent_proof->Some_0.snapshots_view();
+                let js = self.justification->Some_0.snapshots_view();
                 assert(self.parent_proof->Some_0.view() == opps[f]);
                 assert(self.justification->Some_0.view() == ojs[f]);
                 assert(opps[f].len() == old(self).parent.snapshots_view()[f].len());

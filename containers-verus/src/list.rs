@@ -2160,6 +2160,119 @@ where
         }
     }
 
+    // ------------------------------------------------------------------
+    // Shared-history variants (doc 10): the two-member fan-out driven by one
+    // external History via push_frame/restore_frame, so the branch genealogy
+    // lives once instead of per member. Additive — ListArenaToken mark/restore
+    // and their theorems are untouched. The arena archive maintenance and its
+    // proof are the same as mark/restore (push_frame/restore_frame share the
+    // heads/nodes snapshot ensures); the synced-depth invariant is explicit.
+    #[allow(dead_code)]
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).heads_view().len() < usize::MAX,
+            old(self).nodes_view().len() < usize::MAX,
+            old(self).heads_depth_spec() < u32::MAX,
+            old(self).nodes_depth_spec() < u32::MAX,
+            old(self).heads_depth_spec() == old(self).nodes_depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).heads_view() == old(self).heads_view(),
+            final(self).nodes_view() == old(self).nodes_view(),
+            final(self).model_view() == old(self).model_view(),
+            final(self).heads_snapshots_view()
+                == old(self).heads_snapshots_view().push(old(self).heads_view()),
+            final(self).nodes_snapshots_view()
+                == old(self).nodes_snapshots_view().push(old(self).nodes_view()),
+            final(self).model_snapshots_view()
+                == old(self).model_snapshots_view().push(old(self).model_view()),
+            final(self).heads_depth_spec() == old(self).heads_depth_spec() + 1,
+            final(self).heads_depth_spec() == final(self).nodes_depth_spec(),
+    {
+        self.heads.push_frame(shrink);
+        self.nodes.push_frame(shrink);
+        self.model_snapshots = Ghost(self.model_snapshots@.push(self.model@));
+        proof {
+            reveal(arena_archive_agrees);
+            assert(arena_archive_agrees(old(self).model_snapshots@,
+                old(self).heads.snapshots_view(), old(self).nodes.snapshots_view()));
+            let k_new = self.model_snapshots@.len() - 1;
+            assert(self.heads.snapshots_view()[k_new] == old(self).heads_view());
+            assert(self.nodes.snapshots_view()[k_new] == old(self).nodes_view());
+            assert(arena_model_wf(self.model@,
+                self.heads.snapshots_view()[k_new], self.nodes.snapshots_view()[k_new]));
+            assert forall|k: int| 0 <= k < self.model_snapshots@.len()
+                implies arena_model_wf(
+                    #[trigger] self.model_snapshots@[k],
+                    self.heads.snapshots_view()[k], self.nodes.snapshots_view()[k]) by {
+                if k < k_new {
+                    assert(self.model_snapshots@[k] == old(self).model_snapshots@[k]);
+                    assert(self.heads.snapshots_view()[k]
+                        == old(self).heads.snapshots_view()[k]);
+                    assert(self.nodes.snapshots_view()[k]
+                        == old(self).nodes.snapshots_view()[k]);
+                }
+            }
+            assert(arena_archive_agrees(self.model_snapshots@,
+                self.heads.snapshots_view(), self.nodes.snapshots_view()));
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).heads_depth_spec() == old(self).nodes_depth_spec(),
+            (target as nat) < old(self).heads_depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).heads_view() == old(self).heads_snapshots_view()[target as int],
+            final(self).nodes_view() == old(self).nodes_snapshots_view()[target as int],
+            final(self).model_view() == old(self).model_snapshots_view()[target as int],
+            final(self).heads_snapshots_view()
+                == old(self).heads_snapshots_view().subrange(0, target as int),
+            final(self).nodes_snapshots_view()
+                == old(self).nodes_snapshots_view().subrange(0, target as int),
+            final(self).model_snapshots_view()
+                == old(self).model_snapshots_view().subrange(0, target as int),
+            final(self).heads_depth_spec() == target as nat,
+            final(self).heads_depth_spec() == final(self).nodes_depth_spec(),
+    {
+        let ghost snap_model = self.model_snapshots@[target as int];
+        self.heads.restore_frame(target);
+        self.nodes.restore_frame(target);
+        self.model = Ghost(snap_model);
+        self.model_snapshots =
+            Ghost(self.model_snapshots@.subrange(0, target as int));
+        proof {
+            reveal(arena_archive_agrees);
+            let f = target as int;
+            assert(arena_archive_agrees(old(self).model_snapshots@,
+                old(self).heads.snapshots_view(), old(self).nodes.snapshots_view()));
+            assert(arena_model_wf(snap_model,
+                old(self).heads.snapshots_view()[f], old(self).nodes.snapshots_view()[f]));
+            assert(self.heads_view() == old(self).heads.snapshots_view()[f]);
+            assert(self.nodes_view() == old(self).nodes.snapshots_view()[f]);
+            assert(self.heads.snapshots_view()
+                =~= old(self).heads.snapshots_view().subrange(0, f));
+            assert(self.nodes.snapshots_view()
+                =~= old(self).nodes.snapshots_view().subrange(0, f));
+            assert forall|k: int| 0 <= k < self.model_snapshots@.len()
+                implies arena_model_wf(
+                    #[trigger] self.model_snapshots@[k],
+                    self.heads.snapshots_view()[k], self.nodes.snapshots_view()[k]) by {
+                assert(self.model_snapshots@[k] == old(self).model_snapshots@[k]);
+                assert(self.heads.snapshots_view()[k] == old(self).heads.snapshots_view()[k]);
+                assert(self.nodes.snapshots_view()[k] == old(self).nodes.snapshots_view()[k]);
+            }
+            assert(arena_archive_agrees(self.model_snapshots@,
+                self.heads.snapshots_view(), self.nodes.snapshots_view()));
+        }
+    }
+
     // =======================================================================
     // Typed-id API for the production surface. Each method converts the
     // typed handle to the verified usize core through the DenseId axioms:

@@ -1119,6 +1119,119 @@ where T: Sized + Copy + core::default::Default {
             }
         }
     }
+
+    // --------------------------------------------------------------------
+    // Shared-history variants (doc 10): the single-member fan-out driven by one
+    // external History via push_frame/restore_frame, so the branch genealogy
+    // lives once. Additive — the CircularListToken mark/restore above and their
+    // theorems are untouched. The archive maintenance and its proof are the same
+    // as mark/restore (push_frame/restore_frame share the entries snapshot
+    // ensures); the synced-depth group invariant is carried explicitly.
+    #[allow(dead_code)]
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).n_spec() < usize::MAX,
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).next_seq() == old(self).next_seq(),
+            final(self).n_spec() == old(self).n_spec(),
+            final(self).model_view() == old(self).model_view(),
+            final(self).payload_seq() == old(self).payload_seq(),
+            final(self).entries_snapshots_view()
+                == old(self).entries_snapshots_view().push(old(self).entries_view()),
+            final(self).model_snapshots_view()
+                == old(self).model_snapshots_view().push(old(self).model_view()),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+    {
+        self.entries.push_frame(shrink);
+        // Archive the live ring partition alongside the vec snapshot.
+        self.model_snapshots = Ghost(self.model_snapshots@.push(self.model@));
+        proof {
+            assert(self.entries.view() == old(self).entries.view());
+            assert(self.model@ == old(self).model@);
+            assert(self.next_seq() =~= old(self).next_seq());
+            assert forall|i: int| 0 <= i < self.n_spec() implies #[trigger] self.in_some_ring(i) by {
+                assert(old(self).in_some_ring(i));
+                let (c, p) = choose|c: int, p: int|
+                    0 <= c < old(self).model@.len() && 0 <= p < old(self).model@[c].len()
+                        && old(self).model@[c][p] == i;
+                assert(self.model@[c][p] == i);
+            }
+            reveal(ring_archive_agrees);
+            let k_new = self.model_snapshots@.len() - 1;
+            assert(self.entries.snapshots_view()[k_new] == old(self).entries.view());
+            assert forall|i: int| 0 <= i < old(self).entries.view().len()
+                implies #[trigger] idx_in_some_ring(self.model@, i) by {
+                assert(old(self).in_some_ring(i));
+            }
+            let ghost snap_kn = self.entries.snapshots_view()[k_new];
+            assert forall|c: int, p: int|
+                0 <= c < self.model@.len() && 0 <= p < self.model@[c].len() implies
+                (#[trigger] snap_kn[self.model@[c][p] as int]).next.id_nat() as usize
+                    == self.model@[c][if p + 1 < self.model@[c].len() { p + 1 } else { 0 }] by {
+                assert(self.next_seq()[self.model@[c][p] as int]
+                    == self.model@[c][if p + 1 < self.model@[c].len() { p + 1 } else { 0 }]);
+                assert(snap_kn[self.model@[c][p] as int] == self.entries.view()[self.model@[c][p] as int]);
+            }
+            assert(ring_snap_wf(self.model@, self.entries.snapshots_view()[k_new]));
+            assert forall|k: int| 0 <= k < self.model_snapshots@.len()
+                implies ring_snap_wf(
+                    #[trigger] self.model_snapshots@[k],
+                    self.entries.snapshots_view()[k]) by {
+                if k < k_new {
+                    assert(self.model_snapshots@[k] == old(self).model_snapshots@[k]);
+                    assert(self.entries.snapshots_view()[k]
+                        == old(self).entries.snapshots_view()[k]);
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).entries_view()
+                == old(self).entries_snapshots_view()[target as int],
+            final(self).model_view() == old(self).model_snapshots_view()[target as int],
+            final(self).entries_snapshots_view()
+                == old(self).entries_snapshots_view().subrange(0, target as int),
+            final(self).model_snapshots_view()
+                == old(self).model_snapshots_view().subrange(0, target as int),
+            final(self).depth_spec() == target as nat,
+    {
+        proof { reveal(ring_archive_agrees); }
+        let ghost snap_model = self.model_snapshots@[target as int];
+        let ghost snap = old(self).entries.snapshots_view()[target as int];
+        self.entries.restore_frame(target);
+        self.model = Ghost(snap_model);
+        self.model_snapshots =
+            Ghost(self.model_snapshots@.subrange(0, target as int));
+        proof {
+            assert(self.entries.view() == snap);
+            let m = self.model@;
+            let ns = self.next_seq();
+            assert(self.n_spec() == snap.len());
+            assert forall|c: int, p: int|
+                0 <= c < m.len() && 0 <= p < m[c].len() implies
+                ns[#[trigger] m[c][p] as int] == m[c][if p + 1 < m[c].len() { p + 1 } else { 0 }] by {
+                assert(ns[m[c][p] as int] == snap[m[c][p] as int].next.id_nat() as usize);
+            }
+            assert forall|i: int| 0 <= i < self.n_spec() implies #[trigger] self.in_some_ring(i) by {
+                assert(idx_in_some_ring(snap_model, i));
+                let (c, p) = choose|c: int, p: int|
+                    0 <= c < snap_model.len() && 0 <= p < snap_model[c].len() && snap_model[c][p] == i;
+                assert(m[c][p] == i);
+            }
+        }
+    }
 }
 
 /// The splice-merge proof. `post` differs from `pre` by: `next[s]`/`next[a]`

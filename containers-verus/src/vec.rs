@@ -851,6 +851,57 @@ where
         &&& self.forks.wf()
     }
 
+    /// `wf` is preserved by a change to `forks` alone. Every `wf` conjunct except
+    /// `self.forks.wf()` reads only `store`/`frames`/`diff_log`/`snapshots`/
+    /// `active_saved_len`; if those all match a well-formed `old_self`, those
+    /// conjuncts carry, and `self.forks.wf()` supplies the last one. Used by the
+    /// `restore` wrapper (and later `SyncGroup`) to re-establish `wf` across the
+    /// `fork()` branch-cut without re-running `wf`'s quantifiers.
+    pub(crate) proof fn lemma_forks_change_preserves_wf(&self, old_self: Self)
+        requires
+            old_self.wf(),
+            self.store == old_self.store,
+            self.frames@ == old_self.frames@,
+            self.diff_log@ == old_self.diff_log@,
+            self.snapshots@ == old_self.snapshots@,
+            self.active_saved_len == old_self.active_saved_len,
+            self.forks.wf(),
+        ensures
+            self.wf(),
+    {
+        // wf_for_snap and the active/captured conjuncts read only the pinned
+        // fields (store/frames/diff_log/snapshots/active); transfer them from
+        // old_self.wf() instance by instance. forks.wf() is given.
+        assert(self.view() == old_self.view());
+        assert(self.store.captured() == old_self.store.captured());
+        assert(old_self.wf_for_snap());
+        // wf_for_snap's frame_inv_range forall: its args are pinned fields or the
+        // helpers layer_above_at/stratum_end, which read only pinned fields.
+        assert forall|k: int| 0 <= k < self.frames@.len() implies
+            #[trigger] frame_inv_range::<T, I>(
+                self.layer_above_at(k),
+                self.diff_log@,
+                self.frames@[k].diff_start as int,
+                self.stratum_end(k),
+                self.snapshots@[k],
+                self.frames@[k].saved_len.as_nat())
+        by {
+            assert(self.layer_above_at(k) == old_self.layer_above_at(k));
+            assert(self.stratum_end(k) == old_self.stratum_end(k));
+            assert(frame_inv_range::<T, I>(
+                old_self.layer_above_at(k),
+                old_self.diff_log@,
+                old_self.frames@[k].diff_start as int,
+                old_self.stratum_end(k),
+                old_self.snapshots@[k],
+                old_self.frames@[k].saved_len.as_nat()));
+        }
+        assert(self.wf_for_snap());
+        // wf's captured-bridge and no-stray foralls read store.captured()/view/
+        // frames/active/diffs — all pinned, so they carry directly.
+        assert(self.wf());
+    }
+
     /// Every frame's diff_start is `<= diff_log.len()`. Follows from
     /// monotonicity plus the top frame's bound, by upward induction.
     pub(crate) proof fn lemma_diff_start_le_n(&self, k: int)
@@ -2457,24 +2508,23 @@ where
     /// equals the view — so its frame_inv_range transfers.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(200)]
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
+    /// The per-vector core of `mark`: push a frame, no genealogy. Shared fork
+    /// history (doc 10) drives this from a `SyncGroup` while one `History` owns
+    /// the branch/depth bookkeeping; `mark` is the standalone wrapper that adds
+    /// the token. Preserves the frame/snapshot/wf theorems `mark` proves and
+    /// leaves `forks` untouched (`final.forks == old.forks`).
+    pub(crate) fn push_frame(&mut self, shrink: ShrinkPolicy)
         requires
             old(self).wf(),
-            // Mark is unavailable on an untracked vec. Production panics, and
-            // so do we (guard in
-            // body). The TRACK=false observational-equivalence theorem
-            // (untracked ⇒ plain std::Vec) is about push/pop/set/get only.
             TRACK,
-            // The token's `depth` is `frames.len() as u32`: the cast must be
-            // exact or the token's validity coordinates are silently wrong.
             old(self).depth_spec() < u32::MAX,
             old(self).view().len() < I::max_nat(),
         ensures
             final(self).wf(),
             final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+            final(self).forks == old(self).forks,
     {
         // Run guards before maybe_shrink so a rejected mark does not change
         // capacity: TRACK parity and the u32 depth cast.
@@ -2502,13 +2552,6 @@ where
         } else {
             0
         };
-
-        // Token validity coordinates, captured BEFORE the frame push (so
-        // `depth` is the count of frames below this one — its own frame index,
-        // matching production). `branch_id` is the branch live at mark time.
-        let token_branch = self.forks.current_branch();
-        let token_depth = self.frames.len() as u32;
-        let token_container = self.id;
 
         let ghost old_frames = self.frames@;
         let ghost old_snaps = self.snapshots@;
@@ -2678,7 +2721,33 @@ where
                     frames[k].saved_len.as_nat()));
             }
         }
+    }
 
+    /// Open a mark, returning a token that names this version. The standalone
+    /// (non-`SyncGroup`) entry point: captures the genealogy coordinates, then
+    /// delegates the frame push to `push_frame`. Contract unchanged from before
+    /// the `push_frame` factoring.
+    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).depth_spec() < u32::MAX,
+            old(self).view().len() < I::max_nat(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            token.frame_idx_spec() == old(self).depth_spec(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+    {
+        // Genealogy coordinates, captured before the push (depth = frames below
+        // this one = its frame index; branch = the branch live at mark time).
+        // `push_frame` runs `maybe_shrink`, which preserves `frames` and `forks`,
+        // so capturing here matches capturing after the shrink.
+        let token_branch = self.forks.current_branch();
+        let token_depth = self.frames.len() as u32;
+        let token_container = self.id;
+        self.push_frame(shrink);
         VecToken {
             frame_idx: self.frames.len() - 1,
             branch_id: token_branch,
@@ -2687,9 +2756,13 @@ where
         }
     }
 
-    /// Restore the vector to the state captured by `token`.
-    ///
-    /// Restores to any in-range frame across nested strata.
+    /// The genealogy-free core of `restore`: reconstruct the vector to the state
+    /// at frame `target_index` (resize + reverse-replay + truncate), with only a
+    /// structural precondition. Shared fork history (doc 10) drives this from a
+    /// `SyncGroup` while one `History` validates the token and records the branch
+    /// cut; `restore` is the standalone wrapper that adds those. Preserves the
+    /// reconstruction theorems `restore` proves and leaves `forks` untouched
+    /// (`final.forks == old.forks`).
     ///
     /// The loop walks the diff log from `n` down to `frames[target].diff_start`,
     /// replaying each entry. By the `overlay` model, the result on the
@@ -2698,66 +2771,37 @@ where
     /// lemma `lemma_snap_eq_overlay` equals `snapshots[target]`.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(200)]
-    pub(crate) fn restore(&mut self, token: VecToken)
+    pub(crate) fn restore_frame(&mut self, target_index: usize)
         where T: core::default::Default
         requires
             old(self).wf(),
-            // TRACK gate: restore is uncallable
-            // on an untracked vec.
+            // TRACK gate: restore is uncallable on an untracked vec.
             TRACK,
-            // Genealogy validity precondition (the formal form of production's
-            // is_valid + container asserts). Rejects stale/cross-container
-            // tokens. Parallel to — not a substitute for — the structural
-            // frame_idx-in-range precondition (design §0.5).
-            old(self).is_token_valid_spec(token),
-            // Structural reconstruction precondition (mechanism, not validity).
-            token.frame_idx_spec() < old(self).depth_spec(),
-            // Depths fit in u32 (token.depth and frames.len() are u32 in the
-            // exec API); needed for fork's u32 push.
-            old(self).depth_spec() < u32::MAX,
-            old(self).fork_count_spec() + 1 <= u32::MAX,
+            // Structural reconstruction precondition (mechanism, not validity):
+            // the target frame is in range. Genealogy validity is the caller's
+            // (the `History`/`SyncGroup`) responsibility.
+            (target_index as nat) < old(self).depth_spec(),
         ensures
             final(self).wf(),
-            final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec(),
-            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            final(self).view() == old(self).snapshots_view()[target_index as int],
+            final(self).depth_spec() == target_index as nat,
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target_index as int),
+            // Genealogy untouched (the wrapper does the fork): reported in the
+            // `@` form Verus can prove after the reconstruction's `&mut self`
+            // calls — enough for the wrapper's fork() precondition and wf.
+            final(self).forks.origins@ == old(self).forks.origins@,
+            final(self).forks.current_branch_id == old(self).forks.current_branch_id,
     {
-        // A verified caller has proven every `requires` clause, so these
-        // runtime guards are provably true no-ops for that caller. An
-        // unverified caller's build erases `requires`; production asserts the
-        // same conditions at runtime, and so do we — the FULL restorable
-        // predicate, BEFORE reading frames[token.frame_idx] or mutating
-        // anything. Message parity with production for the cases its tests
-        // pin ("token belongs to a different container", "abandoned future",
-        // "token points beyond frame stack").
+        // Structural guard only (the genealogy/container guards live in the
+        // `restore` wrapper): the target frame must be in range before we read
+        // it or mutate anything. A verified caller has proven this; an unverified
+        // one gets the runtime check with message parity.
         crate::guard::check_precondition(TRACK, "restore() called on untracked vec");
         crate::guard::check_precondition(
-            token.container_id.eq(self.id),
-            "token belongs to a different container",
-        );
-        crate::guard::check_precondition(
-            token.frame_idx < self.frames.len(),
+            target_index < self.frames.len(),
             "token points beyond frame stack",
         );
-        // Overflow headrooms next: `fork`'s `as u32` casts on the fork-history
-        // counters must not wrap, and the genealogy walk below casts
-        // frames.len() to u32. The fork-history origin list grows by one per
-        // restore and is never reclaimed, so `origins.len()` is the lifetime
-        // restore count: this is the ~4.29e9-restores ceiling.
-        crate::guard::check_precondition(
-            self.frames.len() < u32::MAX as usize,
-            "Vec::restore: frame-stack depth would overflow u32",
-        );
-        crate::guard::check_precondition(
-            self.forks.origins.len() < u32::MAX as usize,
-            "Vec::restore: fork history exhausted (too many restores)",
-        );
-        crate::guard::check_precondition(
-            self.is_on_current_branch(&token),
-            "invalid restore token (abandoned future)",
-        );
 
-        let target_index = token.frame_idx;
         let target_frame = self.frames[target_index];
         let saved_len = target_frame.saved_len;
         let diff_start = target_frame.diff_start;
@@ -2765,25 +2809,13 @@ where
         let ghost pre_view = self.view();
         let ghost pre_diffs = self.diff_log@;
         let ghost snap_target = self.snapshots@[target_index as int];
-        // forks is untouched by reconstruction. Establish the fork() precondition
-        // facts NOW, while self == old(self) and validity holds, and carry them
-        // as scalar ghosts (Verus loses whole-struct field tracking across the
-        // many reconstruction mutations + the `*self` snapshot below).
+        // forks is untouched by reconstruction; carry its state as scalar ghosts
+        // (Verus loses whole-struct field tracking across the many reconstruction
+        // mutations + the `*self` snapshot below) so the `final.forks == old.forks`
+        // postcondition holds. The genealogy validity / fork() itself is the
+        // `restore` wrapper's job.
         let ghost forks_origins0 = self.forks.origins@;
         let ghost forks_branch0 = self.forks.current_branch_id;
-        proof {
-            crate::fork_history::lemma_fork_valid_characterization(
-                self.forks.origins@,
-                self.forks.current_branch_id as nat,
-                self.frames@.len() as nat,
-                token.branch_id as nat,
-                token.depth as nat);
-            crate::fork_history::lemma_reaches_in_range(
-                self.forks.origins@,
-                self.forks.current_branch_id as nat,
-                token.branch_id as nat);
-            assert(token.branch_id as nat <= forks_origins0.len());
-        }
 
         // Resize the view to EXACTLY the target's saved_len (truncate, or grow
         // with `T::default()` fillers). After this the base length is
@@ -3068,28 +3100,25 @@ where
             self.active_saved_len = <I as IndexLike>::min();
         }
 
-        // Record the branch cut (design §0.6): fork off the token's branch at
-        // the token's depth. Only `self.forks` is mutated — the store,
-        // diff_log, frames, snapshots (hence the reconstruction result) are
-        // untouched. `fork`'s precondition `token.branch_id <= origins.len()`
-        // is discharged by the validity precondition: a valid token's branch
-        // is reachable, hence a real branch id.
+        // No branch cut here: reconstruction leaves `forks` exactly as it was
+        // (the `restore` wrapper records the fork). Confirm it for the
+        // `final.forks == old.forks` postcondition — forks was untouched since
+        // entry, so its fields still match the ghosts captured at the top.
         proof {
-            // forks untouched since entry; the fork() precondition
-            // `token.branch_id <= origins.len()` was established at the top
-            // (over the then-pristine forks) and carries because forks is
-            // unchanged by reconstruction.
             assert(self.forks.origins@ == forks_origins0);
             assert(self.forks.current_branch_id == forks_branch0);
-            assert(token.branch_id as nat <= self.forks.origins@.len());
         }
-        self.forks.fork(token.branch_id, token.depth);
 
         proof {
             // view() now has length saved_len and agrees with snap_target
             // pointwise, so they're equal by extensionality.
             assert(self.view() =~= snap_target);
-            assert(self.forks.wf());  // fork maintains fh_wf
+            // forks untouched by reconstruction, so its fh_wf carries from entry
+            // (the wrapper does the fork). fh_wf reads only origins@ + branch id,
+            // both pinned to the entry ghosts.
+            assert(self.forks.origins@ == forks_origins0);
+            assert(self.forks.current_branch_id == forks_branch0);
+            assert(self.forks.wf());
 
             // Re-establish wf for the truncated stack [0, target_index).
             let frames = self.frames@;
@@ -3248,6 +3277,82 @@ where
             }
             // saved_len monotonicity is no longer a wf clause — nothing to
             // re-establish for the truncated stack.
+        }
+    }
+
+    /// Restore to the version named by `token`: validate the genealogy,
+    /// reconstruct via `restore_frame`, and record the branch cut. The standalone
+    /// (non-`SyncGroup`) entry point; contract unchanged from before the
+    /// `restore_frame` factoring.
+    #[verifier::spinoff_prover]
+    pub(crate) fn restore(&mut self, token: VecToken)
+        where T: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).is_token_valid_spec(token),
+            token.frame_idx_spec() < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+            old(self).fork_count_spec() + 1 <= u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
+            final(self).depth_spec() == token.frame_idx_spec(),
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+    {
+        // Genealogy guards (container + abandoned-future) and the fork() headroom
+        // — the parts `restore_frame` deliberately omits. Message parity retained.
+        crate::guard::check_precondition(TRACK, "restore() called on untracked vec");
+        crate::guard::check_precondition(
+            token.container_id.eq(self.id),
+            "token belongs to a different container",
+        );
+        crate::guard::check_precondition(
+            token.frame_idx < self.frames.len(),
+            "token points beyond frame stack",
+        );
+        crate::guard::check_precondition(
+            self.frames.len() < u32::MAX as usize,
+            "Vec::restore: frame-stack depth would overflow u32",
+        );
+        crate::guard::check_precondition(
+            self.forks.origins.len() < u32::MAX as usize,
+            "Vec::restore: fork history exhausted (too many restores)",
+        );
+        crate::guard::check_precondition(
+            self.is_on_current_branch(&token),
+            "invalid restore token (abandoned future)",
+        );
+        // fork()'s precondition: a valid token's branch is reachable, hence a
+        // real branch id (<= origins.len()). Established over the pristine forks;
+        // `restore_frame` preserves origins@, so it carries afterward.
+        let ghost forks_origins0 = self.forks.origins@;
+        proof {
+            crate::fork_history::lemma_fork_valid_characterization(
+                self.forks.origins@,
+                self.forks.current_branch_id as nat,
+                self.frames@.len() as nat,
+                token.branch_id as nat,
+                token.depth as nat);
+            crate::fork_history::lemma_reaches_in_range(
+                self.forks.origins@,
+                self.forks.current_branch_id as nat,
+                token.branch_id as nat);
+            assert(token.branch_id as nat <= self.forks.origins@.len());
+        }
+        self.restore_frame(token.frame_idx);
+        proof {
+            // restore_frame preserved origins@, so the fork precondition carries.
+            assert(self.forks.origins@ == forks_origins0);
+            assert(token.branch_id as nat <= self.forks.origins@.len());
+        }
+        // wf holds here (restore_frame's postcondition). fork() mutates only
+        // self.forks; the framing lemma re-establishes wf from the unchanged
+        // non-forks state plus fork's self.forks.wf().
+        let ghost old_self = *self;
+        self.forks.fork(token.branch_id, token.depth);
+        proof {
+            self.lemma_forks_change_preserves_wf(old_self);
         }
     }
 }

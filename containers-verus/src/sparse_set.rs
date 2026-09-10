@@ -1130,6 +1130,76 @@ where
         self.sparse.restore(token.sparse);
         self.indices.restore(token.indices);
     }
+
+    // --------------------------------------------------------------------
+    // Shared-history variants (doc 10): the same three-member fan-out driven by
+    // ONE external `History` via the genealogy-free `push_frame`/`restore_frame`
+    // primitives, so the branch genealogy lives once instead of once per member
+    // vector. Additive — the `mark`/`restore` above and their theorems are
+    // untouched; a caller opts into sharing by using these and never the per-vec
+    // genealogy path, leaving each member's own `forks` empty. The synced-depth
+    // precondition (all members and the history at one depth) is the group
+    // invariant, carried explicitly since `wf` does not track a history.
+    #[allow(dead_code)]
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).can_mark_spec(),
+            old(self).dense.depth_spec() == old(self).sparse.depth_spec(),
+            old(self).dense.depth_spec() == old(self).indices.depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).dense_view() == old(self).dense_view(),
+            final(self).sparse_view() == old(self).sparse_view(),
+            final(self).indices_view() == old(self).indices_view(),
+            final(self).dense_snapshots_view()
+                == old(self).dense_snapshots_view().push(old(self).dense_view()),
+            final(self).sparse_snapshots_view()
+                == old(self).sparse_snapshots_view().push(old(self).sparse_view()),
+            final(self).indices_snapshots_view()
+                == old(self).indices_snapshots_view().push(old(self).indices_view()),
+            final(self).dense.depth_spec() == old(self).dense.depth_spec() + 1,
+            final(self).dense.depth_spec() == final(self).sparse.depth_spec(),
+            final(self).dense.depth_spec() == final(self).indices.depth_spec(),
+    {
+        self.dense.push_frame(shrink);
+        self.sparse.push_frame(shrink);
+        self.indices.push_frame(shrink);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        where T: core::default::Default, Idx: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).dense.depth_spec() == old(self).sparse.depth_spec(),
+            old(self).dense.depth_spec() == old(self).indices.depth_spec(),
+            (target as nat) < old(self).dense.depth_spec(),
+            sparse_set_snap_wf(
+                old(self).dense.snapshots_view()[target as int],
+                old(self).sparse.snapshots_view()[target as int],
+                old(self).indices.snapshots_view()[target as int]),
+        ensures
+            final(self).wf(),
+            final(self).dense_view() == old(self).dense.snapshots_view()[target as int],
+            final(self).sparse_view() == old(self).sparse.snapshots_view()[target as int],
+            final(self).indices_view() == old(self).indices.snapshots_view()[target as int],
+            final(self).dense_snapshots_view()
+                == old(self).dense_snapshots_view().subrange(0, target as int),
+            final(self).sparse_snapshots_view()
+                == old(self).sparse_snapshots_view().subrange(0, target as int),
+            final(self).indices_snapshots_view()
+                == old(self).indices_snapshots_view().subrange(0, target as int),
+            final(self).dense.depth_spec() == target as nat,
+            final(self).dense.depth_spec() == final(self).sparse.depth_spec(),
+            final(self).dense.depth_spec() == final(self).indices.depth_spec(),
+    {
+        self.dense.restore_frame(target);
+        self.sparse.restore_frame(target);
+        self.indices.restore_frame(target);
+    }
 }
 
 /// The sparse-set structural invariant stated over raw snapshot sequences (for
