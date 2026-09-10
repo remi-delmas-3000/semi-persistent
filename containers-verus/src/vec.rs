@@ -1755,7 +1755,23 @@ where
             v.view().len() == 0,
             v.snapshots_view().len() == 0,
     {
-        Self::with_store_mode(store, crate::diff_compress::CompressionMode::None)
+        // Experiment lever (measurement instrument, not the final per-column
+        // config): SEMPER_COMPRESS=auto flips default-constructed columns to the
+        // per-frame-adaptive representation, so a whole binary (the e-graph under
+        // Sundance) runs compressed without any constructor plumbing. Capability-
+        // guarded: a store whose restore reads the replayed index slice
+        // (InlineStore's sparse tag-clear) skips it, because the adaptive
+        // representation's index materialization is the measured slow path there.
+        // Unset, nothing changes.
+        // The InlineStore path is now frame-wise too (subrange_vec fast path feeds
+        // its begin_restore materialization and its replay), so the lever covers
+        // every store.
+        let mode = if crate::compression_config::env_compress_default() {
+            crate::diff_compress::CompressionMode::Auto
+        } else {
+            crate::diff_compress::CompressionMode::None
+        };
+        Self::with_store_mode(store, mode)
     }
 
     /// As `with_store`, but selects the diff log's value representation at
@@ -3326,6 +3342,11 @@ where
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
+        // Seal the closing frame first when the column is adaptive: the open
+        // stratum compresses per frame (value-opaque modes, self-demoting) so a
+        // mark IS a seal for every Auto column, with no caller change. A no-op for
+        // plain/column-split representations.
+        self.seal_open_frame_copy();
         // Genealogy coordinates, captured before the push (depth = frames below
         // Mint the generation for this frame's depth (== its frame index),
         // growing the stamp array the first time a depth is reached. Done before
@@ -3344,6 +3365,134 @@ where
             frame_idx: self.frames.len() - 1,
             generation: token_gen,
             container_id: token_container,
+        }
+    }
+
+    /// Seal the open top frame with a value-opaque per-frame encoder (sorted index
+    /// runs, self-demoting to plain when runs do not pay) when the column is the
+    /// adaptive representation, aligned, and the open stratum is nonempty; a no-op
+    /// otherwise. Preserves everything a caller observes (view, depth, snapshots,
+    /// frames, store, forks); only the diff log's representation of the open
+    /// stratum changes, within its write multiset, which the multiset frame rule
+    /// lifts to `wf`.
+    #[verifier::rlimit(800)]
+    #[verifier::spinoff_prover]
+    pub(crate) fn seal_open_frame_copy(&mut self)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            final(self).depth_spec() == old(self).depth_spec(),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+            final(self).frames@ == old(self).frames@,
+            final(self).store == old(self).store,
+            final(self).forks == old(self).forks,
+            final(self).active_saved_len == old(self).active_saved_len,
+            final(self).id == old(self).id,
+    {
+        if self.frames.len() == 0 {
+            return;
+        }
+        let top = self.frames.len() - 1;
+        let ds = self.frames[top].diff_start;
+        proof {
+            self.lemma_diff_start_le_n(top as int);
+        }
+        if !self.diff_log.adaptive_aligned(ds) {
+            return;
+        }
+        let n = self.diff_log.len();
+        if n == ds {
+            // Empty open stratum: sealing would push an empty cold frame.
+            return;
+        }
+        proof {
+            // The open stratum [ds, n) is unique-indexed: it is the top frame's
+            // range in frame_inv_range (first-write-wins capture).
+            let d = self.diff_log@;
+            let lo = ds as int;
+            let hi = d.len() as int;
+            assert(self.stratum_end(top as int) == hi);
+            assert(frame_inv_range::<T, I>(
+                self.layer_above_at(top as int), d, lo, hi,
+                self.snapshots@[top as int],
+                self.frames@[top as int].saved_len.as_nat()));
+            let s = d.subrange(lo, hi);
+            assert forall|a: int, b: int|
+                0 <= a < s.len() && 0 <= b < s.len() && a != b
+                implies (#[trigger] s[a]).1.as_nat() != (#[trigger] s[b]).1.as_nat() by {
+                assert(s[a] == d[lo + a]);
+                assert(s[b] == d[lo + b]);
+            }
+            assert(crate::diff_compress::unique_idx(s));
+        }
+        let ghost pre = *self;
+        let ghost ts = pre.diff_log.idx_cold_len_spec() as int;
+        let ghost topg = (pre.frames@.len() - 1) as int;
+        self.diff_log.compact_adaptive_copy(
+            crate::diff_compress::CompressionMode::IndexRunsSorted);
+        proof {
+            let np = pre.diff_log@.len() as int;
+            assert(pre.frames@[topg].diff_start as int == ts);
+            assert(pre.stratum_end(topg) == np);
+            assert(self.diff_log@.subrange(0, ts) == pre.diff_log@.subrange(0, ts));
+            assert forall|k: int| 0 <= k < self.frames@.len() implies
+                self.diff_log@.subrange(
+                    #[trigger] self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset()
+                == pre.diff_log@.subrange(
+                    self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset()
+            by {
+                pre.lemma_stratum_bounds(k);
+                let lo = self.frames@[k].diff_start as int;
+                let hi = self.stratum_end(k);
+                if k == topg {
+                } else {
+                    pre.lemma_diff_start_monotone(k + 1, topg);
+                    assert(hi <= ts);
+                    assert(self.diff_log@.subrange(lo, hi) =~= pre.diff_log@.subrange(lo, hi)) by {
+                        assert forall|q: int| 0 <= q < hi - lo implies
+                            self.diff_log@.subrange(lo, hi)[q] == pre.diff_log@.subrange(lo, hi)[q] by {
+                            assert(self.diff_log@[lo + q] == self.diff_log@.subrange(0, ts)[lo + q]);
+                            assert(pre.diff_log@[lo + q] == pre.diff_log@.subrange(0, ts)[lo + q]);
+                        }
+                    }
+                }
+            }
+            assert forall|k: int| 0 <= k < self.frames@.len() implies
+                (forall|a: int, b: int|
+                    #[trigger] self.frames@[k].diff_start as int <= a < self.stratum_end(k)
+                    && self.frames@[k].diff_start as int <= b < self.stratum_end(k)
+                    && a != b
+                    ==> (#[trigger] self.diff_log@[a]).1.as_nat()
+                        != (#[trigger] self.diff_log@[b]).1.as_nat())
+            by {
+                pre.lemma_stratum_bounds(k);
+                let lo = self.frames@[k].diff_start as int;
+                let hi = self.stratum_end(k);
+                if k == topg {
+                    assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
+                        implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
+                        assert(self.diff_log@.subrange(lo, hi)[a - lo] == self.diff_log@[a]);
+                        assert(self.diff_log@.subrange(lo, hi)[b - lo] == self.diff_log@[b]);
+                    }
+                } else {
+                    pre.lemma_diff_start_monotone(k + 1, topg);
+                    assert(hi <= ts);
+                    assert(pre.wf_for_snap());
+                    assert(frame_inv_range::<T, I>(
+                        pre.layer_above_at(k), pre.diff_log@, lo, hi,
+                        pre.snapshots@[k], pre.frames@[k].saved_len.as_nat()));
+                    assert forall|a: int, b: int| lo <= a < hi && lo <= b < hi && a != b
+                        implies self.diff_log@[a].1.as_nat() != self.diff_log@[b].1.as_nat() by {
+                        assert(self.diff_log@[a] == self.diff_log@.subrange(0, ts)[a]);
+                        assert(pre.diff_log@[a] == pre.diff_log@.subrange(0, ts)[a]);
+                        assert(self.diff_log@[b] == self.diff_log@.subrange(0, ts)[b]);
+                        assert(pre.diff_log@[b] == pre.diff_log@.subrange(0, ts)[b]);
+                    }
+                }
+            }
+            self.lemma_diff_log_rep_change_preserves_wf_multiset(pre);
         }
     }
 
@@ -4307,7 +4456,7 @@ where
     /// caller carries only the structural bounds.
     #[verifier::rlimit(600)]
     #[verifier::spinoff_prover]
-    pub fn seal_frame(&mut self, shrink: ShrinkPolicy)
+    pub fn seal_frame(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
         requires
             old(self).wf(),
             TRACK,
@@ -4316,6 +4465,7 @@ where
         ensures
             final(self).wf(),
             final(self).view() == old(self).view(),
+            token.frame_idx_spec() == old(self).depth_spec(),
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
@@ -4350,12 +4500,12 @@ where
                 let n = self.diff_log.len();
                 let diffs = self.diff_log.subrange_vec(ds, n);
                 let mode = crate::diff_compress::choose_mode(&diffs);
-                let _ = self.mark_and_compact_adaptive(mode, shrink);
+                return self.mark_and_compact_adaptive(mode, shrink);
             } else {
-                let _ = self.mark(shrink);
+                return self.mark(shrink);
             }
         } else {
-            let _ = self.mark(shrink);
+            return self.mark(shrink);
         }
     }
 }

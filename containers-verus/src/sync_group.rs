@@ -132,7 +132,7 @@ where
     }
 
     fn seal_frame(&mut self, shrink: ShrinkPolicy) {
-        crate::vec::Vec::seal_frame(self, shrink);
+        let _ = crate::vec::Vec::seal_frame(self, shrink);
     }
 
     fn restore_frame(&mut self, depth: usize) {

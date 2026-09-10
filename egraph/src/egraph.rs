@@ -1518,6 +1518,9 @@ where
                 node_a.to_usize(),
                 node_b.to_usize()
             ),
+            Justification::Assumption { lit } => {
+                write!(out, "assumption lit={}", lit.as_usize())
+            }
             Justification::InverseCancel { node_a, node_b } => write!(
                 out,
                 "inverse-cancel nodes={},{}",
@@ -4352,6 +4355,9 @@ mod tests {
                 | Justification::Cancellative { .. }
                 | Justification::InverseCancel { .. } => {
                     panic!("algebraic justification in a non-completion test")
+                }
+                Justification::Assumption { .. } => {
+                    panic!("assumption justification in a non-euf test")
                 }
             }
         }

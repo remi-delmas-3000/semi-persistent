@@ -219,4 +219,168 @@ impl CalibrationPolicy {
     }
 }
 
+
+// ===========================================================================
+// F4: the shadow-encode harness. When SEMPER_SHADOW=1, every seal ALSO encodes
+// the frame in every mode its value type supports and emits one machine-readable
+// line per (column-instance, frame): entry count, run counts, distinct count
+// where computable, and the REAL encoded byte size of every candidate (actual
+// encoders, never projections), plus the mode the live selector chose. Off by
+// default and gated by one cached boolean, so the seal path pays a single
+// branch when disabled. Diagnostic only: external_body, no spec content.
+// ===========================================================================
+
+#[verifier::external_body]
+pub fn shadow_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("SEMPER_SHADOW").map(|v| !v.is_empty()).unwrap_or(false))
+}
+
+/// Emit one shadow line. `SEMPER_SHADOW=1` writes stderr; any other non-empty
+/// value is a file path appended to (survives harnesses that swallow a child's
+/// stderr, and merges lines from many solver subprocesses).
+#[verifier::external_body]
+fn shadow_emit(line: String) {
+    use std::io::Write;
+    static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    let sink = SINK.get_or_init(|| {
+        match std::env::var("SEMPER_SHADOW") {
+            Ok(v) if v != "1" && !v.is_empty() => std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(v)
+                .ok()
+                .map(std::sync::Mutex::new),
+            _ => None,
+        }
+    });
+    match sink {
+        Some(f) => {
+            let mut g = f.lock().unwrap();
+            let _ = writeln!(g, "{}", line);
+        }
+        None => eprintln!("{}", line),
+    }
+}
+
+/// Shadow-encode with the value-opaque candidates (any `T: Copy` column):
+/// plain, write-order runs, sorted runs. `instance` is an opaque column-instance
+/// key (the diff log's address), `frame` the sealed frame's ordinal.
+#[verifier::external_body]
+pub fn shadow_log_copy<T: Copy, I: IndexLike>(
+    pairs: &Vec<(T, I)>,
+    instance: usize,
+    frame: usize,
+    chosen: &str,
+) {
+    if !shadow_enabled() {
+        return;
+    }
+    let n = pairs.len();
+    let plain = n * (core::mem::size_of::<T>() + core::mem::size_of::<I>());
+    let wo = crate::diff_compress::RunCol::compress(pairs).byte_len();
+    let so = crate::diff_compress::RunCol::compress_sorted(pairs).byte_len();
+    shadow_emit(format!(
+        "SHADOW,{},{:?},{},{},{},{},{},{},{},{}",
+        core::any::type_name::<T>(),
+        instance,
+        frame,
+        n,
+        run_count_writeorder(pairs),
+        run_count_sorted(pairs),
+        plain,
+        wo,
+        so,
+        chosen,
+    ));
+}
+
+/// Shadow-encode with the full candidate set (`T: IndexLike` columns): the
+/// value-opaque set plus dictionary and delta, and the distinct-value count.
+#[verifier::external_body]
+pub fn shadow_log_full<T: IndexLike, I: IndexLike>(
+    pairs: &Vec<(T, I)>,
+    instance: usize,
+    frame: usize,
+    chosen: &str,
+) {
+    if !shadow_enabled() {
+        return;
+    }
+    let n = pairs.len();
+    let plain = n * (core::mem::size_of::<T>() + core::mem::size_of::<I>());
+    let wo = crate::diff_compress::RunCol::compress(pairs).byte_len();
+    let so = crate::diff_compress::RunCol::compress_sorted(pairs).byte_len();
+    let dict = {
+        let d = crate::diff_compress::compress(pairs);
+        d.dict.len() * core::mem::size_of::<T>()
+            + d.codes.byte_len()
+            + d.idxs.len() * core::mem::size_of::<I>()
+    };
+    let delta = crate::diff_compress::DeltaFrame::compress(pairs).byte_len();
+    let distinct: std::collections::HashSet<usize> =
+        pairs.iter().map(|p| p.0.as_usize()).collect();
+    shadow_emit(format!(
+        "SHADOWF,{},{:?},{},{},{},{},{},{},{},{},{},{},{}",
+        core::any::type_name::<T>(),
+        instance,
+        frame,
+        n,
+        distinct.len(),
+        run_count_writeorder(pairs),
+        run_count_sorted(pairs),
+        plain,
+        wo,
+        so,
+        dict,
+        delta,
+        chosen,
+    ));
+}
+
+#[verifier::external_body]
+fn run_count_writeorder<T: Copy, I: IndexLike>(pairs: &Vec<(T, I)>) -> usize {
+    let mut runs = 0usize;
+    let mut prev: Option<usize> = None;
+    for p in pairs.iter() {
+        let u = p.1.as_usize();
+        match prev {
+            Some(q) if u == q + 1 => {}
+            _ => runs += 1,
+        }
+        prev = Some(u);
+    }
+    runs
+}
+
+#[verifier::external_body]
+fn run_count_sorted<T: Copy, I: IndexLike>(pairs: &Vec<(T, I)>) -> usize {
+    let mut idx: Vec<usize> = pairs.iter().map(|p| p.1.as_usize()).collect();
+    idx.sort_unstable();
+    let mut runs = 0usize;
+    let mut prev: Option<usize> = None;
+    for &u in idx.iter() {
+        match prev {
+            Some(q) if u == q + 1 => {}
+            _ => runs += 1,
+        }
+        prev = Some(u);
+    }
+    runs
+}
+
+
+/// Mode name for the shadow log's `chosen` column.
+#[verifier::external_body]
+pub fn mode_name(mode: crate::diff_compress::CompressionMode) -> &'static str {
+    match mode {
+        crate::diff_compress::CompressionMode::None => "None",
+        crate::diff_compress::CompressionMode::ValueDict => "ValueDict",
+        crate::diff_compress::CompressionMode::IndexRuns => "IndexRuns",
+        crate::diff_compress::CompressionMode::IndexRunsSorted => "IndexRunsSorted",
+        crate::diff_compress::CompressionMode::Auto => "Auto",
+    }
+}
+
 } // verus!

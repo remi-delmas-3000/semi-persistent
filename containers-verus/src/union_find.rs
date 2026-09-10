@@ -1137,8 +1137,10 @@ where
             token.parent_frame_idx_spec()
                 == final(self).roots_snapshots_view().len() - 1,
     {
-        let parent_tok = self.parent.mark(shrink);
-        let rank_tok = self.rank.mark(shrink);
+        // Seal-based marks: the id-typed columns get the full per-frame mode set
+        // (dictionary and delta included) instead of the copy-only path.
+        let parent_tok = self.parent.seal_frame(shrink);
+        let rank_tok = self.rank.seal_frame(shrink);
         // proof columns (production parity): marked through their total
         // forms; depth exhaustion refuses with production's expect message.
         let pp_tok = match &mut self.parent_proof {

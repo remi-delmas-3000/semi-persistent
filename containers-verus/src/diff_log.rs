@@ -731,6 +731,32 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
             r@.len() == hi - lo,
             forall|k: int| 0 <= k < hi - lo ==> #[trigger] r@[k] == self@[lo + k].1,
     {
+        // Adaptive: one frame-wise pass (subrange_vec's fast path), then project.
+        // Without this every entry pays an O(cold frames) locate walk.
+        if let DiffLog::Adaptive { .. } = self {
+            let pairs = self.subrange_vec(lo, hi);
+            let mut out: Vec<I> = Vec::new();
+            let n = pairs.len();
+            let mut k: usize = 0;
+            while k < n
+                invariant
+                    0 <= k <= n,
+                    n == pairs@.len(),
+                    pairs@ == self@.subrange(lo as int, hi as int),
+                    hi <= self@.len(),
+                    lo <= hi,
+                    out@.len() == k,
+                    forall|j: int| 0 <= j < k ==> #[trigger] out@[j] == self@[lo + j].1,
+                decreases n - k,
+            {
+                proof {
+                    assert(pairs@[k as int] == self@[lo + k]);
+                }
+                out.push(pairs[k].1);
+                k += 1;
+            }
+            return out;
+        }
         let mut out: Vec<I> = Vec::new();
         let mut i: usize = lo;
         while i < hi
@@ -1152,12 +1178,17 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
                 old(self).idx_cold_len_spec() as int, final(self)@.len() as int)),
     {
         proof { reveal(cold_adaptive); }
+        let key = self.shadow_key();
         let ghost cold_len = self.idx_cold_len_spec() as int;
         let ghost n = self@.len() as int;
         match self {
             DiffLog::Adaptive { cold, hot, len: lenf } => {
                 let ghost cold0 = cold@;
                 let ghost hot0 = hot@;
+                if crate::compression_stats::shadow_enabled() {
+                    crate::compression_stats::shadow_log_full(
+                        hot, key, cold.len(), crate::compression_stats::mode_name(mode));
+                }
                 // The hot tail IS the frame's (value, index) pairs; encode in `mode`.
                 let f: ColdFrame<T, I> = ColdFrame::compress_mode(hot, mode);
                 let ghost fg = f;
@@ -1182,6 +1213,80 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
                     assert(self@.len() == n);
                     // cold_adaptive(cold@) == cold_adaptive(cold0) + fg.decode(), so its
                     // length-`cold_len` prefix is cold_adaptive(cold0) unchanged.
+                    assert(self@.subrange(0, cold_len) =~= old(self)@.subrange(0, cold_len)) by {
+                        assert forall|i: int| 0 <= i < cold_len implies
+                            self@[i] == old(self)@[i] by {}
+                    }
+                    assert(self@.subrange(cold_len, n) =~= fg.decode()) by {
+                        assert forall|q: int| 0 <= q < fg.decode().len() implies
+                            self@[cold_len + q] == fg.decode()[q] by {}
+                    }
+                    assert(old(self)@.subrange(cold_len, n) =~= hot0) by {
+                        assert forall|q: int| 0 <= q < hot0.len() implies
+                            old(self)@[cold_len + q] == hot0[q] by {}
+                    }
+                }
+            }
+            DiffLog::Cols { .. } => { proof { assert(false); } }
+        }
+    }
+
+    /// As `compact_adaptive`, but restricted to the value-opaque modes so it needs
+    /// only `T: Copy`: every column (structs included) can seal per-frame with
+    /// plain / index runs / sorted runs, with the encoder's self-demotion to plain
+    /// when runs do not pay. The dictionary modes stay on the `T: IndexLike` entry.
+    /// (Body mirrors `compact_adaptive` with the copy-bounded encoder; the shared
+    /// seal-with-frame factoring is a noted follow-up.)
+    pub fn compact_adaptive_copy(&mut self, mode: CompressionMode)
+        requires
+            old(self).wf(),
+            old(self).is_adaptive(),
+            crate::diff_compress::unique_idx(old(self)@.subrange(
+                old(self).idx_cold_len_spec() as int, old(self)@.len() as int)),
+        ensures
+            final(self).wf(),
+            final(self).is_adaptive(),
+            final(self)@.len() == old(self)@.len(),
+            final(self).idx_cold_len_spec() == final(self)@.len(),
+            final(self)@.subrange(0, old(self).idx_cold_len_spec() as int)
+                == old(self)@.subrange(0, old(self).idx_cold_len_spec() as int),
+            final(self)@.subrange(
+                old(self).idx_cold_len_spec() as int, final(self)@.len() as int).to_multiset()
+                == old(self)@.subrange(
+                    old(self).idx_cold_len_spec() as int, old(self)@.len() as int).to_multiset(),
+            crate::diff_compress::unique_idx(final(self)@.subrange(
+                old(self).idx_cold_len_spec() as int, final(self)@.len() as int)),
+    {
+        proof { reveal(cold_adaptive); }
+        let key = self.shadow_key();
+        let ghost cold_len = self.idx_cold_len_spec() as int;
+        let ghost n = self@.len() as int;
+        match self {
+            DiffLog::Adaptive { cold, hot, len: lenf } => {
+                let ghost cold0 = cold@;
+                let ghost hot0 = hot@;
+                if crate::compression_stats::shadow_enabled() {
+                    crate::compression_stats::shadow_log_copy(
+                        hot, key, cold.len(), crate::compression_stats::mode_name(mode));
+                }
+                let f: ColdFrame<T, I> = ColdFrame::compress_mode_copy(hot, mode);
+                let ghost fg = f;
+                proof {
+                    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+                    lemma_cold_adaptive_snoc(cold0, fg);
+                }
+                cold.push(f);
+                *hot = Vec::new();
+                *lenf = adaptive_len_exec(cold, hot);
+                proof {
+                    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+                    assert(cold@ =~= cold0.push(fg));
+                    assert(cold_adaptive(cold@) =~= cold_adaptive(cold0) + fg.decode());
+                    assert(fg.decode().to_multiset() == hot0.to_multiset());
+                    assert(fg.decode().to_multiset().len() == hot0.to_multiset().len());
+                    assert(fg.decode().len() == hot0.len());
+                    assert(cold_len == cold_adaptive(cold0).len());
+                    assert(self@.len() == n);
                     assert(self@.subrange(0, cold_len) =~= old(self)@.subrange(0, cold_len)) by {
                         assert forall|i: int| 0 <= i < cold_len implies
                             self@[i] == old(self)@[i] by {}
@@ -1229,6 +1334,12 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
     }
 
     /// Materialize entries `[lo, hi)` as a flat `Vec<(T, I)>`.
+    /// Opaque column-instance key for the shadow harness (the log's address).
+    #[verifier::external_body]
+    pub fn shadow_key(&self) -> usize {
+        self as *const _ as usize
+    }
+
     /// Diagnostic: number of sealed (cold) frames, whichever representation.
     #[verifier::external_body]
     pub fn cold_frame_count(&self) -> usize {
@@ -1455,6 +1566,12 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
         requires self.wf(), lo <= hi <= self@.len(),
         ensures r@ == self@.subrange(lo as int, hi as int),
     {
+        // Frame-wise fast path for the adaptive representation: without it every
+        // entry pays an O(cold frames) locate walk, which was measured dominating
+        // both the restore-side materialization and the InlineStore replay.
+        if let DiffLog::Adaptive { .. } = self {
+            return self.subrange_vec_adaptive(lo, hi);
+        }
         let mut out: Vec<(T, I)> = Vec::new();
         let mut i: usize = lo;
         while i < hi
@@ -1469,6 +1586,190 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
         }
         assert(out@ =~= self@.subrange(lo as int, hi as int));
         out
+    }
+
+    /// The adaptive arm of `subrange_vec`: one forward pass over the frames. Whole
+    /// cold frames inside the range decode in one `decode_exec` each; a partial
+    /// leading frame decodes per-entry WITHIN that frame; the hot region reads
+    /// directly. O(hi - lo + frames) total.
+    #[verifier::rlimit(600)]
+    #[verifier::spinoff_prover]
+    fn subrange_vec_adaptive(&self, lo: usize, hi: usize) -> (r: Vec<(T, I)>)
+        requires
+            self.wf(),
+            self is Adaptive,
+            lo <= hi <= self@.len(),
+        ensures r@ == self@.subrange(lo as int, hi as int),
+    {
+        proof { reveal(cold_adaptive); }
+        match self {
+            DiffLog::Adaptive { cold, hot, len } => {
+                let ghost d = self@;
+                let mut out: Vec<(T, I)> = Vec::new();
+                // `done` is the exclusive end of the emitted range: out == d[lo, done).
+                let ghost mut done: int = lo as int;
+                let mut start: usize = 0;
+                let mut k: usize = 0;
+                let nf = cold.len();
+                proof {
+                    assert(cold@.subrange(0, 0) =~= Seq::<ColdFrame<T, I>>::empty());
+                    assert(out@ =~= d.subrange(lo as int, lo as int));
+                }
+                while k < nf
+                    invariant
+                        self.wf(),
+                        self is Adaptive,
+                        cold@ == self->Adaptive_cold@,
+                        hot@ == self->Adaptive_hot@,
+                        d == self@,
+                        lo <= hi <= d.len(),
+                        0 <= k <= nf,
+                        nf == cold@.len(),
+                        start as int == cold_adaptive(cold@.subrange(0, k as int)).len(),
+                        start <= cold_adaptive(cold@).len(),
+                        // done tracks the frame walk, clamped to [lo, hi].
+                        done == if (start as int) < lo as int { lo as int }
+                                else if (start as int) < hi as int { start as int }
+                                else { hi as int },
+                        out@ == d.subrange(lo as int, done),
+                    decreases nf - k,
+                {
+                    proof {
+                        assert(cold@[k as int].wf());
+                    }
+                    let flen = cold[k].entry_len();
+                    let ghost fr = cold@[k as int];
+                    proof {
+                        assert(cold@.subrange(0, k + 1)
+                            =~= cold@.subrange(0, k as int).push(cold@[k as int]));
+                        lemma_cold_adaptive_snoc(cold@.subrange(0, k as int), cold@[k as int]);
+                        lemma_cold_adaptive_split(cold@, (k + 1) as int);
+                        assert forall|q: int| 0 <= q < flen implies
+                            d[start + q] == fr.decode()[q] by {
+                            lemma_cold_adaptive_at(cold@, k as int, start + q);
+                            assert(start + q < cold_adaptive(cold@).len());
+                        }
+                    }
+                    let fend = start + flen;
+                    if fend <= lo || start >= hi {
+                        // Wholly outside the range: skip; done's clamp is unchanged
+                        // or already saturated.
+                    } else {
+                        // Overlaps [lo, hi): emit the in-range slice [s, e) of this frame.
+                        let s = if lo > start { lo - start } else { 0 };
+                        let e = if hi < fend { hi - start } else { flen };
+                        if s == 0 && e == flen {
+                            // Whole frame in range: one bulk decode.
+                            let mut dec = cold[k].decode_exec_cold();
+                            let ghost pre_out = out@;
+                            out.append(&mut dec);
+                            proof {
+                                assert(out@ =~= pre_out + fr.decode());
+                                assert(out@ =~= d.subrange(lo as int, fend as int));
+                                done = fend as int;
+                            }
+                        } else {
+                            let mut q: usize = s;
+                            proof {
+                                assert(done == (start + s) as int);
+                            }
+                            while q < e
+                                invariant
+                                    self.wf(),
+                                    cold@ == self->Adaptive_cold@,
+                                    d == self@,
+                                    0 <= k < cold@.len(),
+                                    fr == cold@[k as int],
+                                    fr.wf(),
+                                    s <= q <= e,
+                                    lo as int <= (start + q) as int,
+                                    e <= flen,
+                                    (e as int) + (start as int) <= hi as int || e == flen,
+                                    (start + e) as int <= hi as int,
+                                    flen == fr.decode().len(),
+                                    lo <= hi <= d.len(),
+                                    forall|j: int| 0 <= j < flen ==> d[start + j] == fr.decode()[j],
+                                    out@ == d.subrange(lo as int, (start + q) as int),
+                                decreases e - q,
+                            {
+                                out.push(cold[k].decode_at(q));
+                                proof {
+                                    let x = (start + q) as int;
+                                    assert(d.subrange(lo as int, x + 1)
+                                        =~= d.subrange(lo as int, x).push(d[x]));
+                                    assert(out@ =~= d.subrange(lo as int, (start + q + 1) as int));
+                                }
+                                q = q + 1;
+                            }
+                            proof {
+                                done = (start + e) as int;
+                            }
+                        }
+                    }
+                    start = fend;
+                    k = k + 1;
+                }
+                // Hot region: [cold_total, len).
+                proof {
+                    assert(cold@.subrange(0, nf as int) =~= cold@);
+                }
+                let cold_total = start;
+                let h_lo = if lo > cold_total { lo } else { cold_total };
+                proof {
+                    // done == clamp(cold_total) == max(lo, min(cold_total, hi));
+                    // if hi <= cold_total the range is already complete.
+                    if hi as int <= cold_total as int {
+                        assert(done == hi as int);
+                    } else {
+                        assert(done == h_lo as int);
+                    }
+                }
+                if hi <= cold_total {
+                    proof { assert(out@ =~= d.subrange(lo as int, hi as int)); }
+                    return out;
+                }
+                let mut i: usize = h_lo;
+                while i < hi
+                    invariant
+                        self.wf(),
+                        self is Adaptive,
+                        cold@ == self->Adaptive_cold@,
+                        hot@ == self->Adaptive_hot@,
+                        d == self@,
+                        cold_total as int == cold_adaptive(cold@).len(),
+                        lo <= hi <= d.len(),
+                        cold_total <= h_lo,
+                        h_lo <= i,
+                        i <= hi || i == h_lo,
+                        i >= cold_total,
+                        out@ == d.subrange(lo as int, i as int),
+                        lo as int <= i as int,
+                    decreases hi - i,
+                {
+                    proof {
+                        // The view's hot branch: position i is past the cold tier.
+                        assert(i < d.len());
+                        assert(d[i as int] == adaptive_at(cold@, hot@, i as int));
+                        assert(cold_adaptive(cold@).len() <= i as int);
+                        assert(d.len() == adaptive_len(cold@, hot@));
+                        assert((i - cold_total) < hot@.len());
+                    }
+                    out.push(hot[i - cold_total]);
+                    proof {
+                        assert(out@ =~= d.subrange(lo as int, (i + 1) as int));
+                    }
+                    i = i + 1;
+                }
+                proof {
+                    assert(out@ =~= d.subrange(lo as int, hi as int));
+                }
+                out
+            }
+            DiffLog::Cols { .. } => {
+                proof { assert(false); }
+                Vec::new()
+            }
+        }
     }
 
     /// Drop the first `n` entries, keeping the suffix. Not called by `Vec` (only by

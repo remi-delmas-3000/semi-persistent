@@ -394,7 +394,9 @@ where
         // Backward replay of [lo, hi). Inherently per-element for this store: every
         // write re-encodes through `into_repr` (which is also the tag-clear), so a
         // raw memcpy of `T` values would skip the tagging and be WRONG here. The
-        // batched entry still removes the per-entry dispatch from the Vec.
+        // range is materialized ONCE frame-wise (subrange_vec's fast path), so a
+        // compressed log costs O(n), not O(n x cold frames).
+        let pairs = diff_log.subrange_vec(lo, hi);
         let ghost base = self.data_spec();
         let mut i: usize = hi;
         while i > lo
@@ -402,6 +404,7 @@ where
                 lo <= i <= hi,
                 hi <= diff_log@.len(),
                 diff_log.wf(),
+                pairs@ == diff_log@.subrange(lo as int, hi as int),
                 self.wf_spec(),
                 self.data@.len() == base.len(),
                 self.data_spec() == crate::vec::overlay::<T, I>(
@@ -412,7 +415,10 @@ where
             decreases i,
         {
             i -= 1;
-            let (v, idx) = diff_log.index(i);
+            let (v, idx) = pairs[i - lo];
+            proof {
+                assert(pairs@[(i - lo) as int] == diff_log@[i as int]);
+            }
             proof {
                 crate::vec::lemma_overlay_len::<T, I>(base, diff_log@, (i + 1) as int, hi as int);
             }

@@ -1873,6 +1873,14 @@ pub proof fn lemma_run_seq_split<T: Copy, I: IndexLike>(runs: Seq<RunEntry<T, I>
 
 /// One finalized frame in whichever mode fit it. `Runs` uses the verified `RunCol`
 /// (no `IndexFromNat`), so the whole enum stays opaque-id safe.
+/// Bytes of a plain frame of `n` entries (the demotion comparison's baseline).
+/// `external_body`: saturating size arithmetic with no spec content; the demotion
+/// it feeds is correctness-invisible (both branches carry the same contract).
+#[verifier::external_body]
+pub fn plain_frame_bytes<T, I>(n: usize) -> usize {
+    n.saturating_mul(core::mem::size_of::<T>() + core::mem::size_of::<I>())
+}
+
 /// Writing a frame's `(value, index)` set back onto a live column, in order
 /// (last write wins; out-of-range indices are skipped). A frame's `restore_to`
 /// reproduces this, whether it does it with a sliced memcpy or scattered writes.
@@ -2013,6 +2021,181 @@ impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for RunCol<T, I> {
     }
 }
 
+// ===========================================================================
+// DeltaFrame: value-equals-index with exceptions (F3). The proof-forest shape:
+// a self-parented union-find root's captured old value IS its own cell index, so
+// the value column collapses to the (rare) exceptions. The design carries NO
+// arithmetic at all: encoding tests `value.as_usize() == index.as_usize()`, and
+// decoding reconstructs the value from the index via `try_from_usize`, whose
+// success is proved from the wf bound. Overflow and underflow are impossible by
+// construction, discharging F3's proved-in-range requirement without a single
+// add or subtract.
+// ===========================================================================
+
+pub struct DeltaFrame<T, I> {
+    /// The index column, verbatim.
+    pub idxs: Vec<I>,
+    /// Positions whose value is NOT the index, with the verbatim value.
+    pub exceptions: Vec<(usize, T)>,
+    /// The write pairs this frame holds (carried as ghost, tied to the columns).
+    pub pairs: Ghost<Seq<(T, I)>>,
+}
+
+impl<T: IndexLike, I: IndexLike> DeltaFrame<T, I> {
+    pub open spec fn wf(&self) -> bool {
+        &&& self.pairs@.len() == self.idxs@.len()
+        &&& forall|k: int| 0 <= k < self.pairs@.len()
+                ==> (#[trigger] self.pairs@[k]).1 == self.idxs@[k]
+        // Exception positions are in range and carry the pair's exact value.
+        &&& forall|e: int| 0 <= e < self.exceptions@.len() ==> {
+                &&& (#[trigger] self.exceptions@[e]).0 < self.pairs@.len()
+                &&& self.exceptions@[e].1 == self.pairs@[self.exceptions@[e].0 as int].0
+            }
+        // Every non-exception position's value IS its index (as a nat), and that
+        // nat fits T, so `try_from_usize` reconstructs it.
+        &&& forall|k: int| 0 <= k < self.pairs@.len()
+                && !exception_at(self.exceptions@, k)
+                ==> {
+                    &&& (#[trigger] self.pairs@[k]).0.as_nat() == self.idxs@[k].as_nat()
+                    &&& self.idxs@[k].as_nat() < T::max_nat()
+                }
+    }
+
+    pub open spec fn decode(&self) -> Seq<(T, I)> {
+        self.pairs@
+    }
+
+    pub fn entry_len(&self) -> (n: usize)
+        requires self.wf(),
+        ensures n == self.decode().len(),
+    {
+        self.idxs.len()
+    }
+
+    /// Random access. Non-exception positions reconstruct the value from the
+    /// index (`try_from_usize`, success proved from wf); exceptions read verbatim.
+    /// O(exceptions) scan; acceptable because the shape this frame targets has
+    /// almost none.
+    pub fn decode_at(&self, i: usize) -> (e: (T, I))
+        requires self.wf(), i < self.decode().len(),
+        ensures e == self.decode()[i as int],
+    {
+        let idx = self.idxs[i];
+        let m = self.exceptions.len();
+        let mut k: usize = 0;
+        while k < m
+            invariant
+                0 <= k <= m,
+                m == self.exceptions@.len(),
+                self.wf(),
+                i < self.decode().len(),
+                idx == self.idxs@[i as int],
+                forall|e: int| 0 <= e < k ==> (#[trigger] self.exceptions@[e]).0 != i,
+            decreases m - k,
+        {
+            let (pos, v) = self.exceptions[k];
+            if pos == i {
+                return (v, idx);
+            }
+            k = k + 1;
+        }
+        proof {
+            assert(!exception_at(self.exceptions@, i as int));
+            // Instantiate wf's non-exception clause at i: value == index as nat, in T range.
+            assert(self.pairs@[i as int].0.as_nat() == self.idxs@[i as int].as_nat());
+            assert(self.idxs@[i as int].as_nat() < T::max_nat());
+        }
+        let v = T::try_from_usize(idx.as_usize()).unwrap();
+        proof {
+            T::lemma_as_nat_injective(v, self.pairs@[i as int].0);
+        }
+        (v, idx)
+    }
+
+    /// Encode a frame. Always succeeds and is always exact (`decode() == diffs@`);
+    /// whether it PAYS is the caller's size comparison (the same demotion protocol
+    /// as the run encoders).
+    pub fn compress(diffs: &Vec<(T, I)>) -> (r: DeltaFrame<T, I>)
+        ensures
+            r.wf(),
+            r.decode() == diffs@,
+    {
+        let mut idxs: Vec<I> = Vec::new();
+        let mut exceptions: Vec<(usize, T)> = Vec::new();
+        let mut i: usize = 0;
+        while i < diffs.len()
+            invariant
+                0 <= i <= diffs@.len(),
+                idxs@.len() == i,
+                forall|k: int| 0 <= k < i ==> #[trigger] idxs@[k] == diffs@[k].1,
+                forall|e: int| 0 <= e < exceptions@.len() ==> {
+                    &&& (#[trigger] exceptions@[e]).0 < i
+                    &&& exceptions@[e].1 == diffs@[exceptions@[e].0 as int].0
+                },
+                forall|k: int| 0 <= k < i && !exception_at(exceptions@, k)
+                    ==> {
+                        &&& (#[trigger] diffs@[k]).0.as_nat() == diffs@[k].1.as_nat()
+                        &&& diffs@[k].1.as_nat() < T::max_nat()
+                    },
+            decreases diffs@.len() - i,
+        {
+            let (v, idx) = diffs[i];
+            let ghost pre_ex = exceptions@;
+            idxs.push(idx);
+            if v.as_usize() == idx.as_usize() {
+                // value == index as a nat; the value itself witnesses the T bound.
+                proof {
+                    v.lemma_as_nat_bounded();
+                    assert forall|k: int| 0 <= k < i + 1 && !exception_at(exceptions@, k)
+                        implies (#[trigger] diffs@[k]).0.as_nat() == diffs@[k].1.as_nat()
+                            && diffs@[k].1.as_nat() < T::max_nat() by {
+                        if k < i {
+                            assert(!exception_at(pre_ex, k));
+                        }
+                    }
+                }
+            } else {
+                exceptions.push((i, v));
+                proof {
+                    // Position i is now an exception (the just-pushed last element).
+                    assert(exceptions@[exceptions@.len() - 1].0 == i);
+                    assert(exception_at(exceptions@, i as int));
+                    assert forall|k: int| 0 <= k < i + 1 && !exception_at(exceptions@, k)
+                        implies (#[trigger] diffs@[k]).0.as_nat() == diffs@[k].1.as_nat()
+                            && diffs@[k].1.as_nat() < T::max_nat() by {
+                        if k == i {
+                            assert(exception_at(exceptions@, k));
+                            assert(false);
+                        }
+                        assert(!exception_at(pre_ex, k)) by {
+                            if exception_at(pre_ex, k) {
+                                let e = choose|e: int| 0 <= e < pre_ex.len()
+                                    && (#[trigger] pre_ex[e]).0 == k;
+                                assert(exceptions@[e] == pre_ex[e]);
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        let r = DeltaFrame { idxs, exceptions, pairs: Ghost(diffs@) };
+        r
+    }
+
+    /// Deterministic encoded footprint: the index column plus the exception list.
+    #[verifier::external_body]
+    pub fn byte_len(&self) -> usize {
+        self.idxs.len() * core::mem::size_of::<I>()
+            + self.exceptions.len() * (core::mem::size_of::<usize>() + core::mem::size_of::<T>())
+    }
+}
+
+/// Whether position `k` appears in the exception list.
+pub open spec fn exception_at<T>(ex: Seq<(usize, T)>, k: int) -> bool {
+    exists|e: int| 0 <= e < ex.len() && (#[trigger] ex[e]).0 == k
+}
+
 pub enum ColdFrame<T, I> {
     Plain(Vec<(T, I)>),
     Dict(DictFrame<T, I>),
@@ -2134,6 +2317,59 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
         }
     }
 
+    /// Value-opaque encode: the modes that move values verbatim (no dictionary),
+    /// so only `T: Copy` is needed — every column qualifies, structs included.
+    /// Implements the self-demotion rule (goal F2.1b): after encoding runs, the
+    /// encoder compares its real `byte_len` against the plain frame and emits the
+    /// PLAIN frame when runs did not coalesce enough to pay; the contract is the
+    /// same either way, so the demotion is invisible to callers, and a run frame
+    /// larger than its plain equivalent can never be stored.
+    pub fn compress_mode_copy(diffs: &Vec<(T, I)>, mode: CompressionMode) -> (r: ColdFrame<T, I>)
+        ensures
+            r.wf(),
+            r.decode().to_multiset() == diffs@.to_multiset(),
+            unique_idx(diffs@) ==> unique_idx(r.decode()),
+    {
+        let runs = match mode {
+            CompressionMode::IndexRuns => Some(RunCol::compress(diffs)),
+            CompressionMode::IndexRunsSorted => Some(RunCol::compress_sorted(diffs)),
+            _ => None,
+        };
+        match runs {
+            Some(rc) => {
+                // Self-demotion: real encoded size against the plain frame.
+                let plain_bytes = plain_frame_bytes::<T, I>(diffs.len());
+                if rc.byte_len() <= plain_bytes {
+                    ColdFrame::Runs(rc)
+                } else {
+                    let f = Self::plain_copy(diffs);
+                    f
+                }
+            }
+            None => Self::plain_copy(diffs),
+        }
+    }
+
+    /// The plain frame (exact copy). Factored so both the `None` mode and the
+    /// self-demotion path share it.
+    pub fn plain_copy(diffs: &Vec<(T, I)>) -> (r: ColdFrame<T, I>)
+        ensures
+            r.wf(),
+            r.decode() == diffs@,
+    {
+        let mut copy: Vec<(T, I)> = Vec::new();
+        let mut i: usize = 0;
+        while i < diffs.len()
+            invariant i <= diffs@.len(), copy@ == diffs@.subrange(0, i as int),
+            decreases diffs@.len() - i,
+        {
+            copy.push(diffs[i]);
+            i += 1;
+        }
+        assert(copy@ =~= diffs@);
+        ColdFrame::Plain(copy)
+    }
+
     /// Deterministic encoded footprint (for the per-frame size comparison / heap check).
     #[verifier::external_body]
     pub fn byte_len(&self) -> usize {
@@ -2143,6 +2379,31 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
                 + d.codes.byte_len()
                 + d.idxs.len() * core::mem::size_of::<I>(),
             ColdFrame::Runs(r) => r.byte_len(),
+        }
+    }
+
+    /// Bulk decode: materialize the whole frame's pairs. One pass per mode
+    /// (`Plain` copies, `Dict` decodes codes, `Runs` reconstructs indices).
+    pub fn decode_exec_cold(&self) -> (r: Vec<(T, I)>)
+        requires self.wf(),
+        ensures r@ == self.decode(),
+    {
+        match self {
+            ColdFrame::Plain(v) => {
+                let mut copy: Vec<(T, I)> = Vec::new();
+                let mut i: usize = 0;
+                while i < v.len()
+                    invariant i <= v@.len(), copy@ == v@.subrange(0, i as int),
+                    decreases v@.len() - i,
+                {
+                    copy.push(v[i]);
+                    i += 1;
+                }
+                assert(copy@ =~= v@);
+                copy
+            }
+            ColdFrame::Dict(d) => d.decode_exec(),
+            ColdFrame::Runs(r) => r.decode_exec(),
         }
     }
 

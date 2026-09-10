@@ -165,4 +165,20 @@ impl ColumnConfig {
     }
 }
 
+
+/// The SEMPER_COMPRESS experiment lever: `auto` (case-insensitive) flips
+/// default-constructed memcpy-restorable columns to the per-frame-adaptive
+/// representation. Read once, cached. `external_body`: environment access with no
+/// spec content; both constructor branches carry the same contract, so the flag is
+/// correctness-invisible by construction.
+#[verifier::external_body]
+pub fn env_compress_default() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("SEMPER_COMPRESS")
+            .map(|v| v.eq_ignore_ascii_case("auto"))
+            .unwrap_or(false)
+    })
+}
+
 } // verus!

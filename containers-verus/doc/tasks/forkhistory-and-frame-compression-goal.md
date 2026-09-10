@@ -175,6 +175,38 @@ compact, encodes the frame in ALL modes and logs one record per (container, fram
 
 ### F5 (MEASURED): per-column decision from real e-graph frames
 
+STATUS: MEASURED for the SMT use case (Sundance regression corpus, 438 instances,
+140k+ shadow-encoded frames; EqSat-scale sweep still open). Encoded-size ratios
+against plain, REAL encoders on REAL frames:
+
+| column (element type) | frames | entries | wo | sorted | dict | delta |
+|---|---|---|---|---|---|---|
+| FixedArityNode<_,_,2> (node cache) | 20 369 | 111 405 | 0.99 | 0.91 | n/a | n/a |
+| ClassData (class data) | 9 760 | 101 923 | 1.00 | 0.92 | n/a | n/a |
+| ENodeId (union-find parent, full set) | 10 885 | 68 898 | 0.97 | **0.83** | 1.12 | 1.05 |
+| u32 (counters) | 20 123 | 133 240 | 0.99 | **0.77** | | |
+| ListHead / ListNode / ring (pointers) | ~30 000 | ~180 000 | 0.98-1.00 | 0.90-0.94 | | |
+| u8 (union-find rank) | 38 882 | 18 576 | 1.00 | 1.00 | 2.14 | 2.57 |
+
+Hypothesis verdicts on THIS corpus:
+- CONFIRMED: frames are tiny (5-15 entries per mark), so headers dominate and no
+  mode wins big; sorted runs are the only consistent winner (0.77-0.94x) and the
+  self-demotion keeps every loser at plain.
+- REFUTED (negative results, recorded): the dictionary on the union-find parent
+  (1.12x, average distinct 5.7 in a ~6-entry frame: merge fan-out per mark is far
+  smaller than the synthetic union_find shape assumed) and delta on these captures
+  (1.05x; self-parented roots are rarely among a frame's captured old values).
+  The synthetic table's 0.30x dict win models EqSat-scale frames, which the SMT
+  corpus never produces; which regime Sundance's e-graph sits in per workload is a
+  measurement, and this one is the SMT side.
+- Corpus behavior: identical results with compression on every column including
+  the union-find (438/403/26/9), wall 162.1 s against 159.6 s baseline (about 2%,
+  within the run-to-run spread seen across sweeps).
+- OPEN: the EqSat-scale sweep (per-rewrite-round frames, where the synthetic
+  shape's dict win should materialize), and per-mode restore-time per column
+  (the time axis is covered today by the 27.1x microbench and the corpus-neutral
+  macro wall, not per column).
+
 Run the harness over real equality-saturation and SMT workloads and decide each
 column from its own numbers.
 
@@ -312,6 +344,31 @@ written strictly outside it. This disjointness is the justification recorded for
   does not satisfy this item.
 
 ### H4 (BUILT + MEASURED): the e-graph adopts it
+
+STATUS, partial (H4-lite BUILT + MEASURED; full ForkHistory adoption open):
+- Every `Vec::mark` now seals adaptive columns automatically (universal T: Copy
+  seal-on-mark with self-demoting sorted index runs), so adoption needs no composite
+  changes; the `SEMPER_COMPRESS=auto` lever flips default-constructed
+  memcpy-restorable columns to the adaptive representation for a whole binary,
+  capability-guarded off InlineStore (whose adaptive index materialization is the
+  measured slow path; its frame-wise `index_range` is the named follow-up that also
+  unblocks the union-find dictionary win).
+- The e-graph suite under the lever: 828 passed, 1 failed, the failure being the
+  pre-existing machine-speed deadline flake (`au_exact_anytime`), identical without
+  the lever. Activation is proved by `env_lever` (strictly smaller log than the
+  plain oracle + oracle-identical restore), not assumed.
+- Sundance repointed at this branch (path dep; local diff in the sundance repo) and
+  builds with `--no-default-features --features semper-egraph` after restoring the
+  satcore-layer0 `Assumption` justification (faithful port from rev ec1eb8ae).
+- MEASURED, full Sundance regression corpus (438 instances): baseline
+  Total 438 / Correct 403 / Incorrect 26 / Timeout 9 in 159.6 s; under
+  SEMPER_COMPRESS=auto IDENTICAL counts in 159.4 s. Compression is
+  behavior-neutral and cost-neutral on the corpus. The 26 incorrect are present in
+  the uncompressed baseline too: branch divergence from the satcore-layer0 pin,
+  recorded as pre-existing, not a compression effect.
+- OPEN for full H4: the e-graph's members behind one `ForkHistory` (its token tree
+  collapsed to one GroupToken) with the parallel twins driving mark/restore, and
+  the peak-fork-bytes before/after measurement.
 
 - H4.1. The e-graph's synchronized members are held by one `ForkHistory`; its own
   mark and restore call the history.
