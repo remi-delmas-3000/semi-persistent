@@ -41,7 +41,10 @@ verus! {
 /// resize-refill need. Every `Tagged` type is already `Default` (the id types,
 /// `Pair`, primitives).
 pub trait Tagged: Sized + Copy + core::default::Default {
-    type Repr: Sized + Copy;
+    /// `Send` because the consumer's mark/restore fans containers of reprs out
+    /// across the rayon pool (the e-graph's member fan-out); every concrete
+    /// `Repr` is a machine word, so the bound costs nothing to satisfy.
+    type Repr: Sized + Copy + Send;
 
     // -- ghost projections ---------------------------------------------------
 
@@ -235,7 +238,7 @@ impl<AR: Copy, B: Copy> Clone for PairRepr<AR, B> {
     }
 }
 
-impl<A: Tagged, B: Copy + core::default::Default> Tagged for Pair<A, B> {
+impl<A: Tagged, B: Copy + core::default::Default + Send> Tagged for Pair<A, B> {
     type Repr = PairRepr<A::Repr, B>;
 
     open spec fn value_of(r: Self::Repr) -> Self { Pair { a: A::value_of(r.a), b: r.b } }

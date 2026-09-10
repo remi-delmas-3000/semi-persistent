@@ -63,18 +63,19 @@ impl SparseSetToken {
 }
 
 /// Semi-persistent sparse set with stable IDs.
-pub struct SparseSet<T, Idx, S, const TRACK: bool = true>
+pub struct SparseSet<T, Idx, S, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
     S: DiffStore<T, Idx, TRACK>,
+    VC: crate::value_compressor::ValueCompressor<T>,
 {
-    pub(crate) dense: SpVec<T, Idx, S, TRACK>,
+    pub(crate) dense: SpVec<T, Idx, S, TRACK, VC>,
     pub(crate) sparse: SpVec<Idx, Idx, InlineStore<Idx, Idx>, TRACK>,
     pub(crate) indices: SpVec<Idx, Idx, InlineStore<Idx, Idx>, TRACK>,
 }
 
-impl<T, Idx, S, const TRACK: bool> SparseSet<T, Idx, S, TRACK>
+impl<T, Idx, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> SparseSet<T, Idx, S, TRACK, VC>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
@@ -111,7 +112,7 @@ where
     }
 
     /// Dense-column reference (spec counterpart, for `data()`'s ensures).
-    pub open(crate) spec fn dense_ref(&self) -> &SpVec<T, Idx, S, TRACK> {
+    pub open(crate) spec fn dense_ref(&self) -> &SpVec<T, Idx, S, TRACK, VC> {
         &self.dense
     }
 
@@ -939,7 +940,7 @@ where
 
     /// Read-only access to the dense value vector (production `data()`
     /// parity: exposes the packed live values for iteration).
-    pub fn data(&self) -> (r: &SpVec<T, Idx, S, TRACK>)
+    pub fn data(&self) -> (r: &SpVec<T, Idx, S, TRACK, VC>)
         ensures r == self.dense_ref(),
     {
         &self.dense
@@ -1363,7 +1364,7 @@ fn values_equal<T: PartialEq>(a: &T, b: &T) -> bool {
 // empty `wf` (the permutation invariant is vacuous at cap == n == 0).
 // ---------------------------------------------------------------------------
 
-impl<T, Idx, S, const TRACK: bool> SparseSet<T, Idx, S, TRACK>
+impl<T, Idx, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> SparseSet<T, Idx, S, TRACK, VC>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
@@ -1397,7 +1398,7 @@ where
     }
 }
 
-impl<T, Idx, const TRACK: bool> SparseSet<T, Idx, crate::parallel_store::ParallelStore<T, Idx>, TRACK>
+impl<T, Idx, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> SparseSet<T, Idx, crate::parallel_store::ParallelStore<T, Idx>, TRACK, VC>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
@@ -1411,7 +1412,7 @@ where
     }
 }
 
-impl<T, Idx, const TRACK: bool> SparseSet<T, Idx, crate::inline_store::InlineStore<T, Idx>, TRACK>
+impl<T, Idx, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> SparseSet<T, Idx, crate::inline_store::InlineStore<T, Idx>, TRACK, VC>
 where
     T: Tagged + Sized + Copy,
     Idx: IndexLike + Tagged,

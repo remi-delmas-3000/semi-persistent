@@ -268,7 +268,7 @@ fn shadow_emit(line: String) {
 /// plain, write-order runs, sorted runs. `instance` is an opaque column-instance
 /// key (the diff log's address), `frame` the sealed frame's ordinal.
 #[verifier::external_body]
-pub fn shadow_log_copy<T: Copy, I: IndexLike>(
+pub fn shadow_log_copy<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
     pairs: &Vec<(T, I)>,
     instance: usize,
     frame: usize,
@@ -281,8 +281,18 @@ pub fn shadow_log_copy<T: Copy, I: IndexLike>(
     let plain = n * (core::mem::size_of::<T>() + core::mem::size_of::<I>());
     let wo = crate::diff_compress::RunCol::compress(pairs).byte_len();
     let so = crate::diff_compress::RunCol::compress_sorted(pairs).byte_len();
+    // Value-layer candidates (F2.4): the column's own codec composed with the
+    // sorted-runs and plain index layers, real encoders.
+    let (vso, vpl) = if VC::enabled() {
+        (
+            format!("{}", crate::layered::LayeredFrame::<T, I, VC>::compress_runs_sorted(pairs).byte_len()),
+            format!("{}", crate::layered::LayeredFrame::<T, I, VC>::compress_plain(pairs).byte_len()),
+        )
+    } else {
+        ("-".to_string(), "-".to_string())
+    };
     shadow_emit(format!(
-        "SHADOW,{},{:?},{},{},{},{},{},{},{},{}",
+        "SHADOW,{},{:?},{},{},{},{},{},{},{},{},{},{},{}",
         core::any::type_name::<T>(),
         instance,
         frame,
@@ -292,6 +302,9 @@ pub fn shadow_log_copy<T: Copy, I: IndexLike>(
         plain,
         wo,
         so,
+        core::any::type_name::<VC>(),
+        vso,
+        vpl,
         chosen,
     ));
 }
@@ -299,7 +312,7 @@ pub fn shadow_log_copy<T: Copy, I: IndexLike>(
 /// Shadow-encode with the full candidate set (`T: IndexLike` columns): the
 /// value-opaque set plus dictionary and delta, and the distinct-value count.
 #[verifier::external_body]
-pub fn shadow_log_full<T: IndexLike, I: IndexLike>(
+pub fn shadow_log_full<T: IndexLike, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
     pairs: &Vec<(T, I)>,
     instance: usize,
     frame: usize,
@@ -321,8 +334,16 @@ pub fn shadow_log_full<T: IndexLike, I: IndexLike>(
     let delta = crate::diff_compress::DeltaFrame::compress(pairs).byte_len();
     let distinct: std::collections::HashSet<usize> =
         pairs.iter().map(|p| p.0.as_usize()).collect();
+    let (vso, vpl) = if VC::enabled() {
+        (
+            format!("{}", crate::layered::LayeredFrame::<T, I, VC>::compress_runs_sorted(pairs).byte_len()),
+            format!("{}", crate::layered::LayeredFrame::<T, I, VC>::compress_plain(pairs).byte_len()),
+        )
+    } else {
+        ("-".to_string(), "-".to_string())
+    };
     shadow_emit(format!(
-        "SHADOWF,{},{:?},{},{},{},{},{},{},{},{},{},{},{}",
+        "SHADOWF,{},{:?},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         core::any::type_name::<T>(),
         instance,
         frame,
@@ -335,6 +356,9 @@ pub fn shadow_log_full<T: IndexLike, I: IndexLike>(
         so,
         dict,
         delta,
+        core::any::type_name::<VC>(),
+        vso,
+        vpl,
         chosen,
     ));
 }

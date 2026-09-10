@@ -206,7 +206,7 @@ where
 
     /// First-write-wins capture. If the slot is in-frame and not yet captured,
     /// log `(old.data()[i], i)` and flip `captured[i]`.
-    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>)
+    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>)
         requires
             old(self).wf(),
             old(diff_log).wf(),
@@ -300,9 +300,9 @@ where
     /// contiguous can use a sliced memcpy instead of scattered per-entry writes.
     /// Capture flags only decrease (a replay write never sets one), so an all-clear
     /// state stays all-clear through the call.
-    fn restore_overlay(
+    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I>,
+        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
         lo: usize,
         hi: usize,
     )

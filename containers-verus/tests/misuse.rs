@@ -134,43 +134,57 @@ fn consumed_token_reported_invalid_and_rejected_before_mutation() {
 
 // ---------------------------------------------------------------------------
 // Abandoned-future token: mark A, restore past it, mark again (new branch) —
-// A's future was cut off; its token must be rejected by genealogy.
+// A's future was cut off. Post-H2 the genealogy lives on the owning group's
+// `History` (a standalone vec is a group of one), so the rejection is the
+// history's: `is_valid` answers false for the abandoned group token, and the
+// paired discipline never hands its depth to the structural vec restore. The
+// vec-level check is structural only (frame liveness), by design.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn abandoned_future_token_refuses_as_err() {
+fn abandoned_future_rejected_by_paired_history() {
+    use semi_persistent_containers_verus::history::History;
     let mut v = V::new();
+    let mut h = History::new();
     v.try_push(1).expect("push: within index word");
     let base = v
         .try_mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
+    let base_g = h.mark();
     v.try_push(2).expect("push: within index word");
-    let abandoned = v
+    let _abandoned = v
         .try_mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness"); // depth 2 on branch 0
+    let abandoned_g = h.mark();
     v.try_push(3).expect("push: within index word");
-    v.try_restore(base).expect("restore: own token"); // cut back to depth 0 -> new branch
+    assert!(h.is_valid(base_g));
+    v.try_restore(base).expect("restore: own token"); // cut back to depth 0
+    h.restore_to(base_g); // -> new branch
     v.try_push(20).expect("push: within index word");
     let _new_frame = v
         .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness"); // depth 1 on the NEW branch
+        .expect("mark: depth bounded by this harness"); // depth 1, NEW branch
+    let _new_g = h.mark();
     v.try_push(21).expect("push: within index word");
-    // `abandoned` names depth 2 of the OLD branch: genealogy must reject it
-    // (its frame_idx=1 is within frames.len()=1? No: frames.len() is 1, so
-    // frame_idx=1 fails liveness... push another frame so liveness passes and
-    // genealogy is the deciding check).
     let _deeper = v
         .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness"); // frames.len()=2, frame_idx=1 live
-    assert_eq!(
-        v.try_restore(abandoned).unwrap_err(),
-        semi_persistent_containers_verus::error::ContainerError::InvalidToken,
-        "was: panic — abandoned-branch future token, rejected by genealogy"
+        .expect("mark: depth bounded by this harness"); // frame at depth 1 live again
+    let _deeper_g = h.mark();
+    // `abandoned_g` names depth 1 of the OLD branch: even though a frame is
+    // live at that depth again, the branch cut bumped its generation.
+    assert!(
+        !h.is_valid(abandoned_g),
+        "abandoned-branch future token must be rejected by the history"
     );
 }
 
 #[test]
-fn abandoned_future_reported_invalid() {
+fn structural_vec_restore_is_frame_liveness_only() {
+    // The complement of the paired test above: the raw vec token surface no
+    // longer carries a genealogy, so a token whose frame index is live again
+    // IS structurally restorable — restoring lands on the frame now at that
+    // index (documented in `Vec::is_restorable_spec`). Owners that need
+    // branch protection pair the vec with a `History`.
     let mut v = V::new();
     v.try_push(1).expect("push: within index word");
     let base = v
@@ -188,11 +202,14 @@ fn abandoned_future_reported_invalid() {
         .expect("mark: depth bounded by this harness");
     let _f2 = v
         .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness"); // make frame_idx=1 live again
+        .expect("mark: depth bounded by this harness"); // frame_idx=1 live again
     assert!(
-        !v.is_valid_token(&abandoned),
-        "abandoned-future token must report not-restorable"
+        v.is_valid_token(&abandoned),
+        "a live frame index is structurally restorable post-H2"
     );
+    v.try_restore(abandoned)
+        .expect("restore: structurally valid frame handle");
+    assert_eq!(v.len(), 2, "restore lands on the frame now at index 1");
 }
 
 // ---------------------------------------------------------------------------

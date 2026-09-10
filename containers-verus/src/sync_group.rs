@@ -97,11 +97,13 @@ pub trait SyncMember: Send {
 /// with the full mode set. `T: IndexLike` is what `poke`/`checksum` and the
 /// dictionary/delta value layers need; opaque-struct columns join through the
 /// `ValueCompressor` design (goal F2) once it lands.
-impl<T, I, S, const TRACK: bool> SyncMember for crate::vec::Vec<T, I, S, TRACK>
+impl<T, I, S, const TRACK: bool, VC> SyncMember for crate::vec::Vec<T, I, S, TRACK, VC>
 where
     T: crate::index_like::IndexLike + core::default::Default + Send,
     I: crate::index_like::IndexLike + Send,
     S: crate::diff_store::DiffStore<T, I, TRACK> + Send,
+    VC: crate::value_compressor::ValueCompressor<T> + Send,
+    VC::Compressed: Send,
 {
     open spec fn wf(&self) -> bool {
         &&& crate::vec::Vec::wf(self)
@@ -715,5 +717,55 @@ mod fork_history_tests {
             seq_restore, par_restore,
             seq_restore.as_secs_f64() / par_restore.as_secs_f64().max(1e-12),
         );
+    }
+
+    // H4b.3 measurement: peak fork-history bytes, the ONE shared `History`
+    // versus the per-member `GenStamps` every column carried before H2. The
+    // duplicated side is reconstructed faithfully at runtime: one fresh
+    // `GenStamps` per member, driven through the same mark/restore depth
+    // trajectory the shared history sees. Run with --nocapture for the
+    // recorded numbers.
+    #[test]
+    fn shared_history_bytes_vs_per_member_duplication() {
+        const MEMBERS: usize = 10;
+        for &depth in &[128usize, 1024, 4096] {
+            let mut shared = crate::history::History::new();
+            let mut per_member: Vec<crate::gen_stamps::GenStamps> =
+                (0..MEMBERS).map(|_| crate::gen_stamps::GenStamps::new(0)).collect();
+            // Drive to `depth`, then a restore-to-half and a re-climb, so the
+            // stamp arrays see a branch cut (the workload that grew the old
+            // `origins` without bound and that GenStamps holds at O(max depth)).
+            let mut toks = Vec::new();
+            for _ in 0..depth {
+                toks.push(shared.mark());
+                for m in per_member.iter_mut() {
+                    let d = toks.len() - 1;
+                    let _ = m.stamp_at(d);
+                }
+            }
+            let half = toks[depth / 2];
+            shared.restore_to(half);
+            for m in per_member.iter_mut() {
+                m.bump_from(depth / 2 + 1);
+            }
+            for k in 0..depth / 2 {
+                toks.push(shared.mark());
+                for m in per_member.iter_mut() {
+                    let _ = m.stamp_at(depth / 2 + k);
+                }
+            }
+            let shared_bytes = shared.heap_bytes();
+            let dup_bytes: usize = per_member.iter().map(|m| m.heap_bytes()).sum();
+            println!(
+                "depth {depth}, {MEMBERS} members: shared history {shared_bytes} B, \
+                 per-member duplication {dup_bytes} B ({:.1}x)",
+                dup_bytes as f64 / shared_bytes.max(1) as f64
+            );
+            assert_eq!(
+                dup_bytes,
+                shared_bytes * MEMBERS,
+                "the duplicated genealogy is exactly N copies of the shared one"
+            );
+        }
     }
 }

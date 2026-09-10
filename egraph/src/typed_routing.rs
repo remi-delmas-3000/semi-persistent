@@ -14,17 +14,19 @@ use crate::containers::VecToken;
 /// Bundle of local DenseId types — one per node kind.
 pub trait NodeIds {
     /// Backing word; must match the owning config's `Index`.
-    type Index: crate::containers::IndexLike + crate::containers::Tagged;
-    type L0: DenseId<Index = Self::Index>;
-    type L1: DenseId<Index = Self::Index>;
-    type L2: DenseId<Index = Self::Index>;
-    type L3: DenseId<Index = Self::Index>;
-    type LSPair: DenseId<Index = Self::Index>;
-    type LN: DenseId<Index = Self::Index>;
-    type LSeq: DenseId<Index = Self::Index>;
-    type LMSet: DenseId<Index = Self::Index>;
-    type LSet: DenseId<Index = Self::Index>;
-    type LLit: DenseId<Index = Self::Index>;
+    /// `Send` on every local id: the node store crosses threads in the
+    /// mark/restore fan-out (see `EGraphConfig::Index`).
+    type Index: crate::containers::IndexLike + crate::containers::Tagged + Send;
+    type L0: DenseId<Index = Self::Index> + Send;
+    type L1: DenseId<Index = Self::Index> + Send;
+    type L2: DenseId<Index = Self::Index> + Send;
+    type L3: DenseId<Index = Self::Index> + Send;
+    type LSPair: DenseId<Index = Self::Index> + Send;
+    type LN: DenseId<Index = Self::Index> + Send;
+    type LSeq: DenseId<Index = Self::Index> + Send;
+    type LMSet: DenseId<Index = Self::Index> + Send;
+    type LSet: DenseId<Index = Self::Index> + Send;
+    type LLit: DenseId<Index = Self::Index> + Send;
 }
 
 /// Typed local id reference — one variant per node kind.

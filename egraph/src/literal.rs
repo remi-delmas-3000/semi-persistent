@@ -12,7 +12,7 @@ use num_traits::Zero;
 use crate::containers::DenseId;
 
 /// Marker trait for literal value types.
-pub trait LitVal: Clone + Eq + Hash + fmt::Debug + fmt::Display {}
+pub trait LitVal: Clone + Eq + Hash + fmt::Debug + fmt::Display + Send {}
 
 /// Opaque token for [`LitValStore::mark`] / [`LitValStore::restore`].
 ///

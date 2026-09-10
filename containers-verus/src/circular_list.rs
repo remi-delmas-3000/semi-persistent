@@ -114,7 +114,7 @@ impl<T: Copy, N: DenseId> Clone for CircularNodeRepr<T, N> {
 // `next` field's `Tagged` impl (`N: DenseId: Tagged`), the same idiom as
 // production's `impl Tagged for EClassEntry`. The `payload` is carried raw:
 // `value_of`/`repr_wf`/`tag_of` all ignore it, so it needs no niche of its own.
-impl<T: Copy + core::default::Default, N: DenseId> Tagged for CircularListNode<T, N> {
+impl<T: Copy + core::default::Default + Send, N: DenseId> Tagged for CircularListNode<T, N> {
     type Repr = CircularNodeRepr<T, N>;
 
     open spec fn value_of(r: Self::Repr) -> Self {
@@ -180,7 +180,7 @@ pub open(crate) spec fn rotate(s: Seq<usize>, k: int) -> Seq<usize> {
 }
 
 pub struct CircularList<T, N: DenseId, const TRACK: bool>
-where T: Sized + Copy + core::default::Default {
+where T: Sized + Copy + core::default::Default + Send {
     /// Storage is indexed by the id's own **storage word** `N::Index`, not by
     /// `usize` — production's `VecI<EClassEntry<T, K>, T::Index>` verbatim. For
     /// the 31-bit e-class instantiation, this makes a semi-persistent diff entry
@@ -203,7 +203,7 @@ where T: Sized + Copy + core::default::Default {
 }
 
 impl<T, N: DenseId, const TRACK: bool> CircularList<T, N, TRACK>
-where T: Sized + Copy + core::default::Default {
+where T: Sized + Copy + core::default::Default + Send {
     /// `next_seq()[i]` is node `i`'s successor position (the stored id's dense
     /// index). Decoding through `id_nat` is what keeps the ghost `model` — and
     /// every merge lemma stated over it — width-agnostic `usize`.
@@ -1245,7 +1245,7 @@ pub(crate) proof fn lemma_splice_merge<T, N: DenseId, const TRACK: bool>(
     pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
     s: int, a: int, cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         pre.wf(),
         pre.entries.wf(),
@@ -1337,7 +1337,7 @@ pub(crate) proof fn lemma_splice_in_range<T, N: DenseId, const TRACK: bool>(
     pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
     cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         pre.wf(), post.n_spec() == pre.n_spec(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1376,7 +1376,7 @@ pub(crate) proof fn lemma_splice_disjoint<T, N: DenseId, const TRACK: bool>(
     pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
     s: int, a: int, cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         pre.wf(), post.n_spec() == pre.n_spec(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1568,7 +1568,7 @@ pub(crate) proof fn lemma_splice_covers<T, N: DenseId, const TRACK: bool>(
     pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
     cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         pre.model_covers(), post.n_spec() == pre.n_spec(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1614,7 +1614,7 @@ pub(crate) proof fn lemma_splice_cyclic<T, N: DenseId, const TRACK: bool>(
     pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
     s: int, a: int, cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         pre.wf(), post.n_spec() == pre.n_spec(),
         0 <= s < pre.n_spec(), 0 <= a < pre.n_spec(),
@@ -1700,7 +1700,7 @@ pub(crate) proof fn lemma_splice_cyclic<T, N: DenseId, const TRACK: bool>(
 pub(crate) proof fn lemma_pre_cyclic_at<T, N: DenseId, const TRACK: bool>(
     pre: CircularList<T, N, TRACK>, c: int, p: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires pre.wf(), 0 <= c < pre.model@.len(), 0 <= p < pre.model@[c].len(),
     ensures
         pre.next_seq()[pre.model@[c][p] as int]
@@ -1713,7 +1713,7 @@ pub(crate) proof fn lemma_pre_cyclic_at<T, N: DenseId, const TRACK: bool>(
 pub(crate) proof fn lemma_other_ring_avoids_sa<T, N: DenseId, const TRACK: bool>(
     pre: CircularList<T, N, TRACK>, s: int, a: int, cs: int, ca: int, c: int, p: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         pre.wf(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(),
@@ -1739,7 +1739,7 @@ pub(crate) proof fn lemma_merge_interior_prefix<T, N: DenseId, const TRACK: bool
     pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
     cs: int, ca: int, ps: int, pa: int, p: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         pre.wf(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1807,7 +1807,7 @@ pub(crate) proof fn lemma_merge_interior_suffix<T, N: DenseId, const TRACK: bool
     pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
     cs: int, ca: int, ps: int, pa: int, p: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         pre.wf(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1872,7 +1872,7 @@ pub(crate) proof fn lemma_merge_interior_suffix<T, N: DenseId, const TRACK: bool
 /// position within it; `cursor_ok` is "`cur` names `class_seq[pos]`, or the
 /// walk is done and `pos == ring length`".
 pub struct RingIter<'a, T, N: DenseId, const TRACK: bool>
-where T: Sized + Copy + core::default::Default {
+where T: Sized + Copy + core::default::Default + Send {
     pub(crate) list: &'a CircularList<T, N, TRACK>,
     /// The node the walk started at, as the id type — production's `ClassIter`
     /// stores `start_idx: T`, and yielding `N` (not `usize`) is what lets the
@@ -1902,7 +1902,7 @@ where T: Sized + Copy + core::default::Default {
 pub(crate) proof fn lemma_ring_same_pos<T, N: DenseId, const TRACK: bool>(
     list: &CircularList<T, N, TRACK>, c: int, p1: int, p2: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         list.model_disjoint(),
         0 <= c < list.model@.len(),
@@ -1942,7 +1942,7 @@ pub(crate) proof fn lemma_ring_step_arith(p0: int, oldpos: int, len: int, j: int
 pub(crate) proof fn lemma_locate_pinned<T, N: DenseId, const TRACK: bool>(
     list: &CircularList<T, N, TRACK>, start: int, c: int, p0: int,
 )
-    where T: Sized + Copy + core::default::Default, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId
     requires
         list.model_disjoint(),
         0 <= c < list.model@.len(),
@@ -1960,7 +1960,7 @@ pub(crate) proof fn lemma_locate_pinned<T, N: DenseId, const TRACK: bool>(
 }
 
 impl<'a, T, N: DenseId, const TRACK: bool> RingIter<'a, T, N, TRACK>
-where T: Sized + Copy + core::default::Default {
+where T: Sized + Copy + core::default::Default + Send {
     /// The list this iterator walks (spec counterpart; fields are `pub(crate)`).
     pub open(crate) spec fn list_ref(&self) -> &'a CircularList<T, N, TRACK> {
         self.list
@@ -2170,7 +2170,7 @@ impl core::fmt::Debug for CircularListToken {
 // ---------------------------------------------------------------------------
 impl<'a, T, N: DenseId, const TRACK: bool> Iterator for RingIter<'a, T, N, TRACK>
 where
-    T: Sized + Copy + core::default::Default,
+    T: Sized + Copy + core::default::Default + Send,
 {
     type Item = N;
 
@@ -2186,7 +2186,7 @@ where
 // ---------------------------------------------------------------------------
 impl<T, N: DenseId, const TRACK: bool> CircularList<T, N, TRACK>
 where
-    T: Sized + Copy + core::default::Default,
+    T: Sized + Copy + core::default::Default + Send,
 {
     /// Read-only entries access for white-box tests.
     #[doc(hidden)]

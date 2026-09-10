@@ -276,7 +276,7 @@ where
     }
 
     #[inline(always)]
-    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>) {
         if !TRACK {
             return;
         }
@@ -385,9 +385,9 @@ where
         }
     }
 
-    fn restore_overlay(
+    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I>,
+        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
         lo: usize,
         hi: usize,
     ) {

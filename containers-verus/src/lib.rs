@@ -109,7 +109,7 @@ pub mod external_specs;
 pub mod frame;
 pub mod gen_stamps;
 pub mod guard;
-pub(crate) mod history;
+pub mod history;
 pub mod sync_group;
 pub mod hasher_spec;
 pub mod id_factory;
@@ -129,6 +129,8 @@ pub mod sparse_set;
 pub mod tagged;
 pub mod two_stack_log;
 pub mod union_find;
+pub mod value_compressor;
+pub mod layered;
 pub mod vec;
 
 // ---------------------------------------------------------------------------
@@ -187,7 +189,7 @@ pub mod bitset;
 
 /// Inline capture: flag stolen inside `T::Repr`. Requires `T: Tagged`.
 /// (Production's `VecI` alias, verbatim.)
-pub type VecI<T, I, const TRACK: bool = true> = Vec<T, I, InlineStore<T, I>, TRACK>;
+pub type VecI<T, I, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression> = Vec<T, I, InlineStore<T, I>, TRACK, VC>;
 
 /// Parallel capture: flag in a packed side bitvector. Works with any
 /// `T: Copy`. Production's `VecP` alias accepted `T: Clone`; the verified

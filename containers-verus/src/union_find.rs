@@ -194,8 +194,10 @@ pub struct UnionFind<T: DenseId, J, const TRACK: bool = true, const PROOFS: bool
 where
     J: crate::tagged::Tagged + Copy + core::default::Default,
 {
-    pub(crate) parent: SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>,
-    pub(crate) rank: SpVec<u8, T::Index, InlineStore<u8, T::Index>, TRACK>,
+    pub(crate) parent: SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK,
+        crate::value_compressor::ValueDictC>,
+    pub(crate) rank: SpVec<u8, T::Index, InlineStore<u8, T::Index>, TRACK,
+        crate::value_compressor::ValueDictC>,
     /// Proof forest: per-node ORIGINAL-edge parent, never compressed
     /// (`Some` iff `PROOFS`). Production's `parent_proof`.
     pub(crate) parent_proof: Option<SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>>,
@@ -319,8 +321,8 @@ where
             u.parent_snapshots_view().len() == 0,
     {
         let u = UnionFind {
-            parent: SpVec::<T, T::Index, InlineStore<T, T::Index>, TRACK>::new(),
-            rank: SpVec::<u8, T::Index, InlineStore<u8, T::Index>, TRACK>::new(),
+            parent: SpVec::<T, T::Index, InlineStore<T, T::Index>, TRACK, crate::value_compressor::ValueDictC>::new(),
+            rank: SpVec::<u8, T::Index, InlineStore<u8, T::Index>, TRACK, crate::value_compressor::ValueDictC>::new(),
             parent_proof: if PROOFS {
                 Some(SpVec::<T, T::Index, InlineStore<T, T::Index>, TRACK>::new())
             } else {

@@ -22,7 +22,6 @@ use vstd::prelude::*;
 
 verus! {
 
-use crate::container_id::ContainerId;
 use crate::diff_store::DiffStore;
 use crate::frame::Frame;
 use crate::index_like::IndexLike;
@@ -40,27 +39,15 @@ pub enum ShrinkPolicy {
 /// Opaque token returned by `mark()`.
 ///
 /// `frame_idx` is the reconstruction coordinate (which frame `restore` rolls
-/// back to). `branch_id`/`depth` are the validity coordinates consumed by the
-/// fork-history check (design doc §0.6): `branch_id` is the branch live at
-/// mark time, `depth` the token's position along it. `container_id` rejects
-/// cross-container use. `frame_idx` and `depth` are numerically equal at mark
-/// but are DIFFERENT quantities (reconstruction index vs. validity depth) —
-/// see `doc/design/03-fork-history.md`.
-///
-/// `branch_id` and `depth` are u32 by design, independent of the element
-/// index width: they count forks and open marks, not elements. The cap is
-/// 2^32 - 1 live branches / mark depth, enforced by the headroom
-/// preconditions on `fork` and the headroom clauses of `is_valid_token`,
-/// not by wrapping.
+/// back to). It is a STRUCTURAL handle only: branch validity and forgery
+/// rejection live on the owning group's `History` (doc 10), which validates a
+/// `GroupToken` once for every member; `Vec` itself no longer carries a
+/// genealogy (H2). A caller that restores through a raw `VecToken` without a
+/// `History` gets exactly the structural guarantee `is_restorable_spec`
+/// states: the frame exists and reconstruction lands on its snapshot.
 #[derive(Copy, Clone)]
 pub struct VecToken {
     pub(crate) frame_idx: usize,
-    /// Generation stamp minted at mark time for this frame's depth (== frame_idx).
-    /// Replaces the branch-model `(branch_id, depth)`: a restore diverging at a
-    /// depth bumps the deeper generations, so a stale token's generation no longer
-    /// matches — O(1) validity, O(max-depth) fork history (no `origins` leak).
-    pub(crate) generation: u64,
-    pub(crate) container_id: ContainerId,
 }
 
 impl VecToken {
@@ -1021,30 +1008,32 @@ pub(crate) proof fn lemma_overlay_eq_snap<T, I: IndexLike>(
 /// Semi-persistent vector parameterized by storage backend `S` and index
 /// type `I`. `TRACK=false` compiles out const-gated tracking execution; the
 /// generic layout still contains empty diff/frame/fork fields.
-pub struct Vec<T, I, S, const TRACK: bool = true>
+pub struct Vec<
+    T,
+    I,
+    S,
+    const TRACK: bool = true,
+    VC = crate::value_compressor::NoValueCompression,
+>
 where
     T: Sized + Copy,
     I: IndexLike,
     S: DiffStore<T, I, TRACK>,
+    VC: crate::value_compressor::ValueCompressor<T>,
 {
     pub(crate) store: S,
-    pub(crate) diff_log: crate::diff_log::DiffLog<T, I>,
+    pub(crate) diff_log: crate::diff_log::DiffLog<T, I, VC>,
     pub(crate) frames: std::vec::Vec<Frame<I>>,
     /// The saved_len of the topmost (active) frame, cached for the hot path.
     /// `I::min()` when the stack is empty. Mirrors production.
     pub(crate) active_saved_len: I,
-    /// Depth-indexed generation stamps for token-validity and branch-cut safety.
-    /// O(max-depth) (replaces the O(R) append-only `origins`): the leak fix.
-    pub(crate) forks: crate::gen_stamps::GenStamps,
-    /// Per-container identity; rejects cross-container token use.
-    pub(crate) id: ContainerId,
     pub(crate) phantom: core::marker::PhantomData<(T, I)>,
     /// Ghost stack of deep copies. `snapshots[k]` is `view()` at the
     /// moment frame `k` was pushed. Always `snapshots.len() == frames.len()`.
     pub(crate) snapshots: Ghost<Seq<Seq<T>>>,
 }
 
-impl<T, I, S, const TRACK: bool> Vec<T, I, S, TRACK>
+impl<T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, S, TRACK, VC>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -1083,28 +1072,28 @@ where
         }
     }
 
-    /// Max spine depth ever reached (generation-stamp array length). Public
-    /// contracts phrase the fork headroom through this; unlike the old origins
-    /// length it is O(max depth), not O(lifetime restores).
-    pub open(crate) spec fn fork_count_spec(&self) -> nat {
-        self.forks.levels@.len()
-    }
-
-    /// Token validity: same container AND its generation still matches the live
-    /// stamp at its frame depth (O(1)). Separate from the structural
-    /// `frame_idx < frames.len()` reconstruction precondition (design §0.5).
+    /// Structural token validity (H2): the genealogy (generation stamps,
+    /// container identity) lives on the owning group's `History`, so per-vec
+    /// validity reduces to frame liveness. Kept under its historical name so
+    /// composite validity chains read unchanged.
     pub open(crate) spec fn is_token_valid_spec(&self, token: VecToken) -> bool {
-        &&& token.container_id.id() == self.id.id()
-        &&& self.forks.valid(token.frame_idx as nat, token.generation)
+        token.frame_idx < self.frames@.len()
     }
 
-    /// "Restorable now": the full runtime-checkable precondition of `restore` —
-    /// identity + generation validity, frame liveness, the TRACK gate, and the
-    /// generation headroom (levels deeper than the target below `u64::MAX`, the
-    /// analogue of the old `origins.len()+1 <= u32::MAX`).
+    /// The mark-depth quantity the depth-headroom contracts are phrased over.
+    /// Post-H2 the container tracks no genealogy, so this is the live frame
+    /// depth (the stamp-array length it used to be lived on `GenStamps`).
+    pub open(crate) spec fn fork_count_spec(&self) -> nat {
+        self.frames@.len()
+    }
+
+    /// "Restorable now": the full runtime-checkable STRUCTURAL precondition of
+    /// `restore` — frame liveness, the TRACK gate, and the depth headroom.
+    /// Branch validity (was: container identity + generation stamp) lives on
+    /// the owning group's `History` (doc 10 / H2), which validates once for
+    /// every member instead of once per member.
     pub open(crate) spec fn is_restorable_spec(&self, token: VecToken) -> bool {
         &&& TRACK
-        &&& self.is_token_valid_spec(token)
         &&& token.frame_idx < self.frames@.len()
         &&& self.frames@.len() < u32::MAX
     }
@@ -1813,8 +1802,6 @@ where
             diff_log,
             frames: std::vec::Vec::new(),
             active_saved_len: <I as IndexLike>::min(),
-            forks: crate::gen_stamps::GenStamps::new(0),
-            id: ContainerId::new(),
             phantom: core::marker::PhantomData,
             snapshots: Ghost(Seq::empty()),
         };
@@ -1842,7 +1829,6 @@ where
             final(self).frames@ == old(self).frames@,
             final(self).snapshots@ == old(self).snapshots@,
             final(self).active_saved_len == old(self).active_saved_len,
-            final(self).forks == old(self).forks,
     {
         match policy {
             ShrinkPolicy::Never => {}
@@ -1913,27 +1899,23 @@ where
         self.store.as_slice()
     }
 
-    /// How many more `restore`s this container can accept before the
-    /// fork-history branch counter saturates `u32`.
+    /// Remaining mark-depth headroom before the `u32::MAX` frame cap.
     ///
-    /// Fork history is now reclaimed (generation stamps, O(max depth)), so restores
-    /// no longer accumulate — the only bound is the `u32::MAX` frame depth. This
-    /// returns the remaining depth headroom (`u32::MAX - max_depth`, saturating at
-    /// 0); `fork_count_spec()` is now the stamp-array length (max depth reached),
-    /// not a lifetime restore count. (`u32::MAX ~ 4.29e9` — not a practical limit.)
+    /// With the genealogy on the owning `History` (H2), restores no longer
+    /// accumulate any per-container state; the only bound is the frame depth.
+    /// (`u32::MAX ~ 4.29e9` — not a practical limit.)
     pub fn restores_remaining(&self) -> (r: usize)
         requires self.wf(),
         ensures
-            self.fork_count_spec() < u32::MAX ==>
-                r as nat == (u32::MAX - self.fork_count_spec()) as nat,
-            self.fork_count_spec() >= u32::MAX ==> r == 0,
+            self.depth_spec() < u32::MAX ==>
+                r as nat == (u32::MAX - self.depth_spec()) as nat,
+            self.depth_spec() >= u32::MAX ==> r == 0,
     {
-        let used = self.forks.depth_capacity();
-        (u32::MAX as usize).saturating_sub(used)
+        (u32::MAX as usize).saturating_sub(self.frames.len())
     }
 
     /// A read-only view over the current contents (parity with production).
-    pub fn view_handle(&self) -> (v: VecView<'_, T, I, S, TRACK>)
+    pub fn view_handle(&self) -> (v: VecView<'_, T, I, S, TRACK, VC>)
         ensures v.vec_ref() == self,
     {
         VecView { vec: self }
@@ -1947,7 +1929,6 @@ where
     pub fn tracking_bytes(&self) -> usize {
         self.diff_log.heap_bytes()
             + self.frames.capacity() * core::mem::size_of::<Frame<I>>()
-            + self.forks.heap_bytes()
     }
 
     /// Total bytes used by this Vec: struct + store backing + tracking.
@@ -2134,13 +2115,12 @@ where
         }
     }
 
-    /// The public token-validity check: "restorable now".
+    /// The public token-validity check: "restorable now", STRUCTURALLY.
     /// Returns exactly `is_restorable_spec(token)` — true iff `restore(token)`
-    /// would succeed at this moment: TRACK on, same container, frame still
-    /// live (rejects consumed tokens), on the live branch path within its
-    /// depth bound, and both counter headrooms hold. Borrows the token
-    /// (production parity). The genealogy-only walk that older revisions
-    /// exposed under this name is the private `is_on_current_branch`.
+    /// would succeed at this moment: TRACK on, frame still live (rejects
+    /// consumed tokens), depth headroom. Branch validity and forgery rejection
+    /// live on the owning group's `History` (doc 10 / H2); a raw token past a
+    /// branch cut is structurally restorable to the frame now at its index.
     pub fn is_valid_token(&self, token: &VecToken) -> (b: bool)
         requires
             self.wf(),
@@ -2150,34 +2130,15 @@ where
         if !TRACK {
             return false;
         }
-        let same_container = token.container_id.eq(self.id);
-        if !same_container {
-            return false;
-        }
-        // Frame liveness before the genealogy walk: a consumed token's branch
-        // can still be on-path, but its frame is gone (design doc 08).
+        // Frame liveness: a consumed token's frame is gone (design doc 08).
         if token.frame_idx >= self.frames.len() {
             return false;
         }
-        // Headroom (frames.len() < u32::MAX; the frame-liveness check above
-        // guarantees frame_idx < frames.len(), so is_token_valid's depth is live).
+        // Headroom (frames.len() < u32::MAX).
         if self.frames.len() >= u32::MAX as usize {
             return false;
         }
-        self.is_on_current_branch(token)
-    }
-
-    /// Genealogy-only validity (identity assumed checked): the token's generation
-    /// still matches the live stamp at its frame depth (O(1)). Private — the one
-    /// public validity notion is `is_valid_token` ("restorable now").
-    fn is_on_current_branch(&self, token: &VecToken) -> (b: bool)
-        requires
-            self.wf(),
-            self.frames@.len() < u32::MAX,
-        ensures
-            b == self.forks.valid(token.frame_idx as nat, token.generation),
-    {
-        self.forks.is_valid(token.frame_idx, token.generation)
+        true
     }
 
     #[inline(always)]
@@ -3113,7 +3074,6 @@ where
             final(self).view() == old(self).view(),
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
-            final(self).forks == old(self).forks,
     {
         // Run guards before maybe_shrink so a rejected mark does not change
         // capacity: TRACK parity and the u32 depth cast.
@@ -3347,25 +3307,11 @@ where
         // mark IS a seal for every Auto column, with no caller change. A no-op for
         // plain/column-split representations.
         self.seal_open_frame_copy();
-        // Genealogy coordinates, captured before the push (depth = frames below
-        // Mint the generation for this frame's depth (== its frame index),
-        // growing the stamp array the first time a depth is reached. Done before
-        // `push_frame` (which does not touch `forks`); the token's `frame_idx`
-        // after the push equals the stamped depth.
-        let token_depth = self.frames.len();
-        let ghost pre = *self;
-        let token_gen = self.forks.stamp_at(token_depth);
-        // `stamp_at` grows `forks.levels` only; every `wf` conjunct reads the
-        // pinned fields (store/frames/diff_log/snapshots/active_saved_len), so
-        // `wf` carries across the forks-only mutation.
-        proof { self.lemma_forks_change_preserves_wf(pre); }
-        let token_container = self.id;
+        // The token is a structural frame handle only: its validity coordinate
+        // (generation stamp at this depth) lives on the owning `History`,
+        // written once for the whole group (doc 10 / H2).
         self.push_frame(shrink);
-        VecToken {
-            frame_idx: self.frames.len() - 1,
-            generation: token_gen,
-            container_id: token_container,
-        }
+        VecToken { frame_idx: self.frames.len() - 1 }
     }
 
     /// Seal the open top frame with a value-opaque per-frame encoder (sorted index
@@ -3387,9 +3333,7 @@ where
             final(self).snapshots_view() == old(self).snapshots_view(),
             final(self).frames@ == old(self).frames@,
             final(self).store == old(self).store,
-            final(self).forks == old(self).forks,
             final(self).active_saved_len == old(self).active_saved_len,
-            final(self).id == old(self).id,
     {
         if self.frames.len() == 0 {
             return;
@@ -3528,7 +3472,6 @@ where
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target_index as int),
             // Genealogy untouched (the wrapper does the cut): the whole stamp
             // array is preserved, enough for the wrapper's bump_from headroom and wf.
-            final(self).forks == old(self).forks,
     {
         // Structural guard only (the genealogy/container guards live in the
         // `restore` wrapper): the target frame must be in range before we read
@@ -3552,7 +3495,6 @@ where
         // mutations + the `*self` snapshot below) so the `final.forks == old.forks`
         // postcondition holds. The genealogy validity / fork() itself is the
         // `restore` wrapper's job.
-        let ghost forks0 = self.forks;
 
         // Resize the view to EXACTLY the target's saved_len (truncate, or grow
         // with `T::default()` fillers). After this the base length is
@@ -3565,8 +3507,6 @@ where
         let ghost old_self = *self;
         proof {
             saved_len.lemma_as_nat_bounded();
-            // Confirm the *self read didn't disturb forks tracking.
-            assert(self.forks == forks0);
         }
         self.store.resize_default(saved_len);
         // Pre-replay flag reset (production's wholesale zero / sparse
@@ -3837,7 +3777,6 @@ where
         // `final.forks == old.forks` postcondition — forks was untouched since
         // entry, so its fields still match the ghosts captured at the top.
         proof {
-            assert(self.forks == forks0);
         }
 
         proof {
@@ -3847,7 +3786,6 @@ where
             // forks untouched by reconstruction, so its fh_wf carries from entry
             // (the wrapper does the fork). fh_wf reads only origins@ + branch id,
             // both pinned to the entry ghosts.
-            assert(self.forks == forks0);
 
             // Re-establish wf for the truncated stack [0, target_index).
             let frames = self.frames@;
@@ -4012,17 +3950,16 @@ where
         }
     }
 
-    /// Restore to the version named by `token`: validate the genealogy,
-    /// reconstruct via `restore_frame`, and record the branch cut. The standalone
-    /// (non-`SyncGroup`) entry point; contract unchanged from before the
-    /// `restore_frame` factoring.
+    /// Restore to the frame named by `token`: reconstruct via `restore_frame`.
+    /// The standalone (non-`SyncGroup`) entry point. Structural only (H2): the
+    /// branch cut and abandoned-future invalidation are the owning `History`'s
+    /// (`History::restore_to`), recorded once for the whole group.
     #[verifier::spinoff_prover]
     pub(crate) fn restore(&mut self, token: VecToken)
         where T: core::default::Default
         requires
             old(self).wf(),
             TRACK,
-            old(self).is_token_valid_spec(token),
             token.frame_idx_spec() < old(self).depth_spec(),
             old(self).depth_spec() < u32::MAX,
         ensures
@@ -4031,13 +3968,8 @@ where
             final(self).depth_spec() == token.frame_idx_spec(),
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
     {
-        // Genealogy guards (container + abandoned-future) and the fork() headroom
-        // — the parts `restore_frame` deliberately omits. Message parity retained.
+        // Structural guards — the parts `restore_frame` deliberately omits.
         crate::guard::check_precondition(TRACK, "restore() called on untracked vec");
-        crate::guard::check_precondition(
-            token.container_id.eq(self.id),
-            "token belongs to a different container",
-        );
         crate::guard::check_precondition(
             token.frame_idx < self.frames.len(),
             "token points beyond frame stack",
@@ -4046,26 +3978,7 @@ where
             self.frames.len() < u32::MAX as usize,
             "Vec::restore: frame-stack depth would overflow u32",
         );
-        crate::guard::check_precondition(
-            self.is_on_current_branch(&token),
-            "invalid restore token (abandoned future)",
-        );
-        // `restore_frame` leaves `forks` untouched (genealogy-free), so the
-        // generation headroom carries to the `bump_from` below.
-        let ghost forks0 = self.forks;
         self.restore_frame(token.frame_idx);
-        proof { assert(self.forks == forks0); }
-        // Record the branch cut: bump the generations strictly below the restored
-        // depth, invalidating the abandoned future (tokens deeper than `token`)
-        // while `token` and its ancestors stay valid (`lemma_bump_invalidates`).
-        // `bump_from` touches only `self.forks`; the framing lemma re-establishes
-        // wf from the unchanged non-forks state.
-        let ghost old_self = *self;
-        self.forks.bump_from(token.frame_idx + 1);
-        proof {
-            assert(self.forks.levels@.len() == old_self.forks.levels@.len());
-            self.lemma_forks_change_preserves_wf(old_self);
-        }
     }
 }
 
@@ -4077,16 +3990,17 @@ where
 // ---------------------------------------------------------------------------
 
 /// Read-only handle over a `Vec`'s current contents.
-pub struct VecView<'a, T, I, S, const TRACK: bool>
+pub struct VecView<'a, T, I, S, const TRACK: bool, VC = crate::value_compressor::NoValueCompression>
 where
     T: Sized + Copy,
     I: IndexLike,
     S: DiffStore<T, I, TRACK>,
+    VC: crate::value_compressor::ValueCompressor<T>,
 {
-    pub(crate) vec: &'a Vec<T, I, S, TRACK>,
+    pub(crate) vec: &'a Vec<T, I, S, TRACK, VC>,
 }
 
-impl<'a, T, I, S, const TRACK: bool> VecView<'a, T, I, S, TRACK>
+impl<'a, T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> VecView<'a, T, I, S, TRACK, VC>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -4099,7 +4013,7 @@ where
 
     /// The underlying vec (spec counterpart; the field is `pub(crate)` — privacy
     /// closeout).
-    pub open(crate) spec fn vec_ref(&self) -> &Vec<T, I, S, TRACK> {
+    pub open(crate) spec fn vec_ref(&self) -> &Vec<T, I, S, TRACK, VC> {
         self.vec
     }
 
@@ -4126,7 +4040,7 @@ where
     }
 
     /// Iterator over `[0, len)` in order.
-    pub fn iter(&self) -> (it: VecViewIter<'a, T, I, S, TRACK>)
+    pub fn iter(&self) -> (it: VecViewIter<'a, T, I, S, TRACK, VC>)
         requires self.vec_ref().wf(),
         ensures it.vec_ref() == self.vec_ref(), it.pos_spec() == 0,
     {
@@ -4135,24 +4049,25 @@ where
 }
 
 /// Forward index iterator over a `Vec`'s contents.
-pub struct VecViewIter<'a, T, I, S, const TRACK: bool>
+pub struct VecViewIter<'a, T, I, S, const TRACK: bool, VC = crate::value_compressor::NoValueCompression>
 where
     T: Sized + Copy,
     I: IndexLike,
     S: DiffStore<T, I, TRACK>,
+    VC: crate::value_compressor::ValueCompressor<T>,
 {
-    pub(crate) vec: &'a Vec<T, I, S, TRACK>,
+    pub(crate) vec: &'a Vec<T, I, S, TRACK, VC>,
     pub(crate) pos: usize,
 }
 
-impl<'a, T, I, S, const TRACK: bool> VecViewIter<'a, T, I, S, TRACK>
+impl<'a, T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> VecViewIter<'a, T, I, S, TRACK, VC>
 where
     T: Sized + Copy,
     I: IndexLike,
     S: DiffStore<T, I, TRACK>,
 {
     /// The underlying vec (spec counterpart; the field is `pub(crate)`).
-    pub open(crate) spec fn vec_ref(&self) -> &Vec<T, I, S, TRACK> {
+    pub open(crate) spec fn vec_ref(&self) -> &Vec<T, I, S, TRACK, VC> {
         self.vec
     }
 
@@ -4212,7 +4127,7 @@ where
 }
 
 // Value-major compaction, gated on `T: IndexLike` (the dictionary dedup key).
-impl<T, I, S, const TRACK: bool> Vec<T, I, S, TRACK>
+impl<T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, S, TRACK, VC>
 where
     T: IndexLike,
     I: IndexLike,
@@ -4512,7 +4427,7 @@ where
 
 // Concrete constructors, mirroring production's two `new()` impls.
 
-impl<T, I, const TRACK: bool> Vec<T, I, crate::parallel_store::ParallelStore<T, I>, TRACK>
+impl<T, I, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, crate::parallel_store::ParallelStore<T, I>, TRACK, VC>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -4532,7 +4447,7 @@ where
     }
 }
 
-impl<T, I, const TRACK: bool> Vec<T, I, crate::inline_store::InlineStore<T, I>, TRACK>
+impl<T, I, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, crate::inline_store::InlineStore<T, I>, TRACK, VC>
 where
     T: crate::tagged::Tagged,
     I: IndexLike,
@@ -4564,8 +4479,6 @@ impl core::fmt::Debug for VecToken {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("VecToken")
             .field("frame_idx", &self.frame_idx)
-            .field("generation", &self.generation)
-            .field("container_id", &self.container_id)
             .finish()
     }
 }
@@ -4582,7 +4495,7 @@ impl core::fmt::Debug for VecToken {
 // Enumerated in doc/design/02-trust-boundary.md group E.
 // ---------------------------------------------------------------------------
 
-impl<T, I, S, const TRACK: bool> Vec<T, I, S, TRACK>
+impl<T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, S, TRACK, VC>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -4607,7 +4520,7 @@ where
 /// verified inherent `next` (trust group E). Enables `for x in
 /// vec.view_handle().iter()`; every yielded element comes from the verified
 /// method, whose contract proves in-order enumeration of `view()`.
-impl<'a, T, I, S, const TRACK: bool> Iterator for VecViewIter<'a, T, I, S, TRACK>
+impl<'a, T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Iterator for VecViewIter<'a, T, I, S, TRACK, VC>
 where
     T: Sized + Copy,
     I: crate::index_like::IndexLike,
@@ -4845,6 +4758,75 @@ mod index_major_sorted_compaction_tests {
 }
 
 #[cfg(test)]
+mod layered_selector_tests {
+    // F2.5 acceptance: a LIVE column declared with a real value codec
+    // (ValueDictC) lets the per-frame selector range over index layer x value
+    // layer. On a scattered small-alphabet workload the layered candidate
+    // wins the byte costing, the column restores identically to a plain
+    // oracle AND to a default-codec twin (the layered mode is selectable and
+    // differential-equal), and its diff-log footprint is strictly below the
+    // index-layer-only twin's: the value layer pays beyond the index layer.
+    use super::{ShrinkPolicy, Vec};
+    use crate::parallel_store::ParallelStore;
+    use crate::value_compressor::ValueDictC;
+
+    type VPlain = Vec<u32, u32, ParallelStore<u32, u32>, true>;
+    type VDict = Vec<u32, u32, ParallelStore<u32, u32>, true, ValueDictC>;
+
+    fn read_plain(v: &VPlain) -> std::vec::Vec<u32> {
+        (0..v.len() as usize).map(|i| v.get_index(i as u32)).collect()
+    }
+    fn read_dict(v: &VDict) -> std::vec::Vec<u32> {
+        (0..v.len() as usize).map(|i| v.get_index(i as u32)).collect()
+    }
+
+    #[test]
+    fn layered_column_restores_like_plain_and_out_compresses_index_only() {
+        const N: u32 = 256;
+        const FRAMES: u32 = 24;
+
+        let mut vd = VDict::new_with_mode(crate::diff_compress::CompressionMode::Auto);
+        let mut vi = VPlain::new_with_mode(crate::diff_compress::CompressionMode::Auto);
+        for _ in 0..N {
+            vd.push(0);
+            vi.push(0);
+        }
+
+        // Scattered order (defeats write-order runs; the sorted base still
+        // coalesces) with a 4-symbol value alphabet: the layered runs x dict
+        // candidate's value column bit-packs to 2 bits per entry, undercutting
+        // the base's plain u32 values.
+        let mut td = std::vec::Vec::new();
+        let mut ti = std::vec::Vec::new();
+        for k in 0..FRAMES {
+            td.push(vd.mark(ShrinkPolicy::Never));
+            ti.push(vi.mark(ShrinkPolicy::Never));
+            for i in 0..N {
+                let cell = (i * 37 + 11) % N;
+                let val = (i + k) % 4;
+                vd.set(cell, val);
+                vi.set(cell, val);
+            }
+            assert_eq!(read_dict(&vd), read_plain(&vi), "views diverged at frame {k}");
+        }
+
+        // The value layer must pay beyond the index layer: same universal
+        // seal, same index base, dict-coded values vs plain values.
+        assert!(
+            vd.tracking_bytes() < vi.tracking_bytes(),
+            "layered diff log {} !< index-only {}",
+            vd.tracking_bytes(),
+            vi.tracking_bytes(),
+        );
+
+        // Deep restore through the layered cold region: contents agree.
+        vd.restore(td[3]);
+        vi.restore(ti[3]);
+        assert_eq!(read_dict(&vd), read_plain(&vi), "views diverged after deep restore");
+    }
+}
+
+#[cfg(test)]
 mod adaptive_compaction_tests {
     // A4 acceptance: an Auto (per-frame-adaptive) column where each frame's mode is
     // picked by the real selector (choose_mode) restores identically to a plain
@@ -5053,27 +5035,58 @@ mod forged_token_tests {
         assert_eq!(v.len(), 8);
     }
 
-    /// A token with a forged generation (never minted): rejected by the O(1)
-    /// generation check.
+    /// A group token with a forged generation (never minted): rejected by the
+    /// owning `History`'s O(1) generation check. Post-H2 the genealogy lives
+    /// on `History`, so the forgery test pairs the vec with one (a group of
+    /// one): validity is asked of the history, and only a valid group token's
+    /// depth is handed to the structural `restore`.
     #[test]
-    fn forged_generation_rejected() {
+    fn forged_generation_rejected_by_history() {
         let mut v = V::new();
+        let mut h = crate::history::History::new();
         v.push(1);
-        let genuine = v.mark(ShrinkPolicy::Never);
+        let genuine_group = h.mark();
+        let genuine_vec = v.mark(ShrinkPolicy::Never);
         v.push(2);
-        let forged = VecToken {
-            generation: genuine.generation + 7,
-            ..genuine
+        let forged = crate::history::GroupToken {
+            generation: genuine_group.generation + 7,
+            ..genuine_group
         };
+        assert!(!h.is_valid(forged), "forged generation must be invalid");
+        // The valid pair restores; depths stay in lockstep.
+        assert!(h.is_valid(genuine_group));
+        v.restore(genuine_vec);
+        h.restore_to(genuine_group);
+        assert_eq!(v.len(), 1);
+        assert_eq!(h.depth(), 0);
+    }
+
+    /// A stale group token from an abandoned future: `History::restore_to`
+    /// bumps the deeper generations, so the abandoned branch's token no
+    /// longer validates even though a frame exists at its depth again.
+    #[test]
+    fn abandoned_future_rejected_by_history() {
+        let mut v = V::new();
+        let mut h = crate::history::History::new();
+        v.push(1);
+        let outer_group = h.mark();
+        let outer_vec = v.mark(ShrinkPolicy::Never);
+        v.push(2);
+        let stale_group = h.mark();
+        let _stale_vec = v.mark(ShrinkPolicy::Never);
+        // Restore to the outer frame: the branch cut invalidates stale_group.
+        v.restore(outer_vec);
+        h.restore_to(outer_group);
+        // Re-mark at the same depths on the new branch.
+        let _new_group = h.mark();
+        let _new_vec = v.mark(ShrinkPolicy::Never);
+        v.push(3);
+        let _deep_group = h.mark();
+        let _deep_vec = v.mark(ShrinkPolicy::Never);
         assert!(
-            !v.is_valid_token(&forged),
-            "forged generation must be invalid"
+            !h.is_valid(stale_group),
+            "a token from the abandoned future must not validate"
         );
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            v.restore(forged);
-        }));
-        assert!(r.is_err());
-        assert_eq!(v.len(), 2, "rejected restore must not mutate");
     }
 
     /// A token pointing at a frame depth beyond the live stack: rejected (its
@@ -5199,13 +5212,11 @@ impl PartialEq for VecToken {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
         self.frame_idx == other.frame_idx
-            && self.generation == other.generation
-            && self.container_id == other.container_id
     }
 }
 impl Eq for VecToken {}
 
-impl<'a, T, I, S, const TRACK: bool> ExactSizeIterator for VecViewIter<'a, T, I, S, TRACK>
+impl<'a, T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> ExactSizeIterator for VecViewIter<'a, T, I, S, TRACK, VC>
 where
     T: Sized + Copy,
     I: crate::index_like::IndexLike,

@@ -32,19 +32,73 @@ pub(crate) enum CompletionClamp {
 
 #[derive(Clone, Copy, Debug)]
 pub struct EGraphToken {
-    classes: crate::classes::EClassesToken,
-    nodes: NodeStoreToken,
-    sorts: SortRegistryToken,
-    ops: OpRegistryToken,
-    rules: RuleRegistryToken,
-    axioms: AxiomRegistryToken,
-    lits: LitValStoreToken,
-    unit_node: crate::containers::MapToken,
-    inverse_op: crate::containers::MapToken,
+    /// One `GroupToken` names the whole synchronized member set's version; the
+    /// e-graph's `History` is the single validity authority (doc 10). The
+    /// per-member token structs live in the e-graph's internal depth-indexed
+    /// stacks, not here.
+    group: crate::containers::history::GroupToken,
     /// The completion outcome at mark time. `mark()` rebuilds first, so this value
     /// describes exactly the state being snapshotted; `restore` puts it back so a caller
     /// can never observe an outcome from a discarded scope.
     completion_outcome: Option<CompletionOutcome>,
+}
+
+/// Live-node threshold under which mark/restore stay sequential (see
+/// [`EGraph::fanout_enabled`]): below it the scope dispatch costs more than the
+/// members' mark/restore work.
+pub const PAR_NODE_MIN: usize = 1 << 14;
+
+/// Fan-out observability: total spawned member closures and a bitset of the
+/// rayon worker indices they ran on. The differential test reads these to
+/// assert the parallel path actually spawned rather than degenerating to the
+/// caller's thread; a saturating bitset (indices past 63 fold into bit 63)
+/// still distinguishes one worker from several.
+static FANOUT_SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static FANOUT_WORKERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn fanout_witness() {
+    use std::sync::atomic::Ordering;
+    FANOUT_SPAWNS.fetch_add(1, Ordering::Relaxed);
+    let idx = rayon::current_thread_index().unwrap_or(0).min(63);
+    FANOUT_WORKERS.fetch_or(1u64 << idx, Ordering::Relaxed);
+}
+
+/// Read and reset the fan-out witness: `(spawned closures, distinct workers)`.
+pub fn take_fanout_witness() -> (usize, u32) {
+    use std::sync::atomic::Ordering;
+    let spawns = FANOUT_SPAWNS.swap(0, Ordering::Relaxed);
+    let workers = FANOUT_WORKERS.swap(0, Ordering::Relaxed).count_ones();
+    (spawns, workers)
+}
+
+/// Mark/restore wall-clock accounting, on only under `SEMPER_PROF` so the
+/// live path pays nothing beyond one static bool read. Drives the profile
+/// that decides whether corpus-level parallel gains are reachable: if
+/// mark+restore is a small fraction of solve time, a neutral corpus wall is
+/// the expected outcome, not a defect.
+static PROF_ON: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os("SEMPER_PROF").is_some());
+static MARK_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MARK_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RESTORE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RESTORE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn prof_record(ns: &std::sync::atomic::AtomicU64, calls: &std::sync::atomic::AtomicU64, t: std::time::Instant) {
+    use std::sync::atomic::Ordering;
+    ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    calls.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Read and reset the profile: `(mark ns, mark calls, restore ns, restore calls)`.
+/// All zeros unless `SEMPER_PROF` is set.
+pub fn take_markrestore_profile() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering;
+    (
+        MARK_NS.swap(0, Ordering::Relaxed),
+        MARK_CALLS.swap(0, Ordering::Relaxed),
+        RESTORE_NS.swap(0, Ordering::Relaxed),
+        RESTORE_CALLS.swap(0, Ordering::Relaxed),
+    )
 }
 
 pub struct EGraph<
@@ -60,6 +114,23 @@ pub struct EGraph<
     lits: LitValStore<L, Cfg::V, TRACK>,
     classes: EClasses<Cfg::G, Cfg::ClassKey, Cfg::UL, Cfg::UN, TRACK, PROOFS>,
     nodes: NodeStore<Cfg::G, Cfg::O, Cfg::V, Cfg::C, Cfg::Ids, TRACK, PROOFS>,
+    /// The ONE genealogy for the whole synchronized member set (doc 10): a
+    /// group token's validity and the branch cuts are recorded here once,
+    /// instead of once per member vector. Sole authority for restore validity.
+    history: crate::containers::history::History,
+    /// Depth-indexed member token stacks: `*_marks[d]` restores its member to
+    /// the state the group token at depth `d` names. Structural frame handles
+    /// only; validity lives on `history`. H2 thins these away once `VecToken`
+    /// loses its per-vector genealogy.
+    classes_marks: Vec<crate::classes::EClassesToken>,
+    nodes_marks: Vec<NodeStoreToken>,
+    sorts_marks: Vec<SortRegistryToken>,
+    ops_marks: Vec<OpRegistryToken>,
+    rules_marks: Vec<RuleRegistryToken>,
+    axioms_marks: Vec<AxiomRegistryToken>,
+    lits_marks: Vec<LitValStoreToken>,
+    unit_node_marks: Vec<crate::containers::MapToken>,
+    inverse_op_marks: Vec<crate::containers::MapToken>,
     worklist: Vec<(Cfg::UL, Cfg::G)>,
     collisions: Vec<(Cfg::G, Cfg::G)>,
     /// Reusable scratch for a node's child ids as bare `G` (the canonical-children buffer for
@@ -251,6 +322,16 @@ where
             lits: LitValStore::new(),
             classes: EClasses::new(),
             nodes: NodeStore::new(),
+            history: crate::containers::history::History::new(),
+            classes_marks: Vec::new(),
+            nodes_marks: Vec::new(),
+            sorts_marks: Vec::new(),
+            ops_marks: Vec::new(),
+            rules_marks: Vec::new(),
+            axioms_marks: Vec::new(),
+            lits_marks: Vec::new(),
+            unit_node_marks: Vec::new(),
+            inverse_op_marks: Vec::new(),
             worklist: Vec::new(),
             collisions: Vec::new(),
             g_buf: Vec::new(),
@@ -2966,42 +3047,253 @@ where
         changed
     }
 
+    /// Always sequential: a mark is a per-member frame push, and the fan-out
+    /// loses at every measured size (0.03x at 12k nodes, 0.30x at 200k, 0.68x
+    /// at 1.6M; `par_fanout_bench`). The parallel twin stays reachable through
+    /// [`Self::mark_with`] for re-measurement.
     pub fn mark(&mut self, shrink: ShrinkPolicy) -> EGraphToken {
+        if *PROF_ON {
+            let t = std::time::Instant::now();
+            let tok = self.mark_with(shrink, false);
+            prof_record(&MARK_NS, &MARK_CALLS, t);
+            return tok;
+        }
+        self.mark_with(shrink, false)
+    }
+
+    pub fn restore(&mut self, token: EGraphToken) {
+        let par = self.fanout_enabled();
+        if *PROF_ON {
+            let t = std::time::Instant::now();
+            self.restore_with(token, par);
+            prof_record(&RESTORE_NS, &RESTORE_CALLS, t);
+            return;
+        }
+        self.restore_with(token, par);
+    }
+
+    /// Heap bytes of the ONE shared genealogy (H4b.3 measurement): the
+    /// counterfactual per-member duplication is this times the number of
+    /// semi-persistent columns the members hold (each carried its own
+    /// `GenStamps` before H2).
+    pub fn fork_history_bytes(&self) -> usize {
+        self.history.heap_bytes()
+    }
+
+    /// Whether restore fans the member composites out over a `rayon` scope.
+    /// `SEMPER_PAR=on` forces the fan-out, `SEMPER_PAR=off` forces sequential;
+    /// otherwise the fan-out runs only at or above [`PAR_NODE_MIN`] live nodes,
+    /// because on a small graph the dispatch costs more than the members' work
+    /// (0.73x at 12k nodes vs 1.62x at 200k; `par_fanout_bench`).
+    fn fanout_enabled(&self) -> bool {
+        match std::env::var_os("SEMPER_PAR") {
+            Some(v) if v == "on" => true,
+            Some(v) if v == "off" => false,
+            _ => self.node_count() >= PAR_NODE_MIN,
+        }
+    }
+
+    /// Mark every member composite, sequentially or fanned out over a
+    /// `rayon::scope` on disjoint `&mut` field borrows. Each member owns its
+    /// stores, logs, and frames, so the fan-out closures touch no shared
+    /// state; the rebuild and the tiny map marks run strictly outside it.
+    pub fn mark_with(&mut self, shrink: ShrinkPolicy, par: bool) -> EGraphToken {
         self.rebuild();
+        let (classes, nodes, sorts, ops, rules, axioms, lits) = if par {
+            let mut classes = None;
+            let mut nodes = None;
+            let mut sorts = None;
+            let mut ops = None;
+            let mut rules = None;
+            let mut axioms = None;
+            let mut lits = None;
+            let (c, n, so, o, r, a, l) = (
+                &mut self.classes,
+                &mut self.nodes,
+                &mut self.sorts,
+                &mut self.ops,
+                &mut self.rules,
+                &mut self.axioms,
+                &mut self.lits,
+            );
+            rayon::scope(|s| {
+                s.spawn(|_| {
+                    fanout_witness();
+                    classes = Some(c.mark(shrink));
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    nodes = Some(n.mark(shrink));
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    sorts = Some(so.mark(shrink));
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    ops = Some(o.mark(shrink));
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    rules = Some(r.mark(shrink));
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    axioms = Some(a.mark(shrink));
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    lits = Some(l.mark(shrink));
+                });
+            });
+            (
+                classes.unwrap(),
+                nodes.unwrap(),
+                sorts.unwrap(),
+                ops.unwrap(),
+                rules.unwrap(),
+                axioms.unwrap(),
+                lits.unwrap(),
+            )
+        } else {
+            (
+                self.classes.mark(shrink),
+                self.nodes.mark(shrink),
+                self.sorts.mark(shrink),
+                self.ops.mark(shrink),
+                self.rules.mark(shrink),
+                self.axioms.mark(shrink),
+                self.lits.mark(shrink),
+            )
+        };
+        // ONE genealogy write for the whole member set; the member tokens go
+        // onto the depth-indexed stacks, so the group token alone names this
+        // version. The depth guard is History::mark's precondition.
+        assert!(
+            self.history.depth() < u32::MAX,
+            "mark: frame depth is bounded by the saturation driver"
+        );
+        let group = self.history.mark();
+        debug_assert_eq!(self.classes_marks.len(), group.depth() as usize);
+        self.classes_marks.push(classes);
+        self.nodes_marks.push(nodes);
+        self.sorts_marks.push(sorts);
+        self.ops_marks.push(ops);
+        self.rules_marks.push(rules);
+        self.axioms_marks.push(axioms);
+        self.lits_marks.push(lits);
+        self.unit_node_marks.push(
+            self.unit_node
+                .try_mark(shrink)
+                .expect("mark: frame depth is bounded by the saturation driver"),
+        );
+        self.inverse_op_marks.push(
+            self.inverse_op
+                .try_mark(shrink)
+                .expect("mark: frame depth is bounded by the saturation driver"),
+        );
         EGraphToken {
-            classes: self.classes.mark(shrink),
-            nodes: self.nodes.mark(shrink),
-            sorts: self.sorts.mark(shrink),
-            ops: self.ops.mark(shrink),
-            rules: self.rules.mark(shrink),
-            axioms: self.axioms.mark(shrink),
-            lits: self.lits.mark(shrink),
-            unit_node: self
-                .unit_node
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-            inverse_op: self
-                .inverse_op
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
+            group,
             completion_outcome: self.completion_outcome,
         }
     }
 
-    pub fn restore(&mut self, token: EGraphToken) {
-        self.classes.restore(token.classes);
-        self.nodes.restore(token.nodes);
-        self.sorts.restore(token.sorts);
-        self.ops.restore(token.ops);
-        self.rules.restore(token.rules);
-        self.axioms.restore(token.axioms);
-        self.lits.restore(token.lits);
+    /// Restore every member composite, sequentially or fanned out over a
+    /// `rayon::scope` on disjoint `&mut` field borrows (same soundness
+    /// argument as [`Self::mark_with`]). The shared bookkeeping (outcome,
+    /// worklists, repair watermark) runs strictly after the fan-out joins.
+    pub fn restore_with(&mut self, token: EGraphToken, par: bool) {
+        // The ONE validity check for the whole member set: the group token's
+        // generation still matches the live stamp at its depth, and its frame
+        // is not already spent. History::restore_to below records the branch
+        // cut once, invalidating every deeper token.
+        assert!(
+            self.history.is_valid(token.group),
+            "restore: token minted by this container's own mark"
+        );
+        let depth32 = token.group.depth();
+        assert!(
+            depth32 < self.history.depth(),
+            "restore: token minted by this container's own mark, and not already spent"
+        );
+        let d = depth32 as usize;
+        // Take each member's structural token at the target depth; the deeper
+        // entries belong to the abandoned future and drop with the truncate.
+        self.classes_marks.truncate(d + 1);
+        self.nodes_marks.truncate(d + 1);
+        self.sorts_marks.truncate(d + 1);
+        self.ops_marks.truncate(d + 1);
+        self.rules_marks.truncate(d + 1);
+        self.axioms_marks.truncate(d + 1);
+        self.lits_marks.truncate(d + 1);
+        self.unit_node_marks.truncate(d + 1);
+        self.inverse_op_marks.truncate(d + 1);
+        let classes = self.classes_marks.pop().expect("restore: member stack tracks history depth");
+        let nodes = self.nodes_marks.pop().expect("restore: member stack tracks history depth");
+        let sorts = self.sorts_marks.pop().expect("restore: member stack tracks history depth");
+        let ops = self.ops_marks.pop().expect("restore: member stack tracks history depth");
+        let rules = self.rules_marks.pop().expect("restore: member stack tracks history depth");
+        let axioms = self.axioms_marks.pop().expect("restore: member stack tracks history depth");
+        let lits = self.lits_marks.pop().expect("restore: member stack tracks history depth");
+        let unit_node = self.unit_node_marks.pop().expect("restore: member stack tracks history depth");
+        let inverse_op = self.inverse_op_marks.pop().expect("restore: member stack tracks history depth");
+        if par {
+            let (c, n, so, o, r, a, l) = (
+                &mut self.classes,
+                &mut self.nodes,
+                &mut self.sorts,
+                &mut self.ops,
+                &mut self.rules,
+                &mut self.axioms,
+                &mut self.lits,
+            );
+            rayon::scope(|s| {
+                s.spawn(|_| {
+                    fanout_witness();
+                    c.restore(classes);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    n.restore(nodes);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    so.restore(sorts);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    o.restore(ops);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    r.restore(rules);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    a.restore(axioms);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    l.restore(lits);
+                });
+            });
+        } else {
+            self.classes.restore(classes);
+            self.nodes.restore(nodes);
+            self.sorts.restore(sorts);
+            self.ops.restore(ops);
+            self.rules.restore(rules);
+            self.axioms.restore(axioms);
+            self.lits.restore(lits);
+        }
         self.unit_node
-            .try_restore(token.unit_node)
+            .try_restore(unit_node)
             .expect("restore: token minted by this container's own mark");
         self.inverse_op
-            .try_restore(token.inverse_op)
+            .try_restore(inverse_op)
             .expect("restore: token minted by this container's own mark");
+        // One branch-cut record for the whole set.
+        self.history.restore_to(token.group);
         // Roll the outcome back with the graph: the mark-time value describes exactly the
         // restored state (mark() rebuilds first), so a post-restore reader never sees an
         // outcome computed for the discarded scope.

@@ -82,6 +82,52 @@ pub struct ClassData<L: DenseId, T: DenseId> {
     pub size: <T as DenseId>::Index,
 }
 
+/// Spec-carrying equality for the class payload (F2.4): what lets the
+/// ClassData column instantiate `ValueRle`. Ids and index words compare
+/// through `as_usize` (whose contract ties it to `as_nat`) plus injectivity;
+/// the bools compare natively; the struct equality follows fieldwise.
+impl<L: DenseId, T: DenseId> crate::value_compressor::EqSpec for ClassData<L, T> {
+    fn eq_exec(&self, other: &Self) -> (r: bool)
+        ensures r == (self == other),
+    {
+        let ul = self.use_list.as_usize() == other.use_list.as_usize();
+        let mr = match (self.min_row, other.min_row) {
+            (Option::None, Option::None) => true,
+            (Option::Some(a), Option::Some(b)) => a.as_usize() == b.as_usize(),
+            _ => false,
+        };
+        let sz = self.size.as_usize() == other.size.as_usize();
+        let r = ul && mr && sz && (self.atomic == other.atomic)
+            && (self.matchable == other.matchable);
+        proof {
+            if r {
+                L::lemma_as_nat_injective(self.use_list, other.use_list);
+                <T as DenseId>::Index::lemma_as_nat_injective(self.size, other.size);
+                match (self.min_row, other.min_row) {
+                    (Option::Some(a), Option::Some(b)) => {
+                        <T as DenseId>::Index::lemma_as_nat_injective(a, b);
+                    }
+                    _ => {}
+                }
+                assert(*self == *other);
+            } else {
+                // Contrapositive: equal structs make every exec comparison
+                // true (each `as_usize` result's nat is its receiver's
+                // `as_nat`, and equal receivers have equal `as_nat`s), which
+                // contradicts !r.
+                if *self == *other {
+                    assert(ul);
+                    assert(sz);
+                    assert(mr);
+                    assert(false);
+                }
+                assert(*self != *other);
+            }
+        }
+        r
+    }
+}
+
 impl<L: DenseId, T: DenseId> Clone for ClassData<L, T> {
     fn clone(&self) -> (r: Self)
         ensures r == *self,
@@ -396,6 +442,13 @@ where
     /// Per-class data. The sparse set uses the full index word internally so
     /// its length can represent the complete bit-stealing ID cardinality; its
     /// numeric keys convert losslessly to the packed `K` stored in the ring.
+    /// Value layer: measured NoValueCompression for the SMT profile. The
+    /// column CAN instantiate `ValueRle` (its `EqSpec` impl below is what
+    /// F2.4 added), and the corpus shadow measurement refuted it there:
+    /// 3.56/3.31 MB for the layered RLE candidates against 2.48 MB plain and
+    /// 2.29 MB sorted runs, zero frames choosing RLE out of 9,845 (SMT
+    /// frames write distinct class payloads, so equality runs degenerate to
+    /// one run per entry). Revisit at EqSat frame scale (goal F5).
     pub(crate) reprs: SparseSet<ClassData<L, T>, <T as DenseId>::Index,
         InlineStore<ClassData<L, T>, <T as DenseId>::Index>, TRACK>,
     /// Verified canonical-representative lookup.
@@ -1089,6 +1142,9 @@ where
     /// ring splice with payload clear, repr removal). Extracted for the same
     /// reason as `lemma_splice_disjoint` (list.rs): proved inline, the ring
     /// and root quantifiers e-match against both states' full `wf`.
+    /// rlimit raised: the F2.4 `EqSpec` impl's ambient axioms nudged this
+    /// proof past the default budget without changing its content.
+    #[verifier::rlimit(60)]
     proof fn lemma_merge_wf(&self, o: Self, s: T, ab: T, key_ab: nat, skey: nat,
         ab_pay: Opt<K>, cs: int, ps: int, ca: int, pa: int)
         requires
@@ -1521,6 +1577,9 @@ where
     /// the absorbed payload cleared, repr removal. `None` iff already one
     /// class. The core of `merge` and `merge_directed`; the distinct-rings
     /// precondition of `splice_absorb` is discharged here from W2 + W3.
+    // rlimit raised alongside lemma_merge_wf: the F2.4 EqSpec impl's ambient
+    // axioms nudged this proof past the default budget, content unchanged.
+    #[verifier::rlimit(120)]
     pub(crate) fn merge_with(&mut self, a: T, b: T, directed: bool, prefer_a: bool)
         -> (r: Option<MergeInfo<T, L>>)
         requires old(self).wf(),

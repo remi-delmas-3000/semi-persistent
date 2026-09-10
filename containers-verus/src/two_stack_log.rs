@@ -24,7 +24,7 @@ use crate::compression_config::ColumnConfig;
 
 verus! {
 
-pub struct TwoStackLog<T, I> {
+pub struct TwoStackLog<T: Copy, I> {
     /// Compressed, read-only bottom (older finalized frames).
     pub cold: CompressedStack<T, I>,
     /// Plain, mutable top (recent frames, including the active one).

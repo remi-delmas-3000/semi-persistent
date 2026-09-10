@@ -172,6 +172,9 @@ pub struct FixedArityCache<
     const PROOFS: bool = false,
 > {
     /// One entry per node, so `L` (a local node id) is the index width.
+    // Value layer: NoValueCompression by measurement (F2.4): the layered RLE
+    // candidates cost 7.28/6.84 MB against 5.06 MB plain and 4.62 MB sorted
+    // runs on the corpus, zero wins in 39,272 frames. Revisit at EqSat scale.
     nodes: VecI<FixedArityNode<G, O, K>, L, TRACK>,
     index: hashbrown::HashMap<StoredKey<L>, (), PassthroughBuildHasher>,
     /// Recanonicalization history, indexed at `usize`: its population is the number of
@@ -548,6 +551,8 @@ pub struct VariableArityCache<
     const PROOFS: bool = false,
 > {
     /// One entry per node, so `L` (a local node id) is the index width.
+    // Same measured demotion as the fixed-arity cache (46.9/42.8 KB layered
+    // RLE vs 35.0 KB plain, 33.8 KB sorted runs, zero wins in 537 frames).
     nodes: VecI<VariableArityNode<G, O>, L, TRACK>,
     /// The shared child pool the nodes' spans address. Indexed at `usize`, matching the
     /// `start`/`end` words in [`VariableArityNode`]: its population is `Σ arity` over the

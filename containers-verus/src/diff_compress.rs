@@ -2196,10 +2196,14 @@ pub open spec fn exception_at<T>(ex: Seq<(usize, T)>, k: int) -> bool {
     exists|e: int| 0 <= e < ex.len() && (#[trigger] ex[e]).0 == k
 }
 
-pub enum ColdFrame<T, I> {
+pub enum ColdFrame<T: Copy, I, VC: crate::value_compressor::ValueCompressor<T> = crate::value_compressor::NoValueCompression> {
     Plain(Vec<(T, I)>),
     Dict(DictFrame<T, I>),
     Runs(RunCol<T, I>),
+    /// The F2 composed mode: index layer x `ValueCompressor` value layer on
+    /// one frame. The arm every column family can inhabit (the codec's bound
+    /// decides which compressors exist for `T`).
+    Layered(crate::layered::LayeredFrame<T, I, VC>),
 }
 
 /// An uncompressed (still-open) frame: the plain `(value, index)` write set. Takes
@@ -2265,7 +2269,7 @@ impl<T: Copy, I: IndexLike> HotFrame<T, I> {
 impl<T: IndexLike, I: IndexLike> HotFrame<T, I> {
     /// Seal this frame into a compressed one in the given mode (the per-frame runtime
     /// choice). Preserves the write set as a multiset.
-    pub fn compress(&self, mode: CompressionMode) -> (r: ColdFrame<T, I>)
+    pub fn compress<VC: crate::value_compressor::ValueCompressor<T>>(&self, mode: CompressionMode) -> (r: ColdFrame<T, I, VC>)
         ensures
             r.wf(),
             r.decode().to_multiset() == self.decode().to_multiset(),
@@ -2275,12 +2279,13 @@ impl<T: IndexLike, I: IndexLike> HotFrame<T, I> {
     }
 }
 
-impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
+impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> ColdFrame<T, I, VC> {
     pub open spec fn wf(&self) -> bool {
         match self {
             ColdFrame::Plain(_) => true,
             ColdFrame::Dict(d) => d.wf(),
             ColdFrame::Runs(r) => r.wf(),
+            ColdFrame::Layered(l) => l.wf(),
         }
     }
 
@@ -2290,10 +2295,11 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
             ColdFrame::Plain(v) => v@,
             ColdFrame::Dict(d) => d.decode(),
             ColdFrame::Runs(r) => r.decode(),
+            ColdFrame::Layered(l) => l.decode(),
         }
     }
 
-    /// Entry count, O(1) in every mode.
+    /// Entry count, O(1) in every mode except the layered one (codec-defined).
     pub fn entry_len(&self) -> (n: usize)
         requires self.wf(),
         ensures n == self.decode().len(),
@@ -2302,6 +2308,7 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
             ColdFrame::Plain(v) => v.len(),
             ColdFrame::Dict(d) => d.entry_len(),
             ColdFrame::Runs(r) => r.entry_len(),
+            ColdFrame::Layered(l) => l.entry_len(),
         }
     }
 
@@ -2314,6 +2321,7 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
             ColdFrame::Plain(v) => v[i],
             ColdFrame::Dict(d) => d.decode_at(i),
             ColdFrame::Runs(r) => r.decode_at(i),
+            ColdFrame::Layered(l) => l.decode_at(i),
         }
     }
 
@@ -2324,7 +2332,7 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
     /// PLAIN frame when runs did not coalesce enough to pay; the contract is the
     /// same either way, so the demotion is invisible to callers, and a run frame
     /// larger than its plain equivalent can never be stored.
-    pub fn compress_mode_copy(diffs: &Vec<(T, I)>, mode: CompressionMode) -> (r: ColdFrame<T, I>)
+    pub fn compress_mode_copy(diffs: &Vec<(T, I)>, mode: CompressionMode) -> (r: ColdFrame<T, I, VC>)
         ensures
             r.wf(),
             r.decode().to_multiset() == diffs@.to_multiset(),
@@ -2335,7 +2343,7 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
             CompressionMode::IndexRunsSorted => Some(RunCol::compress_sorted(diffs)),
             _ => None,
         };
-        match runs {
+        let base = match runs {
             Some(rc) => {
                 // Self-demotion: real encoded size against the plain frame.
                 let plain_bytes = plain_frame_bytes::<T, I>(diffs.len());
@@ -2347,12 +2355,67 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
                 }
             }
             None => Self::plain_copy(diffs),
+        };
+        Self::select_layered(diffs, base)
+    }
+
+    /// The F2.5 selector: when the column's codec is enabled, ALSO build the
+    /// layered candidates (index runs x codec, plain index x codec) and keep
+    /// whichever of {base, layered} has the smallest real encoded size. The
+    /// layered candidates decode EXACTLY the input, so every contract the
+    /// base carries (write multiset, unique-index preservation) is theirs
+    /// too, and self-demotion to the base (which itself demotes to plain) is
+    /// the fallback whenever the codec does not pay. `byte_len` is
+    /// diagnostic-only, so the CHOICE carries no proof weight: whichever
+    /// frame wins, its own wf/decode contract is what restores.
+    pub fn select_layered(diffs: &Vec<(T, I)>, base: ColdFrame<T, I, VC>)
+        -> (r: ColdFrame<T, I, VC>)
+        requires
+            base.wf(),
+            base.decode().to_multiset() == diffs@.to_multiset(),
+            unique_idx(diffs@) ==> unique_idx(base.decode()),
+        ensures
+            r.wf(),
+            r.decode().to_multiset() == diffs@.to_multiset(),
+            unique_idx(diffs@) ==> unique_idx(r.decode()),
+    {
+        if !VC::enabled() {
+            return base;
+        }
+        // The sorted candidate reorders, so it enters only when the frame's
+        // indices are unique (the same runtime gate the base sorted encoder
+        // rides behind); the exact candidates enter unconditionally.
+        let lay_runs = crate::layered::LayeredFrame::<T, I, VC>::compress_runs(diffs);
+        let lay_plain = crate::layered::LayeredFrame::<T, I, VC>::compress_plain(diffs);
+        let lay_sorted = if is_unique_idx(diffs) {
+            Some(crate::layered::LayeredFrame::<T, I, VC>::compress_runs_sorted(diffs))
+        } else {
+            None
+        };
+        let bb = base.byte_len();
+        let rb = lay_runs.byte_len();
+        let pb = lay_plain.byte_len();
+        let sb = match &lay_sorted {
+            Some(f) => f.byte_len(),
+            None => usize::MAX,
+        };
+        if sb <= bb && sb <= rb && sb <= pb {
+            match lay_sorted {
+                Some(f) => ColdFrame::Layered(f),
+                None => base,
+            }
+        } else if rb <= bb && rb <= pb {
+            ColdFrame::Layered(lay_runs)
+        } else if pb <= bb {
+            ColdFrame::Layered(lay_plain)
+        } else {
+            base
         }
     }
 
     /// The plain frame (exact copy). Factored so both the `None` mode and the
     /// self-demotion path share it.
-    pub fn plain_copy(diffs: &Vec<(T, I)>) -> (r: ColdFrame<T, I>)
+    pub fn plain_copy(diffs: &Vec<(T, I)>) -> (r: ColdFrame<T, I, VC>)
         ensures
             r.wf(),
             r.decode() == diffs@,
@@ -2379,6 +2442,7 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
                 + d.codes.byte_len()
                 + d.idxs.len() * core::mem::size_of::<I>(),
             ColdFrame::Runs(r) => r.byte_len(),
+            ColdFrame::Layered(l) => l.byte_len(),
         }
     }
 
@@ -2404,6 +2468,7 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
             }
             ColdFrame::Dict(d) => d.decode_exec(),
             ColdFrame::Runs(r) => r.decode_exec(),
+            ColdFrame::Layered(l) => l.decode_exec(),
         }
     }
 
@@ -2438,6 +2503,7 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
             }
             ColdFrame::Dict(d) => CompressedFrame::restore_to(d, target),
             ColdFrame::Runs(r) => CompressedFrame::restore_to(r, target),
+            ColdFrame::Layered(l) => l.restore_to(target),
         }
     }
 }
@@ -2445,7 +2511,7 @@ impl<T: Copy, I: IndexLike> ColdFrame<T, I> {
 /// The enum is the runtime-dispatch carrier: `choose_mode` picks a variant per frame,
 /// and this impl makes the whole per-frame mix satisfy one interface, so callers hold
 /// `ColdFrame` and never see which encoding a frame actually uses.
-impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for ColdFrame<T, I> {
+impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> CompressedFrame<T, I> for ColdFrame<T, I, VC> {
     open spec fn wf(&self) -> bool { ColdFrame::wf(self) }
 
     open spec fn decode(&self) -> Seq<(T, I)> { ColdFrame::decode(self) }
@@ -2457,18 +2523,18 @@ impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for ColdFrame<T, I> {
     fn restore_to(&self, target: &mut Vec<T>) { ColdFrame::restore_to(self, target) }
 }
 
-impl<T: IndexLike, I: IndexLike> ColdFrame<T, I> {
+impl<T: IndexLike, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> ColdFrame<T, I, VC> {
     /// Encode a finalized frame, picking the mode. `Plain`, `ValueDict`, `IndexRuns`
     /// (write-order) and `IndexRunsSorted` (sort-first) all preserve the write
     /// multiset; `Plain`/`ValueDict`/`IndexRuns` also preserve the exact sequence.
     /// `decode().to_multiset() == diffs@.to_multiset()` for every mode.
-    pub fn compress_mode(diffs: &Vec<(T, I)>, mode: CompressionMode) -> (r: ColdFrame<T, I>)
+    pub fn compress_mode(diffs: &Vec<(T, I)>, mode: CompressionMode) -> (r: ColdFrame<T, I, VC>)
         ensures
             r.wf(),
             r.decode().to_multiset() == diffs@.to_multiset(),
             unique_idx(diffs@) ==> unique_idx(r.decode()),
     {
-        match mode {
+        let base = match mode {
             CompressionMode::ValueDict => {
                 let d = compress(diffs);
                 ColdFrame::Dict(d)
@@ -2497,7 +2563,8 @@ impl<T: IndexLike, I: IndexLike> ColdFrame<T, I> {
                 assert(copy@ =~= diffs@);
                 ColdFrame::Plain(copy)
             }
-        }
+        };
+        Self::select_layered(diffs, base)
     }
 }
 

@@ -23,7 +23,7 @@ verus! {
 /// A version token for a synced group: the generation stamp minted at mark time
 /// and the mark depth. Drops `VecToken`'s per-vector `container_id` — one token
 /// names the whole group's version, validated once by `History`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct GroupToken {
     pub(crate) generation: u64,
     pub(crate) depth: u32,
@@ -34,6 +34,14 @@ impl GroupToken {
     /// crate-private so a token cannot be forged field-by-field outside).
     pub open(crate) spec fn depth_spec(&self) -> nat {
         self.depth as nat
+    }
+
+    /// Exec twin of `depth_spec`: the consumer restores every member to this
+    /// depth after validating the token against the group's `History`.
+    pub fn depth(&self) -> (d: u32)
+        ensures d as nat == self.depth_spec(),
+    {
+        self.depth
     }
 }
 
@@ -66,17 +74,16 @@ impl History {
         self.stamps.valid(t.depth as nat, t.generation)
     }
 
-    pub(crate) fn new() -> (r: History)
+    pub fn new() -> (r: History)
         ensures
             r.wf(),
-            r.depth == 0,
-            r.stamps.levels@.len() == 0,
+            r.depth_spec() == 0,
     {
         History { stamps: crate::gen_stamps::GenStamps::new(0), depth: 0 }
     }
 
-    pub(crate) fn depth(&self) -> (d: u32)
-        ensures d == self.depth,
+    pub fn depth(&self) -> (d: u32)
+        ensures d as nat == self.depth_spec(),
     {
         self.depth
     }
@@ -84,14 +91,14 @@ impl History {
     /// Open a new mark: mint the generation for the current depth (growing the
     /// stamp array the first time a depth is reached), then depth advances by one.
     /// The token is immediately valid.
-    pub(crate) fn mark(&mut self) -> (t: GroupToken)
+    pub fn mark(&mut self) -> (t: GroupToken)
         requires
             old(self).wf(),
-            old(self).depth < u32::MAX,
+            old(self).depth_spec() < u32::MAX as nat,
         ensures
             final(self).wf(),
-            final(self).depth == old(self).depth + 1,
-            t.depth == old(self).depth,
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            t.depth_spec() == old(self).depth_spec(),
             final(self).valid_spec(t),
     {
         let d = self.depth;
@@ -102,11 +109,18 @@ impl History {
 
     /// Is `t` valid — does its generation still match the live stamp at its depth?
     /// Computed once for the whole group (versus `N` identical walks today), O(1).
-    pub(crate) fn is_valid(&self, t: GroupToken) -> (r: bool)
+    pub fn is_valid(&self, t: GroupToken) -> (r: bool)
         requires self.wf(),
         ensures r == self.valid_spec(t),
     {
         self.stamps.is_valid(t.depth as usize, t.generation)
+    }
+
+    /// Heap bytes of the genealogy (diagnostic; no spec content). O(max depth).
+    /// The H4b.3 measurement reads this: one shared instance versus the
+    /// per-member `GenStamps` every column used to carry.
+    pub fn heap_bytes(&self) -> usize {
+        self.stamps.heap_bytes()
     }
 
     /// Restore to `t`: bump the levels strictly below `t.depth` (invalidating the
@@ -114,14 +128,14 @@ impl History {
     /// ancestors stay valid), and set the depth to the token's. O(1) amortized;
     /// no per-restore growth. No overflow precondition: `bump_from` uses
     /// `wrapping_add`, which changes a level unconditionally.
-    pub(crate) fn restore_to(&mut self, t: GroupToken)
+    pub fn restore_to(&mut self, t: GroupToken)
         requires
             old(self).wf(),
             old(self).valid_spec(t),
-            t.depth < old(self).depth,
+            t.depth_spec() < old(self).depth_spec(),
         ensures
             final(self).wf(),
-            final(self).depth == t.depth,
+            final(self).depth_spec() == t.depth_spec(),
     {
         self.stamps.bump_from((t.depth + 1) as usize);
         self.depth = t.depth;

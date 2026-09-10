@@ -43,7 +43,9 @@ pub proof fn lemma_u64_usize_64bit()
 /// (which has `IndexLike` as a supertrait) is then `Debug`/`Ord`/`Hash` without
 /// the config restating those bounds, and the caches' `#[derive(Debug)]` and
 /// hash-map keying resolve.
-pub trait IndexLike: Sized + Copy + core::cmp::Ord + core::hash::Hash + core::fmt::Debug {
+/// `Send` because the consumer's mark/restore fans containers of index words
+/// out across the rayon pool; every concrete index is a machine word.
+pub trait IndexLike: Sized + Copy + core::cmp::Ord + core::hash::Hash + core::fmt::Debug + Send {
     // -- ghost projections ---------------------------------------------------
 
     /// Ghost projection to a natural number. Injective and bounded.

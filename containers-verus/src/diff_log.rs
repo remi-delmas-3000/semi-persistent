@@ -280,7 +280,7 @@ pub proof fn lemma_cold_idxs_split<I: IndexLike>(cold: Seq<RunCol<(), I>>, k: in
 
 /// Flat write sequence of the adaptive cold tier: concatenate each frame's `decode()`.
 #[verifier::opaque]
-pub open spec fn cold_adaptive<T: Copy, I: IndexLike>(cold: Seq<ColdFrame<T, I>>) -> Seq<(T, I)>
+pub open spec fn cold_adaptive<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(cold: Seq<ColdFrame<T, I, VC>>) -> Seq<(T, I)>
     decreases cold.len(),
 {
     if cold.len() == 0 {
@@ -291,8 +291,8 @@ pub open spec fn cold_adaptive<T: Copy, I: IndexLike>(cold: Seq<ColdFrame<T, I>>
 }
 
 /// Appending a cold frame extends the concatenation by exactly that frame's `decode()`.
-pub proof fn lemma_cold_adaptive_snoc<T: Copy, I: IndexLike>(
-    cold: Seq<ColdFrame<T, I>>, f: ColdFrame<T, I>,
+pub proof fn lemma_cold_adaptive_snoc<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
+    cold: Seq<ColdFrame<T, I, VC>>, f: ColdFrame<T, I, VC>,
 )
     ensures cold_adaptive(cold.push(f)) == cold_adaptive(cold) + f.decode(),
     decreases cold.len(),
@@ -316,8 +316,8 @@ pub proof fn lemma_cold_adaptive_snoc<T: Copy, I: IndexLike>(
 
 /// `cold_adaptive(cold)[i]` lands in frame `k` at offset `i - base`, where
 /// `base == cold_adaptive(cold[0..k]).len()`. The random-access bridge `index` needs.
-pub proof fn lemma_cold_adaptive_at<T: Copy, I: IndexLike>(
-    cold: Seq<ColdFrame<T, I>>, k: int, i: int,
+pub proof fn lemma_cold_adaptive_at<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
+    cold: Seq<ColdFrame<T, I, VC>>, k: int, i: int,
 )
     requires
         0 <= k < cold.len(),
@@ -331,7 +331,7 @@ pub proof fn lemma_cold_adaptive_at<T: Copy, I: IndexLike>(
     let head = cold[0];
     let rest = cold.subrange(1, cold.len() as int);
     if k == 0 {
-        assert(cold.subrange(0, 0) =~= Seq::<ColdFrame<T, I>>::empty());
+        assert(cold.subrange(0, 0) =~= Seq::<ColdFrame<T, I, VC>>::empty());
         assert(i < head.decode().len());
         assert(cold_adaptive(cold) == head.decode() + cold_adaptive(rest));
         assert(cold_adaptive(cold)[i] == head.decode()[i]);
@@ -355,8 +355,8 @@ pub proof fn lemma_cold_adaptive_at<T: Copy, I: IndexLike>(
 
 /// The first `rem` entries of frame `k` are entries `[base, base+rem)` of the whole
 /// concatenation, `base == cold_adaptive(cold[0..k]).len()`. For truncate.
-pub proof fn lemma_cold_adaptive_at_prefix<T: Copy, I: IndexLike>(
-    cold: Seq<ColdFrame<T, I>>, k: int, rem: int,
+pub proof fn lemma_cold_adaptive_at_prefix<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
+    cold: Seq<ColdFrame<T, I, VC>>, k: int, rem: int,
 )
     requires
         0 <= k < cold.len(),
@@ -373,8 +373,8 @@ pub proof fn lemma_cold_adaptive_at_prefix<T: Copy, I: IndexLike>(
 }
 
 /// `cold_adaptive` splits at any frame boundary.
-pub proof fn lemma_cold_adaptive_split<T: Copy, I: IndexLike>(
-    cold: Seq<ColdFrame<T, I>>, k: int,
+pub proof fn lemma_cold_adaptive_split<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
+    cold: Seq<ColdFrame<T, I, VC>>, k: int,
 )
     requires 0 <= k <= cold.len(),
     ensures
@@ -384,11 +384,11 @@ pub proof fn lemma_cold_adaptive_split<T: Copy, I: IndexLike>(
 {
     reveal_with_fuel(cold_adaptive, 2);
     if cold.len() == 0 {
-        assert(cold.subrange(0, k) =~= Seq::<ColdFrame<T, I>>::empty());
-        assert(cold.subrange(k, cold.len() as int) =~= Seq::<ColdFrame<T, I>>::empty());
+        assert(cold.subrange(0, k) =~= Seq::<ColdFrame<T, I, VC>>::empty());
+        assert(cold.subrange(k, cold.len() as int) =~= Seq::<ColdFrame<T, I, VC>>::empty());
         assert(cold_adaptive(cold) =~= Seq::<(T, I)>::empty());
     } else if k == 0 {
-        assert(cold.subrange(0, 0) =~= Seq::<ColdFrame<T, I>>::empty());
+        assert(cold.subrange(0, 0) =~= Seq::<ColdFrame<T, I, VC>>::empty());
         assert(cold.subrange(0, cold.len() as int) =~= cold);
     } else {
         let head = cold[0];
@@ -545,8 +545,8 @@ impl<I: IndexLike> DiffIdxs<I> {
 }
 
 /// The adaptive tier's flat length: cold frames' concatenation plus the hot pair tail.
-pub open spec fn adaptive_len<T: Copy, I: IndexLike>(
-    cold: Seq<ColdFrame<T, I>>, hot: Seq<(T, I)>,
+pub open spec fn adaptive_len<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
+    cold: Seq<ColdFrame<T, I, VC>>, hot: Seq<(T, I)>,
 ) -> nat {
     cold_adaptive(cold).len() + hot.len()
 }
@@ -557,8 +557,8 @@ pub open spec fn adaptive_len<T: Copy, I: IndexLike>(
 /// same guarantee `Vec::len` rests on); its `== adaptive_len` contract is the surface
 /// the reconstruction proofs consume.
 #[verifier::external_body]
-pub fn adaptive_len_exec<T: Copy, I: IndexLike>(
-    cold: &Vec<ColdFrame<T, I>>, hot: &Vec<(T, I)>,
+pub fn adaptive_len_exec<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
+    cold: &Vec<ColdFrame<T, I, VC>>, hot: &Vec<(T, I)>,
 ) -> (n: usize)
     requires forall|k: int| 0 <= k < cold@.len() ==> (#[trigger] cold@[k]).wf(),
     ensures n == adaptive_len(cold@, hot@),
@@ -572,8 +572,8 @@ pub fn adaptive_len_exec<T: Copy, I: IndexLike>(
 
 /// The adaptive tier's entry at position `i`: cold-frame decode below the tail,
 /// direct read in it.
-pub open spec fn adaptive_at<T: Copy, I: IndexLike>(
-    cold: Seq<ColdFrame<T, I>>, hot: Seq<(T, I)>, i: int,
+pub open spec fn adaptive_at<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
+    cold: Seq<ColdFrame<T, I, VC>>, hot: Seq<(T, I)>, i: int,
 ) -> (T, I) {
     if i < cold_adaptive(cold).len() {
         cold_adaptive(cold)[i]
@@ -587,12 +587,12 @@ pub open spec fn adaptive_at<T: Copy, I: IndexLike>(
 /// (plain or value-major dict), at most one compressed (A1/A2/A3, fixed mode);
 /// `Adaptive` is a per-frame cold tier where each finalized frame independently picks
 /// its mode (`ColdFrame`), with a plain hot pair tail and a cached length (A4).
-pub enum DiffLog<T, I> {
+pub enum DiffLog<T: Copy, I, VC: crate::value_compressor::ValueCompressor<T> = crate::value_compressor::NoValueCompression> {
     Cols { idxs: DiffIdxs<I>, vals: DiffVals<T> },
-    Adaptive { cold: Vec<ColdFrame<T, I>>, hot: Vec<(T, I)>, len: usize },
+    Adaptive { cold: Vec<ColdFrame<T, I, VC>>, hot: Vec<(T, I)>, len: usize },
 }
 
-impl<T: Copy, I: IndexLike> View for DiffLog<T, I> {
+impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> View for DiffLog<T, I, VC> {
     type V = Seq<(T, I)>;
     open spec fn view(&self) -> Seq<(T, I)> {
         match self {
@@ -604,7 +604,7 @@ impl<T: Copy, I: IndexLike> View for DiffLog<T, I> {
     }
 }
 
-impl<T: Copy, I: IndexLike> DiffLog<T, I> {
+impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> DiffLog<T, I, VC> {
     pub open spec fn wf(&self) -> bool {
         match self {
             DiffLog::Cols { idxs, vals } => {
@@ -648,7 +648,7 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
     }
 
     /// A fresh empty plain log (the `None` / SMT representation).
-    pub fn new_plain() -> (r: DiffLog<T, I>)
+    pub fn new_plain() -> (r: DiffLog<T, I, VC>)
         ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
     {
         let r = DiffLog::Cols { idxs: DiffIdxs::Plain(Vec::new()), vals: DiffVals::Plain(Vec::new()) };
@@ -658,7 +658,7 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
 
     /// A fresh empty value-major log (the `ValueDict` representation): no cold
     /// frames yet, empty hot tail. Index column stays plain.
-    pub fn new_dict() -> (r: DiffLog<T, I>)
+    pub fn new_dict() -> (r: DiffLog<T, I, VC>)
         ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
     {
         let r = DiffLog::Cols {
@@ -673,7 +673,7 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
 
     /// A fresh empty index-major log (the `IndexRuns` representation): no cold index
     /// frames yet, empty hot index tail; value column stays plain.
-    pub fn new_runs() -> (r: DiffLog<T, I>)
+    pub fn new_runs() -> (r: DiffLog<T, I, VC>)
         ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
     {
         let r = DiffLog::Cols {
@@ -688,12 +688,12 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
 
     /// A fresh empty per-frame-adaptive log (the `Auto` representation): no cold
     /// frames, empty hot pair tail, cached length 0.
-    pub fn new_adaptive() -> (r: DiffLog<T, I>)
+    pub fn new_adaptive() -> (r: DiffLog<T, I, VC>)
         ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
     {
         let r = DiffLog::Adaptive { cold: Vec::new(), hot: Vec::new(), len: 0 };
         proof { reveal(cold_adaptive); }
-        assert(cold_adaptive(Seq::<ColdFrame<T, I>>::empty()) =~= Seq::<(T, I)>::empty());
+        assert(cold_adaptive(Seq::<ColdFrame<T, I, VC>>::empty()) =~= Seq::<(T, I)>::empty());
         assert(r@ =~= Seq::<(T, I)>::empty());
         r
     }
@@ -1186,11 +1186,11 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
                 let ghost cold0 = cold@;
                 let ghost hot0 = hot@;
                 if crate::compression_stats::shadow_enabled() {
-                    crate::compression_stats::shadow_log_full(
+                    crate::compression_stats::shadow_log_full::<T, I, VC>(
                         hot, key, cold.len(), crate::compression_stats::mode_name(mode));
                 }
                 // The hot tail IS the frame's (value, index) pairs; encode in `mode`.
-                let f: ColdFrame<T, I> = ColdFrame::compress_mode(hot, mode);
+                let f: ColdFrame<T, I, VC> = ColdFrame::compress_mode(hot, mode);
                 let ghost fg = f;
                 proof {
                     broadcast use vstd::seq_lib::group_to_multiset_ensures;
@@ -1266,10 +1266,10 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
                 let ghost cold0 = cold@;
                 let ghost hot0 = hot@;
                 if crate::compression_stats::shadow_enabled() {
-                    crate::compression_stats::shadow_log_copy(
+                    crate::compression_stats::shadow_log_copy::<T, I, VC>(
                         hot, key, cold.len(), crate::compression_stats::mode_name(mode));
                 }
-                let f: ColdFrame<T, I> = ColdFrame::compress_mode_copy(hot, mode);
+                let f: ColdFrame<T, I, VC> = ColdFrame::compress_mode_copy(hot, mode);
                 let ghost fg = f;
                 proof {
                     broadcast use vstd::seq_lib::group_to_multiset_ensures;
@@ -1553,7 +1553,7 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
                     // end == 0 <= lo. Either way the overlay range is [lo, hi).
                     if end > lo {
                         assert(k == 0);
-                        assert(cold@.subrange(0, 0) =~= Seq::<ColdFrame<T, I>>::empty());
+                        assert(cold@.subrange(0, 0) =~= Seq::<ColdFrame<T, I, VC>>::empty());
                         assert(end == 0);
                         assert(false);
                     }
@@ -1612,7 +1612,7 @@ impl<T: Copy, I: IndexLike> DiffLog<T, I> {
                 let mut k: usize = 0;
                 let nf = cold.len();
                 proof {
-                    assert(cold@.subrange(0, 0) =~= Seq::<ColdFrame<T, I>>::empty());
+                    assert(cold@.subrange(0, 0) =~= Seq::<ColdFrame<T, I, VC>>::empty());
                     assert(out@ =~= d.subrange(lo as int, lo as int));
                 }
                 while k < nf

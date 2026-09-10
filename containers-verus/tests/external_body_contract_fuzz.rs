@@ -214,10 +214,11 @@ fn push_overflow_traps_for_small_index() {
     );
 }
 
-// `restores_remaining()` now reports depth headroom (u32::MAX - max spine depth),
-// NOT a lifetime restore count: the fork history is reclaimed to O(max depth)
-// generation stamps (doc 10), so restores no longer consume headroom. This is the
-// leak fix — the old "drops by one per restore" behavior is gone by design.
+// `restores_remaining()` now reports depth headroom (u32::MAX - live frame
+// depth), NOT a lifetime restore count: post-H2 the container carries no
+// genealogy at all (the owning `History` does), so restores neither consume
+// headroom nor even leave a max-depth watermark. The old "drops by one per
+// restore" behavior is gone by design; so is doc 10's stamp-array watermark.
 #[test]
 fn restores_remaining_tracks_depth_not_restore_count() {
     type V = SpVec<u32, u32, ParallelStore<u32, u32>, true>;
@@ -225,23 +226,28 @@ fn restores_remaining_tracks_depth_not_restore_count() {
     v.try_push(1).expect("push: within index word");
     v.try_push(2).expect("push: within index word");
 
-    // Fresh container: max depth 0, so full u32 headroom.
+    // Fresh container: depth 0, so full u32 headroom.
     let start = v.restores_remaining();
     assert_eq!(start, u32::MAX as usize);
 
-    // Repeatedly mark-at-depth-0, push, restore-to-depth-0. Max depth reached is
-    // 1 throughout, so headroom settles at u32::MAX - 1 and does NOT drop per
-    // restore — restores are now unbounded (the reclamation win).
+    // Repeatedly mark-at-depth-0, push, restore-to-depth-0. Headroom is
+    // u32::MAX - 1 while the frame is open and returns to u32::MAX after each
+    // restore — restores are unbounded and leave no per-container residue.
     for k in 1..=5usize {
         let t = v
             .try_mark(ShrinkPolicy::Never)
             .expect("mark: depth bounded by this harness");
+        assert_eq!(
+            v.restores_remaining(),
+            u32::MAX as usize - 1,
+            "one open frame consumes exactly one depth unit; at {k}"
+        );
         v.try_push(100 + k as u32).expect("push: within index word");
         v.try_restore(t).expect("restore: own token");
         assert_eq!(
             v.restores_remaining(),
-            u32::MAX as usize - 1,
-            "restores must NOT consume headroom (reclaimed fork history); after {k}"
+            u32::MAX as usize,
+            "restores must leave NO headroom residue (genealogy on History); after {k}"
         );
     }
 }

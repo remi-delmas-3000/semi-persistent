@@ -21,25 +21,30 @@ pub trait EGraphConfig: 'static {
     /// constrained to this word. Intentionally bounded semantic registries
     /// (e.g. rule ids) may remain narrower; each such exception is documented
     /// at its definition.
-    type Index: IndexLike + Tagged;
+    /// `Send` on every id family member: the e-graph's mark/restore fan the
+    /// member composites out across the rayon pool on disjoint `&mut` borrows
+    /// (`EGraph::mark_with`), which requires the members, and so the ids they
+    /// store, to cross threads. Every id is a `Copy` machine-word newtype, so
+    /// the bound costs nothing to satisfy.
+    type Index: IndexLike + Tagged + Send;
 
     /// Global e-node id (e.g. 31-bit `ENodeId`).
-    type G: DenseId<Index = Self::Index> + Hash;
+    type G: DenseId<Index = Self::Index> + Hash + Send;
     /// Recycled key into the packed e-class data store. It has the same
     /// payload width as `G`, because the worst case has one class per node.
-    type ClassKey: DenseId<Index = Self::Index>;
+    type ClassKey: DenseId<Index = Self::Index> + Send;
     /// Operator id.
-    type O: DenseId<Index = Self::Index> + Hash;
+    type O: DenseId<Index = Self::Index> + Hash + Send;
     /// Sort id.
-    type S: DenseId<Index = Self::Index>;
+    type S: DenseId<Index = Self::Index> + Send;
     /// Interned literal value id.
-    type V: DenseId<Index = Self::Index> + Hash;
+    type V: DenseId<Index = Self::Index> + Hash + Send;
     /// Use-list id.
-    type UL: DenseId<Index = Self::Index>;
+    type UL: DenseId<Index = Self::Index> + Send;
     /// Use-list node id.
-    type UN: DenseId<Index = Self::Index>;
+    type UN: DenseId<Index = Self::Index> + Send;
     /// AC child type (e.g. `(G, Multiplicity)`).
-    type C: Tagged + Clone + Copy + Hash + Eq + core::fmt::Debug;
+    type C: Tagged + Clone + Copy + Hash + Eq + core::fmt::Debug + Send;
     /// Multiplicity width for AC multiset nodes: `Multiplicity16`,
     /// `Multiplicity`, or `Multiplicity64`.
     ///
@@ -69,7 +74,7 @@ pub trait EGraphConfig: 'static {
     /// [`MultiplicityLike::checked_add`]: crate::multiplicity::MultiplicityLike::checked_add
     fn mset_child_merge(existing: &mut Self::C, new_g: Self::G) -> bool;
     /// Local id bundle for the node store.
-    type Ids: NodeIds<Index = Self::Index>;
+    type Ids: NodeIds<Index = Self::Index> + Send;
     /// AU search/snapshot/pool id bundle.
     type Au: AuIds<Index = Self::Index>;
 }
@@ -114,7 +119,12 @@ macro_rules! impl_mset_child_pair {
 /// Selected by `EGraphConfig::Au` so a wide e-graph gets wide AU arenas.
 pub trait AuIds: 'static {
     /// Backing word; equals the owning config's `Index`.
-    type Index: IndexLike + Tagged;
+    /// `Send` on every id family member: the e-graph's mark/restore fan the
+    /// member composites out across the rayon pool on disjoint `&mut` borrows
+    /// (`EGraph::mark_with`), which requires the members, and so the ids they
+    /// store, to cross threads. Every id is a `Copy` machine-word newtype, so
+    /// the bound costs nothing to satisfy.
+    type Index: IndexLike + Tagged + Send;
 
     // --- Direct identities ---
     /// Dense live-class index inside one AU snapshot.

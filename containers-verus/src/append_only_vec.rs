@@ -17,7 +17,6 @@ use vstd::prelude::*;
 
 verus! {
 
-use crate::container_id::ContainerId;
 use crate::index_like::IndexLike;
 use crate::vec::{ShrinkPolicy, VecToken};
 
@@ -32,8 +31,6 @@ use crate::vec::{ShrinkPolicy, VecToken};
 pub struct AppendOnlyVec<T, I: IndexLike = usize, const TRACK: bool = true> {
     pub(crate) data: std::vec::Vec<T>,
     pub(crate) frames: std::vec::Vec<I>,
-    pub(crate) forks: crate::gen_stamps::GenStamps,
-    pub(crate) id: ContainerId,
     /// Ghost snapshot stack: `snapshots[k]` is `data@` as of frame `k`'s mark,
     /// i.e. the length-`frames[k]` prefix. Parallel to `frames`.
     pub(crate) snapshots: Ghost<Seq<Seq<T>>>,
@@ -55,11 +52,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         self.frames@.len()
     }
 
-    /// Max spine depth reached (generation-stamp array length); O(max depth), not
-    /// the O(R) lifetime restore count.
-    pub open(crate) spec fn fork_count_spec(&self) -> nat {
-        self.forks.levels@.len()
-    }
 
     /// Well-formedness:
     ///  - the element count fits the index word, so every position — the index
@@ -87,18 +79,26 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         &&& true
     }
 
-    /// Token validity (same as `Vec`): same container AND on the live branch
-    /// path within its depth bound. The `restore` precondition.
+
+    /// Structural token validity (H2): the genealogy (generation stamps,
+    /// container identity) lives on the owning group's `History`, so per-vec
+    /// validity reduces to frame liveness. Kept under its historical name so
+    /// composite validity chains read unchanged.
     pub open(crate) spec fn is_token_valid_spec(&self, token: VecToken) -> bool {
-        &&& token.container_id.id() == self.id.id()
-        &&& self.forks.valid(token.frame_idx as nat, token.generation)
+        token.frame_idx < self.frames@.len()
+    }
+
+    /// The mark-depth quantity the depth-headroom contracts are phrased over.
+    /// Post-H2 the container tracks no genealogy, so this is the live frame
+    /// depth (the stamp-array length it used to be lived on `GenStamps`).
+    pub open(crate) spec fn fork_count_spec(&self) -> nat {
+        self.frames@.len()
     }
 
     /// The full runtime-checkable precondition of `restore`, which is what the
     /// public `is_valid_token` answers.
     pub open(crate) spec fn is_restorable_spec(&self, token: VecToken) -> bool {
         &&& TRACK
-        &&& self.is_token_valid_spec(token)
         &&& token.frame_idx < self.frames@.len()
         &&& self.frames@.len() < u32::MAX
     }
@@ -111,8 +111,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         AppendOnlyVec {
             data: std::vec::Vec::new(),
             frames: std::vec::Vec::new(),
-            forks: crate::gen_stamps::GenStamps::new(0),
-            id: ContainerId::new(),
             snapshots: Ghost(Seq::empty()),
         }
     }
@@ -202,18 +200,16 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         self.frames.len()
     }
 
-    /// How many more `restore`s this container can accept before the
-    /// fork-history branch counter saturates `u32` (saturating at 0). While
-    /// `> 0`, `restore`'s `origins.len() + 1 <= u32::MAX` precondition holds.
+    /// Remaining mark-depth headroom before the `u32::MAX` frame cap (the
+    /// genealogy lives on the owning `History`; see `Vec::restores_remaining`).
     pub fn restores_remaining(&self) -> (r: usize)
         requires self.wf(),
         ensures
-            self.fork_count_spec() < u32::MAX ==>
-                r as nat == (u32::MAX - self.fork_count_spec()) as nat,
-            self.fork_count_spec() >= u32::MAX ==> r == 0,
+            self.depth_spec() < u32::MAX ==>
+                r as nat == (u32::MAX - self.depth_spec()) as nat,
+            self.depth_spec() >= u32::MAX ==> r == 0,
     {
-        let used = self.forks.depth_capacity();
-        (u32::MAX as usize).saturating_sub(used)
+        (u32::MAX as usize).saturating_sub(self.frames.len())
     }
 
     /// Mark: save the current length, returning a token. The new frame records
@@ -249,10 +245,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
                 shrink_aov_capacity(&mut self.data, factor, headroom);
             }
         }
-
-        let token_depth = self.frames.len();
-        let token_gen = self.forks.stamp_at(token_depth);
-        let token_container = self.id;
 
         // The saved length is a position, so it is stored as `I`; the conversion
         // is infallible by `wf`.
@@ -295,11 +287,7 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             }
         }
 
-        VecToken {
-            frame_idx: self.frames.len() - 1,
-            generation: token_gen,
-            container_id: token_container,
-        }
+        VecToken { frame_idx: self.frames.len() - 1 }
     }
 
     // ------------------------------------------------------------------
@@ -400,17 +388,13 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         if !TRACK {
             return false;
         }
-        let same_container = token.container_id.eq(self.id);
-        if !same_container {
-            return false;
-        }
         if token.frame_idx >= self.frames.len() {
             return false;
         }
         if self.frames.len() >= u32::MAX as usize {
             return false;
         }
-        self.forks.is_valid(token.frame_idx, token.generation)
+        true
     }
 
     /// Restore to the state the token names: truncate `data` to the saved
@@ -420,7 +404,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         requires
             old(self).wf(),
             TRACK,
-            old(self).is_token_valid_spec(token),
             token.frame_idx_spec() < old(self).depth_spec(),
             old(self).depth_spec() < u32::MAX,
         ensures
@@ -435,10 +418,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         // parity for the token cases.
         crate::guard::check_precondition(TRACK, "restore() called on untracked AppendOnlyVec");
         crate::guard::check_precondition(
-            token.container_id.eq(self.id),
-            "token belongs to a different container",
-        );
-        crate::guard::check_precondition(
             token.frame_idx < self.frames.len(),
             "token points beyond frame stack",
         );
@@ -446,19 +425,12 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             self.frames.len() < u32::MAX as usize,
             "AppendOnlyVec::restore: frame-stack depth would overflow u32",
         );
-        crate::guard::check_precondition(
-            self.forks.is_valid(token.frame_idx, token.generation),
-            "invalid token (abandoned future)",
-        );
-
         let target = token.frame_idx;
         let saved_len = self.frames[target].as_usize();
 
         let ghost old_data = self.data@;
         let ghost old_frames = self.frames@;
         let ghost old_snaps = self.snapshots@;
-        let ghost forks0 = self.forks;
-
         proof {
             // target frame length, for the result.
             assert(old_snaps[target as int] == old_data.subrange(0, saved_len as int));
@@ -468,11 +440,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         self.data.truncate(saved_len);
         self.frames.truncate(target);
         self.snapshots = Ghost(self.snapshots@.subrange(0, target as int));
-
-        proof { assert(self.forks == forks0); }
-        // Record the cut: bump the generations strictly below the restored depth,
-        // invalidating the abandoned future (lemma_bump_invalidates).
-        self.forks.bump_from(token.frame_idx + 1);
 
         proof {
             let data = self.data@;
