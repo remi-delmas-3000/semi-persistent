@@ -752,6 +752,42 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     /// index-major representation DROP the stored index column (reconstructing it from
     /// runs here) without changing the `DiffStore` capture interface. For the current
     /// (idxs-whole) representation it is a range copy.
+    /// Borrow the index column of `[lo, hi)` WITHOUT materializing it, when
+    /// the representation stores indices contiguously (`Cols`/`Plain`, which
+    /// is every uncompressed column). `None` when the indices are encoded
+    /// (run columns, adaptive frames) and must be rebuilt, in which case the
+    /// caller falls back to `index_range`.
+    ///
+    /// This exists because `Vec::push_frame` needs the open stratum's index
+    /// column on EVERY mark to drive the sparse flag clear, and materializing
+    /// it costs one allocation plus an O(stratum) copy per column per mark -
+    /// measured as the dominant term of mark's cost at 46 columns, and a
+    /// contributor to the allocator churn (about 10%) in the backtrack-heavy
+    /// SMT profile.
+    pub fn index_slice(&self, lo: usize, hi: usize) -> (r: Option<&[I]>)
+        requires self.wf(), lo <= hi <= self@.len(),
+        ensures
+            r matches Some(sl) ==> sl@.len() == hi - lo
+                && forall|k: int| 0 <= k < hi - lo ==> #[trigger] sl@[k] == self@[lo + k].1,
+    {
+        match self {
+            DiffLog::Cols { idxs, vals } => {
+                match idxs {
+                    DiffIdxs::Plain(v) => {
+                        proof {
+                            assert(forall|k: int| 0 <= k < hi - lo
+                                ==> #[trigger] v@[lo + k] == self@[lo + k].1);
+                        }
+                        let sl = vstd::slice::slice_subrange(v.as_slice(), lo, hi);
+                        Some(sl)
+                    }
+                    DiffIdxs::Runs { .. } => None,
+                }
+            }
+            DiffLog::Adaptive { .. } => None,
+        }
+    }
+
     pub fn index_range(&self, lo: usize, hi: usize) -> (r: Vec<I>)
         requires self.wf(), lo <= hi <= self@.len(),
         ensures

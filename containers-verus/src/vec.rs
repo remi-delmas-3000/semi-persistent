@@ -3438,8 +3438,22 @@ where
         // future index-major log that drops the stored index column). For the
         // idxs-whole representation this is a range copy; `prev_suffix@` is the same
         // index projection the old `indices()` slice gave.
-        let prev_suffix_vec = self.diff_log.index_range(parent_diff_start, self.diff_log.len());
-        let prev_suffix = prev_suffix_vec.as_slice();
+        // Zero-copy when the index column is contiguous (every uncompressed
+        // column, i.e. the default): borrow the open stratum instead of
+        // materializing it. Materializing cost one allocation plus an
+        // O(stratum) copy per column per mark, and at 46 columns that was
+        // mark's dominant term. Compressed representations rebuild as before.
+        let prev_suffix_vec: std::vec::Vec<I>;
+        let prev_suffix: &[I] = match self.diff_log.index_slice(
+            parent_diff_start, self.diff_log.len())
+        {
+            Some(sl) => sl,
+            None => {
+                prev_suffix_vec =
+                    self.diff_log.index_range(parent_diff_start, self.diff_log.len());
+                prev_suffix_vec.as_slice()
+            }
+        };
         proof {
             // Discharge prepare_mark's sparse-clear requires: every set flag
             // is named by a suffix entry. From wf: a set flag j is (no-stray)
@@ -3897,8 +3911,18 @@ where
         if self.store.needs_replayed_indices() {
             // index-major safe: index_range reconstructs from cold runs when the
             // column is compressed. `replayed_pre@[k] == diff_log@[diff_start+k].1`.
-            let replayed_pre_vec = self.diff_log.index_range(diff_start, self.diff_log.len());
-            let replayed_pre = replayed_pre_vec.as_slice();
+            // Zero-copy when the index column is contiguous (see index_slice);
+            // only an encoded column pays the reconstruction.
+            let replayed_pre_vec: std::vec::Vec<I>;
+            let replayed_pre: &[I] =
+                match self.diff_log.index_slice(diff_start, self.diff_log.len()) {
+                    Some(sl) => sl,
+                    None => {
+                        replayed_pre_vec =
+                            self.diff_log.index_range(diff_start, self.diff_log.len());
+                        replayed_pre_vec.as_slice()
+                    }
+                };
             proof {
                 if TRACK {
                     // begin_restore's requires: every post-resize flag is named
@@ -4057,8 +4081,17 @@ where
             let new_top_ds = new_top_frame.diff_start;
             // index-major safe: reconstruct the surviving index range from cold runs
             // (or copy the plain slice). `surviving@[m] == diff_log@[new_top_ds+m].1`.
-            let surviving_vec = self.diff_log.index_range(new_top_ds, self.diff_log.len());
-            let surviving = surviving_vec.as_slice();
+            // Zero-copy when contiguous (see index_slice).
+            let surviving_vec: std::vec::Vec<I>;
+            let surviving: &[I] =
+                match self.diff_log.index_slice(new_top_ds, self.diff_log.len()) {
+                    Some(sl) => sl,
+                    None => {
+                        surviving_vec =
+                            self.diff_log.index_range(new_top_ds, self.diff_log.len());
+                        surviving_vec.as_slice()
+                    }
+                };
             proof {
                 surviving_view = surviving@;
                 new_top_ds_ghost = new_top_ds as int;

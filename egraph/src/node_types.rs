@@ -44,6 +44,15 @@ pub struct FixedArityNode<G: DenseId, O: DenseId, const K: usize> {
     pub global_id: G::Repr,
     pub op: O::Repr,
     pub flags: u8,
+    // The three bytes after `flags` are padding (a `u8` rounds up to the
+    // `u32` alignment of `children`). A cached 24-bit content tag was built
+    // there and MEASURED FLAT on both regimes (2026-09): as a probe
+    // pre-filter it saves a content compare only on the stale candidates,
+    // which the hint buckets average 0.19 of per probe, while costing a
+    // store per node write and a compare on every hit. Removed rather than
+    // shipped, because an unmeasurable filter that every future write path
+    // must remember to stamp is a latent trap. The space remains available
+    // if a workload ever measures probe-candidate rejection as a cost.
     pub children: [G; K],
 }
 

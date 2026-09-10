@@ -286,7 +286,19 @@ impl<
     /// content has a valid hint for ITSELF in the bucket, which is not a
     /// collision.
     fn probe_hints(&self, op: &O, children: &[G; K], skip: Option<L>) -> Option<G> {
-        let fp = self.fingerprint(op, children);
+        self.probe_hints_fp(self.fingerprint(op, children), op, children, skip)
+    }
+
+    /// `probe_hints` with the fingerprint already in hand: the callers that
+    /// need it afterwards (intern, recanonize) compute it once and thread it
+    /// rather than hashing the same content twice per operation.
+    fn probe_hints_fp(
+        &self,
+        fp: Fingerprint,
+        op: &O,
+        children: &[G; K],
+        skip: Option<L>,
+    ) -> Option<G> {
         let slot = *self.index.get(&FpKey(fp))?;
         let live = self.nodes.len().as_usize();
         let check = |id: L| -> Option<G> {
@@ -361,8 +373,13 @@ impl<
     }
 
     pub fn insert(&mut self, global_id: G, op: O, children: [G; K]) -> L {
-        let node = FixedArityNode::new(global_id, op, children);
         let fp = self.fingerprint(&op, &children);
+        self.insert_fp(fp, global_id, op, children)
+    }
+
+    /// `insert` with the fingerprint already computed (see `probe_or_insert`).
+    pub fn insert_fp(&mut self, fp: Fingerprint, global_id: G, op: O, children: [G; K]) -> L {
+        let node = FixedArityNode::new(global_id, op, children);
         let lid = self.nodes.len();
         self.nodes.try_push(node).expect("push: within index word");
         self.push_hint(fp, lid);
@@ -370,10 +387,13 @@ impl<
     }
 
     pub fn probe_or_insert(&mut self, global_id: G, op: O, children: [G; K]) -> InsertResult<G, L> {
-        if let Some(gid) = self.probe(&op, &children) {
+        // One fingerprint for the pair of operations: the probe's hash is
+        // reused by the insert instead of being recomputed on a miss.
+        let fp = self.fingerprint(&op, &children);
+        if let Some(gid) = self.probe_hints_fp(fp, &op, &children, None) {
             return InsertResult::Hit { global_id: gid };
         }
-        let lid = self.insert(global_id, op, children);
+        let lid = self.insert_fp(fp, global_id, op, children);
         InsertResult::Inserted { local_id: lid }
     }
 
@@ -395,17 +415,17 @@ impl<
         collisions: &mut Vec<(G, G)>,
         touched: &mut Vec<G>,
     ) {
-        let mut node = self.nodes.get(local_id);
-        let old_fp = self.fingerprint(&node.op(), &node.children);
+        let orig = self.nodes.get(local_id);
+        let mut node = orig;
 
         F::canonize(&mut node.children, &find);
 
-        let new_fp = self.fingerprint(&node.op(), &node.children);
-        if new_fp == old_fp {
-            let old = self.nodes.get(local_id);
-            if old.children == node.children {
-                return;
-            }
+        // No-change filter, hash-free: the cached content tag rejects the
+        // common case in one word compare, and any survivor is settled by the
+        // direct children comparison (K <= 3 words). This replaces two full
+        // fingerprint computations per recanonize.
+        if node.children == orig.children {
+            return;
         }
 
         // Node's canonical form genuinely changed this round — record it for
@@ -425,13 +445,17 @@ impl<
         if PROOFS {
             new_node.set_history();
         }
+        // One fingerprint for the whole operation: it keys the collision
+        // probe and the hint push (previously each recomputed a hash of the
+        // same content).
+        let new_fp = self.fingerprint(&new_node.op(), &new_node.children);
         self.nodes.set(local_id, new_node);
 
         // Collision probe AFTER the write, excluding this node: the old hint
         // stays in its bucket (a restore past this point revalidates it), and
         // a self-hint from earlier content is not a collision.
         if let Some(existing_gid) =
-            self.probe_hints(&node.op(), &node.children, Some(local_id))
+            self.probe_hints_fp(new_fp, &node.op(), &node.children, Some(local_id))
         {
             collisions.push((gid, existing_gid));
         }
