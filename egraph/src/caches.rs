@@ -446,7 +446,18 @@ impl<
 
         if incremental {
             for k in frame.dirty_start..self.dirty.len() {
-                self.insert_entry(self.dirty[k]);
+                // Only pre-mark ids get their entries back. `note_dirty` filters
+                // against the TOP frame's saved_len at push time, but this restore
+                // may target an OLDER frame with a SMALLER saved_len: a node added
+                // after THIS frame's mark and later re-keyed sits in `dirty` yet is
+                // part of the deleted suffix here, so re-inserting it would read a
+                // rolled-back slot (the corpus-measured out-of-bounds abort in
+                // notify_backtrack). Its entry was already removed by the suffix
+                // loop above; skipping is the correct semantics, not a workaround.
+                let id = self.dirty[k];
+                if id.as_usize() < frame.saved_len {
+                    self.insert_entry(id);
+                }
             }
         } else {
             self.rebuild_index();
@@ -891,7 +902,18 @@ impl<
 
         if incremental {
             for k in frame.dirty_start..self.dirty.len() {
-                self.insert_entry(self.dirty[k]);
+                // Only pre-mark ids get their entries back. `note_dirty` filters
+                // against the TOP frame's saved_len at push time, but this restore
+                // may target an OLDER frame with a SMALLER saved_len: a node added
+                // after THIS frame's mark and later re-keyed sits in `dirty` yet is
+                // part of the deleted suffix here, so re-inserting it would read a
+                // rolled-back slot (the corpus-measured out-of-bounds abort in
+                // notify_backtrack). Its entry was already removed by the suffix
+                // loop above; skipping is the correct semantics, not a workaround.
+                let id = self.dirty[k];
+                if id.as_usize() < frame.saved_len {
+                    self.insert_entry(id);
+                }
             }
         } else {
             self.rebuild_index();
@@ -1527,6 +1549,63 @@ mod tests {
         assert!(c.probe(&op, &[id(1), id(7)]).is_none());
         assert!(c.probe(&op, &[id(3), id(4)]).is_none());
         assert!(c.probe(&op, &[id(5), id(6)]).is_none());
+    }
+
+    /// A node added after the OUTER mark and re-keyed under the inner scope
+    /// sits in `dirty` past the outer frame's `dirty_start` yet belongs to the
+    /// suffix the outer restore deletes: `note_dirty` filtered it against the
+    /// INNER frame's larger `saved_len`. The restore must skip it instead of
+    /// re-reading the rolled-back slot (the corpus-measured out-of-bounds
+    /// abort in `notify_backtrack`). The in-restore `index_matches_rebuild`
+    /// assertion checks the resulting index against the from-scratch rebuild.
+    #[test]
+    fn restore_to_outer_skips_a_rekeyed_inner_suffix_node() {
+        let mut c = FixedArityCache::<ENodeId, OpId, Plain2Id, 2>::new();
+        let op = OpId::new(0);
+        c.probe_or_insert(id(10), op, [id(1), id(2)]);
+        let outer = c.mark(SHRINK);
+        c.probe_or_insert(id(20), op, [id(3), id(4)]);
+        let _inner = c.mark(SHRINK);
+        // Re-key the post-outer-mark node: its local id (1) passes the inner
+        // frame's saved_len filter (2) but not the outer's (1).
+        c.recanonize_node::<PlainCanon>(
+            Plain2Id::new(1),
+            |g| if g == id(4) { id(5) } else { g },
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        assert!(c.probe(&op, &[id(3), id(5)]).is_some());
+
+        c.restore(outer);
+        assert_eq!(c.len(), Plain2Id::new(1));
+        assert_eq!(c.probe(&op, &[id(1), id(2)]), Some(id(10)));
+        assert!(c.probe(&op, &[id(3), id(4)]).is_none());
+        assert!(c.probe(&op, &[id(3), id(5)]).is_none());
+    }
+
+    /// Same scenario through the pool-backed cache.
+    #[test]
+    fn pool_restore_to_outer_skips_a_rekeyed_inner_suffix_node() {
+        let mut c = VariableArityCache::<ENodeId, OpId, ENodeId, SetNodeId>::new();
+        let op = OpId::new(0);
+        c.probe_or_insert(id(10), op, &[id(1), id(2), id(3)]);
+        let outer = c.mark(SHRINK);
+        c.probe_or_insert(id(20), op, &[id(4), id(5), id(6)]);
+        let _inner = c.mark(SHRINK);
+        c.recanonize_node::<SetCanon>(
+            SetNodeId::new(1),
+            |g| if g == id(6) { id(7) } else { g },
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            crate::canon::CanonMode::PLAIN,
+        );
+        assert!(c.probe(op, &[id(4), id(5), id(7)]).is_some());
+
+        c.restore(outer);
+        assert_eq!(c.probe(op, &[id(1), id(2), id(3)]), Some(id(10)));
+        assert!(c.probe(op, &[id(4), id(5), id(6)]).is_none());
+        assert!(c.probe(op, &[id(4), id(5), id(7)]).is_none());
     }
 
     /// A scope that adds more than a quarter of the arena takes the rebuild
