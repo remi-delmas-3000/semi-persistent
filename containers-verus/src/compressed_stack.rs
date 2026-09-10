@@ -164,7 +164,7 @@ impl<T: IndexLike, I: IndexFromNat> CompressedStack<T, I> {
                 FrameEncoding::Plain(v) => v.capacity() * core::mem::size_of::<(T, I)>(),
                 FrameEncoding::Dict(d) => {
                     d.dict.capacity() * core::mem::size_of::<T>()
-                        + d.codes.capacity() * core::mem::size_of::<usize>()
+                        + d.codes.heap_bytes()
                         + d.idxs.capacity() * core::mem::size_of::<I>()
                 }
                 FrameEncoding::Runs(rf) => {

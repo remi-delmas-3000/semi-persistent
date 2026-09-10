@@ -310,6 +310,137 @@ pub(crate) proof fn lemma_overlay_uncaptured_prefix<T, I: IndexLike>(
     }
 }
 
+/// Every entry in the frame names a distinct index. This is the first-write-wins
+/// invariant of a finalized frame, and it is what makes reordering the frame
+/// sound: with unique indices, `overlay` writes each cell exactly once, so the
+/// restored state depends only on the index->value map, not the entry order.
+pub open(crate) spec fn unique_idx<T, I: IndexLike>(d: Seq<(T, I)>) -> bool {
+    forall|a: int, b: int|
+        0 <= a < d.len() && 0 <= b < d.len() && a != b
+            ==> (#[trigger] d[a]).1.as_nat() != (#[trigger] d[b]).1.as_nat()
+}
+
+/// Frame `d` names index `j` somewhere. The trigger handle for the same-map
+/// hypothesis of `lemma_overlay_same_map`.
+pub open(crate) spec fn frame_covers<T, I: IndexLike>(d: Seq<(T, I)>, j: nat) -> bool {
+    exists|k: int| 0 <= k < d.len() && (#[trigger] d[k]).1.as_nat() == j
+}
+
+/// SET-LEVEL RESTORE EQUIVALENCE. Two finalized frames with unique indices that
+/// define the same index->value map (same covered indices, agreeing values)
+/// overlay to the same result over any base. This is what licenses a compression
+/// scheme to REORDER a frame (e.g. sort it by index for longer runs): the sorted
+/// frame is a permutation of the original, so it has the same map, so it restores
+/// identically. Proof is pointwise via `lemma_overlay_captured` (covered cells
+/// take the unique hitter's value) and `lemma_overlay_uncaptured` (uncovered
+/// cells keep the base), then extensionality.
+pub(crate) proof fn lemma_overlay_same_map<T, I: IndexLike>(
+    base: Seq<T>, d1: Seq<(T, I)>, d2: Seq<(T, I)>,
+)
+    requires
+        unique_idx(d1),
+        unique_idx(d2),
+        // Same covered indices.
+        forall|j: nat| #![trigger frame_covers(d1, j)]
+            j < base.len() ==> frame_covers(d1, j) == frame_covers(d2, j),
+        // Agreeing values wherever an index is shared.
+        forall|k1: int, k2: int|
+            0 <= k1 < d1.len() && 0 <= k2 < d2.len()
+                && (#[trigger] d1[k1]).1.as_nat() == (#[trigger] d2[k2]).1.as_nat()
+            ==> d1[k1].0 == d2[k2].0,
+    ensures
+        overlay::<T, I>(base, d1, 0, d1.len() as int)
+            == overlay::<T, I>(base, d2, 0, d2.len() as int),
+{
+    lemma_overlay_len::<T, I>(base, d1, 0, d1.len() as int);
+    lemma_overlay_len::<T, I>(base, d2, 0, d2.len() as int);
+    assert forall|j: int| 0 <= j < base.len() implies
+        overlay::<T, I>(base, d1, 0, d1.len() as int)[j]
+            == overlay::<T, I>(base, d2, 0, d2.len() as int)[j] by {
+        // Instantiate the same-covered-indices hypothesis at j.
+        assert(frame_covers(d1, j as nat) == frame_covers(d2, j as nat));
+        if frame_covers(d1, j as nat) {
+            let k1 = choose|k1: int| 0 <= k1 < d1.len() && (#[trigger] d1[k1]).1.as_nat() == j as nat;
+            let k2 = choose|k2: int| 0 <= k2 < d2.len() && (#[trigger] d2[k2]).1.as_nat() == j as nat;
+            lemma_overlay_captured::<T, I>(base, d1, 0, d1.len() as int, k1, j);
+            lemma_overlay_captured::<T, I>(base, d2, 0, d2.len() as int, k2, j);
+            // Values agree because both entries name index j.
+            assert(d1[k1].0 == d2[k2].0);
+        } else {
+            lemma_overlay_uncaptured::<T, I>(base, d1, 0, d1.len() as int, j);
+            lemma_overlay_uncaptured::<T, I>(base, d2, 0, d2.len() as int, j);
+        }
+    }
+    assert(overlay::<T, I>(base, d1, 0, d1.len() as int)
+        =~= overlay::<T, I>(base, d2, 0, d2.len() as int));
+}
+
+/// THE CODEC CONTRACT, formalized. Two finalized frames with unique indices and
+/// the SAME MULTISET OF WRITES restore identically over any base. This is the one
+/// invariant every codec must preserve: `decode(encode(d))` need only carry the
+/// same set of `(value, index)` writes as `d` — order is irrelevant because each
+/// cell is written at most once per frame (first-write-wins), so the multiset is a
+/// map and the restore is that map applied. Reduces to `lemma_overlay_same_map`
+/// by deriving same-covered-indices and value-agreement from multiset equality:
+/// a shared write is `contains`-equal on both sides (equal multisets ⇒ equal
+/// counts ⇒ equal membership), and a shared index forces the SAME pair on both
+/// sides, else the two distinct pairs at one index break `unique_idx`.
+pub(crate) proof fn lemma_multiset_eq_overlay<T, I: IndexLike>(
+    base: Seq<T>, d1: Seq<(T, I)>, d2: Seq<(T, I)>,
+)
+    requires
+        unique_idx(d1),
+        unique_idx(d2),
+        d1.to_multiset() == d2.to_multiset(),
+    ensures
+        overlay::<T, I>(base, d1, 0, d1.len() as int)
+            == overlay::<T, I>(base, d2, 0, d2.len() as int),
+{
+    // `x` present in `d1` is present in `d2` (equal multisets ⇒ equal counts ⇒
+    // equal membership), and vice versa.
+    assert forall|x: (T, I)| d1.contains(x) implies d2.contains(x) by {
+        vstd::seq_lib::to_multiset_contains(d1, x);
+        vstd::seq_lib::to_multiset_contains(d2, x);
+    }
+    assert forall|x: (T, I)| d2.contains(x) implies d1.contains(x) by {
+        vstd::seq_lib::to_multiset_contains(d1, x);
+        vstd::seq_lib::to_multiset_contains(d2, x);
+    }
+    // Same covered indices: a covering entry is present on both sides.
+    assert forall|j: nat| #![trigger frame_covers(d1, j)]
+        j < base.len() implies frame_covers(d1, j) == frame_covers(d2, j) by {
+        if frame_covers(d1, j) {
+            let k = choose|k: int| 0 <= k < d1.len() && (#[trigger] d1[k]).1.as_nat() == j;
+            assert(d1.contains(d1[k]));
+            let k2 = choose|k2: int| 0 <= k2 < d2.len() && d2[k2] == d1[k];
+            assert(d2[k2].1.as_nat() == j);
+        }
+        if frame_covers(d2, j) {
+            let k = choose|k: int| 0 <= k < d2.len() && (#[trigger] d2[k]).1.as_nat() == j;
+            assert(d2.contains(d2[k]));
+            let k1 = choose|k1: int| 0 <= k1 < d1.len() && d1[k1] == d2[k];
+            assert(d1[k1].1.as_nat() == j);
+        }
+    }
+    // Value agreement: if entries on the two sides share an index, they are the
+    // same pair — otherwise both distinct pairs sit at that index in one frame
+    // (each is present in the other, by multiset equality), breaking uniqueness.
+    assert forall|k1: int, k2: int|
+        0 <= k1 < d1.len() && 0 <= k2 < d2.len()
+            && (#[trigger] d1[k1]).1.as_nat() == (#[trigger] d2[k2]).1.as_nat()
+        implies d1[k1].0 == d2[k2].0 by {
+        assert(d1.contains(d1[k1]));
+        let q = choose|q: int| 0 <= q < d2.len() && d2[q] == d1[k1];
+        // q and k2 both name index j in d2; uniqueness forces q == k2, so the
+        // pair at k2 equals d1[k1].
+        if q != k2 {
+            assert(d2[q].1.as_nat() == d2[k2].1.as_nat());  // both == j
+            assert(false);
+        }
+    }
+    lemma_overlay_same_map::<T, I>(base, d1, d2);
+}
+
 /// Bridge between subrange-position existential and absolute-range
 /// `captured_in_range`. If `sub == diffs.subrange(lo, hi)`, then
 /// "some sub[kk] hits j" iff "some diffs[k] in [lo, hi) hits j".
@@ -1270,9 +1401,11 @@ where
             crate::diff_compress::CompressionMode::ValueDict =>
                 crate::diff_log::DiffLog::new_dict(),
             // The single-stack Vec's diff_log is either plain or dict-top;
-            // index-major run-coalescing lives in the two-stack (TwoStackLog),
-            // not this in-place log, so IndexRuns builds a plain top here.
-            crate::diff_compress::CompressionMode::IndexRuns =>
+            // index-major run-coalescing and per-frame Auto selection live in the
+            // two-stack (TwoStackLog), not this in-place log, so both build a
+            // plain top here.
+            crate::diff_compress::CompressionMode::IndexRuns
+            | crate::diff_compress::CompressionMode::Auto =>
                 crate::diff_log::DiffLog::new_plain(),
         };
         let v = Vec {

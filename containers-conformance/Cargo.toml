@@ -45,6 +45,10 @@ name = "reorder_bench"
 harness = false
 
 [[bench]]
+name = "scheme_comparison_bench"
+harness = false
+
+[[bench]]
 name = "nested_mark_bench"
 harness = false
 

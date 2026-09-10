@@ -136,8 +136,11 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
     /// Compress the first `k` hot frames into the cold bottom and drop them from
     /// the hot top. `k` must leave at least the active frame hot. The flat view
     /// is unchanged: the `k` compressed frames' decodes tile exactly the hot
-    /// prefix that is dropped.
-    pub fn flush_cold(&mut self, k: usize)
+    /// prefix that is dropped. `mode` selects the encoder for these frames
+    /// (`Auto` for per-frame exact-size selection during calibration; a promoted
+    /// default in steady state); the view is preserved for any mode, so the proof
+    /// does not depend on the choice.
+    pub fn flush_cold(&mut self, k: usize, mode: crate::diff_compress::CompressionMode)
         requires
             old(self).wf(),
             k < old(self).hot_starts@.len(),
@@ -175,7 +178,7 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
             let hi = self.hot_starts[f + 1];
             assert(lo <= hi <= hot0.len());
             let diffs = self.hot.subrange_vec(lo, hi);
-            self.cold.push_frame(&diffs, self.config.scheme);
+            self.cold.push_frame(&diffs, mode);
             proof {
                 // cold@ == cold0 + hot0[0..lo] + hot0[lo..hi] == cold0 + hot0[0..hi]
                 assert(hot0.subrange(0, lo as int) + hot0.subrange(lo as int, hi as int)
@@ -264,7 +267,7 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
             // nframes >= 1, so nframes - 1 is safe.
             let k = if want < nframes { want } else { nframes - 1 };
             if k < nframes {
-                self.flush_cold(k);
+                self.flush_cold(k, self.config.scheme);
             }
         }
     }

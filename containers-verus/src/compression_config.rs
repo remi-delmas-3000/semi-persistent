@@ -61,6 +61,17 @@ impl ColumnConfig {
         }
     }
 
+    /// Per-frame automatic scheme selection (exact-size costing): each flushed
+    /// frame is encoded in whichever of plain/value-dict/index-runs is smallest
+    /// for that frame's own content. Use when a column's frames vary in shape.
+    pub const fn auto(compress_at_percent: u32, keep_hot_frames: usize) -> ColumnConfig {
+        ColumnConfig {
+            scheme: CompressionMode::Auto,
+            compress_at_percent,
+            keep_hot_frames,
+        }
+    }
+
     /// Whether this column ever compresses (i.e. is not the `None` scheme).
     pub open spec fn compresses(self) -> bool {
         !matches!(self.scheme, CompressionMode::None)
@@ -79,8 +90,8 @@ impl ColumnConfig {
     {
         match self.scheme {
             CompressionMode::None => false,
-            // Both compressing modes share the size-fraction trigger.
-            CompressionMode::ValueDict | CompressionMode::IndexRuns => {
+            // All compressing modes share the size-fraction trigger.
+            CompressionMode::ValueDict | CompressionMode::IndexRuns | CompressionMode::Auto => {
                 // Both products fit u128: `uncompressed_bytes`/`base_bytes` are
                 // usize (< 2^64 here, `global size_of usize == 8`), the percent is
                 // u32 (< 2^32), so each product is < 2^96 << u128::MAX. The
@@ -108,7 +119,7 @@ impl ColumnConfig {
     pub open spec fn should_flush_spec(self, uncompressed_bytes: nat, base_bytes: nat) -> bool {
         match self.scheme {
             CompressionMode::None => false,
-            CompressionMode::ValueDict | CompressionMode::IndexRuns =>
+            CompressionMode::ValueDict | CompressionMode::IndexRuns | CompressionMode::Auto =>
                 uncompressed_bytes * 100 >= base_bytes * (self.compress_at_percent as nat),
         }
     }

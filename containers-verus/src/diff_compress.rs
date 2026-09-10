@@ -17,29 +17,172 @@ use crate::index_like::{IndexLike, IndexFromNat};
 
 verus! {
 
+/// The dictionary code column, stored at the narrowest byte width that fits the
+/// dictionary size (`u8` for `D <= 256`, `u16` for `D <= 65536`, else `u32`).
+/// Its abstract value is `Seq<nat>` regardless of width, so `DictFrame`'s
+/// bijection is stated over `view()` and the storage is swappable: a future
+/// bit-packed variant (`ceil(log2 D)` bits) drops in behind this same contract
+/// without touching the frame or any caller. This is what takes value-major from
+/// a loss at `usize` codes to a win (measured 0.63x byte / 0.30x bit-packed).
+pub enum Codes {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+    U32(Vec<u32>),
+    Usize(Vec<usize>),
+}
+
+impl Codes {
+    pub open spec fn view(&self) -> Seq<nat> {
+        match self {
+            Codes::U8(v) => Seq::new(v@.len(), |i: int| v@[i] as nat),
+            Codes::U16(v) => Seq::new(v@.len(), |i: int| v@[i] as nat),
+            Codes::U32(v) => Seq::new(v@.len(), |i: int| v@[i] as nat),
+            Codes::Usize(v) => Seq::new(v@.len(), |i: int| v@[i] as nat),
+        }
+    }
+
+    pub fn len(&self) -> (n: usize)
+        ensures n == self.view().len(),
+    {
+        match self {
+            Codes::U8(v) => v.len(),
+            Codes::U16(v) => v.len(),
+            Codes::U32(v) => v.len(),
+            Codes::Usize(v) => v.len(),
+        }
+    }
+
+    pub fn get(&self, i: usize) -> (c: usize)
+        requires i < self.view().len(),
+        ensures c as nat == self.view()[i as int],
+    {
+        match self {
+            Codes::U8(v) => v[i] as usize,
+            Codes::U16(v) => v[i] as usize,
+            Codes::U32(v) => v[i] as usize,
+            Codes::Usize(v) => v[i],
+        }
+    }
+
+    /// Bytes of the code column (diagnostic).
+    #[verifier::external_body]
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            Codes::U8(v) => v.capacity(),
+            Codes::U16(v) => v.capacity() * 2,
+            Codes::U32(v) => v.capacity() * 4,
+            Codes::Usize(v) => v.capacity() * 8,
+        }
+    }
+
+    /// Build the narrowest-width code column from `usize` codes, given the
+    /// dictionary size they index into. `view()` reproduces the codes exactly.
+    pub fn from_usize(codes: &Vec<usize>, dict_len: usize) -> (r: Codes)
+        requires forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < dict_len,
+        ensures
+            r.view().len() == codes@.len(),
+            forall|t: int| 0 <= t < codes@.len() ==> #[trigger] r.view()[t] == codes@[t] as nat,
+    {
+        if dict_len <= 256 {
+            let mut v: Vec<u8> = Vec::new();
+            let mut t: usize = 0;
+            while t < codes.len()
+                invariant
+                    t <= codes@.len(),
+                    dict_len <= 256,
+                    forall|k: int| 0 <= k < codes@.len() ==> #[trigger] codes@[k] < dict_len,
+                    v@.len() == t,
+                    forall|k: int| 0 <= k < t ==> #[trigger] v@[k] as nat == codes@[k] as nat,
+                decreases codes@.len() - t,
+            {
+                v.push(codes[t] as u8);
+                t += 1;
+            }
+            let r = Codes::U8(v);
+            assert forall|k: int| 0 <= k < codes@.len() implies #[trigger] r.view()[k] == codes@[k] as nat by {}
+            r
+        } else if dict_len <= 65536 {
+            let mut v: Vec<u16> = Vec::new();
+            let mut t: usize = 0;
+            while t < codes.len()
+                invariant
+                    t <= codes@.len(),
+                    dict_len <= 65536,
+                    forall|k: int| 0 <= k < codes@.len() ==> #[trigger] codes@[k] < dict_len,
+                    v@.len() == t,
+                    forall|k: int| 0 <= k < t ==> #[trigger] v@[k] as nat == codes@[k] as nat,
+                decreases codes@.len() - t,
+            {
+                v.push(codes[t] as u16);
+                t += 1;
+            }
+            let r = Codes::U16(v);
+            assert forall|k: int| 0 <= k < codes@.len() implies #[trigger] r.view()[k] == codes@[k] as nat by {}
+            r
+        } else if dict_len <= u32::MAX as usize {
+            let mut v: Vec<u32> = Vec::new();
+            let mut t: usize = 0;
+            while t < codes.len()
+                invariant
+                    t <= codes@.len(),
+                    dict_len <= u32::MAX as usize,
+                    forall|k: int| 0 <= k < codes@.len() ==> #[trigger] codes@[k] < dict_len,
+                    v@.len() == t,
+                    forall|k: int| 0 <= k < t ==> #[trigger] v@[k] as nat == codes@[k] as nat,
+                decreases codes@.len() - t,
+            {
+                v.push(codes[t] as u32);
+                t += 1;
+            }
+            let r = Codes::U32(v);
+            assert forall|k: int| 0 <= k < codes@.len() implies #[trigger] r.view()[k] == codes@[k] as nat by {}
+            r
+        } else {
+            // Fallback: dictionary larger than 2^32 entries — keep usize codes
+            // (no narrowing possible without truncation).
+            let mut v: Vec<usize> = Vec::new();
+            let mut t: usize = 0;
+            while t < codes.len()
+                invariant
+                    t <= codes@.len(),
+                    v@.len() == t,
+                    forall|k: int| 0 <= k < t ==> #[trigger] v@[k] as nat == codes@[k] as nat,
+                decreases codes@.len() - t,
+            {
+                v.push(codes[t]);
+                t += 1;
+            }
+            let r = Codes::Usize(v);
+            assert forall|k: int| 0 <= k < codes@.len() implies #[trigger] r.view()[k] == codes@[k] as nat by {}
+            r
+        }
+    }
+}
+
 /// One finalized frame's diffs with the value column dictionary-encoded and the
 /// index column kept verbatim. `codes[t]` indexes `dict` to entry `t`'s value;
 /// `idxs[t]` is entry `t`'s original cell index.
 pub struct DictFrame<T, I> {
     pub dict: Vec<T>,
-    pub codes: Vec<usize>,
+    pub codes: Codes,
     pub idxs: Vec<I>,
 }
 
 impl<T: IndexLike, I: IndexLike> DictFrame<T, I> {
     /// Well-formed: the code/index columns are parallel and every code indexes
-    /// the dictionary.
+    /// the dictionary. Stated over `codes.view()`, so the code storage width is
+    /// invisible here.
     pub open spec fn wf(&self) -> bool {
-        &&& self.codes@.len() == self.idxs@.len()
-        &&& forall|t: int| 0 <= t < self.codes@.len()
-                ==> (#[trigger] self.codes@[t]) < self.dict@.len()
+        &&& self.codes.view().len() == self.idxs@.len()
+        &&& forall|t: int| 0 <= t < self.codes.view().len()
+                ==> (#[trigger] self.codes.view()[t]) < self.dict@.len()
     }
 
     /// Decode back to the flat `(value, index)` diff sequence.
     pub open spec fn decode(&self) -> Seq<(T, I)> {
         Seq::new(
             self.idxs@.len(),
-            |t: int| (self.dict@[self.codes@[t] as int], self.idxs@[t]),
+            |t: int| (self.dict@[self.codes.view()[t] as int], self.idxs@[t]),
         )
     }
 
@@ -64,7 +207,7 @@ impl<T: IndexLike, I: IndexLike> DictFrame<T, I> {
                 forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
             decreases n - t,
         {
-            let code = self.codes[t];
+            let code = self.codes.get(t);
             let v = self.dict[code];
             let idx = self.idxs[t];
             out.push((v, idx));
@@ -138,10 +281,15 @@ pub fn compress<T: IndexLike, I: IndexLike>(diffs: &Vec<(T, I)>) -> (r: DictFram
         idxs.push(idx);
         i += 1;
     }
-    let r = DictFrame { dict, codes, idxs };
+    // Narrow the codes to the smallest width that indexes `dict` (the value-major
+    // space win); `Codes::from_usize` reproduces the code sequence exactly.
+    let dict_len = dict.len();
+    let packed = Codes::from_usize(&codes, dict_len);
+    let r = DictFrame { dict, codes: packed, idxs };
     proof {
         assert forall|t: int| 0 <= t < diffs@.len()
             implies r.decode()[t] == diffs@[t] by {
+            assert(r.codes.view()[t] == codes@[t] as nat);
             assert(r.decode()[t] == (diffs@[t].0, diffs@[t].1));
         }
         assert(r.decode() =~= diffs@);
@@ -624,6 +772,107 @@ pub fn compress_runs_writeorder<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFram
     r
 }
 
+/// Sort a finalized frame ascending by index. The contract is the only thing
+/// callers depend on — the multiset of writes is preserved (a permutation),
+/// the result is ascending, and uniqueness carries over — so the internal
+/// algorithm is swappable behind it (std introsort now; a radix pass later if a
+/// bench shows it matters) without touching a single caller or proof. Soundness
+/// of *using* a sorted frame is separate and already proved
+/// (`vec::lemma_multiset_eq_overlay`): a permuted frame restores identically.
+/// `external_body` because the sort algorithm is not the verified surface — its
+/// contract is, and `sort_frame_roundtrip` (containers-conformance) checks it.
+/// Trust ledger: group B (a permutation + order property, no `unsafe`).
+#[verifier::external_body]
+pub fn sort_frame_by_index<T: Copy, I: IndexLike>(d: &Vec<(T, I)>) -> (r: Vec<(T, I)>)
+    ensures
+        r@.to_multiset() == d@.to_multiset(),
+        forall|a: int, b: int| 0 <= a < b < r@.len()
+            ==> (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
+        unique_idx(d@) ==> unique_idx(r@),
+{
+    let mut r = d.clone();
+    r.sort_unstable_by_key(|e| e.1.as_usize());
+    r
+}
+
+/// A finalized frame has at most one write per cell (first-write-wins), so its
+/// index projection is injective. Mirrors `vec::unique_idx` for the encoder side.
+pub open spec fn unique_idx<T, I: IndexLike>(d: Seq<(T, I)>) -> bool {
+    forall|a: int, b: int|
+        0 <= a < d.len() && 0 <= b < d.len() && a != b
+            ==> (#[trigger] d[a]).1.as_nat() != (#[trigger] d[b]).1.as_nat()
+}
+
+/// Sort-first index-major encoding: sort the frame by index, then run-coalesce.
+/// Because sorting captures ALL index contiguity (not just capture-order runs),
+/// this is the strongest index-major compressor. It is a REORDERING codec, so it
+/// does not reproduce the input sequence — but it preserves the multiset of
+/// writes (`decode_i().to_multiset() == diffs@.to_multiset()`), which is the whole
+/// codec contract: `vec::lemma_multiset_eq_overlay` then gives identical restore.
+/// Requires the frame's indices be unique (first-write-wins), which is what makes
+/// the sort strictly ascending (so `compress_runs` applies) and the reorder sound.
+pub fn compress_runs_sorted<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) -> (r: RunFrame<T>)
+    requires unique_idx(diffs@),
+    ensures
+        r.wf(),
+        r.fits::<I>(),
+        r.decode_i::<I>().to_multiset() == diffs@.to_multiset(),
+        unique_idx(r.decode_i::<I>()),
+{
+    let s = sort_frame_by_index(diffs);
+    // s: same multiset as diffs, sorted (<=) by index, unique indices.
+    assert(unique_idx(s@));
+    // Project to usize and prove strictly ascending (sorted + unique => strict).
+    let mut usized: Vec<(T, usize)> = Vec::new();
+    let mut i: usize = 0;
+    while i < s.len()
+        invariant
+            i <= s@.len(),
+            usized@.len() == i,
+            forall|t: int| #![trigger usized@[t]] 0 <= t < i ==>
+                usized@[t].0 == s@[t].0
+                && usized@[t].1 as nat == s@[t].1.as_nat(),
+        decreases s@.len() - i,
+    {
+        let (v, idx) = s[i];
+        usized.push((v, idx.as_usize()));
+        i += 1;
+    }
+    proof {
+        // Strictly ascending: sorted gives <=, uniqueness upgrades to <.
+        assert forall|a: int, b: int| 0 <= a < b < usized@.len() implies
+            usized@[a].1 < usized@[b].1 by {
+            assert(s@[a].1.as_nat() <= s@[b].1.as_nat());
+            assert(s@[a].1.as_nat() != s@[b].1.as_nat());
+            assert(usized@[a].1 as nat == s@[a].1.as_nat());
+            assert(usized@[b].1 as nat == s@[b].1.as_nat());
+        }
+    }
+    let rf = compress_runs(&usized);
+    proof {
+        // rf.decode() == mapped_diffs(usized@) == the (T, nat) projection of s;
+        // decode_i maps each nat back via from_nat, recovering s exactly.
+        assert(usized@.len() == s@.len());
+        assert forall|t: int| 0 <= t < s@.len() implies
+            rf.decode()[t] == (s@[t].0, s@[t].1.as_nat()) by {
+            assert(rf.decode()[t] == (usized@[t].0, usized@[t].1 as nat));
+        }
+        assert forall|t: int| 0 <= t < rf.decode().len() implies
+            (#[trigger] rf.decode()[t].1) < I::max_nat() by {
+            I::lemma_as_nat_bounded_val(s@[t].1);
+        }
+        assert forall|t: int| 0 <= t < s@.len() implies
+            #[trigger] rf.decode_i::<I>()[t] == s@[t] by {
+            I::lemma_from_as_nat(s@[t].1);
+        }
+        assert(rf.decode_i::<I>() =~= s@);
+        // Same multiset as diffs, and uniqueness carries.
+        assert(rf.decode_i::<I>().to_multiset() == s@.to_multiset());
+        assert(s@.to_multiset() == diffs@.to_multiset());
+    }
+    rf
+}
+
 /// Per-instance compression mode, selected at `Vec` construction (not a const
 /// generic): one binary runs SMT with `None` (speed) and equality saturation
 /// with a per-column mode (memory). `ValueDict` is value-major (dictionary +
@@ -635,6 +884,28 @@ pub enum CompressionMode {
     None,
     ValueDict,
     IndexRuns,
+    /// Choose per frame by exact-size costing (`choose_mode`): compute the plain,
+    /// run, and dictionary sizes for this frame and pick the smallest. Lets one
+    /// column carry a mix of schemes — value-major frames where a value repeats,
+    /// index-major frames where indices cluster — decided from the frame's own
+    /// content rather than a fixed guess.
+    Auto,
+}
+
+/// Exact-size cost selector: pick the cheapest scheme for this specific frame.
+/// `external_body` — a heuristic with no spec content: whichever mode it returns,
+/// `compress_frame`'s bijection still holds, so correctness does not depend on the
+/// choice, only the size does. `R` (run count) is the scatter signal; `D`
+/// (distinct values) is the value-repetition signal.
+#[verifier::external_body]
+pub fn choose_mode<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) -> CompressionMode {
+    // One O(N) stats pass (R runs, D distinct; no sort), then the exact-size
+    // decision. `external_body` only for the `size_of`/hashset it threads
+    // through; the arithmetic lives in the verified `FrameStats::best_mode`.
+    let stats = crate::compression_stats::frame_stats(diffs);
+    // best_mode costs each scheme at the shipped encoders' achievable widths
+    // (sorted run count, narrow code width computed from D internally).
+    stats.best_mode(core::mem::size_of::<T>(), core::mem::size_of::<I>())
 }
 
 /// A finalized frame in whichever representation its column's mode selected. The
@@ -705,8 +976,15 @@ pub fn compress_frame<T: IndexLike, I: IndexFromNat>(
         r.wf(),
         r.decode() == diffs@,
 {
+    // Resolve Auto to a concrete scheme per frame; the bijection below holds for
+    // whichever concrete mode is chosen, so the choice is size-only.
+    let mode = match mode {
+        CompressionMode::Auto => choose_mode(diffs),
+        other => other,
+    };
     match mode {
-        CompressionMode::None => {
+        // choose_mode never returns Auto; if it somehow did, plain is safe.
+        CompressionMode::Auto | CompressionMode::None => {
             let mut copy: Vec<(T, I)> = Vec::new();
             let mut i: usize = 0;
             while i < diffs.len()

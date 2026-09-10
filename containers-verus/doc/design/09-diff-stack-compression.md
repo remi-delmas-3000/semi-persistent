@@ -508,6 +508,26 @@ untouched):
 - `FrameEncoding::decode_exec` / `DictFrame::decode_exec` — executable
   decompression (verified `r@ == decode()`), used by `pop_frame` and timed by the
   bench.
+- `CompressionMode::Auto` + `compression_stats` — per-frame exact-size selection
+  and calibrated-adaptive selection. `frame_stats` computes `R` (contiguous runs,
+  scatter) and `D` (distinct values, repetition) in one O(N) pass, no sort;
+  `FrameStats::best_mode` picks the smallest of plain/runs/dict; `choose_mode`
+  delegates to it and `compress_frame`'s `Auto` arm resolves per frame.
+  `CalibrationStats::recommend` names the average winner over a window, and
+  `CalibrationPolicy` runs `Auto` for a calibration window, promotes that winner
+  as a static default, runs it for a period, and re-calibrates — paying the
+  adaptive cost only during the windows. `flush_cold` takes the flush mode as a
+  parameter so a driver feeds it `flush_mode()`.
+
+**Decision uses the sorted run count; the shipped encoder is write-order.**
+`frame_stats` counts `R` from index-set contiguity (`ix-1` absent), i.e. the
+run count a *sorted* index-major encoding would achieve. The shipped
+`compress_runs_writeorder` only coalesces capture-order-consecutive runs, so on a
+shuffled-but-contiguous frame it produces more runs than `R` and under-delivers
+against the `Auto` estimate. Closing the gap means shipping the sorted encoder
+(with the set-level restore-equivalence theorem), which the reorder bench already
+showed is 2-3x smaller and faster to compress and restore — so it is the next
+increment, and it also makes `Auto`'s estimates exact.
 
 End-to-end measurement (`two_stack_bench`, 400 marks x 16 writes, distinct=256,
 flush at 5% with hot floor 4): the mechanism works — under `ValueDict` the trigger
@@ -539,6 +559,54 @@ materialize-into-cold for deep backtracks (`pop_frame` is the primitive;
 `truncate_hot` covers the hot region); (4) `IndexFromNat` for the wrapper id types,
 needed only when an e-graph column keyed on them selects `IndexRuns`; (5) adoption
 by the e-graph column aggregates.
+
+## Decision: value-major lives (measured 2026-09-06)
+
+Head-to-head across column shapes (`scheme_comparison_bench`; real run counts from
+`compress_runs_writeorder`/`compress_runs_sorted`, computed sizes for the packed
+value-major variants), ratio vs plain:
+
+| shape | plain | idx sorted | val usize | val byte | val packed |
+|-------|-------|-----------|-----------|----------|------------|
+| union_find D=64 | 1.00x | 1.37x | 1.50x | **0.63x** | **0.36x** |
+| union_find D=4  | 1.00x | 1.37x | 1.50x | **0.63x** | **0.30x** |
+| contiguous      | 1.00x | **0.51x** | 2.00x | 1.25x | 0.95x |
+| scattered_unique| 1.00x | 1.37x | 2.00x | 1.25x | 0.98x |
+
+**Value-major is NOT retired — it wins decisively on the union-find shape**
+(0.30-0.36x), the memory-critical eq-sat column, where index-major loses (indices
+scattered, ~0.87 runs/entry even sorted). The 1.50x that made it look like a loser
+was entirely the `usize` codes: byte-granular codes (u8/u16/u32 by `D`) already win
+at 0.63x, and bit-packing to `ceil(log2 D)` bits reaches 0.30x. Index-major owns
+the contiguous shape (0.51x); plain wins the scattered-unique shape. So the
+per-column defaults are: union-find `parent`/`rank` -> value-major (packed),
+contiguous batch columns -> index-major, everything else -> plain. Sort-first
+index-major only edges write-order on latent-contiguity frames (1.37x vs 1.50x
+here, both losing); it earns its keep on shuffled-but-contiguous frames, not
+truly-scattered ones.
+
+**Build order that follows:** value-major needs packed codes to realize the win.
+Byte-granular codes (0.63x, easy to verify, swappable behind the codec contract)
+first; bit-packed codes (0.30x, a further ~2x, bit-arithmetic proofs) after. Both
+sit behind the round-trip-preserves-the-write-multiset contract, so upgrading the
+code representation touches only the codec, not callers.
+
+**Realized (2026-09-06):** byte-granular value-major is built and verified. The
+`Codes` column (`U8`/`U16`/`U32`/`Usize`) sits behind a `view: Seq<nat>` contract;
+`DictFrame` stores `codes: Codes` and its bijection is stated over `codes.view()`,
+so the width is invisible and a future bit-packed variant drops in without
+touching the frame or callers. `compress` narrows codes via `Codes::from_usize`
+(width by dict size), keeping `decode == diffs@` verified — value-major is a
+non-reordering codec, so it keeps the exact contract and needs no two-stack rework.
+The selector is now honest: `FrameStats::best_mode` costs index-major at the
+sorted run count (usize starts) and value-major at the narrow code width
+(`code_width`, computed from D) with indices stored, so `Auto`/calibration compare
+what the encoders actually ship. Consequence, pinned by `choose_mode_criterion`:
+the selector now picks value-major for value-repetitive scattered columns (dict
+2516 < plain 4000 at D=4, N=500) where the usize-code cost wrongly picked plain.
+Still remaining: bit-packed codes (the further 2x), the hashmap dedup (current
+`dict_find` is O(N*D)), sorted-index-major made selectable through a set-level
+two-stack contract, and fork-history reclamation (doc 10).
 
 ## Benchmark plan
 
