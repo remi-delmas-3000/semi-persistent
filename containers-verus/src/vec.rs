@@ -6440,6 +6440,205 @@ where
         }
     }
 
+    /// wf_for_snap half of the HOT-target wf re-establishment. Split out of
+    /// lemma_restore_hot_wf so each SMT query fits the solver ceiling: the
+    /// structural conjuncts + survivor frame_inv are subrange-preserved from
+    /// old_self.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(3000)]
+    pub(crate) proof fn lemma_restore_hot_wf_snap(
+        &self, old_self: Self, target: int, hf_start: int, bcut: int,
+    )
+        requires
+            old_self.wf(),
+            TRACK,
+            old_self.cold_stack@.len() < target < old_self.trail_frames@.len(),
+            self.store.wf(),
+            self.cold_stack@ == old_self.cold_stack@,
+            self.hot_stack@ == old_self.hot_stack@.subrange(
+                0, target - old_self.cold_stack@.len() as int),
+            self.diff_log@ == old_self.diff_log@.subrange(0, hf_start),
+            self.trail_frames@ == old_self.trail_frames@.subrange(0, target),
+            self.snapshots@ == old_self.snapshots@.subrange(0, target),
+            self.full_trail@ == old_self.full_trail@.subrange(0, bcut),
+            hf_start == old_self.hot_stack@[target - old_self.cold_stack@.len() as int].start,
+            bcut == old_self.g_start(target),
+            self.view() == old_self.snapshots@[target as int],
+        ensures
+            self.wf_for_snap(),
+    {
+        let cc = old_self.cold_stack@.len() as int;
+        let hotlen = self.hot_stack@.len() as int;
+        let ndl = self.diff_log@.len() as int;
+        self.lemma_restore_survivors_frame_inv(old_self, target);
+        assert(cc + hotlen == target);
+        assert(self.hot_stack@.len() > 0);
+        assert forall|i: int| 0 <= i < hotlen implies
+            (#[trigger] self.hot_stack@[i]).start as int <= ndl by {
+            assert(self.hot_stack@[i].start == old_self.hot_stack@[i].start);
+            old_self.lemma_hot_start_monotone(i, target - cc);
+        }
+        assert forall|i: int| 0 <= i && i + 1 < hotlen implies
+            (#[trigger] self.hot_stack@[i]).start <= self.hot_stack@[i + 1].start by {
+            assert(self.hot_stack@[i].start == old_self.hot_stack@[i].start);
+            assert(self.hot_stack@[i + 1].start == old_self.hot_stack@[i + 1].start);
+        }
+        assert forall|kx: int| #![trigger self.trail_frames@[kx]]
+            0 <= kx && kx + 1 < self.trail_frames@.len() implies
+            self.trail_frames@[kx] <= self.trail_frames@[kx + 1] by {
+            assert(self.trail_frames@[kx] == old_self.trail_frames@[kx]);
+            assert(self.trail_frames@[kx + 1] == old_self.trail_frames@[kx + 1]);
+        }
+        assert forall|i: int| 0 <= i < hotlen implies
+            (#[trigger] self.hot_stack@[i]).saved_len.as_nat()
+                == self.snapshots@[cc + i].len() by {
+            assert(self.hot_stack@[i].saved_len == old_self.hot_stack@[i].saved_len);
+            assert(self.snapshots@[cc + i] == old_self.snapshots@[cc + i]);
+        }
+        // tf[0] == 0 and tf[last] <= n (prefix of old's).
+        assert(self.trail_frames@[0] == old_self.trail_frames@[0]);
+        old_self.lemma_diff_start_le_n(target);
+        assert(self.full_trail@.len() == bcut);
+        // tf[target-1] <= bcut == new full_trail.len(): old ghost monotone.
+        old_self.lemma_diff_start_monotone(target - 1, target);
+        assert(self.trail_frames@[(self.trail_frames@.len() - 1) as int]
+            == old_self.trail_frames@[target - 1]);
+        // Bridge part 1's frame_inv_range_holds to wf_for_snap's inline form.
+        assert forall|kx: int| 0 <= kx < self.trail_frames@.len() implies
+            #[trigger] frame_inv_range::<T, I>(
+                self.layer_above_at(kx), self.full_trail@, self.g_start(kx),
+                self.g_end(kx), self.snapshots@[kx], self.snapshots@[kx].len()) by {
+            assert(self.frame_inv_range_holds(kx));
+        }
+        assert(self.wf_for_snap());
+    }
+
+    /// wf re-establishment for a HOT-target restore, composed on top of
+    /// lemma_restore_hot_wf_snap: given the truncated final state, the
+    /// reconstructed view, and finish_restore's rebuilt capture flags, the full
+    /// `wf` holds. Bundles the wf-extras (repr_ok, active, index_set, the
+    /// capture bridges, no-stray, frame_iso, unique phys) - mirroring mainline's
+    /// inline tail.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(4000)]
+    pub(crate) proof fn lemma_restore_hot_wf(
+        &self, old_self: Self, target: int, hf_start: int, bcut: int,
+    )
+        requires
+            old_self.wf(),
+            TRACK,
+            old_self.cold_stack@.len() < target < old_self.trail_frames@.len(),
+            self.store.wf(),
+            self.store.unique_capture_spec() == old_self.store.unique_capture_spec(),
+            self.store.needs_replayed_indices_spec()
+                == old_self.store.needs_replayed_indices_spec(),
+            self.cold_stack@ == old_self.cold_stack@,
+            self.cold_index_runs@ == old_self.cold_index_runs@,
+            self.cold_value_pool@ == old_self.cold_value_pool@,
+            self.hot_stack@ == old_self.hot_stack@.subrange(
+                0, target - old_self.cold_stack@.len() as int),
+            self.diff_log@ == old_self.diff_log@.subrange(0, hf_start),
+            self.trail_frames@ == old_self.trail_frames@.subrange(0, target),
+            self.snapshots@ == old_self.snapshots@.subrange(0, target),
+            self.full_trail@ == old_self.full_trail@.subrange(0, bcut),
+            hf_start == old_self.hot_stack@[target - old_self.cold_stack@.len() as int].start,
+            bcut == old_self.g_start(target),
+            self.view() == old_self.snapshots@[target as int],
+            self.view().len() == self.g_saved_len(target as int),
+            self.active_saved_len == self.hot_stack@[(self.hot_stack@.len() - 1) as int].saved_len,
+            self.store.captured().len() == self.view().len(),
+            forall|j: int| 0 <= j < self.view().len() as int ==>
+                #[trigger] self.store.captured()[j]
+                    == captured_in_range::<T, I>(
+                        self.diff_log@,
+                        self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int,
+                        self.diff_log@.len() as int, j as nat),
+        ensures
+            self.wf(),
+    {
+        let cc = old_self.cold_stack@.len() as int;
+        let hotlen = self.hot_stack@.len() as int;
+        let toph = (hotlen - 1) as int;
+        let topg = (self.trail_frames@.len() - 1) as int;
+        let ptop = self.hot_stack@[toph].start as int;
+        let ndl = self.diff_log@.len() as int;
+
+        // wf_for_snap from the split sub-lemma.
+        self.lemma_restore_hot_wf_snap(old_self, target, hf_start, bcut);
+        // Trail bridges + alignment, frame_iso survivors, unique phys frame_inv.
+        self.lemma_restore_hot_structural(old_self, target, hf_start, bcut);
+        self.lemma_restore_survivors_frame_iso(old_self, target, hf_start, bcut);
+        if self.store.unique_capture_spec() {
+            self.lemma_restore_survivors_phys(old_self, target, hf_start);
+        }
+
+        // repr_ok (cold pools unchanged) and active_saved_len.
+        assert(self.repr_ok());
+        assert(cc + toph == topg);
+        assert(self.active_saved_len.as_nat() == self.g_saved_len(topg));
+
+        let gtop = self.g_start(topg);
+        let m = self.full_trail@.len() as int;
+        // index_set_ok: frame_iso(top) IS index_set_ok's forall (same slices),
+        // but the two quantifiers trigger differently - instantiate per-j.
+        assert(self.frame_iso(toph));
+        assert(self.snapshots@[cc + toph].len() == self.active_saved_len.as_nat());
+        assert(self.phys_hot_end(toph) == ndl);
+        assert(self.g_end(cc + toph) == m);
+        assert(self.phys_hot_start(toph) == ptop);
+        assert(self.g_start(cc + toph) == gtop);
+        assert(self.index_set_ok()) by {
+            assert forall|j: int| #![trigger captured_in_range::<T, I>(
+                    self.full_trail@, gtop, m, j as nat)]
+                0 <= j < self.active_saved_len.as_nat() implies
+                captured_in_range::<T, I>(self.diff_log@, ptop, ndl, j as nat)
+                == captured_in_range::<T, I>(self.full_trail@, gtop, m, j as nat) by {
+                assert(j < self.snapshots@[cc + toph].len());
+                assert(captured_in_range::<T, I>(
+                    self.diff_log@, self.phys_hot_start(toph), self.phys_hot_end(toph), j as nat)
+                    == captured_in_range::<T, I>(
+                        self.full_trail@, self.g_start(cc + toph), self.g_end(cc + toph), j as nat));
+            }
+        }
+
+        // Capture bridges: physical (finish's rebuilt flags), ghost (index_set).
+        self.store.lemma_wf_captured_len();
+        assert forall|j: int|
+            0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
+            (#[trigger] self.store.captured()[j])
+                == captured_in_range::<T, I>(self.diff_log@, ptop, ndl, j as nat) by {}
+        assert forall|j: int|
+            0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
+            #[trigger] self.store.captured()[j]
+                == captured_in_range::<T, I>(self.full_trail@, gtop, m, j as nat) by {
+            assert(captured_in_range::<T, I>(self.diff_log@, ptop, ndl, j as nat)
+                == captured_in_range::<T, I>(self.full_trail@, gtop, m, j as nat));
+        }
+        // No-stray: a set flag names an entry in [ptop, ndl); its index < active
+        // (unique: physical frame_inv; trail: bridge maps it to a ghost entry).
+        assert forall|j: int| 0 <= j < self.view().len()
+            && #[trigger] self.store.captured()[j]
+            implies self.trail_frames@.len() > 0 && j < self.active_saved_len.as_nat() by {
+            assert(captured_in_range::<T, I>(self.diff_log@, ptop, ndl, j as nat));
+            let q = choose|q: int| ptop <= q < ndl && 0 <= q < self.diff_log@.len()
+                && (#[trigger] self.diff_log@[q]).1.as_nat() == j as nat;
+            if self.store.unique_capture_spec() {
+                assert(self.phys_frame_inv_range_holds(toph));
+                assert(self.diff_log@[q].1.as_nat() < self.snapshots@[cc + toph].len());
+            } else {
+                assert(self.diff_log@ == self.full_trail@.subrange(self.g_start(cc), m));
+                assert(self.diff_log@[q] == self.full_trail@[self.g_start(cc) + q]);
+                assert(self.hot_stack@[toph].start as int + self.g_start(cc) == gtop);
+                assert(self.g_start(cc) + q == gtop + (q - ptop));
+                assert(self.frame_inv_range_holds(topg));
+                assert(gtop <= gtop + (q - ptop) < m);
+                assert(self.full_trail@[gtop + (q - ptop)].1.as_nat()
+                    < self.g_saved_len(topg));
+            }
+        }
+        assert(self.wf());
+    }
+
     pub(crate) proof fn lemma_restore_survivors_frame_inv(&self, old_self: Self, target: int)
         requires
             old_self.wf_for_snap(),
