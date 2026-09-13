@@ -1935,6 +1935,7 @@ where
     /// conjuncts carry, and `self.forks.wf()` supplies the last one. Used by the
     /// `restore` wrapper (and later `SyncGroup`) to re-establish `wf` across the
     /// `fork()` branch-cut without re-running `wf`'s quantifiers.
+    #[verifier::rlimit(2000)]
     pub(crate) proof fn lemma_forks_change_preserves_wf(&self, old_self: Self)
         requires
             old_self.wf(),
@@ -1971,16 +1972,8 @@ where
             assert(old_self.frame_inv_range_holds(k));
         }
         assert(self.wf_for_snap());
-        // Index-set equality: forks pins diff_log/hot_stack/full_trail/
-        // trail_frames, so it carries from old_self.wf().
-        if self.hot_stack@.len() > 0 {
-            let top = (self.trail_frames@.len() - 1) as int;
-            let phys_lo = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
-            assert forall|j: int| 0 <= j < self.active_saved_len.as_nat() implies
-                captured_in_range::<T, I>(self.diff_log@, phys_lo, self.diff_log@.len() as int, j as nat)
-                == captured_in_range::<T, I>(self.full_trail@, self.g_start(top), self.full_trail@.len() as int, j as nat)
-            by {}
-        }
+        // Index-set equality carries: forks pins diff_log/hot_stack/
+        // full_trail/trail_frames, so it transfers from old_self.wf().
         assert(self.wf());
     }
 
@@ -2376,6 +2369,7 @@ where
     /// so `view()`, `wf`, and all tracked sequences are unchanged. (The
     /// production diff_log capacity hint is omitted — it's a pure allocator
     /// hint with no effect on `diff_log@`.)
+    #[verifier::rlimit(2000)]
     fn maybe_shrink(&mut self, policy: ShrinkPolicy)
         requires old(self).wf(),
         ensures
@@ -2456,12 +2450,10 @@ where
             // Index-set equality: all inputs (diff_log/hot_stack/full_trail/
             // trail_frames) are pinned == old, which satisfied it via old wf.
             if self.hot_stack@.len() > 0 {
-                let top = (self.trail_frames@.len() - 1) as int;
-                let phys_lo = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
-                assert forall|j: int| 0 <= j < self.active_saved_len.as_nat() implies
-                    captured_in_range::<T, I>(self.diff_log@, phys_lo, self.diff_log@.len() as int, j as nat)
-                    == captured_in_range::<T, I>(self.full_trail@, self.g_start(top), self.full_trail@.len() as int, j as nat)
-                by {}
+                // Index-set equality carries: diff_log/hot_stack/full_trail/
+                // trail_frames are all pinned == old (asserted above), so the
+                // clause transfers from old wf by congruence.
+                assert(self.diff_log@ == old(self).diff_log@);
             }
         }
     }
