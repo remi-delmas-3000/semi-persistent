@@ -1824,6 +1824,12 @@ where
         &&& (self.hot_stack@.len() > 0 ==>
                 self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int
                     <= self.diff_log@.len())
+        // Every hot frame starts at or before the log end (not just the top):
+        // frames open at the then-current log length and the log only grows
+        // between marks, so all starts are bounded. restore_frame's hot path
+        // reads this to slice [hf.start, diff_log.len()) for any target frame.
+        &&& (forall|i: int| 0 <= i < self.hot_stack@.len() ==>
+                (#[trigger] self.hot_stack@[i]).start as int <= self.diff_log@.len())
         // The open (top) frame is always hot: mark opens a hot frame, and
         // compression moves closed frames to cold but push_frame re-opens a
         // hot one. So a live stack always has at least one hot frame.
