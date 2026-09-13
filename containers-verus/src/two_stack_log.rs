@@ -508,7 +508,7 @@ pub(crate) fn two_stack_drop_front<T: Copy, I: crate::index_like::IndexLike>(
     d: &mut std::vec::Vec<(T, I)>, m: usize,
 )
     requires m <= old(d)@.len(),
-    ensures d@ == old(d)@.subrange(m as int, old(d)@.len() as int),
+    ensures final(d)@ == old(d)@.subrange(m as int, old(d)@.len() as int),
 {
     let tail = crate::vec::log_subrange_vec(d, m, d.len());
     *d = tail;

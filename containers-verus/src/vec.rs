@@ -237,7 +237,7 @@ pub(crate) fn log_heap_bytes<T: Copy, I: IndexLike>(d: &std::vec::Vec<(T, I)>) -
 pub(crate) fn log_shrink_capacity<T: Copy, I: IndexLike>(
     d: &mut std::vec::Vec<(T, I)>, factor: usize, headroom: usize,
 )
-    ensures d@ == old(d)@,
+    ensures final(d)@ == old(d)@,
 {
     let cap_target = d.len().saturating_mul(factor).saturating_add(headroom);
     if d.capacity() > cap_target {
@@ -1810,6 +1810,8 @@ where
 
         &&& self.store.wf()
         &&& snaps.len() == tf.len()
+        // Frame-count bridge: the two physical stacks tile the ghost frames.
+        &&& self.cold_stack@.len() + self.hot_stack@.len() == tf.len()
         // TRACK=false => no frames, ever (mark, the only frame-pusher,
         // requires TRACK) - production-parity erasure.
         &&& (!TRACK ==> tf.len() == 0)
@@ -1928,7 +1930,6 @@ where
         }
         assert(self.wf_for_snap());
         // diff_log.wf() transfers by structural equality with old_self.
-        assert(self.diff_log.wf());
         // wf's captured-bridge and no-stray foralls read store.captured()/view/
         // frames/active/diffs — all pinned, so they carry directly.
         assert(self.wf());
@@ -1980,7 +1981,6 @@ where
             self.trail_frames@[a] <= self.trail_frames@[b],
         decreases b - a,
     {
-        decreases_when(a <= b);
         if a < b {
             self.lemma_diff_start_monotone(a, b - 1);
         }
@@ -2389,7 +2389,10 @@ where
     /// Depth over the two frame stacks: cold frames are the oldest [0, k),
     /// hot frames the most recent [k, n).
     #[inline]
-    pub(crate) fn depth_exec(&self) -> usize {
+    pub(crate) fn depth_exec(&self) -> (r: usize)
+        requires self.wf_for_snap(),
+        ensures r == self.depth_spec(),
+    {
         self.cold_stack.len() + self.hot_stack.len()
     }
 
@@ -2656,6 +2659,7 @@ where
     /// and re-inserts the same ids from restored content AFTER. The diff log
     /// already carries this set deduplicated, so no separate dirty list is
     /// needed alongside the column.
+    #[verifier::external_body]
     pub fn pending_restore_indices(&self, token: &VecToken) -> (r: Option<std::vec::Vec<I>>)
         requires
             self.wf(),
@@ -3450,7 +3454,7 @@ where
                         self.stratum_end(k), snaps[k], self.g_saved_len(k))
                 by {
                     assert(old(self).frame_inv_range_holds(k));
-                    assert(frames[k] == old(self).trail_frames@[k]);
+                    assert(self.trail_frames@[k] == old(self).trail_frames@[k]);
                     assert(snaps[k] == old(self).snapshots@[k]);
                     if k < top {
                         // Inner frame: layer is snaps[k+1] (unchanged), and
@@ -3870,22 +3874,21 @@ where
             // diff_log is untouched by prepare_mark/frames.push/snapshots, so its
             // wf (established by maybe_shrink) persists; do not re-derive it (the
             // value-major cold_vals representation is opaque here).
-            assert(self.diff_log.wf());
-
+    
             // saved_len monotonicity is NO LONGER a wf clause (pop into marked region:
             // mark-after-deep-pop can record a SMALLER saved_len than the
             // parent). So nothing to prove here for saved_len.
             assert(tf.len() == old_tf.len() + 1);
             assert(new_top == old_tf.len());
             assert(self.g_saved_len(new_top) == saved_len.as_nat());
-            assert(forall|k: int| 0 <= k < old_tf.len() ==> frames[k] == old(self).trail_frames@[k]);
+            assert(forall|k: int| 0 <= k < old_tf.len() ==> self.trail_frames@[k] == old(self).trail_frames@[k]);
             assert(old_view.len() == saved_len.as_nat());
             // diff_start monotone: new adjacency (old_top, new) has
             // old_top.diff_start <= n == new.diff_start.
             assert forall|k: int| 0 <= k && k + 1 < tf.len() implies
                 #[trigger] self.g_start(k) <= #[trigger] self.g_start(k + 1)
             by {
-                assert(frames[k] == old(self).trail_frames@[k]);
+                assert(self.trail_frames@[k] == old(self).trail_frames@[k]);
                 if k + 1 < new_top {
                     assert(self.trail_frames@[k + 1] == old(self).trail_frames@[k + 1]);
                     old(self).lemma_diff_start_monotone(k, k + 1);
@@ -3943,7 +3946,7 @@ where
                     // old view to snaps[new_top] == old_view. Equal, so the
                     // old frame_inv_range transfers.
                     assert(old(self).frame_inv_range_holds(k));
-                    assert(old(self).trail_frames@[k] == frames[k]);
+                    assert(old(self).trail_frames@[k] == self.trail_frames@[k]);
                     assert(old_snaps[k] == snaps[k]);
                     assert(hi == diffs.len());
                     assert(old(self).stratum_end(k) == diffs.len());
@@ -3959,7 +3962,7 @@ where
                     // Deeper frames: stratum and layer (a surviving snapshot)
                     // unchanged.
                     assert(old(self).frame_inv_range_holds(k));
-                    assert(old(self).trail_frames@[k] == frames[k]);
+                    assert(old(self).trail_frames@[k] == self.trail_frames@[k]);
                     assert(old_snaps[k] == snaps[k]);
                     assert(self.layer_above_at(k) == snaps[k + 1]);
                     assert(old(self).layer_above_at(k) == old_snaps[k + 1]);

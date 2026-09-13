@@ -386,8 +386,6 @@ where
                 old(self).data@, diff_log@, lo as int, hi as int);
             assume(self.data@ == crate::vec::overlay::<T, I>(
                 old(self).data@, diff_log@, lo as int, hi as int));
-            assume(forall|j: int| 0 <= j < self.captured()@.len()
-                ==> true);
         }
     }
 
