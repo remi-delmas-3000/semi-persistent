@@ -3496,6 +3496,61 @@ where
             }
     }
 
+    /// One step of the cold-target reconstruction: replaying cold frame `f`'s
+    /// runs onto data that already equals `snapshots[f+1]` (the layer above `f`)
+    /// yields `snapshots[f]`. A covered cell takes the run value
+    /// `cold_value(f,c) == snapshots[f][c]`; an uncovered cell keeps
+    /// `snapshots[f+1][c] == layer_above(f)[c] == snapshots[f][c]`. Telescoped
+    /// over the newest-first replay loop from `cold_count` down to `target`, the
+    /// invariant `data == snapshots[f]` bottoms out at `snapshots[target]`. The
+    /// replay effect and the coverage bound (uncovered saved cells lie within
+    /// the layer) are what the body's run loop and compress's `repr_ok` supply.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(300)]
+    pub(crate) proof fn lemma_cold_replay_step(
+        &self, f: int, data_before: Seq<T>, data_after: Seq<T>,
+    )
+        requires
+            0 <= f,
+            f + 1 < self.trail_frames@.len(),
+            self.cold_reconstructs(f),
+            // uncovered saved cells of f lie within the layer above (coverage).
+            forall|c: int| 0 <= c < self.snapshots@[f].len() as int
+                && !(#[trigger] self.cold_covered(f, c as nat))
+                ==> c < self.snapshots@[f + 1].len() as int,
+            // in-invariant: data_before matches the layer snapshots[f+1].
+            forall|c: int| 0 <= c < self.snapshots@[f + 1].len() as int
+                ==> #[trigger] data_before[c] == self.snapshots@[f + 1][c],
+            // replay effect on f's saved region.
+            forall|c: int| 0 <= c < self.snapshots@[f].len() as int
+                ==> #[trigger] data_after[c] == if self.cold_covered(f, c as nat) {
+                        self.cold_value(f, c as nat)
+                    } else {
+                        data_before[c]
+                    },
+        ensures
+            forall|c: int| 0 <= c < self.snapshots@[f].len() as int
+                ==> data_after[c] == self.snapshots@[f][c],
+    {
+        // layer_above_at(f) == snapshots[f+1] since f+1 < trail_frames.len().
+        assert(self.layer_above_at(f) == self.snapshots@[f + 1]);
+        assert forall|c: int| 0 <= c < self.snapshots@[f].len() as int implies
+            data_after[c] == self.snapshots@[f][c] by {
+            // cold_reconstructs(f) at c (c < g_saved_len(f) == snapshots[f].len()).
+            // Fire its quantifier via the cold_value(f,c) trigger term.
+            assert(self.g_saved_len(f) == self.snapshots@[f].len());
+            let _ = self.cold_value(f, c as nat);
+            if self.cold_covered(f, c as nat) {
+                assert(self.cold_value(f, c as nat) == self.snapshots@[f][c]);
+            } else {
+                assert(c < self.snapshots@[f + 1].len() as int);
+                assert(data_after[c] == data_before[c]);
+                assert(data_before[c] == self.snapshots@[f + 1][c]);
+                assert(self.snapshots@[f][c] == self.layer_above_at(f)[c]);
+            }
+        }
+    }
+
     /// Carry the top frame's `frame_inv_range` across a push (old_self had wf;
     /// the new view is the old view plus appended elements). Coverage-based:
     /// no `saved_len <= view.len()` needed — the per-cell uncaptured arm itself
