@@ -284,7 +284,7 @@ where
     }
 
     #[inline(always)]
-    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>) {
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
@@ -297,7 +297,7 @@ where
         let r = self.data[iu];
         if !T::tag(&r) {
             let v = T::from_repr(&r);
-            diff_log.push(v, i);
+            diff_log.push((v, i));
             let mut new_r = r;
             T::set_tag(&mut new_r);
             self.data.set(iu, new_r);
@@ -313,7 +313,7 @@ where
         }
     }
 
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
@@ -325,7 +325,7 @@ where
         }
         let r = self.data[iu];
         let v = T::from_repr(&r);
-        diff_log.push(v, i);
+        diff_log.push((v, i));
         let mut new_r = r;
         T::set_tag(&mut new_r);
         self.data.set(iu, new_r);
@@ -410,9 +410,9 @@ where
         }
     }
 
-    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
+    fn restore_overlay(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
+        diff_log: &Vec<(T, I)>,
         lo: usize,
         hi: usize,
     ) {
@@ -426,7 +426,8 @@ where
         // tier): zero allocation, zero copy, production's shape (design doc
         // restore-from-compressed-frames-goal.md #1/#4). Only a range dipping
         // into sealed cold frames materializes, and that is off the live path.
-        if let Some(sl) = diff_log.hot_slice(lo, hi) {
+        let sl = vstd::slice::slice_subrange(diff_log.as_slice(), lo, hi);
+
             proof {
                 assert(sl@ =~= diff_log@.subrange(lo as int, hi as int));
             }
@@ -436,7 +437,6 @@ where
                 invariant
                     lo <= i <= hi,
                     hi <= diff_log@.len(),
-                    diff_log.wf(),
                     sl@ == diff_log@.subrange(lo as int, hi as int),
                     self.wf_spec(),
                     self.data@.len() == base.len(),
@@ -470,51 +470,7 @@ where
                     }
                 }
             }
-            return;
-        }
-        let pairs = diff_log.subrange_vec(lo, hi);
-        let ghost base = self.data_spec();
-        let mut i: usize = hi;
-        while i > lo
-            invariant
-                lo <= i <= hi,
-                hi <= diff_log@.len(),
-                diff_log.wf(),
-                pairs@ == diff_log@.subrange(lo as int, hi as int),
-                self.wf_spec(),
-                self.data@.len() == base.len(),
-                self.data_spec() == crate::vec::overlay::<T, I>(
-                    base, diff_log@, i as int, hi as int),
-                forall|j: int| 0 <= j < self.captured_spec().len()
-                    && #[trigger] self.captured_spec()[j]
-                    ==> old(self).captured_spec()[j],
-            decreases i,
-        {
-            i -= 1;
-            let (v, idx) = pairs[i - lo];
-            proof {
-                assert(pairs@[(i - lo) as int] == diff_log@[i as int]);
-            }
-            proof {
-                crate::vec::lemma_overlay_len::<T, I>(base, diff_log@, (i + 1) as int, hi as int);
-            }
-            let ghost pre_caps = self.captured_spec();
-            let iu = idx.as_usize();
-            if iu < self.data.len() {
-                self.data.set(iu, v.into_repr());
-            }
-            proof {
-                assert(self.data_spec() =~= crate::vec::overlay::<T, I>(
-                    base, diff_log@, i as int, hi as int));
-                // Tag-clear write: the touched slot's flag is now false, every other
-                // slot is unchanged, so decrease-only chains through the iteration.
-                assert forall|j: int| 0 <= j < self.captured_spec().len()
-                    && #[trigger] self.captured_spec()[j]
-                    implies old(self).captured_spec()[j] by {
-                    assert(pre_caps[j]);
-                }
-            }
-        }
+
     }
 
     fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], _saved_len: I) {

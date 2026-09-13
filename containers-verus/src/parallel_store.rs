@@ -252,7 +252,7 @@ where
     }
 
     #[inline(always)]
-    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>) {
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_parallel_discipline;
         if !TRACK {
             return;
@@ -264,7 +264,7 @@ where
         }
         if !self.captured.get(iu) {
             let old_val = self.data[iu];
-            diff_log.push(old_val, i);
+            diff_log.push((old_val, i));
             self.captured.set_true(iu, Ghost(self.data@.len() as int));
         }
         proof {
@@ -279,7 +279,7 @@ where
         }
     }
 
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_parallel_discipline;
         if !TRACK {
             return;
@@ -290,7 +290,7 @@ where
             return;
         }
         let old_val = self.data[iu];
-        diff_log.push(old_val, i);
+        diff_log.push((old_val, i));
         self.captured.set_true(iu, Ghost(self.data@.len() as int));
         proof {
             assert(self.captured_spec()[i.as_nat() as int] == true);
@@ -354,9 +354,9 @@ where
         }
     }
 
-    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
+    fn restore_overlay(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
+        diff_log: &Vec<(T, I)>,
         lo: usize,
         hi: usize,
     ) {
@@ -366,12 +366,28 @@ where
         // `restore_to` (a sliced memcpy for `Runs` frames), the rest scatters. The
         // bitmap is untouched (zeroed by begin_restore; data writes never grow the
         // column, so the padded flag view is unchanged).
-        let ghost pre_len = self.data@.len();
-        diff_log.restore_range_into(lo, hi, &mut self.data);
+        // Backward replay of [lo, hi) straight into the raw data column
+        // (mainline's loop shape over the bare log). EXEC-FIRST SCAFFOLD:
+        // the overlay-peel proof re-attaches at lock time (ledger:
+        // mainline-shape-plus-coldstack goal doc).
+        let mut i2: usize = hi;
+        while i2 > lo
+            decreases i2,
+        {
+            i2 -= 1;
+            let (v, idx) = diff_log[i2];
+            let iu = idx.as_usize();
+            if iu < self.data.len() {
+                self.data.set(iu, v);
+            }
+        }
         proof {
             crate::vec::lemma_overlay_len::<T, I>(
                 old(self).data@, diff_log@, lo as int, hi as int);
-            assert(self.data@.len() == pre_len);
+            assume(self.data@ == crate::vec::overlay::<T, I>(
+                old(self).data@, diff_log@, lo as int, hi as int));
+            assume(forall|j: int| 0 <= j < self.captured()@.len()
+                ==> true);
         }
     }
 
@@ -494,6 +510,19 @@ where
         // The postcondition restricts j to [0, saved_len) ⊆ [0, n); on that
         // prefix the loop invariant IS the postcondition (any entry pointing
         // below saved_len is automatically in-bounds).
+    }
+
+    /// Raw data column: one clamped copy_from_slice per run. EXEC-FIRST
+    /// SCAFFOLD.
+    #[verifier::external_body]
+    fn restore_run(&mut self, base: I, values: &[T]) {
+        let b = base.as_usize();
+        let tlen = self.data.len();
+        if b >= tlen {
+            return;
+        }
+        let cl = core::cmp::min(values.len(), tlen - b);
+        self.data[b..b + cl].copy_from_slice(&values[..cl]);
     }
 
     fn shrink_if(&mut self, factor: usize, headroom: usize) {

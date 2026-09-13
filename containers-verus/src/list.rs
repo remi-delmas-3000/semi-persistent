@@ -2042,8 +2042,8 @@ where
         if !(hn < usize::MAX && nn < usize::MAX) {
             return Err(crate::error::ContainerError::CapacityExhausted);
         }
-        if !(self.heads.frames.len() < u32::MAX as usize
-            && self.nodes.frames.len() < u32::MAX as usize)
+        if !(self.heads.depth_exec() < u32::MAX as usize
+            && self.nodes.depth_exec() < u32::MAX as usize)
         {
             return Err(crate::error::ContainerError::DepthLimit);
         }

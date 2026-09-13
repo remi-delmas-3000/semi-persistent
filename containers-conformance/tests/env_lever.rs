@@ -25,20 +25,28 @@ fn env_auto_activates_and_matches_oracle() {
     }
     let t0 = v.try_mark(ShrinkPolicy::Never).unwrap();
     let o0 = oracle.try_mark(ShrinkPolicy::Never).unwrap();
-    for i in 0..N {
-        v.set_index(i, i + 1);
-        oracle.set_index(i, i + 1);
+    // ACTIVATION under the ruled cadence: an activated column compresses
+    // once more than HOT_BUFFER (8) hot frames exist, folding each frame's
+    // contiguous distinct-valued writes into run cold frames; the plain
+    // oracle never compresses. March both columns past the buffer with
+    // identical writes, then compare tracking sizes.
+    for round in 1..12u32 {
+        for i in 0..N {
+            v.set_index(i, i + round);
+            oracle.set_index(i, i + round);
+        }
+        // The activated column reclaims at mark (ruled order: compress,
+        // then release over-committed capacity); the plain oracle keeps
+        // ShrinkPolicy::Never so its log capacity reflects its length.
+        let _ = v
+            .try_mark(ShrinkPolicy::IfOverallocated {
+                factor: 2,
+                headroom: 64,
+            })
+            .unwrap();
+        let _ = oracle.try_mark(ShrinkPolicy::Never).unwrap();
     }
-    let bytes_before = v.tracking_bytes();
-    let _t1 = v.try_mark(ShrinkPolicy::Never).unwrap();
-    let _o1 = oracle.try_mark(ShrinkPolicy::Never).unwrap();
     let bytes_after = v.tracking_bytes();
-    let _ = bytes_before;
-
-    // ACTIVATION: the second mark sealed the (contiguous, distinct-valued) frame
-    // into a run cold frame, so the compressed log is SMALLER than the oracle's
-    // plain log for the same captures. Without activation the two logs are
-    // byte-identical in shape and this strict inequality fails.
     let plain_bytes = oracle.tracking_bytes();
     assert!(
         bytes_after < plain_bytes,

@@ -1025,7 +1025,7 @@ where T: Sized + Copy + core::default::Default + Send {
         if !(self.entries.store.data.len() < usize::MAX) {
             return Err(crate::error::ContainerError::CapacityExhausted);
         }
-        if !(self.entries.frames.len() < (u32::MAX as usize)) {
+        if !(self.entries.depth_exec() < (u32::MAX as usize)) {
             return Err(crate::error::ContainerError::DepthLimit);
         }
         Ok(self.mark(shrink))

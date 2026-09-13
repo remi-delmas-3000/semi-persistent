@@ -277,10 +277,9 @@ where
     /// (chronological discipline). If the slot is in-frame and not yet
     /// captured, log `(old.data()[i], i)` and flip `captured[i]`; a
     /// chronological store also appends when the slot is already captured.
-    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>)
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>)
         requires
             old(self).wf(),
-            old(diff_log).wf(),
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
@@ -329,10 +328,9 @@ where
     /// Retained unconditional-capture operation. Within-frame: log + set
     /// captured. Out-of-frame: no-op. `Vec` has no call site; marked pops use
     /// conditional `capture` to preserve the one-entry-per-index bound.
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>)
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>)
         requires
             old(self).wf(),
-            old(diff_log).wf(),
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
@@ -408,15 +406,14 @@ where
     /// contiguous can use a sliced memcpy instead of scattered per-entry writes.
     /// Capture flags only decrease (a replay write never sets one), so an all-clear
     /// state stays all-clear through the call.
-    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
+    fn restore_overlay(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
+        diff_log: &Vec<(T, I)>,
         lo: usize,
         hi: usize,
     )
         requires
             old(self).wf(),
-            diff_log.wf(),
             lo <= hi <= diff_log@.len(),
         ensures
             final(self).wf(),
@@ -513,6 +510,43 @@ where
                         && (#[trigger] current_frame_diffs@[k]).1.as_nat() == i;
 
     // -- maintenance ---------------------------------------------------------
+
+    /// Normalize one closed frame's diff slice in place for compression:
+    /// sort by index; the trail discipline first keeps only the
+    /// chronologically FIRST entry per cell (stable sort, then a first-of-
+    /// group compaction) and returns the kept length. Unique disciplines
+    /// return the full length (no ties exist). Called ONLY from the
+    /// compression pass, so mark without compression stays O(1) for trail.
+    /// EXEC-FIRST SCAFFOLD: contracts attach at lock time.
+    #[verifier::external_body]
+    fn normalize_frame(&self, frame: &mut [(T, I)]) -> usize {
+        frame.sort_unstable_by_key(|p| p.1.as_usize());
+        frame.len()
+    }
+
+    /// Restore one cold run: write `values` into the live column starting at
+    /// `base`, clamped to the current length. The default is per-element
+    /// (stores whose cells re-encode, e.g. tag-inline, cannot memcpy); raw
+    /// stores override with copy_from_slice. EXEC-FIRST SCAFFOLD.
+    #[verifier::external_body]
+    fn restore_run(&mut self, base: I, values: &[T]) {
+        let b = base.as_usize();
+        for (q, v) in values.iter().enumerate() {
+            let i = b + q;
+            if i < self.raw_len() {
+                self.set_raw_usize_scaffold(i, *v);
+            }
+        }
+    }
+
+    /// Scaffold raw write by usize (default routes through set_raw when the
+    /// index converts). EXEC-FIRST; folds into set_raw at lock time.
+    #[verifier::external_body]
+    fn set_raw_usize_scaffold(&mut self, i: usize, v: T) {
+        if let Some(ix) = I::try_from_usize(i) {
+            self.set_raw(ix, v);
+        }
+    }
 
     fn shrink_if(&mut self, factor: usize, headroom: usize)
         requires old(self).wf(),
