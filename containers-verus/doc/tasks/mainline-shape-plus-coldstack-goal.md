@@ -856,3 +856,58 @@ So restore_frame's remaining discharge, corrected (all for IndexLike, no bound):
      try_from_usize as_nat ensure + run uniqueness.
   3. wf re-establishment on the truncated + re-materialized state.
   4. cold telescoping / hot reconstruction chaining (lemmas already proven).
+
+## Finding: unique-discipline restore needs a per-frame index-set invariant (2026-09-13)
+
+restore_frame's hot-target wf re-establishment is now lemma-covered for the
+TRAIL discipline: reconstruction (lemma_reconstruct_hot_all, both disciplines),
+survivors' ghost + physical frame_inv_range (parts 1-2), structural + trail
+bridges (part 3), and index_set_ok (part 4, from the trail sequence-bridge +
+alignment via the exact bijection k <-> g_start(cc)+k).
+
+The UNIQUE discipline's index_set_ok for a promoted survivor top frame does NOT
+follow from the existing invariants, and this is proven, not conjectured.
+index_set_ok equates which indices appear in the top frame's PHYSICAL stratum
+with those in its GHOST stratum. wf carries, for unique, only
+phys_frame_inv_range (per-stratum, VALUE-based). frame_inv_range cannot force
+the two index sets to match: take layer_above = [5], snapshot = [5], a ghost
+stratum [(5, cell0)] (cell0 written to value 5, which equals the layer), and a
+physical stratum [] (cell0 not present). Both satisfy frame_inv_range - the
+ghost via the captured arm (snap[0] == 5 == entry value), the physical via the
+uncaptured arm (snap[0] == 5 == layer_above[0], 0 < len) - yet their index sets
+differ ({0} vs {}). The unique store forces them equal by capturing on WRITE
+(not value-change), so index-set(physical) == index-set(ghost) == cells written
+this frame; but that is store SEMANTICS, not recoverable from the value-based
+frame_inv. wf's index_set_ok is asserted for the TOP frame only, so once a frame
+is buried by deeper pushes the fact is lost, and restore promotes a buried frame
+back to top.
+
+Why the trail case is free and the unique case is not: the trail sequence-bridge
+(diff_log == full_trail hot suffix) makes every physical stratum element-equal
+to its ghost stratum, so index-set equality is a corollary for ANY frame. The
+unique discipline has no such standing sequence bridge (the comment at wf's
+trail-bridge notes the unique bridge is "per-stratum", but per-stratum in wf is
+phys_frame_inv_range, which is insufficient here).
+
+Resolution (the gating obligation for D6 restore_frame): add a per-frame
+physical<->ghost index-set invariant to wf, held over all hot frames (not just
+the top). The trail half is the part-4 technique generalized to any frame (free
+from the existing bridge). The unique half must be MAINTAINED by the mutators
+that touch a stratum - set/capture (adds the same index to physical top and
+ghost top in lockstep), push/mark (closes the top; buried strata are immutable,
+so the fact is framed forward), pop and compress (truncate/migrate whole
+strata). This is an invariant strengthening threaded through the mutators, not a
+single lemma; it is the required work before restore_frame's external_body can
+be removed, because the goal forbids ledgering restore_frame (it is named on the
+restore path, which must reach zero external_body).
+
+restore_frame remaining, updated (2026-09-13):
+  1. Per-frame physical<->ghost index-set invariant added to wf; trail half via
+     the generalized part-4 bijection, unique half maintained through
+     set/mark/push/pop/compress. (GATING - blocks the unique branch.)
+  2. Capture-bridge wiring from finish_restore's physical ensure composed
+     through (1) (discipline-independent once (1) holds).
+  3. Cold-target reconstruction (cold_reconstructs through restore_run) + the
+     re-materialized top frame's frame_inv_range (loop-invariant coupled).
+  4. Body wiring: loop invariants, precondition discharge, rlimit-driven lemma
+     extraction of the reconstruction and wf postconditions.
