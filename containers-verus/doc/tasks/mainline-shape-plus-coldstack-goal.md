@@ -104,3 +104,30 @@ seams.
 - A3 LOCK + PROVE: freeze the algorithm, then discharge the scaffolding
   ledger (restore_frame, compress_all_hot, store hooks, restore loops),
   reusing commit 20's proof assets at the seams.
+
+
+## Findings during hardening (2026-09-13)
+
+**The orphan-stratum defect (found by proptest, fixed).** After a cold-target
+restore clears the hot stack, subsequent writes capture into the pool with no
+HotFrame owner: they are the cold top frame's stratum continuing in the pool
+(mainline's "top stratum extends to the log end", in two-stack form). The
+compression pass walked only hot_stack and truncated the pool, destroying
+those undo pairs; a later restore then failed to roll the cell back. Minimal
+case: marks past the buffer, restore into cold, one write, marks past the
+buffer again. Fix: the pass folds the orphan prefix into the cold top frame
+first - normalize, drop cells the frame's sealed (older, first-wins) runs
+already cover, append the rest as new runs, bump the header. Replay order was
+already correct (pool backward, then cold frames newest-first) because the
+orphan sits at the pool's start and its owner is always cold_stack.last().
+Regression net: trail_semi_persistence proptests (random ops and deep unwind,
+every op differentially checked, 256 cases).
+
+**Normalize sort measurement (partial).** packed-u64-key decoration sort
+(index << 32 | position, sort_unstable, group-first walk reading payloads by
+position) beats the tuple sorts at every measured size on the unique shape:
+76 vs 86 ns at 32, 1.10 vs 1.12 us at 256, 23.9 vs 26.2 us at 4096
+(normalize_bench). Margins are modest; the trail-shaped group (where packed
+replaces the ~20% slower stable sort + fold) is still to be measured, and
+adoption is gated on it. T stays opaque under the packed scheme; 31-bit
+IndexLike packs, wide indices keep the comparison path.

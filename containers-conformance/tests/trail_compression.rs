@@ -120,7 +120,11 @@ fn trail_hot_restore_is_first_entry_wins() {
         v.set_index(3u32, 1000 + rep);
     }
     v.try_restore(t).expect("restore");
-    assert_eq!(v.get_index(3u32), 30, "hot replay must restore the pre-frame value");
+    assert_eq!(
+        v.get_index(3u32),
+        30,
+        "hot replay must restore the pre-frame value"
+    );
 }
 
 /// Pop/churn below the buffer: marks and restores interleave, nothing ever
@@ -139,7 +143,9 @@ fn trail_churn_below_buffer_tracks_model() {
         let snap = model.clone();
         let t = v.try_mark(ShrinkPolicy::Never).expect("mark");
         for _w in 0..12 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let idx = ((seed >> 33) as usize % LEN) as u32;
             let val = seed;
             v.set_index(idx, val);
@@ -154,7 +160,9 @@ fn trail_churn_below_buffer_tracks_model() {
             let snap2 = model.clone();
             let t2 = v.try_mark(ShrinkPolicy::Never).expect("mark2");
             for _w in 0..6 {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let idx = ((seed >> 33) as usize % LEN) as u32;
                 v.set_index(idx, seed);
                 model[idx as usize] = seed;

@@ -4308,6 +4308,89 @@ where
     /// EXEC-FIRST SCAFFOLD: proofs attach at lock time.
     #[verifier::external_body]
     pub(crate) fn compress_all_hot(&mut self) {
+        // Orphan prefix first: after a cold-target restore cleared the hot
+        // stack, writes captured under the (cold) top frame sit in
+        // pool[0 .. hot_stack[0].start) with no HotFrame owner - they are
+        // that cold frame's stratum continuing in the pool (mainline's "top
+        // stratum extends to the log end", in two-stack form). Fold them
+        // into the cold top frame before the hot frames migrate, or the
+        // pool truncation below destroys their undo pairs (found by the
+        // trail semi-persistence proptest, minimal case: marks past the
+        // buffer, restore into cold, write, marks past the buffer again).
+        let orphan_end = if self.hot_stack.len() > 0 {
+            self.hot_stack[0].start
+        } else {
+            0
+        };
+        if orphan_end > 0 && self.cold_stack.len() > 0 {
+            let kept = self
+                .store
+                .normalize_frame(&mut self.diff_log[0..orphan_end]);
+            let top_c = self.cold_stack.len() - 1;
+            let hdr = self.cold_stack[top_c];
+            let mut extra_runs: usize = 0;
+            let mut q: usize = 0;
+            while q < kept {
+                let (v0, idx0) = self.diff_log[q];
+                // The frame's sealed entries are OLDER captures of the same
+                // stratum: under first-entry-wins they beat the extension,
+                // so any cell already covered by an existing run is dropped.
+                let iu = idx0.as_usize();
+                let mut covered = false;
+                for r in hdr.runs_start..hdr.runs_start + hdr.runs_len {
+                    let run = self.cold_index_runs[r];
+                    let b = run.base.as_usize();
+                    if iu >= b && iu < b + run.len {
+                        covered = true;
+                        break;
+                    }
+                }
+                if covered {
+                    q += 1;
+                    continue;
+                }
+                // Open a run at q over uncovered, consecutive cells.
+                let vstart = self.cold_value_pool.len();
+                self.cold_value_pool.push(v0);
+                let mut prev = iu;
+                let mut len: usize = 1;
+                q += 1;
+                while q < kept {
+                    let (v, idx) = self.diff_log[q];
+                    let ju = idx.as_usize();
+                    if ju != prev + 1 {
+                        break;
+                    }
+                    let mut cov2 = false;
+                    for r in hdr.runs_start..hdr.runs_start + hdr.runs_len {
+                        let run = self.cold_index_runs[r];
+                        let b = run.base.as_usize();
+                        if ju >= b && ju < b + run.len {
+                            cov2 = true;
+                            break;
+                        }
+                    }
+                    if cov2 {
+                        break;
+                    }
+                    self.cold_value_pool.push(v);
+                    prev = ju;
+                    len += 1;
+                    q += 1;
+                }
+                self.cold_index_runs.push(crate::frame::IndexRun {
+                    base: idx0,
+                    start: vstart,
+                    len,
+                });
+                extra_runs += 1;
+            }
+            if extra_runs > 0 {
+                let mut h2 = self.cold_stack[top_c];
+                h2.runs_len += extra_runs;
+                self.cold_stack.set(top_c, h2);
+            }
+        }
         let hn = self.hot_stack.len();
         for j in 0..hn {
             let f = self.hot_stack[j];
