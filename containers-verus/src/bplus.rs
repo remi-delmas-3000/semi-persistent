@@ -10321,7 +10321,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         if !TRACK {
             crate::guard::refuse("BPlusTreeSet::mark: tree is untracked");
         }
-        if !(self.nodes.frames.len() < (u32::MAX as usize)) {
+        if !(self.nodes.depth_exec() < (u32::MAX as usize)) {
             crate::guard::refuse("BPlusTreeSet::mark: frame depth at u32 ceiling");
         }
             let nodes_token = self.nodes.mark(shrink);

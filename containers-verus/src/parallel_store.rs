@@ -512,6 +512,19 @@ where
         // below saved_len is automatically in-bounds).
     }
 
+    /// Raw data column: one clamped copy_from_slice per run. EXEC-FIRST
+    /// SCAFFOLD.
+    #[verifier::external_body]
+    fn restore_run(&mut self, base: I, values: &[T]) {
+        let b = base.as_usize();
+        let tlen = self.data.len();
+        if b >= tlen {
+            return;
+        }
+        let cl = core::cmp::min(values.len(), tlen - b);
+        self.data[b..b + cl].copy_from_slice(&values[..cl]);
+    }
+
     fn shrink_if(&mut self, factor: usize, headroom: usize) {
         broadcast use crate::diff_store::lemma_parallel_discipline;
         // Production formula (containers/src/diff_store.rs:192-197): shrink the

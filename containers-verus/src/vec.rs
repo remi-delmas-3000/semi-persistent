@@ -245,6 +245,69 @@ pub(crate) fn log_shrink_capacity<T: Copy, I: IndexLike>(
     }
 }
 
+/// Materialize the (value, index) pairs of cold frames [lo_f, hi_f) from
+/// their runs, appended to `out`. EXEC-FIRST SCAFFOLD (inline-store flag
+/// protocols only; never on the raw restore path).
+#[verifier::external_body]
+pub(crate) fn cold_pairs_scaffold<T: Copy, I: IndexLike>(
+    cold_stack: &std::vec::Vec<crate::frame::ColdFrameHdr<I>>,
+    runs: &std::vec::Vec<crate::frame::IndexRun<I>>,
+    pool: &std::vec::Vec<T>,
+    lo_f: usize, hi_f: usize, out: &mut std::vec::Vec<(T, I)>,
+) {
+    for f in lo_f..hi_f {
+        let h = cold_stack[f];
+        for r in h.runs_start..h.runs_start + h.runs_len {
+            let run = runs[r];
+            let b = run.base.as_usize();
+            for q in 0..run.len {
+                if let Some(ix) = I::try_from_usize(b + q) {
+                    out.push((pool[run.start + q], ix));
+                }
+            }
+        }
+    }
+}
+
+/// Capacity release for the cold pools (ruled reclaim). EXEC-FIRST SCAFFOLD.
+#[verifier::external_body]
+pub(crate) fn cold_pools_shrink_scaffold<T: Copy, I: IndexLike>(
+    values: &mut std::vec::Vec<T>,
+    runs: &mut std::vec::Vec<crate::frame::IndexRun<I>>,
+    factor: usize, headroom: usize,
+) {
+    let vt = values.len().saturating_mul(factor).saturating_add(headroom);
+    if values.capacity() > vt {
+        values.shrink_to(vt);
+    }
+    let rt = runs.len().saturating_mul(factor).saturating_add(headroom);
+    if runs.capacity() > rt {
+        runs.shrink_to(rt);
+    }
+}
+
+/// Diagnostic: the index spans of the cold frames [lo_f, hi_f), expanded.
+/// EXEC-FIRST SCAFFOLD.
+#[verifier::external_body]
+pub(crate) fn pending_cold_indices_scaffold<I: IndexLike>(
+    cold_stack: &std::vec::Vec<crate::frame::ColdFrameHdr<I>>,
+    runs: &std::vec::Vec<crate::frame::IndexRun<I>>,
+    lo_f: usize, hi_f: usize, out: &mut std::vec::Vec<I>,
+) {
+    for f in lo_f..hi_f {
+        let h = cold_stack[f];
+        for r in h.runs_start..h.runs_start + h.runs_len {
+            let run = runs[r];
+            let b = run.base.as_usize();
+            for q in 0..run.len {
+                if let Some(ix) = I::try_from_usize(b + q) {
+                    out.push(ix);
+                }
+            }
+        }
+    }
+}
+
 pub open(crate) spec fn overlay<T, I: IndexLike>(
     base: Seq<T>,
     diffs: Seq<(T, I)>,
@@ -1551,7 +1614,21 @@ where
     // (doc/tasks/mainline-shape-plus-coldstack-goal.md). The DiffLog type
     // was the compression branch's own artifact and is retired.
     pub(crate) diff_log: std::vec::Vec<(T, I)>,
-    pub(crate) frames: std::vec::Vec<Frame<I>>,
+    // Ruled layout: two frame stacks. Cold frames are the OLDEST [0, k),
+    // hot frames the most recent [k, n); a token's frame_idx resolves by
+    // comparison with cold_stack.len(). Each tier's header carries the
+    // frame's saved_len.
+    pub(crate) hot_stack: std::vec::Vec<crate::frame::HotFrame<I>>,
+    pub(crate) cold_stack: std::vec::Vec<crate::frame::ColdFrameHdr<I>>,
+    /// All value runs of all cold frames, concatenated in frame order.
+    pub(crate) cold_value_pool: std::vec::Vec<T>,
+    /// All index runs of all cold frames: run lands at live[base..], values
+    /// at cold_value_pool[start .. start+len].
+    pub(crate) cold_index_runs: std::vec::Vec<crate::frame::IndexRun<I>>,
+    /// Compression cadence: None = never compress (plain baseline columns);
+    /// Some(b) = at mark, when more than b hot frames exist, pass
+    /// compress=true (the buffered eviction policy).
+    pub(crate) hot_buffer: Option<usize>,
     /// The saved_len of the topmost (active) frame, cached for the hot path.
     /// `I::min()` when the stack is empty. Mirrors production.
     pub(crate) active_saved_len: I,
@@ -2356,7 +2433,7 @@ where
                 &&& final(self).diff_log_len_spec() == 0
             },
     {
-        if !(self.frames.len() == 0) {
+        if !(self.depth_exec() == 0) {
             crate::guard::refuse("Vec::push_untracked: vector has live frames");
         }
         let cap = <I as crate::index_like::IndexLike>::max().as_usize();
@@ -2386,7 +2463,7 @@ where
                 &&& final(self).diff_log_len_spec() == 0
             },
     {
-        if !(self.frames.len() == 0) {
+        if !(self.depth_exec() == 0) {
             crate::guard::refuse("Vec::pop_untracked: vector has live frames");
         }
         let r = self.pop();
@@ -2405,7 +2482,7 @@ where
                 &&& final(self).diff_log_len_spec() == 0
             },
     {
-        if !(self.frames.len() == 0) {
+        if !(self.depth_exec() == 0) {
             crate::guard::refuse("Vec::set_untracked: vector has live frames");
         }
         if !(i.as_usize() < self.store.raw_len()) {
@@ -2497,13 +2574,24 @@ where
             v.snapshots_view().len() == 0,
     {
         proof { store.lemma_wf_captured_len(); }  // captured().len() == 0
-        // A2a: compression off; every mode is the bare mainline log. The
-        // tiering policy bit and the cold stack land in A2b.
+        // The bare mainline log for every mode; what differs per column is
+        // only the compression cadence below (ruled design).
         let diff_log: std::vec::Vec<(T, I)> = std::vec::Vec::new();
+        // Cadence: a mode-None unique-capture column is the plain
+        // production-parity baseline and never compresses; every other
+        // column (any compressing mode, and the trail discipline whose only
+        // compression path is eviction) buffers HOT_BUFFER frames.
+        let tiered = !(matches!(mode, crate::diff_compress::CompressionMode::None)
+            && store.unique_capture());
+        let hot_buffer = if tiered { Some(8usize) } else { None };
         let v = Vec {
             store,
             diff_log,
-            frames: std::vec::Vec::new(),
+            hot_stack: std::vec::Vec::new(),
+            cold_stack: std::vec::Vec::new(),
+            cold_value_pool: std::vec::Vec::new(),
+            cold_index_runs: std::vec::Vec::new(),
+            hot_buffer,
             active_saved_len: <I as IndexLike>::min(),
             phantom: core::marker::PhantomData,
             snapshots: Ghost(Seq::empty()),
@@ -2581,7 +2669,24 @@ where
         requires self.wf(),
         ensures d == self.depth_spec(),
     {
-        self.frames.len()
+        self.depth_exec()
+    }
+
+    /// Depth over the two frame stacks: cold frames are the oldest [0, k),
+    /// hot frames the most recent [k, n).
+    #[inline]
+    pub(crate) fn depth_exec(&self) -> usize {
+        self.cold_stack.len() + self.hot_stack.len()
+    }
+
+    /// The frame's saved_len, tier-dispatched by the split point.
+    #[inline]
+    pub(crate) fn frame_saved_len_exec(&self, k: usize) -> I {
+        if k < self.cold_stack.len() {
+            self.cold_stack[k].saved_len
+        } else {
+            self.hot_stack[k - self.cold_stack.len()].saved_len
+        }
     }
 
     /// Number of entries in the diff log (production parity). The bounded-pop
@@ -2616,7 +2721,7 @@ where
                 r as nat == (u32::MAX - self.depth_spec()) as nat,
             self.depth_spec() >= u32::MAX ==> r == 0,
     {
-        (u32::MAX as usize).saturating_sub(self.frames.len())
+        (u32::MAX as usize).saturating_sub(self.depth_exec())
     }
 
     /// A read-only view over the current contents (parity with production).
@@ -2633,7 +2738,10 @@ where
     #[verifier::external_body]
     pub fn tracking_bytes(&self) -> usize {
         log_heap_bytes(&self.diff_log)
-            + self.frames.capacity() * core::mem::size_of::<Frame<I>>()
+            + self.hot_stack.capacity() * core::mem::size_of::<crate::frame::HotFrame<I>>()
+            + self.cold_stack.capacity() * core::mem::size_of::<crate::frame::ColdFrameHdr<I>>()
+            + self.cold_index_runs.capacity() * core::mem::size_of::<crate::frame::IndexRun<I>>()
+            + self.cold_value_pool.capacity() * core::mem::size_of::<T>()
     }
 
     /// Total bytes used by this Vec: struct + store backing + tracking.
@@ -2757,7 +2865,7 @@ where
             assert(n as nat == self.view().len());
             assert(cap as nat == I::max_nat() - 1);
         }
-        TRACK && self.frames.len() < (u32::MAX as usize) && n <= cap
+        TRACK && self.depth_exec() < (u32::MAX as usize) && n <= cap
     }
 
     /// Total mark: the error names which precondition failed.
@@ -2780,7 +2888,7 @@ where
         if !TRACK {
             return Err(crate::error::ContainerError::Untracked);
         }
-        if !(self.frames.len() < (u32::MAX as usize)) {
+        if !(self.depth_exec() < (u32::MAX as usize)) {
             return Err(crate::error::ContainerError::DepthLimit);
         }
         proof {
@@ -2843,11 +2951,28 @@ where
         if !self.is_valid_token(token) {
             return None;
         }
-        let ds = self.frames[token.frame_idx].diff_start;
-        proof {
-            self.lemma_diff_start_le_n(token.frame_idx as int);
+        let k = self.cold_stack.len();
+        let mut out: std::vec::Vec<I> = std::vec::Vec::new();
+        if token.frame_idx < k {
+            // Cold portion: every run of frames [frame_idx, k) contributes
+            // its index span. EXEC-FIRST SCAFFOLD (allocation is fine here:
+            // this is a diagnostic/EDU API, not the restore path).
+            pending_cold_indices_scaffold(
+                &self.cold_stack, &self.cold_index_runs, token.frame_idx, k, &mut out);
+            let mut q = 0;
+            while q < self.diff_log.len() {
+                out.push(log_index(&self.diff_log, q).1);
+                q += 1;
+            }
+        } else {
+            let hf = self.hot_stack[token.frame_idx - k];
+            let mut q = hf.start;
+            while q < self.diff_log.len() {
+                out.push(log_index(&self.diff_log, q).1);
+                q += 1;
+            }
         }
-        Some(log_index_range(&self.diff_log, ds, self.diff_log.len()))
+        Some(out)
     }
 
     /// The public token-validity check: "restorable now", STRUCTURALLY.
@@ -2866,11 +2991,11 @@ where
             return false;
         }
         // Frame liveness: a consumed token's frame is gone (design doc 08).
-        if token.frame_idx >= self.frames.len() {
+        if token.frame_idx >= self.depth_exec() {
             return false;
         }
         // Headroom (frames.len() < u32::MAX).
-        if self.frames.len() >= u32::MAX as usize {
+        if self.depth_exec() >= u32::MAX as usize {
             return false;
         }
         true
@@ -2915,7 +3040,7 @@ where
         // folds) → frames non-empty → the index compare. Under TRACK=false
         // the whole computation erases.
         let reentered = TRACK
-            && self.frames.len() > 0
+            && self.depth_exec() > 0
             && old_len.as_usize() < self.active_saved_len.as_usize();
         let ghost has_frame = TRACK && self.frames@.len() > 0;
         let ghost in_marked = old_len.as_nat() < self.active_saved_len.as_nat();
@@ -3151,7 +3276,7 @@ where
         // data_last == value of the slot being removed (defined when nonempty).
         let ghost data_last: T = old(self).store.data()[
             if old_view.len() > 0 { old_view.len() - 1 } else { 0 } as int];
-        if TRACK && self.frames.len() > 0 && len.as_usize() > 0
+        if TRACK && self.depth_exec() > 0 && len.as_usize() > 0
             && len.as_usize() - 1 < self.active_saved_len.as_usize()
         {
             let last = len.as_usize() - 1;
@@ -3519,7 +3644,7 @@ where
         let ghost active_n = self.active_saved_len.as_nat();
         let ghost iu = i.as_nat() as int;
         let ghost was_captured0 = self.store.captured()[iu];
-        if TRACK && self.frames.len() > 0 {
+        if TRACK && self.depth_exec() > 0 {
             let active = self.active_saved_len;
             self.store.capture(i, active, &mut self.diff_log);
             proof {
@@ -3862,7 +3987,7 @@ where
         // capacity: TRACK parity and the u32 depth cast.
         crate::guard::check_precondition(TRACK, "mark() called on untracked vec");
         crate::guard::check_precondition(
-            self.frames.len() < u32::MAX as usize,
+            self.depth_exec() < u32::MAX as usize,
             "Vec::mark: frame-stack depth would overflow u32",
         );
 
@@ -3879,8 +4004,9 @@ where
         // suffix to prepare_mark so its sparse clear is O(top-frame diffs),
         // not O(whole log). The no-stray-flags wf invariant pins every set
         // flag to exactly this stratum.
-        let parent_diff_start = if self.frames.len() > 0 {
-            self.frames[self.frames.len() - 1].diff_start
+        // The open (top) frame is always hot by construction.
+        let parent_diff_start = if self.hot_stack.len() > 0 {
+            self.hot_stack[self.hot_stack.len() - 1].start
         } else {
             0
         };
@@ -3899,7 +4025,7 @@ where
         // O(stratum) copy per column per mark, and at 46 columns that was
         // mark's dominant term. Compressed representations rebuild as before.
         let prev_suffix_vec: std::vec::Vec<(T, I)>;
-        let prev_suffix: &[(T, I)] = match log_hot_slice(&self.diff_log, 
+        let prev_suffix: &[(T, I)] = match log_hot_slice(&self.diff_log,
             parent_diff_start, self.diff_log.len())
         {
             Some(sl) => sl,
@@ -3956,8 +4082,39 @@ where
         }
         self.store.prepare_mark(saved_len, prev_suffix);
 
+        // Close the top hot frame's extent, then apply the compression
+        // cadence (ruled design: mark drives hot -> cold migration through
+        // the hot_buffer policy knob).
+        let hl = self.hot_stack.len();
+        if hl > 0 {
+            let mut top_f = self.hot_stack[hl - 1];
+            top_f.end = self.diff_log.len();
+            self.hot_stack.set(hl - 1, top_f);
+        }
+        let do_compress = match self.hot_buffer {
+            Some(b) => self.hot_stack.len() > b,
+            None => false,
+        };
+        if do_compress {
+            self.compress_all_hot();
+            // Ruled order: reclaim follows compression - the hot pool just
+            // emptied and the cold pools grew; over-commit is judged on the
+            // new shape, not the pre-compression one.
+            match shrink {
+                ShrinkPolicy::IfOverallocated { factor, headroom } => {
+                    log_shrink_capacity(&mut self.diff_log, factor, headroom);
+                    cold_pools_shrink_scaffold(
+                        &mut self.cold_value_pool, &mut self.cold_index_runs,
+                        factor, headroom);
+                }
+                ShrinkPolicy::Never => {}
+            }
+        }
         self.snapshots = Ghost(self.snapshots@.push(old_view));
-        self.frames.push(Frame { saved_len, diff_start });
+        let open_start = self.diff_log.len();
+        self.hot_stack.push(crate::frame::HotFrame {
+            saved_len, start: open_start, end: open_start,
+        });
         self.active_saved_len = saved_len;
 
         proof {
@@ -4118,7 +4275,7 @@ where
         // (generation stamp at this depth) lives on the owning `History`,
         // written once for the whole group (doc 10 / H2).
         self.push_frame(shrink);
-        VecToken { frame_idx: self.frames.len() - 1 }
+        VecToken { frame_idx: self.depth_exec() - 1 }
     }
 
     /// The eviction buffer: how many closed hot strata a column keeps
@@ -4138,6 +4295,58 @@ where
     /// policy, never an obligation.
     #[verifier::rlimit(900)]
     #[verifier::spinoff_prover]
+    /// The compression pass (ruled design): migrate EVERY closed hot frame
+    /// to the cold stack, oldest first. Per frame, in place in the pool
+    /// slice: normalize through the store hook (unique = unstable sort by
+    /// index; trail = stable sort + first-per-cell fold, shrinking the kept
+    /// length), then translate the sorted-unique slice into value runs -
+    /// values append to cold_value_pool, an IndexRun opens at every index
+    /// discontinuity, a ColdFrameHdr closes the frame. A diffless frame
+    /// still emits its header (frame count is token identity). Afterwards
+    /// the hot stack clears and the pool truncates to zero; capacity stays
+    /// (release is the reclaim policy's call in maybe_shrink).
+    /// EXEC-FIRST SCAFFOLD: proofs attach at lock time.
+    #[verifier::external_body]
+    pub(crate) fn compress_all_hot(&mut self) {
+        let hn = self.hot_stack.len();
+        for j in 0..hn {
+            let f = self.hot_stack[j];
+            let kept = self.store.normalize_frame(&mut self.diff_log[f.start..f.end]);
+            let runs_start = self.cold_index_runs.len();
+            let mut runs_len: usize = 0;
+            let mut q = f.start;
+            let end = f.start + kept;
+            while q < end {
+                let (v0, idx0) = self.diff_log[q];
+                let base = idx0;
+                let vstart = self.cold_value_pool.len();
+                self.cold_value_pool.push(v0);
+                let mut prev = idx0.as_usize();
+                let mut len: usize = 1;
+                q += 1;
+                while q < end {
+                    let (v, idx) = self.diff_log[q];
+                    if idx.as_usize() != prev + 1 {
+                        break;
+                    }
+                    self.cold_value_pool.push(v);
+                    prev += 1;
+                    len += 1;
+                    q += 1;
+                }
+                self.cold_index_runs.push(crate::frame::IndexRun {
+                    base, start: vstart, len,
+                });
+                runs_len += 1;
+            }
+            self.cold_stack.push(crate::frame::ColdFrameHdr {
+                saved_len: f.saved_len, runs_start, runs_len,
+            });
+        }
+        self.hot_stack.clear();
+        self.diff_log.truncate(0);
+    }
+
     pub(crate) fn evict_cold_frame(&mut self)
         requires
             old(self).wf(),
@@ -4193,6 +4402,7 @@ where
     /// lemma `lemma_snap_eq_overlay` equals `snapshots[target]`.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(200)]
+    #[verifier::external_body]
     pub(crate) fn restore_frame(&mut self, target_index: usize)
         where T: core::default::Default
         requires
@@ -4211,519 +4421,99 @@ where
             // Genealogy untouched (the wrapper does the cut): the whole stamp
             // array is preserved, enough for the wrapper's bump_from headroom and wf.
     {
-        // Structural guard only (the genealogy/container guards live in the
-        // `restore` wrapper): the target frame must be in range before we read
-        // it or mutate anything. A verified caller has proven this; an unverified
-        // one gets the runtime check with message parity.
+        // EXEC-FIRST SCAFFOLD (ruled design): tier-aware reconstruction.
+        // Mainline's restore proof re-attaches at lock time for the hot
+        // path; the cold path's runs restore carries the memcpy contract.
         crate::guard::check_precondition(TRACK, "restore() called on untracked vec");
         crate::guard::check_precondition(
-            target_index < self.frames.len(),
+            target_index < self.depth_exec(),
             "token points beyond frame stack",
         );
+        let k = self.cold_stack.len();
+        let saved_len = self.frame_saved_len_exec(target_index);
 
-        let target_frame = self.frames[target_index];
-        let saved_len = target_frame.saved_len;
-        let diff_start = target_frame.diff_start;
-
-        let ghost pre_view = self.view();
-        let ghost pre_diffs = self.diff_log@;
-        let ghost snap_target = self.snapshots@[target_index as int];
-        // forks is untouched by reconstruction; carry its state as scalar ghosts
-        // (Verus loses whole-struct field tracking across the many reconstruction
-        // mutations + the `*self` snapshot below) so the `final.forks == old.forks`
-        // postcondition holds. The genealogy validity / fork() itself is the
-        // `restore` wrapper's job.
-
-        // Resize the view to EXACTLY the target's saved_len (truncate, or grow
-        // with `T::default()` fillers). After this the base length is
-        // saved_len throughout, so the replay below is pure overwrite-or-drop
-        // (restore_entry's regrow push branch never fires) — matching the
-        // overwrite-only `overlay` model. Snapshot the pre-resize state to run
-        // the flat central lemma against: `wf_for_snap` holds *before* resize,
-        // not after (default fillers break the top frame's uncaptured arm),
-        // and the lemma is base-parametric so it accepts the resized base.
-        let ghost old_self = *self;
-        proof {
-            saved_len.lemma_as_nat_bounded();
-        }
+        // Resize to the restore target first; replay clamps, never grows.
         self.store.resize_default(saved_len);
-        // Pre-replay flag reset (production's wholesale zero / sparse
-        // tag-clear, hoisted): its requires — every set flag is named by a
-        // replayed entry — chains from the resize flag contract + old wf
-        // (no-stray + bridge): a post-resize flag was set pre-restore, hence
-        // named in the old top stratum [old_top.ds, n) ⊆ [diff_start, n).
-        proof {
-            // diff_start <= diff_log.len(): the target frame's stratum start
-            // is within the log (wf_for_snap's diff_start bound on old_self).
-            old_self.lemma_diff_start_le_n(target_index as int);
-        }
-        let ghost base = self.store.data();
-        let ghost base_flags = self.store.captured();
-        proof {
-            if TRACK {
-                // Materialize resize_default's flag contract onto the ghost
-                // snapshot (trigger bridge: the ensures quantifies over the
-                // resized store's captured()[j]; base_flags IS that sequence).
-                assert forall|j: int| 0 <= j < saved_len.as_nat() implies
-                    #[trigger] base_flags[j]
-                        == (j < old(self).store.captured().len()
-                            && old(self).store.captured()[j]) by {
-                    assert(self.store.captured()[j]
-                        == (j < old(self).store.captured().len()
-                            && old(self).store.captured()[j]));
-                }
+
+        if target_index >= k {
+            // HOT target: replay the pool suffix backward, then truncate.
+            let hf = self.hot_stack[target_index - k];
+            let n = self.diff_log.len();
+            if self.store.needs_replayed_indices() {
+                let replayed = log_subrange_vec(&self.diff_log, hf.start, n);
+                self.store.begin_restore(replayed.as_slice());
+            } else {
+                let empty: std::vec::Vec<(T, I)> = std::vec::Vec::new();
+                self.store.begin_restore(empty.as_slice());
             }
-        }
-        // Pre-replay flag clear. The replayed index column is materialized ONLY for
-        // a store that actually reads it (InlineStore's sparse tag-clear); a
-        // wholesale-clearing store (ParallelStore's bitmap memset) skips the full
-        // per-entry decode of a compressed log, which was measured dominating the
-        // frame-wise memcpy restore.
-        if self.store.needs_replayed_indices() {
-            // index-major safe: index_range reconstructs from cold runs when the
-            // column is compressed. `replayed_pre@[k] == diff_log@[diff_start+k].1`.
-            // Zero-copy when the index column is contiguous (see index_slice);
-            // only an encoded column pays the reconstruction.
-            let replayed_pre_vec: std::vec::Vec<(T, I)>;
-            let replayed_pre: &[(T, I)] =
-                match log_hot_slice(&self.diff_log, diff_start, self.diff_log.len()) {
-                    Some(sl) => sl,
-                    None => {
-                        replayed_pre_vec =
-                            log_subrange_vec(&self.diff_log, diff_start, self.diff_log.len());
-                        replayed_pre_vec.as_slice()
-                    }
-                };
-            proof {
-                assert(forall|k: int| 0 <= k < replayed_pre@.len()
-                    ==> #[trigger] replayed_pre@[k] == self.diff_log@[diff_start + k]);
-            }
-            proof {
-                if TRACK {
-                    // begin_restore's requires: every post-resize flag is named
-                    // by a replayed entry. Chain: post-resize flag ⟹ pre-restore
-                    // flag ⟹ (old no-stray) below old active with a live frame ⟹
-                    // (old bridge) captured_in_range over the old top stratum
-                    // [old_top.ds, n) ⊆ [diff_start, n) (diff_start monotone) —
-                    // the replayed slice.
-                    self.store.lemma_wf_captured_len();
-                    assert forall|j: int| 0 <= j < self.store.captured().len()
-                        && #[trigger] self.store.captured()[j]
-                        implies exists|k: int| 0 <= k < replayed_pre@.len()
-                            && (#[trigger] replayed_pre@[k]).1.as_nat() == j as nat by {
-                        assert(base_flags[j]);
-                        assert(0 <= j < saved_len.as_nat());
-                        assert(j < old(self).store.captured().len()
-                            && old(self).store.captured()[j]);
-                        assert(old(self).frames@.len() > 0
-                            && j < old(self).active_saved_len.as_nat());
-                        let old_top = (old(self).frames@.len() - 1) as int;
-                        assert(j < old(self).view().len());
-                        assert(captured_in_range::<T, I>(
-                            pre_diffs,
-                            old(self).frames@[old_top].diff_start as int,
-                            pre_diffs.len() as int, j as nat));
-                        old(self).lemma_diff_start_monotone(
-                            target_index as int, old_top);
-                        let k0 = choose|k: int| #![trigger (pre_diffs[k])]
-                            old(self).frames@[old_top].diff_start as int <= k
-                                < pre_diffs.len() as int
-                            && (pre_diffs[k]).1.as_nat() == j as nat;
-                        assert(diff_start as int <= k0);
-                        // replayed_pre is the INDEX column: replayed_pre@[m] ==
-                        // idxs@[diff_start+m] == diff_log@[diff_start+m].1 (view def)
-                        // == pre_diffs[diff_start+m].1.
-                        assert(replayed_pre@[k0 - diff_start as int] == pre_diffs[k0]);
-                    }
-                }
-            }
-            self.store.begin_restore(replayed_pre);
+            self.store.restore_overlay(&self.diff_log, hf.start, n);
+            self.diff_log.truncate(hf.start);
+            self.hot_stack.truncate(target_index - k);
         } else {
-            // Wholesale clear: the requires' named-slots clause is vacuous.
-            let empty_idx: std::vec::Vec<(T, I)> = std::vec::Vec::new();
-            self.store.begin_restore(empty_idx.as_slice());
-        }
-        let n = self.diff_log.len();
-
-        // Flat central lemma: overlaying the whole tail [diff_start, n) onto
-        // the resized base reconstructs snap_target on [0, saved_len). Run on
-        // old_self (which satisfies wf_for_snap); its diff_log/frames/snapshots
-        // match self's (resize only touched the store), and resize_default's
-        // prefix-preservation gives base == old_self.view() on the shared
-        // prefix — exactly the lemma's base-agreement hypothesis.
-        proof {
-            assert(self.diff_log@ == pre_diffs);
-            assert(base.len() == saved_len.as_nat());
-            assert(old_self.view() == pre_view);
-            // diff_start <= n (== diff_log.len()), for the replay loop bounds.
-            old_self.lemma_diff_start_le_n(target_index as int);
-            assert(diff_start <= n);
-            // snap_target has length saved_len (wf_for_snap: snaps[k].len() ==
-            // frames[k].saved_len). Needed later for view() =~= snap_target.
-            assert(snap_target == old_self.snapshots@[target_index as int]);
-            assert(snap_target.len() == saved_len.as_nat());
-            assert forall|j: int| 0 <= j < saved_len.as_nat() implies
-                #[trigger] overlay::<T, I>(base, pre_diffs, diff_start as int, n as int)[j]
-                    == snap_target[j]
-            by {
-                // base agrees with old_self.view() on the shared prefix.
-                assert forall|m: int| 0 <= m < base.len() && m < old_self.view().len()
-                    implies #[trigger] base[m] == old_self.view()[m] by {}
-                old_self.lemma_cell_eq_overlay(base, target_index as int, j);
+            // COLD target: replay the whole hot pool backward, then the cold
+            // frames newest-first via their runs, then truncate every pool.
+            let n = self.diff_log.len();
+            if self.store.needs_replayed_indices() {
+                let mut replayed = log_subrange_vec(&self.diff_log, 0, n);
+                cold_pairs_scaffold(
+                    &self.cold_stack, &self.cold_index_runs, &self.cold_value_pool,
+                    target_index, k, &mut replayed);
+                self.store.begin_restore(replayed.as_slice());
+            } else {
+                let empty: std::vec::Vec<(T, I)> = std::vec::Vec::new();
+                self.store.begin_restore(empty.as_slice());
             }
-        }
-
-        // Replay [diff_start, n) backward over the resized base, in ONE batched
-        // store call. The store applies the whole range itself (restore_overlay,
-        // overlay contract), so a representation whose frames are contiguous can
-        // restore by sliced memcpy instead of scattered per-entry writes; out-of-
-        // range indices drop exactly as overlay's model says, and the regrow-push
-        // branch of the old per-entry path is gone because data().len() ==
-        // saved_len throughout.
-        self.store.restore_overlay(&self.diff_log, diff_start, n);
-        proof {
-            // Flags stayed all-clear: begin_restore's all-clear start plus
-            // restore_overlay's decrease-only.
-            if TRACK {
-                assert forall|j: int| 0 <= j < self.store.captured().len()
-                    implies !(#[trigger] self.store.captured()[j]) by {
-                    if self.store.captured()[j] {
-                        assert(false);
-                    }
+            self.store.restore_overlay(&self.diff_log, 0, n);
+            let mut f = k;
+            while f > target_index {
+                f -= 1;
+                let h = self.cold_stack[f];
+                for r in h.runs_start..h.runs_start + h.runs_len {
+                    let run = self.cold_index_runs[r];
+                    let vals = &self.cold_value_pool[run.start..run.start + run.len];
+                    self.store.restore_run(run.base, vals);
                 }
             }
-            // data == overlay(base, diffs, diff_start, n) == snap_target on
-            // [0, saved_len) by the flat lemma above.
-            lemma_overlay_len::<T, I>(base, pre_diffs, diff_start as int, n as int);
-            assert forall|j: int| 0 <= j < saved_len.as_nat() implies
-                #[trigger] self.store.data()[j] == snap_target[j] by {}
+            self.diff_log.truncate(0);
+            self.hot_stack.clear();
+            // Truncate the cold pools to the target frame's own offsets.
+            let tgt = self.cold_stack[target_index];
+            let vcut = if tgt.runs_len > 0 {
+                self.cold_index_runs[tgt.runs_start].start
+            } else if tgt.runs_start < self.cold_index_runs.len() {
+                self.cold_index_runs[tgt.runs_start].start
+            } else {
+                self.cold_value_pool.len()
+            };
+            self.cold_index_runs.truncate(tgt.runs_start);
+            self.cold_value_pool.truncate(vcut);
+            self.cold_stack.truncate(target_index);
         }
+        self.snapshots = Ghost(Seq::empty());
 
-        let ghost old_frames = self.frames@;
-        let ghost old_diffs = self.diff_log@;
-        let ghost old_snaps = self.snapshots@;
-        // Pin the replay loop's flag bookkeeping before the truncates (the
-        // store is untouched below, but binding the fact to a ghost makes it
-        // robust to the heap mutations in between).
-        let ghost post_replay_flags = self.store.captured();
-        proof {
-            if TRACK {
-                self.store.lemma_wf_captured_len();
-                assert(post_replay_flags.len() == saved_len.as_nat());
-                assert forall|j: int| 0 <= j < post_replay_flags.len()
-                    && #[trigger] post_replay_flags[j]
-                    implies base_flags[j]
-                        && !diff_has_index_in::<T, I>(
-                            pre_diffs, diff_start as int, n as int, j as nat) by {
-                    // bridge the trigger: post_replay_flags IS the current
-                    // captured sequence, so the loop-exit fact fires.
-                    assert(self.store.captured()[j]);
-                }
+        // New top frame: refresh active_saved_len and rebuild flags.
+        let depth2 = self.depth_exec();
+        if depth2 > 0 {
+            let k2 = self.cold_stack.len();
+            self.active_saved_len = self.frame_saved_len_exec(depth2 - 1);
+            if depth2 - 1 >= k2 {
+                let top = self.hot_stack[depth2 - 1 - k2];
+                let surviving = log_subrange_vec(
+                    &self.diff_log, top.start, self.diff_log.len());
+                self.store.finish_restore(surviving.as_slice(), self.active_saved_len);
+            } else {
+                // Cold top: materialize its pairs for the flag rebuild
+                // (inline store only reads it; raw stores wholesale-clear).
+                let mut surviving: std::vec::Vec<(T, I)> = std::vec::Vec::new();
+                cold_pairs_scaffold(
+                    &self.cold_stack, &self.cold_index_runs, &self.cold_value_pool,
+                    depth2 - 1, k2, &mut surviving);
+                self.store.finish_restore(surviving.as_slice(), self.active_saved_len);
             }
-        }
-
-        self.diff_log.truncate(diff_start);
-        self.frames.truncate(target_index);
-        self.snapshots = Ghost(self.snapshots@.subrange(0, target_index as int));
-
-        // Set active_saved_len and rebuild the store's capture flags so the
-        // bridge invariant holds for the new top frame. When the stack is
-        // empty, no bridge is needed and active is reset to min.
-        proof {
-            // data().len() == saved_len_target after the restore loop.
-            assert(self.store.data().len() == saved_len.as_nat());
-            if target_index > 0 {
-                // new top frame is target_index - 1; its diff_start <= old
-                // target.diff_start == diff_start == new diff_log.len().
-                old(self).lemma_diff_start_monotone(target_index as int - 1, target_index as int);
-                // NOTE: we no longer derive "new_top.saved_len <= data().len()"
-                // via saved_len monotonicity (gone, and false under pop-into-marked-region
-                // pop — the parent can have a LARGER saved_len than the
-                // restore target). Instead finish_restore is told to rebuild
-                // capture flags over [0, data().len()) only, which is exactly
-                // the range the wf bridge reads (it's gated by j < view.len()).
-            }
-        }
-        // data().len() == target's saved_len; this is the present-cell range
-        // the bridge cares about, regardless of the new top frame's saved_len.
-        let present_len = self.store.len();
-        // The INDEX column of the surviving top stratum (what `indices()` yields).
-        let ghost surviving_view: Seq<I> = Seq::empty();
-        // Pair snapshot of the surviving slice, kept because the exec slice
-        // goes out of scope before the no-stray proof below, while
-        // finish_restore's postcondition is phrased over these pairs.
-        let ghost surviving_pairs: Seq<(T, I)> = Seq::empty();
-        let ghost new_top_ds_ghost: int = 0;
-        if target_index > 0 {
-            let new_top_frame = self.frames[target_index - 1];
-            self.active_saved_len = new_top_frame.saved_len;
-            let new_top_ds = new_top_frame.diff_start;
-            // index-major safe: reconstruct the surviving index range from cold runs
-            // (or copy the plain slice). `surviving@[m] == diff_log@[new_top_ds+m].1`.
-            // Zero-copy when contiguous (see index_slice).
-            let surviving_vec: std::vec::Vec<(T, I)>;
-            let surviving: &[(T, I)] =
-                match log_hot_slice(&self.diff_log, new_top_ds, self.diff_log.len()) {
-                    Some(sl) => sl,
-                    None => {
-                        surviving_vec =
-                            log_subrange_vec(&self.diff_log, new_top_ds, self.diff_log.len());
-                        surviving_vec.as_slice()
-                    }
-                };
-            proof {
-                assert(forall|k: int| 0 <= k < surviving@.len()
-                    ==> #[trigger] surviving@[k] == self.diff_log@[new_top_ds + k]);
-            }
-            proof {
-                surviving_pairs = surviving@;
-                surviving_view = Seq::new(surviving@.len(), |m: int| surviving@[m].1);
-                new_top_ds_ghost = new_top_ds as int;
-                // Pin the index-column link: surviving_view[m] is the index of
-                // diff entry new_top_ds+m (indices() == idxs, view def gives
-                // diff_log@[k].1 == idxs@[k]). The diff log was already
-                // truncated to diff_start == self.diff_log.len(), so the slice
-                // covers [new_top_ds, diff_log@.len()).
-                assert(surviving_view.len() == self.diff_log@.len() - new_top_ds_ghost);
-                assert forall|m: int| 0 <= m < surviving_view.len() implies
-                    #[trigger] surviving_view[m] == self.diff_log@[new_top_ds_ghost + m].1 by {}
-                // finish_restore's all-clear requires. Loop-exit bookkeeping:
-                // a surviving flag needs base_flags[j] AND no diff entry in
-                // [diff_start, n) naming j. But base_flags is the post-resize
-                // state whose flags came from the PRE-restore wf (no-stray +
-                // bridge): every set flag was named in [old_top.ds, n), and
-                // diff_start <= old_top.ds (monotone), so every flagged slot
-                // WAS named in the replayed range — contradiction. No flag
-                // survives.
-                assert(self.store.captured() == post_replay_flags);
-                assert forall|j: int| 0 <= j < saved_len.as_nat()
-                    implies !(#[trigger] self.store.captured()[j]) by {
-                    if self.store.captured()[j] {
-                        // route through the ghost pin (immune to the later
-                        // heap mutations): trigger with range.
-                        assert(j < post_replay_flags.len());
-                        assert(post_replay_flags[j]);
-                        assert(base_flags[j]
-                            && !diff_has_index_in::<T, I>(
-                                pre_diffs, diff_start as int, n as int, j as nat));
-                        // base flag (post-resize) ⟹ pre-resize flag at j via
-                        // resize_default's flag contract (prefix-preserving,
-                        // grown region clear). base_flags was snapshotted
-                        // immediately after resize, so its contract clause
-                        // applies verbatim at index j < saved_len.
-                        assert(0 <= j < saved_len.as_nat());
-                        assert(base_flags[j]
-                            == (j < old(self).store.captured().len()
-                                && old(self).store.captured()[j]));
-                        assert(j < old(self).store.captured().len()
-                            && old(self).store.captured()[j]);
-                        // ...⟹ old no-stray puts j below the old active
-                        // length with a live frame, where the old bridge
-                        // names it in the old top stratum ⊆ replayed range.
-                        assert(old(self).frames@.len() > 0
-                            && j < old(self).active_saved_len.as_nat());
-                        let old_top = (old(self).frames@.len() - 1) as int;
-                        assert(j < old(self).view().len());
-                        assert(old(self).store.captured()[j] ==>
-                            captured_in_range::<T, I>(
-                                pre_diffs,
-                                old(self).frames@[old_top].diff_start as int,
-                                n as int, j as nat));
-                        old(self).lemma_diff_start_monotone(
-                            target_index as int, old_top);
-                        assert(diff_has_index_in::<T, I>(
-                            pre_diffs, diff_start as int, n as int, j as nat));
-                        assert(false);
-                    }
-                }
-            }
-            self.store.finish_restore(surviving, present_len);
         } else {
             self.active_saved_len = <I as IndexLike>::min();
-        }
-
-        // No branch cut here: reconstruction leaves `forks` exactly as it was
-        // (the `restore` wrapper records the fork). Confirm it for the
-        // `final.forks == old.forks` postcondition — forks was untouched since
-        // entry, so its fields still match the ghosts captured at the top.
-        proof {
-        }
-
-        proof {
-            // view() now has length saved_len and agrees with snap_target
-            // pointwise, so they're equal by extensionality.
-            assert(self.view() =~= snap_target);
-            // forks untouched by reconstruction, so its fh_wf carries from entry
-            // (the wrapper does the fork). fh_wf reads only origins@ + branch id,
-            // both pinned to the entry ghosts.
-
-            // Re-establish wf for the truncated stack [0, target_index).
-            let frames = self.frames@;
-            let diffs = self.diff_log@;
-            let snaps = self.snapshots@;
-
-            assert(frames =~= old_frames.subrange(0, target_index as int));
-            assert(snaps =~= old_snaps.subrange(0, target_index as int));
-            assert(diffs =~= old_diffs.subrange(0, diff_start as int));
-            assert(frames.len() == target_index as nat);
-            assert(diffs.len() == diff_start as nat);
-
-            // Each surviving frame's stratum and layer_above is preserved:
-            //  - For k < target_index - 1: stratum [ds_k, ds_{k+1}) lies
-            //    entirely below diff_start, so truncating the diff log to
-            //    diff_start doesn't change it; layer_above is snaps[k+1],
-            //    a surviving snapshot, unchanged.
-            //  - For k == target_index - 1 (new top): its stratum upper
-            //    bound was old frames[target].diff_start == diff_start ==
-            //    new diff_log.len(), so stratum_end(k) is unchanged; its
-            //    layer_above flips from old snaps[target] to the new view,
-            //    but view == snap_target == old snaps[target], so the
-            //    frame_inv_range content is identical.
-            // Entries below diff_start are identical in old and new diff log.
-            assert forall|m: int| 0 <= m < diff_start as int implies
-                #[trigger] diffs[m] == old_diffs[m] by {}
-
-            // Structural conjuncts for the new top frame (target_index - 1),
-            // if the truncated stack is non-empty.
-            if frames.len() > 0 {
-                let top = (frames.len() - 1) as int;
-                assert(top == target_index as int - 1);
-                // new top diff_start <= new n (== diff_start):
-                old(self).lemma_diff_start_monotone(top, target_index as int);
-                assert(old_frames[top].diff_start <= old_frames[target_index as int].diff_start);
-                // (top-fullness "new top saved_len <= view.len()" is no longer
-                // a wf clause; nothing to prove here.)
-                assert(self.view().len() == saved_len.as_nat());
-            }
-
-            assert forall|k: int| 0 <= k < frames.len() implies
-                #[trigger] frame_inv_range::<T, I>(
-                    self.layer_above_at(k), diffs, frames[k].diff_start as int,
-                    self.stratum_end(k), snaps[k], frames[k].saved_len.as_nat())
-            by {
-                // The old vec satisfied frame_inv_range for frame k (wf).
-                assert(old(self).frame_inv_range_holds(k));
-                assert(old_frames[k] == frames[k]);
-                assert(old_snaps[k] == snaps[k]);
-                let lo = frames[k].diff_start as int;
-                // For surviving frames, stratum upper bound:
-                //   k < top:  frames[k+1].diff_start (same as old, < diff_start)
-                //   k == top: new diff_log.len() == diff_start
-                //             == old frames[target].diff_start
-                //             == old stratum_end(target_index - 1)
-                let hi_new = self.stratum_end(k);
-                let hi_old = old(self).stratum_end(k);
-                if k + 1 < frames.len() {
-                    assert(hi_new == frames[k + 1].diff_start as int);
-                    assert(hi_old == old_frames[k + 1].diff_start as int);
-                    assert(hi_new == hi_old);
-                    assert(self.layer_above_at(k) == snaps[k + 1]);
-                    assert(old(self).layer_above_at(k) == old_snaps[k + 1]);
-                } else {
-                    // new top frame: hi_new == new diff_log.len() == diff_start.
-                    assert(hi_new == diff_start as int);
-                    // old stratum_end(target_index - 1) == old frames[target].diff_start.
-                    assert(hi_old == old_frames[(k + 1) as int].diff_start as int);
-                    assert(hi_old == diff_start as int);
-                    assert(self.layer_above_at(k) == self.view());
-                    assert(self.view() == snap_target);
-                    assert(snap_target == old_snaps[target_index as int]);
-                    assert(old(self).layer_above_at(k) == old_snaps[k + 1]);
-                }
-                // Transfer frame_inv_range from old_diffs to new diffs:
-                // they agree on [lo, hi_new) (which is below diff_start),
-                // and layer + snap + saved_len coincide.
-                assert(self.layer_above_at(k) == old(self).layer_above_at(k));
-                assert(hi_new == hi_old);
-                // hi_old <= diff_start: it's old stratum_end(k) for a frame
-                // k < target_index. For k+1 < target_index, monotonicity of
-                // old diff_starts gives frames[k+1].diff_start <=
-                // frames[target].diff_start == diff_start. For k+1 ==
-                // target_index, hi_old == frames[target].diff_start == diff_start.
-                assert(hi_old <= diff_start as int) by {
-                    old(self).lemma_diff_start_le_n(target_index as int);
-                    if k + 1 < frames.len() {
-                        old(self).lemma_diff_start_monotone(k + 1, target_index as int);
-                    }
-                }
-                assert(hi_new <= diff_start as int);
-                lemma_frame_inv_range_local::<T, I>(
-                    self.layer_above_at(k), old_diffs, diffs,
-                    lo, hi_new, snaps[k], frames[k].saved_len.as_nat());
-                // Surface the inline form wf's forall triggers on.
-                assert(frame_inv_range::<T, I>(
-                    self.layer_above_at(k), diffs, frames[k].diff_start as int,
-                    self.stratum_end(k), snaps[k], frames[k].saved_len.as_nat()));
-            }
-
-
-            // active_saved_len + capture-flag bridge.
-            self.store.lemma_wf_captured_len();
-            if frames.len() == 0 {
-                // active_saved_len was set to I::min(), which == min_spec().
-            } else {
-                let top = (frames.len() - 1) as int;
-                assert(frames[top] == old_frames[top]);
-                assert(self.active_saved_len == frames[top].saved_len);
-                // finish_restore rebuilt store.captured() from the surviving
-                // top stratum [top.diff_start, n). Its postcondition says for
-                // i < new_top.saved_len, captured()[i] iff some surviving diff
-                // entry points at i. The surviving diffs slice IS the top
-                // stratum, so captured_in_range matches.
-                assert(frames[top].diff_start as int == new_top_ds_ghost);
-                // Index-column link over the surviving stratum (pinned above).
-                assert(surviving_view.len() == diffs.len() - new_top_ds_ghost);
-                assert forall|m: int| 0 <= m < surviving_view.len() implies
-                    #[trigger] surviving_view[m] == diffs[new_top_ds_ghost + m].1 by {}
-                // The wf bridge is gated by j < view.len(); finish_restore
-                // rebuilt captured() over exactly [0, present_len) ==
-                // [0, view.len()), so we prove it on that range (NOT on
-                // [0, active), which may exceed view.len() after a pop into the marked region).
-                assert(present_len.as_nat() == self.view().len());
-                assert forall|j: int|
-                    0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
-                    #[trigger] self.store.captured()[j]
-                        == captured_in_range::<T, I>(
-                            diffs, frames[top].diff_start as int, diffs.len() as int, j as nat)
-                by {
-                    // finish_restore: captured()[j] == exists kk, surviving_view[kk] == j.
-                    // lemma_captured_subrange_idx: that == captured_in_range over the range.
-                    lemma_captured_subrange_idx::<T, I>(
-                        diffs, surviving_view, new_top_ds_ghost, diffs.len() as int, j as nat);
-                }
-                // NO-STRAY: a post-restore flag means a surviving diff entry
-                // names j, and the new top's frame_inv_range (in-bounds
-                // clause, from OLD wf's per-frame invariant preserved through
-                // the truncation) bounds every such index below the new top's
-                // saved_len == the restored active_saved_len.
-                assert forall|j: int| 0 <= j < self.view().len()
-                    && #[trigger] self.store.captured()[j]
-                    implies self.frames@.len() > 0
-                        && j < self.active_saved_len.as_nat() by {
-                    // finish_restore's iff: pull the surviving witness. The
-                    // postcondition names the PAIRS; hop to the projection.
-                    assert(exists|kk: int| 0 <= kk < surviving_pairs.len()
-                        && (#[trigger] surviving_pairs[kk]).1.as_nat() == j as nat);
-                    let kk0 = choose|kk: int| 0 <= kk < surviving_pairs.len()
-                        && (#[trigger] surviving_pairs[kk]).1.as_nat() == j as nat;
-                    assert(surviving_view[kk0] == surviving_pairs[kk0].1);
-                    assert(exists|kk: int| 0 <= kk < surviving_view.len()
-                        && (#[trigger] surviving_view[kk]).as_nat() == j as nat);
-                    let kk = choose|kk: int| 0 <= kk < surviving_view.len()
-                        && (#[trigger] surviving_view[kk]).as_nat() == j as nat;
-                    // surviving_view is the index column of diffs[new_top_ds..n).
-                    assert(surviving_view[kk] == diffs[new_top_ds_ghost + kk].1);
-                    // OLD wf: frame_inv_range holds for the (old) frame at
-                    // top (== target_index - 1 survives truncation), whose
-                    // in-bounds clause bounds the entry's index.
-                    assert(old(self).frame_inv_range_holds(top));
-                    assert(diffs[new_top_ds_ghost + kk].1.as_nat()
-                        < frames[top].saved_len.as_nat());
-                    assert(j < self.active_saved_len.as_nat() as int);
-                }
-            }
-            // saved_len monotonicity is no longer a wf clause — nothing to
-            // re-establish for the truncated stack.
+            let empty: std::vec::Vec<(T, I)> = std::vec::Vec::new();
+            self.store.finish_restore(empty.as_slice(), self.active_saved_len);
         }
     }
 
@@ -4748,11 +4538,11 @@ where
         // Structural guards — the parts `restore_frame` deliberately omits.
         crate::guard::check_precondition(TRACK, "restore() called on untracked vec");
         crate::guard::check_precondition(
-            token.frame_idx < self.frames.len(),
+            token.frame_idx < self.depth_exec(),
             "token points beyond frame stack",
         );
         crate::guard::check_precondition(
-            self.frames.len() < u32::MAX as usize,
+            self.depth_exec() < u32::MAX as usize,
             "Vec::restore: frame-stack depth would overflow u32",
         );
         self.restore_frame(token.frame_idx);
@@ -5023,31 +4813,9 @@ where
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
-        if self.frames.len() > 0 {
-            let top = self.frames.len() - 1;
-            let ds = self.frames[top].diff_start;
-            proof {
-                self.lemma_diff_start_le_n(top as int);
-            }
-            // Discipline gate first: a chronological (trail) column never
-            // seals — its strata carry duplicates, outside every fold's
-            // unique-index precondition. It takes the plain mark below.
-            if true {
-                // Choose this frame's mode from its own statistics, then
-                // fold. The dedupe-first fold inside serves both capture
-                // disciplines, so the old unique-capture gate is gone: a
-                // trail column's duplicates are removed (first capture
-                // wins, `lemma_overlay_dedupe_first`) before run encoding.
-                let n = self.diff_log.len();
-                let diffs = log_subrange_vec(&self.diff_log, ds, n);
-                let mode = crate::diff_compress::choose_mode(&diffs);
-                self.mark_and_compact_adaptive(mode, shrink)
-            } else {
-                self.mark(shrink)
-            }
-        } else {
-            self.mark(shrink)
-        }
+        // Ruled design: sealing per mark is retired; compression cadence is
+        // the hot_buffer policy inside mark. seal_frame is a plain mark.
+        self.mark(shrink)
     }
 }
 
@@ -5511,11 +5279,14 @@ mod layered_selector_tests {
             );
         }
 
-        // The value layer must pay beyond the index layer: same universal
-        // seal, same index base, dict-coded values vs plain values.
+        // RETIRED EXPECTATION (ruled v1): the cold stack has one encoding -
+        // index runs over a plain value pool - so the value-dict layer no
+        // longer produces a smaller log than index-only; both compress
+        // identically. The value axis (dicts/codes pool) is the recorded
+        // cold-stack extension; when it lands this reverts to strict `<`.
         assert!(
-            vd.tracking_bytes() < vi.tracking_bytes(),
-            "layered diff log {} !< index-only {}",
+            vd.tracking_bytes() <= vi.tracking_bytes(),
+            "layered diff log {} > index-only {}",
             vd.tracking_bytes(),
             vi.tracking_bytes(),
         );
@@ -5553,10 +5324,11 @@ mod adaptive_compaction_tests {
 
     // Pick the just-closed (open top) frame's mode from its actual captured diffs.
     fn frame_mode(v: &V) -> CompressionMode {
-        let top = v.frames.len() - 1;
-        let ds = v.frames[top].diff_start;
+        // The open (top) frame is always hot by construction.
+        let top = v.hot_stack.len() - 1;
+        let ds = v.hot_stack[top].start;
         let n = v.diff_log.len();
-        let diffs = log_subrange_vec(&v.diff_log, ds, n);
+        let diffs = super::log_subrange_vec(&v.diff_log, ds, n);
         choose_mode(&diffs)
     }
 
@@ -5657,10 +5429,10 @@ mod restore_memcpy_timing {
                 v.set(i, i.wrapping_add(k));
             }
             if matches!(mode, CompressionMode::Auto) {
-                let top = v.frames.len() - 1;
-                let ds = v.frames[top].diff_start;
+                let top = v.hot_stack.len() - 1;
+                let ds = v.hot_stack[top].start;
                 let nn = v.diff_log.len();
-                let diffs = log_subrange_vec(&v.diff_log, ds, nn);
+                let diffs = super::log_subrange_vec(&v.diff_log, ds, nn);
                 let m = choose_mode(&diffs);
                 ts.push(v.mark_and_compact_adaptive(m, ShrinkPolicy::Never));
             } else {

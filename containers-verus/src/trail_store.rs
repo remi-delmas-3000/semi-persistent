@@ -315,6 +315,39 @@ where
         }
     }
 
+    /// Trail normalize: stable sort by index (equal-index ties keep pool =
+    /// temporal order), then keep the FIRST entry of each index group,
+    /// compacted to the front; returns the kept length. EXEC-FIRST SCAFFOLD.
+    #[verifier::external_body]
+    fn normalize_frame(&self, frame: &mut [(T, I)]) -> usize {
+        frame.sort_by_key(|p| p.1.as_usize());
+        let n = frame.len();
+        if n == 0 {
+            return 0;
+        }
+        let mut w: usize = 1;
+        for r in 1..n {
+            if frame[r].1.as_usize() != frame[w - 1].1.as_usize() {
+                frame[w] = frame[r];
+                w += 1;
+            }
+        }
+        w
+    }
+
+    /// Raw data column: one clamped copy_from_slice per run. EXEC-FIRST
+    /// SCAFFOLD.
+    #[verifier::external_body]
+    fn restore_run(&mut self, base: I, values: &[T]) {
+        let b = base.as_usize();
+        let tlen = self.data.len();
+        if b >= tlen {
+            return;
+        }
+        let cl = core::cmp::min(values.len(), tlen - b);
+        self.data[b..b + cl].copy_from_slice(&values[..cl]);
+    }
+
     fn shrink_if(&mut self, _factor: usize, _headroom: usize) {
         broadcast use crate::diff_store::lemma_trail_discipline;
         // Capacity reclamation is optional under the contract; the trail

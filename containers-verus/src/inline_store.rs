@@ -470,7 +470,7 @@ where
                     }
                 }
             }
-        
+
     }
 
     fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], _saved_len: I) {

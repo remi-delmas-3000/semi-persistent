@@ -81,10 +81,26 @@ locked state discharges them, reusing commit 20's proof assets (ColdStack wf
 and restores, the dedupe overlay theorem, the fold frame rule) at the two
 seams.
 
-## Phases
+## Phases (ruled 2026-09-13: fuzz and tune BEFORE any proof)
 
 - A2a: delete the DiffLog type; bare `diff_log` field; compression off;
-  every gate green; mark_churn == mainline by identity (measured to confirm).
-- A2b: add cold/scratch/loc + mark-driven evict/reclaim + cold restores;
-  conformance + trail compression + deep-history bench.
-- A3: lock; discharge the scaffolding ledger; full battery.
+  every gate green; mark_churn == mainline by identity. DONE - measured
+  3.898us vs prod 3.843us on mark_churn/1000 (1.4%), restore_replay
+  163.6us vs prod 207.8us.
+- A2b: the ruled two-stack layout + mark-driven compression + tier-aware
+  restore. Gate: full conformance including trail compression. DONE
+  pending env_lever cadence update.
+- A2c FUZZ: proptest differential fuzzing against the production container
+  as oracle - arbitrary op sequences (push/pop/set/mark with and without
+  compression/restore/deep restore across the cold boundary), all stores
+  (inline/parallel/trail/dyn), duplicate-heavy trail workloads, degenerate
+  frames (empty, single-cell, full-width), pop-into-marked-region, high
+  iteration counts. No proof work until this suite is green and has run
+  long enough to be boring.
+- A2d PERF: benchmark battery vs the mainline baseline (mark_churn,
+  restore_replay, a new deep-history cold-restore bench, trail-heavy
+  churn); tune normalize (sort choice), run translation, and the capacity
+  policies until the numbers stop improving. Record every experiment.
+- A3 LOCK + PROVE: freeze the algorithm, then discharge the scaffolding
+  ledger (restore_frame, compress_all_hot, store hooks, restore loops),
+  reusing commit 20's proof assets at the seams.

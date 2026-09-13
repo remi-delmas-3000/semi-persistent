@@ -511,6 +511,43 @@ where
 
     // -- maintenance ---------------------------------------------------------
 
+    /// Normalize one closed frame's diff slice in place for compression:
+    /// sort by index; the trail discipline first keeps only the
+    /// chronologically FIRST entry per cell (stable sort, then a first-of-
+    /// group compaction) and returns the kept length. Unique disciplines
+    /// return the full length (no ties exist). Called ONLY from the
+    /// compression pass, so mark without compression stays O(1) for trail.
+    /// EXEC-FIRST SCAFFOLD: contracts attach at lock time.
+    #[verifier::external_body]
+    fn normalize_frame(&self, frame: &mut [(T, I)]) -> usize {
+        frame.sort_unstable_by_key(|p| p.1.as_usize());
+        frame.len()
+    }
+
+    /// Restore one cold run: write `values` into the live column starting at
+    /// `base`, clamped to the current length. The default is per-element
+    /// (stores whose cells re-encode, e.g. tag-inline, cannot memcpy); raw
+    /// stores override with copy_from_slice. EXEC-FIRST SCAFFOLD.
+    #[verifier::external_body]
+    fn restore_run(&mut self, base: I, values: &[T]) {
+        let b = base.as_usize();
+        for (q, v) in values.iter().enumerate() {
+            let i = b + q;
+            if i < self.raw_len() {
+                self.set_raw_usize_scaffold(i, *v);
+            }
+        }
+    }
+
+    /// Scaffold raw write by usize (default routes through set_raw when the
+    /// index converts). EXEC-FIRST; folds into set_raw at lock time.
+    #[verifier::external_body]
+    fn set_raw_usize_scaffold(&mut self, i: usize, v: T) {
+        if let Some(ix) = I::try_from_usize(i) {
+            self.set_raw(ix, v);
+        }
+    }
+
     fn shrink_if(&mut self, factor: usize, headroom: usize)
         requires old(self).wf(),
         ensures
