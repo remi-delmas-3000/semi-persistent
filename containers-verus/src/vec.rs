@@ -3944,26 +3944,25 @@ where
                     && #[trigger] self.store.captured()[j]
                     implies exists|k: int| 0 <= k < prev_suffix@.len()
                         && (#[trigger] prev_suffix@[k]).1.as_nat() == j as nat by {
-                    // no-stray: live frame and j < active.
+                    // no-stray: live frame and j < active < view (set flags).
                     assert(self.trail_frames@.len() > 0 && j < self.active_saved_len.as_nat());
-                    let top = (self.trail_frames@.len() - 1) as int;
                     self.store.lemma_wf_captured_len();
                     assert(j < self.view().len());
-                    // bridge: captured_in_range(diffs, top.diff_start, |diffs|, j).
-                    assert(self.active_saved_len.as_nat() == self.g_saved_len(top as int));
+                    // PHYSICAL bridge (wf): parent_diff_start IS the physical
+                    // open start hot_top.start, over diff_log - not the ghost
+                    // g_start. This is the offset split; prepare_mark consumes
+                    // the physical suffix, so the physical bridge is exactly
+                    // what discharges its requires.
+                    assert(self.hot_stack@.len() > 0);
+                    let phys_lo = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
+                    assert(parent_diff_start == phys_lo);
                     assert(captured_in_range::<T, I>(
                         self.diff_log@,
-                        self.g_start(top),
+                        phys_lo,
                         self.diff_log@.len() as int, j as nat));
-                    // captured_in_range == exists entry in [ds, |diffs|) naming j.
                     let k0 = choose|k: int| #![trigger (self.diff_log@[k])]
-                        self.g_start(top) <= k < self.diff_log@.len()
+                        phys_lo <= k < self.diff_log@.len()
                         && (self.diff_log@[k]).1.as_nat() == j as nat;
-                    // prev_suffix == diffs[parent_diff_start..]; parent_diff_start
-                    // == top.diff_start, so k0 maps to suffix index k0 - ds.
-                    assert(parent_diff_start == self.g_start(top));
-                    // prev_suffix is the index column: entry k0 - ds is the
-                    // index of diff_log@[k0] (indices() == idxs, view def).
                     assert(prev_suffix@[k0 - parent_diff_start as int]
                         == self.diff_log@[k0]);
                 }
@@ -4023,7 +4022,10 @@ where
             // capture flags changed, which the Vec invariant doesn't read.
             assert(self.view() == old_view);
             assert(diffs == old(self).full_trail@);
-            assert(diff_start == diffs.len());
+            // g_start(new_top) is the ghost boundary just pushed (full_trail
+            // len); the physical new hot start is open_start == diff_log.len()
+            // (post-compression), tracked separately below.
+            assert(self.g_start(new_top) == diffs.len());
             // diff_log is untouched by prepare_mark/frames.push/snapshots, so its
             // wf (established by maybe_shrink) persists; do not re-derive it (the
             // value-major cold_vals representation is opaque here).
@@ -4047,7 +4049,7 @@ where
                     old(self).lemma_diff_start_monotone(k, k + 1);
                 } else {
                     assert(k == old_tf.len() - 1);
-                    assert(self.g_start(k + 1) == diff_start);
+                    assert(self.g_start(k + 1) == diffs.len() as int);
                     old(self).lemma_diff_start_le_n(k);
                 }
             }
@@ -4069,6 +4071,23 @@ where
             by {
                 // stratum empty ⇒ RHS false; prepare_mark ⇒ LHS false.
                 assert(self.g_start(new_top) == diffs.len());
+            }
+            // PHYSICAL bridge for the new stack: the new hot frame's physical
+            // start is open_start == diff_log.len() (post-compression), so its
+            // physical stratum [start, len) is empty; prepare_mark cleared the
+            // flags, so both sides are false.
+            assert(self.hot_stack@.len() > 0);
+            assert(self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int
+                == self.diff_log@.len());
+            assert forall|j: int|
+                0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
+                #[trigger] self.store.captured()[j]
+                    == captured_in_range::<T, I>(
+                        self.diff_log@,
+                        self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int,
+                        self.diff_log@.len() as int, j as nat)
+            by {
+                // empty physical stratum ⇒ RHS false; prepare_mark ⇒ LHS false.
             }
 
             // Re-establish the per-frame frame_inv_range for the new stack.
@@ -4201,7 +4220,28 @@ where
     /// (release is the reclaim policy's call in maybe_shrink).
     /// EXEC-FIRST SCAFFOLD: proofs attach at lock time.
     #[verifier::external_body]
-    pub(crate) fn compress_all_hot(&mut self) {
+    pub(crate) fn compress_all_hot(&mut self)
+        ensures
+            // Representation change only: the ghost trail, snapshots, store,
+            // view, and depth are untouched (the ghost is
+            // representation-independent - the whole point of the model).
+            final(self).view() == old(self).view(),
+            final(self).full_trail@ == old(self).full_trail@,
+            final(self).trail_frames@ == old(self).trail_frames@,
+            final(self).snapshots@ == old(self).snapshots@,
+            final(self).active_saved_len == old(self).active_saved_len,
+            final(self).store == old(self).store,
+            // Post-state: every hot frame migrated to cold; the physical hot
+            // log is empty. (wf is NOT ensured here - open-frame-is-hot is
+            // transiently violated until push_frame re-opens a hot frame.)
+            final(self).hot_stack@.len() == 0,
+            final(self).diff_log@.len() == 0,
+            final(self).cold_stack@.len() == old(self).trail_frames@.len(),
+            // Reconstruction survives: frame_inv_range over the (unchanged)
+            // ghost trail still holds for every frame.
+            forall|k: int| 0 <= k < final(self).trail_frames@.len()
+                ==> #[trigger] final(self).frame_inv_range_holds(k),
+    {
         let mut keys: std::vec::Vec<u64> = std::vec::Vec::new();
         let mut wide: std::vec::Vec<usize> = std::vec::Vec::new();
 
