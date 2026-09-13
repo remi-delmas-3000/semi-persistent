@@ -332,3 +332,95 @@ restore_cold with the ghost-dedupe (all lemmas exist and verify - see section 6)
 The 3-stack model is the better architecture only for a from-scratch redesign,
 where per-stack invariants would be clean from the start; it is not worth a
 rewrite mid-flight given the lock.
+
+## 8. Recommended clean-slate architecture and its starting goal
+
+If the successor chooses the redesign (section 7's verdict: better if starting
+fresh), this is the concrete data layout and the task contract.
+
+### 8.1 Data layout: open buffer + three stacks
+
+Separate the WRITABLE region from the frame HISTORY, and split history into
+three age tiers. Frame index space oldest->newest:
+`cold [0,C) . hot [C,C+H) . trail [C+H, C+H+T)`, with a single open buffer above.
+`depth = C+H+T`.
+
+- Live column: `data: Vec<T>` (the store).
+- Open buffer (always trail-discipline, the ONLY writable region):
+  `open_log: Vec<(T,I)>` raw append log of (old_value, index). Because writes go
+  here and nowhere else, "the open frame is writable" is trivial - NO
+  re-materialization ever needed.
+- Trail stack: `trail_log: Vec<(T,I)>` + `trail_frames: Vec<{start, saved_len}>`.
+  Invariant TrailInv: each stratum == its ghost stratum (identity, dups included).
+- Hot stack: `hot_log: Vec<(T,I)>` + `hot_frames: Vec<{start, saved_len}>`.
+  Invariant HotInv: each stratum == dedupe_first(ghost stratum).
+- Cold stack: `cold_index_runs: Vec<{base,len,val_start}>` +
+  `cold_value_pool: Vec<T>` + `cold_frames: Vec<{runs_start,runs_len,saved_len}>`.
+  Invariant ColdInv: runs decode to a sorted cell-disjoint permutation of
+  dedupe_first(ghost stratum) (cold_reconstructs && cold_runs_disjoint).
+- Ghost (spec, erased): full_trail (raw, all frames, dups) + trail_frames +
+  snapshots. One abstraction; three UNCONDITIONAL per-tier invariants (no
+  unique_capture_spec branching).
+
+Aging (amortized on mark): write -> open_log; mark closes open_log into a TRAIL
+frame; |trail|>tau_hot dedups oldest trail into hot (T2H); |hot|>tau_cold
+compresses oldest hot into cold (H2C).
+
+restore(t): truncate all four regions + ghost to frames < t; clear open_log;
+reconstruct data == snapshots[t] by ONE telescope induction (k from depth-1 down
+to t, each frame replayed by its tier's step). No re-mat, no ghost-dedupe.
+
+### 8.2 The theorems
+
+- Ghost model + lemma_cell_eq_overlay (exists).
+- Migration: T2H (lemma_overlay_dedupe_first, exists), H2C (order-independence +
+  cold_reconstructs, exists).
+- One stack-agnostic lemma_telescope_step(k): data==snapshots[k+1] ==>
+  (undo frame k via its tier) ==> data==snapshots[k]. Three per-tier instances:
+  trail/hot via lemma_cell_eq_overlay per frame; cold via lemma_cold_replay_step_l
+  (exists, fixed-length coverage already handled).
+- Composite restore = induction over telescope_step, invariant data==snapshots[k].
+- wf = TrailInv(all) && HotInv(all) && ColdInv(all) && tiling && open_is_trail;
+  restore re-establishes by survivor framing (survivor lemmas exist).
+
+### 8.3 Starting goal (task contract) for the redesign
+
+One-line outcome (BUILT): a Verus-verified Vec with open-buffer + trail/hot/cold
+tiers whose restore is a single telescope induction; cargo verus verify 0 errors
+and zero external_body on the write/restore path; conversion + restore theorems
+proven; full gate battery green.
+
+Acceptance (runnable checks):
+1. cargo verus verify -p semi-persistent-containers-verus -> 0 errors; no
+   external_body on set/mark/restore/the three migrations (memcpy hooks may
+   re-prove via copy_from_slice; anything else external_body carries a named
+   trust-ledger belt).
+2. restore is proven (no external_body), structured as one loop over
+   telescope_step(k) dispatching by tier; loop invariant data==snapshots[k] is
+   the sole reconstruction obligation.
+3. TrailInv/HotInv/ColdInv are unconditional - grep for unique_capture_spec in
+   wf's tier clauses returns nothing.
+4. T2H, H2C, and telescope_step (+ its three per-tier instances) verify, reusing
+   lemma_overlay_dedupe_first / lemma_cell_eq_overlay / lemma_cold_replay_step_l;
+   no re-derivation.
+5. Differential proptest (ported trail/deep-unwind): 512+ cases green across all
+   three tiers crossing both eviction thresholds; conformance + lib green.
+6. Benches re-taken and recorded (rewrite => fresh D4 lock, with numbers);
+   floors stated; regressions justified or fixed.
+
+Forbidden proxies: no external_body on write/restore where a proof is wanted; no
+discipline-conditional invariant reintroduced; no "restore proven" while
+telescope_step is stubbed for any tier; no bench claim without before/after
+numbers; a batched replay must still carry the frame-by-frame telescope proof or
+a proven batched-run variant.
+
+Optimal-first: the open-buffer decoupling is mandatory from line one (it deletes
+re-materialization); do not start with an open frame coupled to a tier.
+
+Hard-part-first: land telescope_step + the composite restore induction BEFORE any
+migration/eviction plumbing.
+
+No lateral motion / partial = not done: don't build eviction cadence, benches, or
+the parallel variant while restore is unproven; each open item names its
+remaining obligation. Status reports label each deliverable
+BUILT/MEASURED/DESIGNED with command output or diff, not prose.
