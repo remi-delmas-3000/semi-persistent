@@ -13,40 +13,61 @@ regression plus the residual mark_churn tax were the price of that type, not
 of compression. The design is therefore not a redesign: it is mainline's
 container unchanged, plus one cold stack beside it.
 
-## Layout (verbatim, the lock target)
+## Layout (verbatim, the lock target - ruled 2026-09-13)
 
     struct Vec<T, I, S> {
-        store:    S,
-        diff_log: Vec<(T, I)>,         // mainline's field - the hot tier
-        frames:   Vec<Frame<I>>,       // mainline's field; diff_start
-                                       //   generalizes to loc: Hot(off) | Cold(idx)
-        cold:     ColdStack<T, I, VC>, // doc restore-from-compressed-frames \S3,
-                                       //   already built and proven
-        scratch:  Vec<T>,              // dict-decode buffer (\S4)
+        store: S,                          // live values Vec<T> + capture discipline
+
+        hot_value_pool: Vec<(T, I)>,       // all uncompressed diffs
+        hot_stack: Vec<HotFrame<I>>,       // { saved_len, start, end } into hot_value_pool
+
+        cold_value_pool: Vec<T>,           // all value runs, concatenated
+        cold_index_runs: Vec<IndexRun<I>>, // { base, start, len }: run lands at
+                                           //   live[base..], values at
+                                           //   cold_value_pool[start..start+len]
+        cold_stack: Vec<ColdFrame<I>>,     // { runs_start, runs_len, saved_len }
     }
 
-Hot writes and hot restores are mainline's code by identity, so the write
-path cannot regress by construction. The cold stack is reachable only from
-`mark()` (evict past HOT_BUFFER, reclaim over-committed pools) and from
-cold-frame restores.
+Cold frames are the oldest [0, k), hot frames the most recent [k, n);
+depth n = cold_stack.len() + hot_stack.len(). A token's frame_idx resolves
+by comparison with the split point; each tier's header carries saved_len.
+No unified frame array, no loc tag, no CSR offs column (IndexRun carries
+its own len), no dict or plain cold modes in v1 - every cold frame is runs.
 
-## Algorithms
+## Algorithms (ruled)
 
-- Capture: unique-capture stores check the flag per write; the trail store
-  appends every write unconditionally. Both push into `diff_log`.
-- mark(saved_len): push Frame{saved_len, loc: Hot(diff_log.len())}; if the
-  column is tiered and hot frames exceed HOT_BUFFER, evict the oldest hot
-  stratum; if pools are over-committed, reclaim.
-- Evict: fold-min in temporal order (keep each cell's chronologically first
-  capture; decorate with position, one sort by (index, position), linear
-  group-first pass - the sort RLE needs does double duty), select the mode
-  per frame with the restore term (\S5), seal into the cold pools, retag the
-  frame's loc Hot -> Cold, shift remaining Hot offsets by the deduped delta.
-- Restore: hot frame = mainline's backward loop; cold Plain = backward walk
-  of the pooled pairs; cold Runs = one clamped copy_from_slice per run; cold
-  RunsDict = per-run dict decode into `scratch`, then the same block copy.
-- Pop: hot = truncate `diff_log`; cold = truncate every pool to the popped
-  header's offsets.
+- Capture: unique stores check the flag per write; the trail store appends
+  unconditionally and its flag hooks are no-ops. Both push into
+  hot_value_pool.
+- mark(reclaim_policy, compress: bool): push HotFrame{saved_len, start=end
+  =pool.len()}; when compress, run the compression pass; reclaim per policy.
+- Compression pass (all hot frames migrate, oldest first, IN PLACE in the
+  pool slice [start, end) - no stratum materialization):
+    1. normalize (a DiffStore hook, called only here so mark(_, false)
+       stays O(1) for trail): unique discipline = sort_unstable by index
+       (no ties, allocation-free); trail = STABLE sort by index (ties keep
+       temporal order), then a forward pass compacting the first entry per
+       index group; the frame's effective length shrinks to the kept count.
+       Extents never shift: the dead tail is reclaimed when the whole pool
+       truncates at the end of the pass.
+    2. translate: one traversal of pool[start..start+kept] appending values
+       to cold_value_pool, opening an IndexRun at each index discontinuity,
+       closing with a ColdFrame. A diffless frame still emits its ColdFrame
+       (runs_len 0) - frame count is token identity.
+    3. after the last frame: hot_stack clears, hot_value_pool truncates to
+       0 always; capacity is released only when reclaim_policy asks.
+- Restore cold frame: resize live to saved_len, then per run one clamped
+  memcpy cold_value_pool[start..start+len] -> live[base..].
+- Restore hot frame: reverse walk of pool[start..end] (high to low), so
+  the most ancient value lands last - correct for trail duplicates.
+- Pop: hot = pop header + truncate pool to its start; cold = pop header +
+  truncate cold_index_runs to runs_start and cold_value_pool to the popped
+  frame's first run start.
+
+Known honesty note: Rust's stable slice sort uses a transient merge buffer,
+so the trail normalize is pool-in-place but not allocation-free during the
+sort; the unique branch is. Upgrade (in-place stable merge, or decoration
+into the frame's own dead tail) only when a profile shows it.
 
 ## Method (exec-first, per the 2026-09-12 direction)
 
