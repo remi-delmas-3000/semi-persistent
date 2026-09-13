@@ -278,25 +278,33 @@ where
     ) {
         broadcast use crate::diff_store::lemma_trail_discipline;
         // Backward replay of [lo, hi) straight into the raw data column
-        // (mainline's loop shape over the bare log). EXEC-FIRST SCAFFOLD:
-        // the overlay-peel proof re-attaches at lock time (ledger:
-        // mainline-shape-plus-coldstack goal doc).
+        // (mainline's loop shape over the bare log). The loop realizes
+        // `overlay`'s front-recursion on `lo`: overlay(base, i, hi) equals
+        // overlay(base, i+1, hi) updated at diffs[i] (when its index is in
+        // range). Walking i downward from hi and setting data[diffs[i].1] on
+        // top of the running overlay reproduces that recurrence exactly, so
+        // the loop invariant carries data@ == overlay(base, i2, hi).
+        let ghost base = self.data@;
         let mut i2: usize = hi;
         while i2 > lo
+            invariant
+                lo <= i2 <= hi,
+                hi <= diff_log@.len(),
+                self.data@.len() == base.len(),
+                self.data@ == crate::vec::overlay::<T, I>(
+                    base, diff_log@, i2 as int, hi as int),
             decreases i2,
         {
+            proof {
+                crate::vec::lemma_overlay_len::<T, I>(
+                    base, diff_log@, (i2 - 1) as int, hi as int);
+            }
             i2 -= 1;
             let (v, idx) = diff_log[i2];
             let iu = idx.as_usize();
             if iu < self.data.len() {
                 self.data.set(iu, v);
             }
-        }
-        proof {
-            crate::vec::lemma_overlay_len::<T, I>(
-                old(self).data@, diff_log@, lo as int, hi as int);
-            assume(self.data@ == crate::vec::overlay::<T, I>(
-                old(self).data@, diff_log@, lo as int, hi as int));
         }
     }
 

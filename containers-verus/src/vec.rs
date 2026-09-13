@@ -3463,6 +3463,87 @@ where
                         old_gt, gt, ds_top, j as nat, new_len as nat);
                 }
 
+                // --- PHYSICAL bridge (same shape, over diff_log/hot_top.start) ---
+                let phys_lo = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
+                assert forall|j: int|
+                    0 <= j < active_n && j < self.view().len() implies
+                    #[trigger] self.store.captured()[j]
+                        == captured_in_range::<T, I>(diffs, phys_lo, diffs.len() as int, j as nat)
+                by {
+                    assert(j < new_len);
+                    assert(j < old_view.len());
+                    let old_phys = old(self).hot_stack@[(old(self).hot_stack@.len() - 1) as int].start as int;
+                    assert(old_phys == phys_lo);
+                    assert(self.store.captured()[j] == mid_captured[j]);
+                    assert(mid_captured[j] == old(self).store.captured()[j]);
+                    assert(old(self).store.captured()[j]
+                        == captured_in_range::<T, I>(
+                            old_diffs, old_phys, old_diffs.len() as int, j as nat));
+                    lemma_captured_in_range_append_other::<T, I>(
+                        old_diffs, diffs, phys_lo, j as nat, new_len as nat);
+                }
+
+                // --- index_set_ok: physical slice == ghost slice on [0, active) ---
+                assert forall|j: int| #![trigger captured_in_range::<T, I>(
+                        gt, ds_top, gt.len() as int, j as nat)]
+                    0 <= j < active_n implies
+                    captured_in_range::<T, I>(diffs, phys_lo, diffs.len() as int, j as nat)
+                    == captured_in_range::<T, I>(gt, ds_top, gt.len() as int, j as nat)
+                by {
+                    if j < self.view().len() {
+                        // both == captured()[j] by the two bridges above.
+                        assert(self.store.captured()[j]
+                            == captured_in_range::<T, I>(gt, ds_top, gt.len() as int, j as nat));
+                        assert(self.store.captured()[j]
+                            == captured_in_range::<T, I>(diffs, phys_lo, diffs.len() as int, j as nat));
+                    } else {
+                        // popped region [new_len, active): the write at new_len
+                        // added the same index to both slices (or neither), and
+                        // for j != new_len the append-other framing carries the
+                        // old equality.
+                        let old_phys = old(self).hot_stack@[(old(self).hot_stack@.len() - 1) as int].start as int;
+                        assert(old_phys == phys_lo);
+                        assert(ds_top <= old_gt.len());
+                        assert(old_phys <= old_diffs.len());
+                        assert(captured_in_range::<T, I>(old_diffs, old_phys, old_diffs.len() as int, j as nat)
+                            == captured_in_range::<T, I>(old_gt, ds_top, old_gt.len() as int, j as nat));
+                        if j == new_len {
+                            // j == new_len == old_view.len()-1 < old_view.len(),
+                            // so the OLD bridges apply at new_len. captured_marked
+                            // holds (new_len < active). Both slices end up
+                            // containing new_len; show each true.
+                            assert(new_len < old_view.len());
+                            assert(captured_marked);
+                            // GHOST: captured_marked ⟹ gt pushed (.,new_len).
+                            assert(gt[old_gt.len() as int].1.as_nat() == new_len as nat);
+                            assert(ds_top <= old_gt.len() < gt.len());
+                            assert(captured_in_range::<T, I>(gt, ds_top, gt.len() as int, new_len as nat));
+                            // PHYSICAL: pushed on first capture; else old_captured
+                            // ⟹ old physical bridge (valid at new_len<old_view)
+                            // ⟹ old_diffs had it ⟹ diffs (prefix) has it.
+                            if !old_store_captured[new_len] || !old(self).store.unique_capture_spec() {
+                                assert(diffs[old_diffs.len() as int].1.as_nat() == new_len as nat);
+                                assert(phys_lo <= old_diffs.len() < diffs.len());
+                                assert(captured_in_range::<T, I>(diffs, phys_lo, diffs.len() as int, new_len as nat));
+                            } else {
+                                assert(old_store_captured[new_len]);
+                                assert(old(self).store.captured()[new_len]
+                                    == captured_in_range::<T, I>(
+                                        old_diffs, phys_lo, old_diffs.len() as int, new_len as nat));
+                                assert(captured_in_range::<T, I>(old_diffs, phys_lo, old_diffs.len() as int, new_len as nat));
+                                lemma_captured_in_range_append_other::<T, I>(
+                                    old_diffs, diffs, phys_lo, new_len as nat, new_len as nat + 1);
+                                assert(captured_in_range::<T, I>(diffs, phys_lo, diffs.len() as int, new_len as nat));
+                            }
+                        } else {
+                            lemma_captured_in_range_append_other::<T, I>(
+                                old_gt, gt, ds_top, j as nat, new_len as nat);
+                            lemma_captured_in_range_append_other::<T, I>(
+                                old_diffs, diffs, phys_lo, j as nat, new_len as nat);
+                        }
+                    }
+                }
+
             } else if old_tf.len() > 0 {
                 // old_view empty (so view stays empty): store.pop is a no-op
                 // and the capture branch can't have run (len == 0). So the
