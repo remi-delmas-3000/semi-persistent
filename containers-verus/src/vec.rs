@@ -1942,6 +1942,16 @@ where
         // compression moves closed frames to cold but push_frame re-opens a
         // hot one. So a live stack always has at least one hot frame.
         &&& (tf.len() > 0 ==> self.hot_stack@.len() > 0)
+        // Each physical frame's stored saved_len is its ghost snapshot's length.
+        // (Noted in this doc since the first draft but only now encoded: restore
+        // resizes to frame_saved_len_exec(target), which the reconstruction must
+        // know equals snapshots[target].len().)
+        &&& (forall|i: int| 0 <= i < self.hot_stack@.len() ==>
+                (#[trigger] self.hot_stack@[i]).saved_len.as_nat()
+                    == self.snapshots@[self.cold_stack@.len() + i].len())
+        &&& (forall|f: int| 0 <= f < self.cold_stack@.len() ==>
+                (#[trigger] self.cold_stack@[f]).saved_len.as_nat()
+                    == self.snapshots@[f].len())
         // Frame count fits usize (the depth guards keep it below u32::MAX).
         &&& tf.len() < usize::MAX
         // TRACK=false => no frames, ever (mark, the only frame-pusher,
@@ -5549,6 +5559,39 @@ where
             } else {
                 self.lemma_push_frame_frame_iso(*old(self), old_view);
             }
+
+            // saved_len == snapshot length for every frame. The new top frame's
+            // saved_len is store.len() at mark == old_view.len() == its snapshot;
+            // survivors keep old's (seal touches only .end); migrated cold frames
+            // carry it through compress's ledgered ensure.
+            let cc3 = self.cold_stack@.len() as int;
+            assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                self.hot_stack@[i].saved_len.as_nat() == self.snapshots@[cc3 + i].len() by {
+                if i == self.hot_stack@.len() - 1 {
+                    assert(self.hot_stack@[i].saved_len == saved_len);
+                    assert(cc3 + i == new_top);
+                    assert(self.snapshots@[new_top] == old_view);
+                    assert(saved_len.as_nat() == old_view.len());
+                } else {
+                    assert(!do_compress);
+                    assert(cc3 == old(self).cold_stack@.len());
+                    assert(self.hot_stack@[i].saved_len == old(self).hot_stack@[i].saved_len);
+                    assert(old(self).hot_stack@[i].saved_len.as_nat()
+                        == old(self).snapshots@[old(self).cold_stack@.len() + i].len());
+                    assert(self.snapshots@[cc3 + i] == old(self).snapshots@[cc3 + i]);
+                }
+            }
+            assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+                self.cold_stack@[f].saved_len.as_nat() == self.snapshots@[f].len() by {
+                if do_compress {
+                    // compress's ledgered ensure gave cold[f].saved_len ==
+                    // (post-compress snapshots)[f].len(); the final snapshots.push
+                    // appends past index f (< cc3 == old tf.len), so [f] is stable.
+                } else {
+                    assert(self.cold_stack@[f] == old(self).cold_stack@[f]);
+                    assert(self.snapshots@[f] == old(self).snapshots@[f]);
+                }
+            }
         }
     }
 
@@ -5646,6 +5689,12 @@ where
             // top frame and the cold telescoping.
             forall|f: int| 0 <= f < final(self).cold_stack@.len()
                 ==> #[trigger] final(self).cold_reconstructs(f),
+            // Each migrated frame keeps its saved_len == snapshot length
+            // (compress copies the hot frame's saved_len, which matched its
+            // snapshot). Ledgered against the D2 belt, like cold_reconstructs.
+            forall|f: int| 0 <= f < final(self).cold_stack@.len()
+                ==> (#[trigger] final(self).cold_stack@[f]).saved_len.as_nat()
+                    == final(self).snapshots@[f].len(),
     {
         let mut keys: std::vec::Vec<u64> = std::vec::Vec::new();
         let mut wide: std::vec::Vec<usize> = std::vec::Vec::new();
