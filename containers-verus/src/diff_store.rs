@@ -511,11 +511,32 @@ where
 
 
     /// Restore one cold run: write `values` into the live column starting at
-    /// `base`, clamped to the current length. The default is per-element
-    /// (stores whose cells re-encode, e.g. tag-inline, cannot memcpy); raw
-    /// stores override with copy_from_slice. EXEC-FIRST SCAFFOLD.
+    /// `base`, clamped to the current length. Overwrite-only: the window
+    /// `[base, base+values.len())` (intersected with `[0, data.len())`) takes
+    /// the run values, every other cell is untouched, and the length and
+    /// capture flags are unchanged (a raw data write; the bitmap is inert).
+    /// The default is per-element (stores whose cells re-encode, e.g.
+    /// tag-inline, cannot memcpy) and stays a trusted scaffold; the raw stores
+    /// override with a proven copy_from_slice.
     #[verifier::external_body]
-    fn restore_run(&mut self, base: I, values: &[T]) {
+    fn restore_run(&mut self, base: I, values: &[T])
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
+            final(self).captured() == old(self).captured(),
+            final(self).data().len() == old(self).data().len(),
+            forall|i: int| 0 <= i < final(self).data().len() ==>
+                #[trigger] final(self).data()[i] ==
+                    if base.as_nat() <= i && (i as nat) < base.as_nat() + values@.len() {
+                        values@[i - base.as_nat()]
+                    } else {
+                        old(self).data()[i]
+                    },
+    {
         let b = base.as_usize();
         for (q, v) in values.iter().enumerate() {
             let i = b + q;
