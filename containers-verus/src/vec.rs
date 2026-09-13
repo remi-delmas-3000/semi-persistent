@@ -1815,6 +1815,11 @@ where
         // No frames => no captures => the physical hot log is empty (and
         // by the bridge both stacks are too).
         &&& (tf.len() == 0 ==> self.diff_log@.len() == 0)
+        // Hot-frame extents tile the physical diff_log: the open (top) hot
+        // frame starts at or before the log end, and starts are monotone.
+        &&& (self.hot_stack@.len() > 0 ==>
+                self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int
+                    <= self.diff_log@.len())
         // Frame count fits usize (the depth guards keep it below u32::MAX).
         &&& tf.len() < usize::MAX
         // TRACK=false => no frames, ever (mark, the only frame-pusher,
@@ -1878,6 +1883,21 @@ where
                             self.full_trail@,
                             self.g_start((tf.len() - 1) as int),
                             self.full_trail@.len() as int,
+                            j as nat))
+        // PHYSICAL capture bridge over the open frame's diff_log slice: a set
+        // flag is named by a physical diff_log entry in [hot_top.start, len).
+        // This is what prepare_mark's sparse-clear consumes (it reads the
+        // physical slice, not the ghost). The pre-tiering wf carried exactly
+        // this; the store maintains it (capture appends the index in the same
+        // step it sets the flag).
+        &&& (self.hot_stack@.len() > 0 ==>
+                forall|j: int|
+                    0 <= j < self.active_saved_len.as_nat() && j < self.view().len() ==>
+                    (#[trigger] self.store.captured()[j])
+                        == captured_in_range::<T, I>(
+                            self.diff_log@,
+                            self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int,
+                            self.diff_log@.len() as int,
                             j as nat))
         // No stray flags: every set flag lies in the trackable region.
         &&& (TRACK ==> forall|j: int| 0 <= j < self.view().len()
@@ -3743,6 +3763,66 @@ where
                                 && 0 <= p < old_gt.len()
                                 && (#[trigger] old_gt[p]).1.as_nat() == j as nat;
                             assert(gt[p] == old_gt[p]);
+                        }
+                    }
+                }
+                // PHYSICAL capture bridge (same shape, over diff_log/hot_top.start).
+                let phys_lo = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
+                let ghost diffs_p = self.diff_log@;
+                // Bridge gated by j < view.len() (matches the wf clause): the
+                // store only tracks flags for present cells. set_raw preserves
+                // length, so view.len() == old_view.len().
+                assert forall|j: int|
+                    0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
+                    #[trigger] self.store.captured()[j]
+                        == captured_in_range::<T, I>(
+                            diffs_p, phys_lo, diffs_p.len() as int, j as nat)
+                by {
+                    // old bridge for j; hot_stack unchanged by set_index, so
+                    // the old physical open start equals phys_lo.
+                    assert(j < old(self).view().len());
+                    assert(old(self).hot_stack@ == self.hot_stack@);
+                    assert(old(self).store.captured()[j]
+                        == captured_in_range::<T, I>(
+                            old_diffs, phys_lo, old_diffs.len() as int, j as nat));
+                    if j == iu {
+                        if appended {
+                            // first write: captured[iu] set, (.,iu) appended.
+                            assert(self.store.captured()[iu] == true);
+                            let newpos = old_diffs.len() as int;
+                            assert(phys_lo <= newpos < diffs_p.len() as int);
+                            assert(diffs_p[newpos].1.as_nat() == iu as nat);
+                        } else {
+                            // duplicate on an already-captured unique cell:
+                            // flag stays true, diff_log unchanged, and iu was
+                            // already in the old slice (old bridge).
+                            assert(was_captured0);
+                            assert(self.store.captured()[iu] == true);
+                            assert(diffs_p == old_diffs);
+                            assert(captured_in_range::<T, I>(
+                                old_diffs, phys_lo, old_diffs.len() as int, iu as nat));
+                        }
+                    } else {
+                        // j != iu: captured()[j] unchanged by capture/set_raw,
+                        // and captured_in_range(j) unchanged (only iu added).
+                        assert(self.store.captured()[j] == old(self).store.captured()[j]);
+                        if captured_in_range::<T, I>(diffs_p, phys_lo, diffs_p.len() as int, j as nat) {
+                            let p = choose|p: int| phys_lo <= p < diffs_p.len() as int
+                                && 0 <= p < diffs_p.len()
+                                && (#[trigger] diffs_p[p]).1.as_nat() == j as nat;
+                            if p < old_diffs.len() {
+                                assert(diffs_p[p] == old_diffs[p]);
+                            } else {
+                                assert(appended);
+                                assert(diffs_p[p].1.as_nat() == iu as nat);
+                            }
+                        }
+                        if captured_in_range::<T, I>(
+                            old_diffs, phys_lo, old_diffs.len() as int, j as nat) {
+                            let p = choose|p: int| phys_lo <= p < old_diffs.len() as int
+                                && 0 <= p < old_diffs.len()
+                                && (#[trigger] old_diffs[p]).1.as_nat() == j as nat;
+                            assert(diffs_p[p] == old_diffs[p]);
                         }
                     }
                 }
