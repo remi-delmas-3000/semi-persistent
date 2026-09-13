@@ -6638,6 +6638,55 @@ where
         assert(self.wf());
     }
 
+    /// COLD survivors keep their ghost `frame_inv_range`: for a cold-target
+    /// restore the surviving frames `[0, target-1)` (frame `target-1` is
+    /// re-materialized separately) read only the ghost prefix
+    /// `full_trail[0, g_start(target-1))`, which the re-mat dedupe update leaves
+    /// unchanged. Needs only PREFIX agreement (not full subrange equality),
+    /// since the top frame's stratum is replaced by its deduped decode.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(500)]
+    pub(crate) proof fn lemma_restore_cold_survivors_frame_inv(
+        &self, old_self: Self, target: int,
+    )
+        requires
+            old_self.wf_for_snap(),
+            0 < target <= old_self.cold_stack@.len(),
+            self.trail_frames@ == old_self.trail_frames@.subrange(0, target),
+            self.snapshots@ == old_self.snapshots@.subrange(0, target),
+            old_self.g_start((target - 1) as int) <= self.full_trail@.len(),
+            forall|m: int| 0 <= m < old_self.g_start((target - 1) as int)
+                ==> #[trigger] self.full_trail@[m] == old_self.full_trail@[m],
+        ensures
+            forall|k: int| 0 <= k < target - 1 ==> #[trigger] self.frame_inv_range_holds(k),
+    {
+        let bnd = old_self.g_start((target - 1) as int);
+        old_self.lemma_diff_start_le_n((target - 1) as int);
+        assert forall|k: int| 0 <= k < target - 1 implies
+            #[trigger] self.frame_inv_range_holds(k) by {
+            assert(old_self.frame_inv_range_holds(k));
+            let lo = self.g_start(k);
+            let hi = self.g_end(k);
+            assert(self.trail_frames@[k] == old_self.trail_frames@[k]);
+            assert(lo == old_self.g_start(k));
+            old_self.lemma_diff_start_le_n(k);
+            // k+1 < target, so g_end reads the (preserved) trail_frames boundary.
+            assert(self.trail_frames@[k + 1] == old_self.trail_frames@[k + 1]);
+            assert(hi == old_self.g_start(k + 1));
+            old_self.lemma_diff_start_monotone(k + 1, (target - 1) as int);
+            assert(hi <= bnd);
+            assert(self.layer_above_at(k) == self.snapshots@[k + 1]);
+            assert(self.layer_above_at(k) == old_self.layer_above_at(k));
+            assert(self.snapshots@[k] == old_self.snapshots@[k]);
+            assert(lo <= hi <= bnd);
+            assert forall|q: int| lo <= q < hi implies
+                #[trigger] self.full_trail@[q] == old_self.full_trail@[q] by {}
+            lemma_frame_inv_range_local::<T, I>(
+                self.layer_above_at(k), old_self.full_trail@, self.full_trail@,
+                lo, hi, self.snapshots@[k], self.snapshots@[k].len());
+        }
+    }
+
     pub(crate) proof fn lemma_restore_survivors_frame_inv(&self, old_self: Self, target: int)
         requires
             old_self.wf_for_snap(),
