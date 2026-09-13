@@ -1,0 +1,38 @@
+    Checking semi-persistent-containers-verus v0.3.0 (/private/tmp/d21wt/containers-verus)
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:172:5
+    |
+172 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:189:5
+    |
+189 |     static KIND: std::sync::OnceLock<crate::dyn_store::StoreKind> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:237:5
+    |
+237 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:247:5
+    |
+247 | /     static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+248 | |         std::sync::OnceLock::new();
+    | |__________________________________^
+
+
+thread '<unnamed>' (26681852) panicked at rust_verify/src/verifier.rs:983:21:
+unexpected output from solver: containers-verus/src/vec.rs:4962:5: 4962:62 (#0) expected rlimit-count in smt statistics
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread '<unnamed>' (26681852) panicked at rust_verify/src/verifier.rs:2167:29:
+worker thread panicked
+warning: `semi-persistent-containers-verus` (lib) generated 4 warnings
+error: could not compile `semi-persistent-containers-verus` (lib); 4 warnings emitted
+
+Caused by:
+  process didn't exit successfully: `/Users/remidelmas/.cargo/bin/verus /Users/remidelmas/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin/rustc --crate-name semi_persistent_containers_verus --edition=2024 containers-verus/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata -C embed-bitcode=no -C debuginfo=2 -C split-debuginfo=unpacked --warn=unexpected_cfgs --check-cfg 'cfg(verus_only)' --check-cfg 'cfg(verus_keep_ghost)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("compat-all", "compat-bplus", "compat-composites", "compat-core", "compat-ids", "compat-list", "hasher-random-seed", "literal-types", "strict-id-exhaustion"))' -C metadata=8d4969d2f4cce000 -C extra-filename=-18424dfab133dc04 --out-dir /private/tmp/d21wt/target/debug/deps -C incremental=/private/tmp/d21wt/target/debug/incremental -L dependency=/private/tmp/d21wt/target/debug/deps --extern foldhash=/private/tmp/d21wt/target/debug/deps/libfoldhash-8a2c8965b10d55de.rmeta --extern rayon=/private/tmp/d21wt/target/debug/deps/librayon-f66fba4afcfcac6c.rmeta --extern vstd=/private/tmp/d21wt/target/debug/deps/libvstd-fba6ae3db341cda9.rmeta` (exit status: 1)

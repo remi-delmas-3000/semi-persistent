@@ -1,0 +1,31 @@
+    Checking semi-persistent-containers-verus v0.3.0 (/private/tmp/d21wt/containers-verus)
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:172:5
+    |
+172 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:189:5
+    |
+189 |     static KIND: std::sync::OnceLock<crate::dyn_store::StoreKind> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:237:5
+    |
+237 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:247:5
+    |
+247 | /     static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+248 | |         std::sync::OnceLock::new();
+    | |__________________________________^
+
+note: verifying module vec, function semi_persistent_containers_verus::vec::Vec::pop (selected functions)
+
+verification results:: 1 verified, 0 errors (partial verification with `--verify-*`)
+warning: `semi-persistent-containers-verus` (lib) generated 4 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.44s

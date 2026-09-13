@@ -1,0 +1,145 @@
+    Checking semi-persistent-containers-verus v0.3.0 (/private/tmp/d21wt/containers-verus)
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:172:5
+    |
+172 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:189:5
+    |
+189 |     static KIND: std::sync::OnceLock<crate::dyn_store::StoreKind> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:237:5
+    |
+237 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:247:5
+    |
+247 | /     static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+248 | |         std::sync::OnceLock::new();
+    | |__________________________________^
+
+error: postcondition not satisfied
+    --> containers-verus/src/vec.rs:2728:13
+     |
+2728 |               final(self).wf(),
+     |               ^^^^^^^^^^^^^^^^ failed this postcondition
+...
+2764 |           proof {
+     |  _______________-
+...    |
+2817 | |         }
+     | |_________- at the end of the function body
+
+error: assertion failed
+    --> containers-verus/src/vec.rs:3319:28
+     |
+3319 |                 #[trigger] self.frame_iso(i) by {
+     |                            ^^^^^^^^^^^^^^^^^ assertion failed
+
+error: postcondition not satisfied
+    --> containers-verus/src/vec.rs:3531:13
+     |
+3531 |               final(self).wf(),
+     |               ^^^^^^^^^^^^^^^^ failed this postcondition
+...
+3539 | /     {
+3540 | |         let ghost old_view = self.view();
+3541 | |         let ghost old_diffs = self.diff_log@;
+3542 | |         let ghost old_tf = self.trail_frames@;
+...    |
+4139 | |         r
+4140 | |     }
+     | |_____- at the end of the function body
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:4111:59
+     |
+4111 | ...                   assert(old_view[j] == snap[j]);
+     |                                             ^^^^^^^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |             0 <= i < self.len(),
+     |             ------------------- recommendation not met
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:4116:58
+     |
+4116 | ...                   assert(diffs[p].0 == snap[j]);
+     |                                            ^^^^^^^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |             0 <= i < self.len(),
+     |             ------------------- recommendation not met
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:4087:62
+     |
+4087 | ...                   && old_diffs[p].0 == snap[j]
+     |                                            ^^^^^^^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |             0 <= i < self.len(),
+     |             ------------------- recommendation not met
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:3554:34
+     |
+3554 |           let ghost data_last: T = old(self).store.data()[
+     |  __________________________________^
+3555 | |             if old_view.len() > 0 { old_view.len() - 1 } else { 0 } as int];
+     | |___________________________________________________________________________^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |               0 <= i < self.len(),
+     |               ------------------- recommendation not met
+
+error: postcondition not satisfied
+    --> containers-verus/src/vec.rs:4152:13
+     |
+4152 |               final(self).wf(),
+     |               ^^^^^^^^^^^^^^^^ failed this postcondition
+...
+4157 | /     {
+4158 | |         // Total-with-documented-panic (hot family): explicit bound branch.
+4159 | |         if !(i.as_usize() < self.store.raw_len()) {
+4160 | |             crate::guard::refuse("Vec::set_index: index out of bounds");
+...    |
+4767 | |     }
+     | |_____- at the end of the function body
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:4186:28
+     |
+4186 |                     assert(self.store.captured()[iu] == true);
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |             0 <= i < self.len(),
+     |             ------------------- recommendation not met
+
+note: function body check: Resource limit (rlimit) exceeded; consider rerunning with --profile for more details
+    --> containers-verus/src/vec.rs:4148:5
+     |
+4148 |     pub fn set_index(&mut self, i: I, value: T)
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+
+thread '<unnamed>' (26653332) panicked at rust_verify/src/verifier.rs:983:21:
+unexpected output from solver: containers-verus/src/vec.rs:4866:5: 4866:62 (#0) expected rlimit-count in smt statistics
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread '<unnamed>' (26653332) panicked at rust_verify/src/verifier.rs:2167:29:
+worker thread panicked
+warning: `semi-persistent-containers-verus` (lib) generated 4 warnings
+error: could not compile `semi-persistent-containers-verus` (lib) due to 4 previous errors; 4 warnings emitted

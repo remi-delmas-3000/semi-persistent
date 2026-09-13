@@ -1,0 +1,112 @@
+    Checking semi-persistent-containers-verus v0.3.0 (/private/tmp/d21wt/containers-verus)
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:172:5
+    |
+172 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:189:5
+    |
+189 |     static KIND: std::sync::OnceLock<crate::dyn_store::StoreKind> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:237:5
+    |
+237 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:247:5
+    |
+247 | /     static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+248 | |         std::sync::OnceLock::new();
+    | |__________________________________^
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:5632:21
+     |
+5632 |                 ==> #[trigger] self.diff_log@[k] == old_self.diff_log@[k],
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |             0 <= i < self.len(),
+     |             ------------------- recommendation not met
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:5636:21
+     |
+5636 |                 ==> #[trigger] self.full_trail@[k] == old_self.full_trail@[k],
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |             0 <= i < self.len(),
+     |             ------------------- recommendation not met
+
+error: assertion failed
+    --> containers-verus/src/vec.rs:5648:16
+     |
+5648 |         assert(ge == old_self.g_end(cc + fidx));
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ assertion failed
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:5649:40
+     |
+5649 |         assert forall|j: int| 0 <= j < self.snapshots@[cc + fidx].len() implies
+     |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |             0 <= i < self.len(),
+     |             ------------------- recommendation not met
+
+error: assertion failed
+    --> containers-verus/src/vec.rs:5654:20
+     |
+5654 |               assert(captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat)
+     |  ____________________^
+5655 | |                 == captured_in_range::<T, I>(old_self.diff_log@, ps, pe, j as nat)) by {
+     | |__________________________________________________________________________________^ assertion failed
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:5664:28
+     |
+5664 |                     assert(self.diff_log@[k] == old_self.diff_log@[k]);
+     |                            ^^^^^^^^^^^^^^^^^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |             0 <= i < self.len(),
+     |             ------------------- recommendation not met
+
+error: assertion failed
+    --> containers-verus/src/vec.rs:5668:20
+     |
+5668 |               assert(captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat)
+     |  ____________________^
+5669 | |                 == captured_in_range::<T, I>(old_self.full_trail@, gs, ge, j as nat)) by {
+     | |____________________________________________________________________________________^ assertion failed
+
+note: recommendation not met
+    --> containers-verus/src/vec.rs:5678:28
+     |
+5678 |                     assert(self.full_trail@[k] == old_self.full_trail@[k]);
+     |                            ^^^^^^^^^^^^^^^^^^^
+     |
+    ::: /Users/remidelmas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/vstd-0.0.0-2026-08-02-0125/seq.rs:972:13
+     |
+ 972 |             0 <= i < self.len(),
+     |             ------------------- recommendation not met
+
+
+thread '<unnamed>' (26667617) panicked at rust_verify/src/verifier.rs:983:21:
+unexpected output from solver: containers-verus/src/vec.rs:4962:5: 4962:62 (#0) expected rlimit-count in smt statistics
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread '<unnamed>' (26667617) panicked at rust_verify/src/verifier.rs:2167:29:
+worker thread panicked
+warning: `semi-persistent-containers-verus` (lib) generated 4 warnings
+error: could not compile `semi-persistent-containers-verus` (lib) due to 3 previous errors; 4 warnings emitted

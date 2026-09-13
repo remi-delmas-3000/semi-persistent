@@ -2114,6 +2114,11 @@ where
         // slice and ghost open stratum name the same indices over [0,active),
         // reaching the popped-marked slots the view-gated bridges cannot.
         &&& self.index_set_ok()
+        // PER-FRAME index-set equality (generalizes index_set_ok off the top):
+        // restore promotes a buried frame to top and needs its physical<->ghost
+        // index-set match. Trail half from the sequence-bridge/alignment; unique
+        // half maintained by the capture discipline. (2026-09-13 finding.)
+        &&& (forall|i: int| 0 <= i < self.hot_stack@.len() ==> #[trigger] self.frame_iso(i))
         // TRAIL sequence bridge: under the append-always (non-unique)
         // discipline the physical diff_log IS the ghost trail's hot suffix -
         // every hot write is recorded in both, in lockstep, and compression
@@ -2192,6 +2197,24 @@ where
         assert(self.wf_for_snap());
         // Index-set equality transfers (forks pins the four fields it reads).
         self.lemma_index_set_transfer(old_self);
+        // Per-frame index-set: all frame fields are pinned, so frame_iso(i) is
+        // the identical predicate on old_self, which wf gives. The nested
+        // forall|j| needs the field-substitution helpers to transfer.
+        assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+            #[trigger] self.frame_iso(i) by {
+            let cc = self.cold_stack@.len() as int;
+            assert(old_self.frame_iso(i));
+            assert forall|j: int| 0 <= j < self.snapshots@[cc + i].len() implies
+                #[trigger] captured_in_range::<T, I>(
+                    self.diff_log@, self.phys_hot_start(i), self.phys_hot_end(i), j as nat)
+                == captured_in_range::<T, I>(
+                    self.full_trail@, self.g_start(cc + i), self.g_end(cc + i), j as nat) by {
+                assert(self.phys_hot_start(i) == old_self.phys_hot_start(i));
+                assert(self.phys_hot_end(i) == old_self.phys_hot_end(i));
+                assert(self.g_start(cc + i) == old_self.g_start(cc + i));
+                assert(self.g_end(cc + i) == old_self.g_end(cc + i));
+            }
+        }
         if self.store.unique_capture_spec() {
             assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
                 #[trigger] self.phys_frame_inv_range_holds(i) by {
@@ -2791,6 +2814,24 @@ where
                 // Index-set equality transfers (all four fields pinned).
                 self.lemma_index_set_transfer(ms_pre);
             }
+            // Per-frame index-set: every frame field is pinned == ms_pre, so
+            // frame_iso(i) is the identical predicate (field-subst helpers carry
+            // the nested forall|j|).
+            assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                #[trigger] self.frame_iso(i) by {
+                let cc = self.cold_stack@.len() as int;
+                assert(ms_pre.frame_iso(i));
+                assert forall|j: int| 0 <= j < self.snapshots@[cc + i].len() implies
+                    #[trigger] captured_in_range::<T, I>(
+                        self.diff_log@, self.phys_hot_start(i), self.phys_hot_end(i), j as nat)
+                    == captured_in_range::<T, I>(
+                        self.full_trail@, self.g_start(cc + i), self.g_end(cc + i), j as nat) by {
+                    assert(self.phys_hot_start(i) == ms_pre.phys_hot_start(i));
+                    assert(self.phys_hot_end(i) == ms_pre.phys_hot_end(i));
+                    assert(self.g_start(cc + i) == ms_pre.g_start(cc + i));
+                    assert(self.g_end(cc + i) == ms_pre.g_end(cc + i));
+                }
+            }
         }
     }
 
@@ -3290,6 +3331,24 @@ where
             // captured by the earlier pop — coverage).
             // Index-set equality transfers (push touches neither log).
             self.lemma_index_set_transfer(old_self);
+            // Per-frame index-set: push pins every frame field, so frame_iso(i)
+            // is the identical predicate on old_self (field-substitution helpers
+            // carry the nested forall|j|).
+            assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                #[trigger] self.frame_iso(i) by {
+                let cc = self.cold_stack@.len() as int;
+                assert(old_self.frame_iso(i));
+                assert forall|j: int| 0 <= j < self.snapshots@[cc + i].len() implies
+                    #[trigger] captured_in_range::<T, I>(
+                        self.diff_log@, self.phys_hot_start(i), self.phys_hot_end(i), j as nat)
+                    == captured_in_range::<T, I>(
+                        self.full_trail@, self.g_start(cc + i), self.g_end(cc + i), j as nat) by {
+                    assert(self.phys_hot_start(i) == old_self.phys_hot_start(i));
+                    assert(self.phys_hot_end(i) == old_self.phys_hot_end(i));
+                    assert(self.g_start(cc + i) == old_self.g_start(cc + i));
+                    assert(self.g_end(cc + i) == old_self.g_end(cc + i));
+                }
+            }
             self.store.lemma_wf_captured_len();
             if tf.len() > 0 {
                 let top = (tf.len() - 1) as int;
@@ -4106,6 +4165,40 @@ where
                     }
                 }
             }
+
+            // Per-frame index-set (frame_iso): top from index_set_ok, buried
+            // frames framed forward across pop's (at most one) capture append.
+            if self.hot_stack@.len() > 0 {
+                assert(self.index_set_ok());
+                let ghost os = *old(self);
+                assert(self.diff_log@ == old_diffs
+                    || self.diff_log@ == old_diffs.push(pushed_e));
+                assert(self.full_trail@ == old_ft
+                    || self.full_trail@ == old_ft.push(pushed_e));
+                assert forall|fidx: int| 0 <= fidx < self.hot_stack@.len() implies
+                    #[trigger] self.frame_iso(fidx) by {
+                    if fidx + 1 == self.hot_stack@.len() {
+                        assert(self.cold_stack@.len() + self.hot_stack@.len() == tf.len());
+                        assert(self.active_saved_len.as_nat()
+                            == self.g_saved_len((tf.len() - 1) as int));
+                        self.lemma_frame_iso_top_from_index_set();
+                    } else {
+                        assert(os.frame_iso(fidx));
+                        assert(self.hot_stack@ == os.hot_stack@);
+                        assert(self.phys_hot_end(fidx) <= old_diffs.len()) by {
+                            assert(os.hot_stack@[fidx + 1].start <= os.diff_log@.len());
+                        }
+                        assert(self.g_end(self.cold_stack@.len() + fidx) <= old_ft.len()) by {
+                            os.lemma_stratum_bounds(self.cold_stack@.len() + fidx);
+                        }
+                        assert forall|k: int| 0 <= k < old_diffs.len() implies
+                            #[trigger] self.diff_log@[k] == old_diffs[k] by {}
+                        assert forall|k: int| 0 <= k < old_ft.len() implies
+                            #[trigger] self.full_trail@[k] == old_ft[k] by {}
+                        self.lemma_frame_iso_buried_framed(os, fidx);
+                    }
+                }
+            }
         }
         r
     }
@@ -4734,6 +4827,38 @@ where
                     }
                 }
             }
+
+            // Per-frame index-set (frame_iso): top frame from the just-proven
+            // index_set_ok, buried frames framed forward across the append.
+            assert(self.index_set_ok());
+            let ghost os = *old(self);
+            assert forall|fidx: int| 0 <= fidx < self.hot_stack@.len() implies
+                #[trigger] self.frame_iso(fidx) by {
+                if fidx + 1 == self.hot_stack@.len() {
+                    assert(self.cold_stack@.len() + self.hot_stack@.len() == tf.len());
+                    assert(self.active_saved_len.as_nat()
+                        == self.g_saved_len((tf.len() - 1) as int));
+                    self.lemma_frame_iso_top_from_index_set();
+                } else {
+                    assert(os.frame_iso(fidx));
+                    assert(self.hot_stack@ == os.hot_stack@);
+                    assert(self.phys_hot_end(fidx) <= old_diffs.len()) by {
+                        assert(os.hot_stack@[fidx + 1].start <= os.diff_log@.len());
+                    }
+                    assert(self.g_end(self.cold_stack@.len() + fidx) <= old_ft.len()) by {
+                        os.lemma_stratum_bounds(self.cold_stack@.len() + fidx);
+                    }
+                    assert(self.diff_log@ == old_diffs
+                        || self.diff_log@ == old_diffs.push((old_view[iu], i)));
+                    assert(self.full_trail@ == old_ft
+                        || self.full_trail@ == old_ft.push((old_view[iu], i)));
+                    assert forall|k: int| 0 <= k < old_diffs.len() implies
+                        #[trigger] self.diff_log@[k] == old_diffs[k] by {}
+                    assert forall|k: int| 0 <= k < old_ft.len() implies
+                        #[trigger] self.full_trail@[k] == old_ft[k] by {}
+                    self.lemma_frame_iso_buried_framed(os, fidx);
+                }
+            }
         }
     }
 
@@ -4814,6 +4939,93 @@ where
             assert(frame_inv_range::<T, I>(
                 self.layer_above_at(k), diffs, lo, hi, snaps[k],
                 snaps[k].len()));
+        }
+    }
+
+    /// Per-frame `frame_iso` for the whole new stack after a mark, extracted
+    /// from `push_frame` to keep its SMT query small. The logs' CONTENT is
+    /// unchanged (mark opens an empty frame, appending nothing); only the frame
+    /// indexing shifts. Each old frame's physical and ghost stratum bounds are
+    /// unchanged (the old top's ends were both the log lengths, which equal the
+    /// new frame's start), so its `frame_iso` carries from `old_self`. The new
+    /// top's stratum is empty, so both `captured_in_range` sides are false.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(1000)]
+    pub(crate) proof fn lemma_push_frame_frame_iso(&self, old_self: Self, old_view: Seq<T>)
+        requires
+            old_self.wf(),
+            old_self.hot_stack@.len() > 0,
+            self.diff_log@ == old_self.diff_log@,
+            self.full_trail@ == old_self.full_trail@,
+            self.cold_stack@ == old_self.cold_stack@,
+            self.trail_frames@ == old_self.trail_frames@.push(
+                old_self.full_trail@.len() as nat),
+            self.snapshots@ == old_self.snapshots@.push(old_view),
+            self.hot_stack@.len() == old_self.hot_stack@.len() + 1,
+            // frame_iso reads only stratum starts (phys_hot_start / the next
+            // frame's start), never .end, so .start-equality is all mark's seal
+            // (which mutates only the closing frame's .end) must preserve.
+            forall|i: int| 0 <= i < old_self.hot_stack@.len()
+                ==> (#[trigger] self.hot_stack@[i]).start == old_self.hot_stack@[i].start,
+            self.hot_stack@[old_self.hot_stack@.len() as int].start as int
+                == old_self.diff_log@.len(),
+        ensures
+            forall|i: int| 0 <= i < self.hot_stack@.len() ==> #[trigger] self.frame_iso(i),
+    {
+        let cc = self.cold_stack@.len() as int;
+        let och = old_self.hot_stack@.len() as int;
+        let otf = old_self.trail_frames@.len() as int;
+        // frame-count bridge in old_self: cc + och == otf.
+        assert(cc + och == otf);
+        assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+            #[trigger] self.frame_iso(i) by {
+            if i < och {
+                // OLD frame: stratum bounds and content unchanged.
+                assert(self.phys_hot_start(i) == old_self.phys_hot_start(i));
+                assert(self.phys_hot_end(i) == old_self.phys_hot_end(i)) by {
+                    if i + 1 < och {
+                        assert(self.hot_stack@[i + 1].start == old_self.hot_stack@[i + 1].start);
+                    } else {
+                        // old top: new end is the pushed frame's start == old log len.
+                        assert(self.phys_hot_end(i) == old_self.diff_log@.len());
+                        assert(old_self.phys_hot_end(i) == old_self.diff_log@.len());
+                    }
+                }
+                assert(self.g_start(cc + i) == old_self.g_start(cc + i)) by {
+                    assert(self.trail_frames@[cc + i] == old_self.trail_frames@[cc + i]);
+                }
+                assert(self.g_end(cc + i) == old_self.g_end(cc + i)) by {
+                    if cc + i + 1 < otf {
+                        assert(self.trail_frames@[cc + i + 1]
+                            == old_self.trail_frames@[cc + i + 1]);
+                    } else {
+                        // old top: new boundary is the pushed full_trail.len().
+                        assert(cc + i + 1 == otf);
+                        assert(self.g_end(cc + i) == old_self.full_trail@.len());
+                        assert(old_self.g_end(cc + i) == old_self.full_trail@.len());
+                    }
+                }
+                assert(self.snapshots@[cc + i] == old_self.snapshots@[cc + i]);
+                assert(old_self.frame_iso(i));
+            } else {
+                // NEW top frame i == och: empty physical and ghost stratum.
+                assert(i == och);
+                assert(self.phys_hot_start(i) == old_self.diff_log@.len());
+                assert(self.phys_hot_end(i) == self.diff_log@.len());
+                assert(self.phys_hot_end(i) == old_self.diff_log@.len());
+                assert(self.g_start(cc + i) == old_self.full_trail@.len()) by {
+                    assert(self.trail_frames@[cc + i] == old_self.full_trail@.len());
+                }
+                assert(self.g_end(cc + i) == self.full_trail@.len());
+                assert forall|j: int| 0 <= j < self.snapshots@[cc + i].len() implies
+                    #[trigger] captured_in_range::<T, I>(
+                        self.diff_log@, self.phys_hot_start(i), self.phys_hot_end(i), j as nat)
+                    == captured_in_range::<T, I>(
+                        self.full_trail@, self.g_start(cc + i), self.g_end(cc + i), j as nat) by {
+                    assert(self.phys_hot_start(i) == self.phys_hot_end(i));
+                    assert(self.g_start(cc + i) == self.g_end(cc + i));
+                }
+            }
         }
     }
 
@@ -5196,6 +5408,27 @@ where
                     }
                 }
             }
+
+            // Per-frame index-set (frame_iso): trail via the general lemma
+            // (bridge + alignment established above); unique splits into the
+            // single-empty-frame case (compression or first mark) and the
+            // append case (extracted lemma keeps this query small).
+            let cc2 = (self.trail_frames@.len() - self.hot_stack@.len()) as int;
+            if !self.store.unique_capture_spec() {
+                assert(self.g_start(cc2) + self.diff_log@.len() == self.full_trail@.len());
+                self.lemma_frame_iso_trail_all();
+            } else if self.hot_stack@.len() == 1 {
+                assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                    #[trigger] self.frame_iso(i) by {
+                    assert(self.phys_hot_start(0) == self.phys_hot_end(0));
+                    assert(self.g_start(cc2) == self.g_end(cc2)) by {
+                        assert(self.g_start(cc2) == self.full_trail@.len());
+                        assert(self.g_end(cc2) == self.full_trail@.len());
+                    }
+                }
+            } else {
+                self.lemma_push_frame_frame_iso(*old(self), old_view);
+            }
         }
     }
 
@@ -5461,6 +5694,117 @@ where
     {
         // Retired: seal-on-mark contradicted the buffered-eviction policy
         // (goal doc §6) and is gone for good; A2b's eviction replaces it.
+    }
+
+    /// The top frame's `frame_iso` is exactly `index_set_ok` (same slices): a
+    /// mutator that has re-established `index_set_ok` gets `frame_iso(top)` for
+    /// free. Connects the term shapes: `phys_hot_end(top) == diff_log.len()`,
+    /// `g_end(cc+top) == full_trail.len()`, `cc+top == tf.len()-1`, and the
+    /// active/saved-len tie gives the quantifier bound.
+    pub(crate) proof fn lemma_frame_iso_top_from_index_set(&self)
+        requires
+            self.index_set_ok(),
+            self.hot_stack@.len() > 0,
+            self.cold_stack@.len() + self.hot_stack@.len() == self.trail_frames@.len(),
+            self.active_saved_len.as_nat()
+                == self.g_saved_len((self.trail_frames@.len() - 1) as int),
+        ensures
+            self.frame_iso((self.hot_stack@.len() - 1) as int),
+    {
+        let top_h = (self.hot_stack@.len() - 1) as int;
+        let cc = self.cold_stack@.len() as int;
+        assert(cc + top_h == self.trail_frames@.len() - 1);
+        assert(self.phys_hot_end(top_h) == self.diff_log@.len());
+        assert(self.g_end(cc + top_h) == self.full_trail@.len());
+        assert(self.snapshots@[cc + top_h].len() == self.active_saved_len.as_nat());
+    }
+
+    /// A buried frame's `frame_iso` frames forward across an append-type mutator
+    /// (set/pop capture, push): its physical and ghost strata lie within the old
+    /// logs' prefixes, which the new logs preserve, so `captured_in_range` over
+    /// each stratum reads the same entries and `old_self.frame_iso` transfers.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_frame_iso_buried_framed(&self, old_self: Self, fidx: int)
+        requires
+            old_self.frame_iso(fidx),
+            0 <= fidx,
+            fidx + 1 < self.hot_stack@.len(),
+            // buried frame: cc+fidx+1 < tf.len(), so g_end reads trail_frames
+            // (pinned) rather than full_trail.len() (which the append changes).
+            self.cold_stack@.len() + self.hot_stack@.len() == self.trail_frames@.len(),
+            self.hot_stack@ == old_self.hot_stack@,
+            self.cold_stack@ == old_self.cold_stack@,
+            self.trail_frames@ == old_self.trail_frames@,
+            self.snapshots@ == old_self.snapshots@,
+            // buried physical stratum ends within the old log, preserved prefix
+            self.phys_hot_end(fidx) <= old_self.diff_log@.len(),
+            old_self.diff_log@.len() <= self.diff_log@.len(),
+            forall|k: int| 0 <= k < old_self.diff_log@.len()
+                ==> #[trigger] self.diff_log@[k] == old_self.diff_log@[k],
+            // buried ghost stratum ends within the old trail, preserved prefix
+            self.g_end(self.cold_stack@.len() + fidx) <= old_self.full_trail@.len(),
+            old_self.full_trail@.len() <= self.full_trail@.len(),
+            forall|k: int| 0 <= k < old_self.full_trail@.len()
+                ==> #[trigger] self.full_trail@[k] == old_self.full_trail@[k],
+        ensures
+            self.frame_iso(fidx),
+    {
+        let cc = self.cold_stack@.len() as int;
+        let ps = self.phys_hot_start(fidx);
+        let pe = self.phys_hot_end(fidx);
+        let gs = self.g_start(cc + fidx);
+        let ge = self.g_end(cc + fidx);
+        assert(ps == old_self.phys_hot_start(fidx));
+        assert(pe == old_self.phys_hot_end(fidx));
+        assert(gs == old_self.g_start(cc + fidx));
+        assert(ge == old_self.g_end(cc + fidx));
+        assert forall|j: int| 0 <= j < self.snapshots@[cc + fidx].len() implies
+            #[trigger] captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat)
+            == captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat) by {
+            assert(old_self.frame_iso(fidx));
+            assert(pe <= old_self.diff_log@.len());
+            assert(ge <= old_self.full_trail@.len());
+            // physical: reads within [0, old diff_log.len()) agree with old, so
+            // the two ranges [ps,pe) hold the same indices (pe <= old.len()).
+            assert(captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat)
+                == captured_in_range::<T, I>(old_self.diff_log@, ps, pe, j as nat)) by {
+                if captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat) {
+                    let k = choose|k: int| ps <= k < pe && 0 <= k < self.diff_log@.len()
+                        && (#[trigger] self.diff_log@[k]).1.as_nat() == j as nat;
+                    assert(0 <= k < old_self.diff_log@.len());
+                    assert(old_self.diff_log@[k] == self.diff_log@[k]);
+                    assert(old_self.diff_log@[k].1.as_nat() == j as nat);
+                    assert(captured_in_range::<T, I>(old_self.diff_log@, ps, pe, j as nat));
+                }
+                if captured_in_range::<T, I>(old_self.diff_log@, ps, pe, j as nat) {
+                    let k = choose|k: int| ps <= k < pe && 0 <= k < old_self.diff_log@.len()
+                        && (#[trigger] old_self.diff_log@[k]).1.as_nat() == j as nat;
+                    assert(self.diff_log@[k] == old_self.diff_log@[k]);
+                    assert(self.diff_log@[k].1.as_nat() == j as nat);
+                    assert(captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat));
+                }
+            }
+            // ghost: same, within [0, old full_trail.len()).
+            assert(captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat)
+                == captured_in_range::<T, I>(old_self.full_trail@, gs, ge, j as nat)) by {
+                if captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat) {
+                    let k = choose|k: int| gs <= k < ge && 0 <= k < self.full_trail@.len()
+                        && (#[trigger] self.full_trail@[k]).1.as_nat() == j as nat;
+                    assert(0 <= k < old_self.full_trail@.len());
+                    assert(old_self.full_trail@[k] == self.full_trail@[k]);
+                    assert(old_self.full_trail@[k].1.as_nat() == j as nat);
+                    assert(captured_in_range::<T, I>(old_self.full_trail@, gs, ge, j as nat));
+                }
+                if captured_in_range::<T, I>(old_self.full_trail@, gs, ge, j as nat) {
+                    let k = choose|k: int| gs <= k < ge && 0 <= k < old_self.full_trail@.len()
+                        && (#[trigger] old_self.full_trail@[k]).1.as_nat() == j as nat;
+                    assert(self.full_trail@[k] == old_self.full_trail@[k]);
+                    assert(self.full_trail@[k].1.as_nat() == j as nat);
+                    assert(captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat));
+                }
+            }
+        }
     }
 
     /// The trail half of the per-frame index-set invariant: under the
