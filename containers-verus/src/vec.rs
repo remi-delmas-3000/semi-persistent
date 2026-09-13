@@ -2865,8 +2865,9 @@ where
 
     /// The frame's saved_len, tier-dispatched by the split point.
     #[inline]
-    pub(crate) fn frame_saved_len_exec(&self, k: usize) -> I
+    pub(crate) fn frame_saved_len_exec(&self, k: usize) -> (r: I)
         requires self.wf_for_snap(), k < self.depth_spec(),
+        ensures r.as_nat() == self.g_saved_len(k as int),
     {
         if k < self.cold_stack.len() {
             self.cold_stack[k].saved_len
