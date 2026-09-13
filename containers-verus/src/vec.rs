@@ -6544,7 +6544,6 @@ where
             hf_start == old_self.hot_stack@[target - old_self.cold_stack@.len() as int].start,
             bcut == old_self.g_start(target),
             self.view() == old_self.snapshots@[target as int],
-            self.view().len() == self.g_saved_len(target as int),
             self.active_saved_len == self.hot_stack@[(self.hot_stack@.len() - 1) as int].saved_len,
             self.store.captured().len() == self.view().len(),
             forall|j: int| 0 <= j < self.view().len() as int ==>
@@ -6812,6 +6811,143 @@ where
     /// marked region `[0, saved_len_target)` equals
     /// `overlay(pre_view, diff_log, diff_start, n)`, which by the central
     /// lemma `lemma_snap_eq_overlay` equals `snapshots[target]`.
+    /// HOT-target reconstruction (`target > cold_count`): the surviving stack
+    /// keeps at least one hot frame, so no re-materialization is needed. Adapts
+    /// mainline's single-stack `restore`: `restore_overlay` applies the whole
+    /// hot suffix in one call (its ensure IS the overlay, replacing the
+    /// per-entry replay loop), the reconstruction is `lemma_reconstruct_hot_all`
+    /// on `old(self)`, and the wf re-establishment is the composed
+    /// `lemma_restore_hot_wf`. Genealogy is the wrapper's job.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(4000)]
+    pub(crate) fn restore_hot(&mut self, target_index: usize)
+        where T: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).cold_stack@.len() < target_index < old(self).depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[target_index as int],
+            final(self).depth_spec() == target_index as nat,
+            final(self).snapshots_view()
+                == old(self).snapshots_view().subrange(0, target_index as int),
+    {
+        let k = self.cold_stack.len();
+        let saved_len = self.frame_saved_len_exec(target_index);
+        let hf = self.hot_stack[target_index - k];
+        let ghost old_self = *self;
+        let ghost snap_target = self.snapshots@[target_index as int];
+        let ghost hf_start = hf.start as int;
+        let ghost bcut = old_self.g_start(target_index as int);
+        proof { saved_len.lemma_as_nat_bounded(); }
+        if self.store.len().as_usize() != saved_len.as_usize() {
+            self.store.resize_default(saved_len);
+        }
+        let n = self.diff_log.len();
+        let ghost base = self.store.data();
+
+        // begin_restore's named-slots requires: every set flag is named by an
+        // entry of the replayed slice diff_log[hf.start, n). Set flags lie in
+        // the current top frame's physical stratum [hot_top.start, n), and
+        // hf.start <= hot_top.start (hot-start monotone).
+        proof {
+            if TRACK && self.store.needs_replayed_indices_spec() {
+                self.store.lemma_wf_captured_len();
+                let hot_top = (self.hot_stack@.len() - 1) as int;
+                old_self.lemma_hot_start_monotone(target_index - k as int, hot_top);
+                assert forall|j: int| 0 <= j < self.store.captured().len()
+                    && #[trigger] self.store.captured()[j]
+                    implies exists|kk: int| 0 <= kk < n - hf.start
+                        && (#[trigger] self.diff_log@[hf.start + kk]).1.as_nat() == j as nat by {
+                    assert(base[j] == self.store.data()[j]);
+                    assert(j < saved_len.as_nat());
+                    assert(old_self.store.captured()[j]);
+                    assert(old_self.hot_stack@.len() > 0 && j < old_self.active_saved_len.as_nat());
+                    assert(j < old_self.view().len());
+                    let ptop = old_self.hot_stack@[hot_top].start as int;
+                    assert(old_self.store.captured()[j] == captured_in_range::<T, I>(
+                        old_self.diff_log@, ptop, old_self.diff_log@.len() as int, j as nat));
+                    let k0 = choose|q: int| ptop <= q < old_self.diff_log@.len() as int
+                        && (#[trigger] old_self.diff_log@[q]).1.as_nat() == j as nat;
+                    assert(hf.start <= ptop);
+                    assert(self.diff_log@[hf.start + (k0 - hf.start)] == old_self.diff_log@[k0]);
+                }
+            }
+        }
+        if self.store.needs_replayed_indices() {
+            let replayed = vstd::slice::slice_subrange(self.diff_log.as_slice(), hf.start, n);
+            proof {
+                assert forall|j: int| 0 <= j < self.store.captured().len()
+                    && #[trigger] self.store.captured()[j]
+                    implies exists|m: int| 0 <= m < replayed@.len()
+                        && (#[trigger] replayed@[m]).1.as_nat() == j as nat by {
+                    let kk = choose|kk: int| 0 <= kk < n - hf.start
+                        && (#[trigger] self.diff_log@[hf.start + kk]).1.as_nat() == j as nat;
+                    assert(replayed@[kk] == self.diff_log@[hf.start + kk]);
+                }
+            }
+            self.store.begin_restore(replayed);
+        } else {
+            let empty: std::vec::Vec<(T, I)> = std::vec::Vec::new();
+            self.store.begin_restore(empty.as_slice());
+        }
+
+        // Reconstruction: overlay of the hot suffix reconstructs snap_target.
+        proof {
+            old_self.lemma_reconstruct_hot_all(target_index as int, base);
+            lemma_overlay_len::<T, I>(base, self.diff_log@, hf.start as int, n as int);
+        }
+        self.store.restore_overlay(&self.diff_log, hf.start, n);
+        proof {
+            assert(self.store.data().len() == base.len());
+            assert forall|j: int| 0 <= j < snap_target.len() as int implies
+                #[trigger] self.store.data()[j] == snap_target[j] by {}
+            assert(self.store.data() =~= snap_target);
+        }
+        self.diff_log.truncate(hf.start);
+        self.hot_stack.truncate(target_index - k);
+
+        // Ghost trail truncates to the target frame's boundary.
+        proof {
+            self.full_trail@ = self.full_trail@.subrange(0, bcut);
+            self.trail_frames@ = self.trail_frames@.subrange(0, target_index as int);
+            self.snapshots = Ghost(self.snapshots@.subrange(0, target_index as int));
+        }
+
+        // finish_restore: rebuild capture flags over [0, present_len) (the new
+        // top's saved_len may exceed data.len() after pop-into-marked).
+        let ktop = self.cold_stack.len();
+        let top = self.hot_stack[target_index - 1 - ktop];
+        self.active_saved_len = top.saved_len;
+        let tstart = top.start;
+        let tlen = self.diff_log.len();
+        let present_len = self.store.len();
+        proof {
+            assert forall|j: int| 0 <= j < self.store.captured().len()
+                ==> !(#[trigger] self.store.captured()[j]) by {}
+        }
+        self.store.finish_restore(
+            vstd::slice::slice_subrange(self.diff_log.as_slice(), tstart, tlen),
+            present_len);
+
+        // wf re-establishment: convert finish's rebuilt flags to captured_in_range
+        // form, then invoke the composed wf lemma.
+        proof {
+            self.store.lemma_wf_captured_len();
+            let ghost surviving = self.diff_log@.subrange(tstart as int, tlen as int);
+            assert forall|j: int| 0 <= j < self.view().len() as int implies
+                #[trigger] self.store.captured()[j]
+                    == captured_in_range::<T, I>(
+                        self.diff_log@, tstart as int, self.diff_log@.len() as int, j as nat) by {
+                lemma_captured_subrange::<T, I>(
+                    self.diff_log@, surviving, tstart as int, self.diff_log@.len() as int, j as nat);
+            }
+            assert(tstart as int == self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int);
+            self.lemma_restore_hot_wf(old_self, target_index as int, hf_start, bcut);
+        }
+    }
+
     #[verifier::spinoff_prover]
     #[verifier::rlimit(200)]
     #[verifier::external_body]
