@@ -399,3 +399,79 @@ Definitive remaining after the choice: push (reentered), push_frame (offset
 split, discharges from the physical bridge), D6 (restore-path discharge),
 D7 (battery). cargo verus verify NOT at 0 errors; commit 20 (053caca,
 15/15) is the verified baseline.
+
+## D5 complete, D6 foundation landed (2026-09-13)
+
+The dual-bridge design choice above resolved as (A): wf carries the ghost
+frame_inv_range, and the physical bridge's reentered case is discharged
+through `index_set_ok` (a wf clause naming the same index set over
+[0, active) for both the physical open slice and the ghost open stratum)
+plus `lemma_index_set_transfer`. set_index, push (reentered), pop, and
+push_frame all verify against this. The full vec module and workspace verify.
+
+**D5 discharged.** `cargo verus verify` reports 2173 verified, 0 errors across
+the workspace, with zero `assume()` in the source. pop's `index_set_ok`
+maintenance closed the last vec function: its j==new_len captured-marked case
+reasons from the old bridges (new_len < old_view.len(), so the old
+physical/ghost bridges apply at new_len directly) plus the append framing.
+The two restore-path `assume`s in trail_store and parallel_store
+`restore_overlay` are discharged with real invariant proofs: the backward
+replay loop realizes `overlay`'s front-recursion on `lo`, carried as the loop
+invariant `data@ == overlay(base, diff_log@, i2, hi)`. Restore correctness is
+now proven against the ghost overlay rather than assumed at the store
+boundary. Commits d7c7343 (pop + assume discharge), and the campaign floor
+moves off the commit-20 baseline.
+
+**D6 foundation landed, restore_frame discharge open.** Two structural
+invariants that restore_frame's body needs are in wf and maintained with no
+mutator cascade:
+  - `repr_ok` (commit 6e3a071): the cold tier is a contiguous frame-ordered
+    partition. Index runs partition `cold_index_runs` (each ColdFrameHdr names
+    a half-open [runs_start, +runs_len) slice, adjacent frames abut, the last
+    reaches the pool end); values partition `cold_value_pool` in run order.
+    `compress_all_hot` ensures it (trusted via external_body until its body is
+    discharged); `cold_pools_shrink_scaffold` gained `final@ == old@` ensures.
+  - per-frame hot extent (commit c1dd0a5): every hot frame's `start` is bounded
+    by `diff_log.len()`, not just the top frame's.
+
+restore_frame stays external_body. Removing it surfaces 13 obligations. The
+mechanical ones (resize bound, run-index arithmetic, begin_restore named-slots)
+are tractable. The two that are not yet dischargeable name the remaining work:
+
+  1. **Hot-path reconstruction** needs `frame_inv_range` over the PHYSICAL
+     `diff_log` slice for the target hot frame, to feed `lemma_overlay_eq_snap`
+     (which `restore_overlay`'s proven `data@ == overlay(base, diff_log, lo, hi)`
+     ensure then chains to `snapshots[target]`). wf carries `frame_inv_range`
+     only over the ghost `full_trail`. A physical-`diff_log` `frame_inv_range`
+     clause is the D5 "trail hot = identity" commuting equivalence made an
+     invariant. It is discipline-specific and must be maintained across
+     set_index/push/pop, mirroring the ghost version already maintained
+     op-by-op. This is the next repr_ok-scale brick.
+  2. **Cold-path reconstruction** needs a semantic ensure on `compress_all_hot`:
+     each cold frame's runs reconstruct that frame's snapshot (the "compressed
+     cold = sorted unique permutation of dedupe_first(ghost)" equivalence). It
+     rests on `frame_sort_order`'s output semantics (currently external_body
+     with no semantic ensure). Per this goal's ledger rule, `compress_all_hot`
+     may stay external_body with this ensure trust-ledgered against the D2
+     differential proptests (trail_semi_persistence, trail_compression) as the
+     named belt, since it is on the COMPRESSION path, not the restore path.
+     restore_frame's cold path then discharges from that ensure, and
+     restore_frame itself becomes non-external_body (proven), satisfying "zero
+     external_body on the restore path".
+
+`lemma_frame_inv_range_shift` already supplies the ghost `frame_inv_range`
+prefix-preservation restore_frame's wf re-establishment needs under ghost-trail
+truncation, so that part is not new work.
+
+**D7 status on the current floor.** conformance tests pass (33/33 across the
+binaries, 0 failed); lib tests pass (38/38); `cargo fmt --all -- --check` passes
+(commit 276e2fa stripped one trailing-whitespace line). The `cargo clippy
+--workspace -- -D warnings` gate is NOT green: roughly 15 warnings, in the D2
+conformance tests (loop-index-into-slice, is_multiple_of, useless u32
+conversion, dead assignment) and in vec.rs (dead `log_index_range`, spec-only
+fields clippy reads as never-read, truncating-to-zero, identical-if-blocks).
+These are the D7 cleanup, deferred behind the D6 restore_frame discharge per
+the hard-part-first ordering.
+
+cargo verus verify at 0 errors (2173 verified). Remaining: D6 restore_frame
+discharge (bricks 1 and 2 above), then D7 battery (clippy cleanup + full run).
