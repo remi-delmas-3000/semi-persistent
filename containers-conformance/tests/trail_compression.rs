@@ -76,3 +76,104 @@ fn trail_column_compresses_at_eviction_and_restores() {
         }
     }
 }
+
+/// The no-check property, observed: every write appends, duplicates
+/// included, so before any compression fires the log length equals the
+/// write count exactly. A capture check anywhere on the path would drop
+/// duplicates and break the equality.
+#[test]
+fn trail_appends_every_write_before_compression() {
+    let mut v: VecT<u64, u32> = VecT::new();
+    for i in 0..16u64 {
+        v.try_push(i).expect("push");
+    }
+    let mut writes = 0usize;
+    // Stay at or below the buffer so compression never fires.
+    for _frame in 0..4 {
+        v.try_mark(ShrinkPolicy::Never).expect("mark");
+        for rep in 0..5u64 {
+            for j in 0..4u32 {
+                v.set_index(j, rep * 100 + j as u64);
+                writes += 1;
+            }
+        }
+        assert_eq!(
+            v.diff_log_len(),
+            writes,
+            "a write did not append: the trail hot path is supposed to be check-free"
+        );
+    }
+}
+
+/// First-entry-wins through the HOT path: restore a frame whose open
+/// stratum still carries duplicates (no compression, no dedup has run) and
+/// check the chronologically first capture is what comes back.
+#[test]
+fn trail_hot_restore_is_first_entry_wins() {
+    let mut v: VecT<u64, u32> = VecT::new();
+    for i in 0..8u64 {
+        v.try_push(i * 10).expect("push");
+    }
+    let t = v.try_mark(ShrinkPolicy::Never).expect("mark");
+    // Cell 3 rewritten four times in one frame; the pre-frame value is 30.
+    for rep in 0..4u64 {
+        v.set_index(3u32, 1000 + rep);
+    }
+    v.try_restore(t).expect("restore");
+    assert_eq!(
+        v.get_index(3u32),
+        30,
+        "hot replay must restore the pre-frame value"
+    );
+}
+
+/// Pop/churn below the buffer: marks and restores interleave, nothing ever
+/// compresses, and every restore tracks the model. This is the SMT-profile
+/// shape the trail store exists for (zero mark-time and write-time cost).
+#[test]
+fn trail_churn_below_buffer_tracks_model() {
+    const LEN: usize = 32;
+    let mut v: VecT<u64, u32> = VecT::new();
+    for i in 0..LEN {
+        v.try_push(i as u64).expect("push");
+    }
+    let mut model: Vec<u64> = (0..LEN as u64).collect();
+    let mut seed: u64 = 12345;
+    for _round in 0..50 {
+        let snap = model.clone();
+        let t = v.try_mark(ShrinkPolicy::Never).expect("mark");
+        for _w in 0..12 {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let idx = ((seed >> 33) as usize % LEN) as u32;
+            let val = seed;
+            v.set_index(idx, val);
+            model[idx as usize] = val;
+        }
+        // Half the rounds roll back immediately (churn), half keep going
+        // one more frame deep before rolling back both.
+        if seed % 2 == 0 {
+            v.try_restore(t).expect("restore");
+            model = snap.clone();
+        } else {
+            let snap2 = model.clone();
+            let t2 = v.try_mark(ShrinkPolicy::Never).expect("mark2");
+            for _w in 0..6 {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let idx = ((seed >> 33) as usize % LEN) as u32;
+                v.set_index(idx, seed);
+                model[idx as usize] = seed;
+            }
+            v.try_restore(t2).expect("restore2");
+            model = snap2;
+            v.try_restore(t).expect("restore1");
+            model = snap;
+        }
+        for i in 0..LEN {
+            assert_eq!(v.get_index(i as u32), model[i], "cell {i} diverged");
+        }
+    }
+}
