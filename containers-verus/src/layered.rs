@@ -13,10 +13,10 @@
 //! `wf` ties the stored columns to the model entry by entry, `decode()` is
 //! the model, and every compressor proves the model against its input.
 
-use vstd::prelude::*;
+use crate::diff_compress::{RunCol, RunEntry};
 use crate::index_like::IndexLike;
 use crate::value_compressor::ValueCompressor;
-use crate::diff_compress::{RunCol, RunEntry};
+use vstd::prelude::*;
 
 verus! {
 

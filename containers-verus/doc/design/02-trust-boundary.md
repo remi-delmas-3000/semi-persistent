@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **27** (3 structs + 24 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
-| `literal-types` | **32** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **49** (3 structs + 46 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
+| `literal-types` | **54** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,12 +72,12 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. This crate has 27 default-build markers: 3 ContainerId + 11
+boundary. This crate has 49 default-build markers: 3 ContainerId + 15
 capacity/byte diagnostics and shrink helpers + the 5 `bplus_layout`
 bounds-elided array/slice primitives + `check_precondition` + `refuse` +
 `clone_key_exact` + `values_equal` + the debug ring-walk +
 `white_box_head` + the `ExIndexHasher` and `ExFoldHasher` registrations
-(5 more behind `literal-types`, for 32). The casts that were *eliminated* (the
+(5 more behind `literal-types`, for 54). The casts that were *eliminated* (the
 `IndexLike`/`DenseId` integer casts) are described in §3.
 
 The groups differ in kind, and the distinction is the point of this chapter:
@@ -201,7 +201,7 @@ environmental assumption, with finite runtime evidence from
 mint thousands of ids and check end-to-end that one container rejects another's
 token.
 
-## 2. Group B: unmodeled std behavior, 16 items
+## 2. Group B: unmodeled std behavior, 20 items
 
 Verus/vstd model a `Vec`'s element sequence (`@`) but not its **allocation**:
 `capacity()`, `shrink_to`, and `size_of::<T>()` have no specs. Everything that
@@ -210,7 +210,7 @@ primitives (§2d) are the same kind of trust over three other unspecced std
 operations (`get_unchecked`, `select_unpredictable`, `copy_within`). Four
 sub-kinds:
 
-### 2a. Byte reporters (no `ensures`; diagnostic), 8 items
+### 2a. Byte reporters (no `ensures`; diagnostic), 12 items
 
 Production parity: all report the capacity-based allocation
 footprint using exactly production's formulas.
@@ -573,9 +573,83 @@ acyclicity or explanation correctness. See
 verification task in
 [`../future/conformance-and-release.md`](../future/conformance-and-release.md).
 
+## 3.6. Group F: the diff-compression campaign's additions, 19 items
+
+The compression, shared-fork-history and parallel-mark work has added 19
+markers at this point. 17 carry no `ensures` and so cannot corrupt a
+proof; 2 carry contracts.
+
+### 3.6a. Diagnostics and shadow instrumentation (no `ensures`), 12 items
+
+`frame_stats` (compression_stats.rs), `mode_name` (compression_stats.rs), `observe` (compression_stats.rs), `observe_frame` (compression_stats.rs), `run_count_sorted` (compression_stats.rs), `run_count_writeorder` (compression_stats.rs), `shadow_emit` (compression_stats.rs), `shadow_enabled` (compression_stats.rs), `shadow_log_copy` (compression_stats.rs), `shadow_log_full` (compression_stats.rs), `cold_frame_count` (diff_log.rs), `shadow_key` (diff_log.rs).
+
+None carries an `ensures`, so no proof can depend on them and a wrong body
+yields a wrong diagnostic rather than an unsound theorem. They are external for
+three separate reasons: `frame_stats`, `run_count_sorted` and
+`run_count_writeorder` use `HashSet` and `sort_unstable`, which Verus does not
+model; the `shadow_*` family does file and stderr I/O behind a `OnceLock`; and
+`shadow_key` is `self as *const _ as usize`, raw pointer identity. `mode_name`
+and `cold_frame_count` are pure matches and are recorded as dischargeable
+rather than necessary.
+
+### 3.6b. Environment levers (no `ensures`), 2 items
+
+`env_compress_default` (compression_config.rs), `env_diff_store_kind` (compression_config.rs).
+
+`std::env` has no Verus model. These are sound to trust rather than merely
+unavoidable, because every value each lever selects carries the same verified
+contract: the stores are separately proved to refine one model, so the flag
+chooses between representations that are already interchangeable.
+
+### 3.6c. Mode selection (no `ensures`), 1 items
+
+`choose_mode` (diff_compress.rs).
+
+The decision arithmetic is verified in `FrameStats::best_mode`. The marker
+covers only the `size_of` and the `HashSet` the wrapper threads through on its
+way there.
+
+### 3.6d. Parallel mark and restore (contract-carrying), 2 items
+
+`mark_parallel` (sync_group.rs), `restore_parallel` (sync_group.rs).
+
+The campaign's real trust growth, and the only markers it adds whose
+postconditions enter downstream proofs: `wf()`, member-count preservation and
+the depth relation are assumed, not proved.
+
+What limits the exposure: both dispatch on a threshold and fall back to the
+verified sequential path below it, the fan-out is over members that own
+disjoint storage, and the per-member operation inside it is the verified one.
+
+What is genuinely trusted: that the rayon fan-out partitions the members
+disjointly, and that no worker observes another's writes. A mis-split or a data
+race would break `wf()` with no verifier complaint, and because `wf()` is
+assumed rather than checked on return, the violation would propagate silently
+into every proof downstream of the mark.
+
+Why it is not proved: Verus has no model of parallel execution, so this cannot
+be discharged by any effort on our side. The mitigation is a differential test
+pinning parallel against sequential, which is evidence and not a theorem.
+
+### 3.6e. Parallel canary (no `ensures`), 1 items
+
+`par_sum_canary` (parallel.rs).
+
+A rayon reduction over a range, confirming at runtime that the parallel backend
+is present and functioning. It asserts nothing and is on no correctness path.
+
+### 3.6f. Group checksum (`requires` only), 1 items
+
+`checksum` (sync_group.rs).
+
+Declared on the group's member trait with `requires self.wf()` and no `ensures`,
+so a differential harness can compare a production container against a verified
+one without a typed handle. It returns a `u64` the verifier knows nothing
+about, so a wrong checksum weakens a test rather than a proof.
+
 ## 4. Summary table
 
-All 27 default-build `external_body` markers plus the 1 default-build axiom
+All 49 default-build `external_body` markers plus the 1 default-build axiom
 (the `literal-types` additions are listed after):
 
 | # | Item | Group | Trusted because | Provable? |

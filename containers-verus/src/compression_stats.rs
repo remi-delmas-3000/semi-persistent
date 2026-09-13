@@ -12,9 +12,9 @@
 //! and re-check it periodically instead of paying the adaptive decision every
 //! frame.
 
-use vstd::prelude::*;
-use crate::index_like::{IndexLike, IndexFromNat};
 use crate::diff_compress::CompressionMode;
+use crate::index_like::{IndexFromNat, IndexLike};
+use vstd::prelude::*;
 
 verus! {
 
@@ -61,12 +61,19 @@ impl FrameStats {
     }
 
     /// The cheapest scheme for this frame, never worse than plain — costed at the
-    /// achievable sizes of the shipped encoders.
+    /// achievable sizes of the shipped encoders, with a restore term.
     pub fn best_mode(self, t: usize, i: usize) -> CompressionMode {
         let plain = self.plain_bytes(t, i);
         let runs = self.runs_bytes(t);
         let dict = self.dict_bytes(t, i);
-        if runs <= dict && runs < plain {
+        // Restore term (design doc §5): a run-encoded frame restores with
+        // one block copy per run, so a frame of mostly length-1 runs pays
+        // the per-run setup once per element - strictly worse than plain's
+        // single sequential pass, even when the encoding is smaller. Require
+        // real coalescing (average run length >= 2) before the size
+        // comparison may pick the run encoding.
+        let runs_coalesce = sat_mul(self.runs, 2) <= self.n;
+        if runs_coalesce && runs <= dict && runs < plain {
             // `runs_bytes` costs the sorted (index-set) run count, which is what
             // `compress_runs_sorted` achieves — so the honest winner is the sorted
             // encoder, not write-order `IndexRuns` (which fragments into more runs

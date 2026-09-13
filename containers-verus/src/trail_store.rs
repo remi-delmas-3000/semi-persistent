@@ -36,6 +36,7 @@ where
     pub(crate) data: Vec<T>,
     /// The capture flags the `DiffStore` contract is phrased over. Ghost:
     /// no runtime counterpart exists, which is the discipline's point.
+    #[allow(dead_code)]
     pub(crate) captured: Ghost<Seq<bool>>,
     pub(crate) _phantom: core::marker::PhantomData<I>,
 }
@@ -188,7 +189,7 @@ where
         }
     }
 
-    fn prepare_mark(&mut self, _saved_len: I, _prev_diffs: &[I]) {
+    fn prepare_mark(&mut self, _saved_len: I, _prev_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_trail_discipline;
         // Exec no-op: the flags are ghost, so the frame-open clear costs
         // nothing (ParallelStore pays a bitmap memset here).
@@ -244,7 +245,7 @@ where
 
     fn needs_replayed_indices(&self) -> bool { false }
 
-    fn begin_restore(&mut self, _replayed_diffs: &[I]) {
+    fn begin_restore(&mut self, _replayed_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_trail_discipline;
         // Exec no-op (ghost clear only).
         proof {
@@ -285,7 +286,7 @@ where
         }
     }
 
-    fn finish_restore(&mut self, current_frame_diffs: &[I], _saved_len: I) {
+    fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], _saved_len: I) {
         broadcast use crate::diff_store::lemma_trail_discipline;
         // Exec no-op: the post-restore flag state is defined, not computed
         // (ParallelStore walks the surviving diffs setting bits here).
@@ -293,7 +294,7 @@ where
             let diffs = current_frame_diffs@;
             self.captured@ = Seq::new(self.data@.len(), |i: int| {
                 exists|k: int| 0 <= k < diffs.len()
-                    && (#[trigger] diffs[k]).as_nat() == i as nat
+                    && (#[trigger] diffs[k]).1.as_nat() == i as nat
             });
         }
     }

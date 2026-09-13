@@ -216,7 +216,7 @@ where
         }
     }
 
-    fn prepare_mark(&mut self, saved_len: I, prev_diffs: &[I]) {
+    fn prepare_mark(&mut self, saved_len: I, prev_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_dyn_views;
         let ghost pre = *self;
         match self {
@@ -286,7 +286,7 @@ where
         }
     }
 
-    fn begin_restore(&mut self, replayed_diffs: &[I]) {
+    fn begin_restore(&mut self, replayed_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_dyn_views;
         let ghost pre = *self;
         match self {
@@ -355,7 +355,7 @@ where
         }
     }
 
-    fn finish_restore(&mut self, current_frame_diffs: &[I], saved_len: I) {
+    fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], saved_len: I) {
         broadcast use crate::diff_store::lemma_dyn_views;
         let ghost pre = *self;
         match self {

@@ -210,7 +210,7 @@ where
         }
     }
 
-    fn prepare_mark(&mut self, _saved_len: I, prev_diffs: &[I]) {
+    fn prepare_mark(&mut self, _saved_len: I, prev_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
@@ -234,17 +234,17 @@ where
                 // cleared so far: every slot named by a processed entry.
                 forall|j: int| 0 <= j < self.data@.len()
                     && (exists|kk: int| 0 <= kk < k as int
-                        && (#[trigger] prev_diffs@[kk]).as_nat() == j as nat)
+                        && (#[trigger] prev_diffs@[kk]).1.as_nat() == j as nat)
                     ==> !(#[trigger] T::tag_of(self.data@[j])),
                 // untouched slots keep their old tag.
                 forall|j: int| 0 <= j < self.data@.len()
                     && !(exists|kk: int| 0 <= kk < k as int
-                        && (#[trigger] prev_diffs@[kk]).as_nat() == j as nat)
+                        && (#[trigger] prev_diffs@[kk]).1.as_nat() == j as nat)
                     ==> #[trigger] T::tag_of(self.data@[j])
                         == T::tag_of(old(self).data@[j]),
             decreases (m - k) as int,
         {
-            let idx = prev_diffs[k];
+            let idx = prev_diffs[k].1;
             let iu = idx.as_usize();
             if iu < self.data.len() {
                 let mut r = self.data[iu];
@@ -267,12 +267,12 @@ where
                     assert(old(self).captured_spec()[i]);
                     assert(DiffStore::<T, I, TRACK>::captured(&*old(self))[i]);
                     assert(exists|kk: int| 0 <= kk < prev_diffs@.len()
-                        && (#[trigger] prev_diffs@[kk]).as_nat() == i as nat);
+                        && (#[trigger] prev_diffs@[kk]).1.as_nat() == i as nat);
                     assert(!(T::tag_of(self.data@[i])));
                 } else {
                     // old tag clear: either untouched (keeps false) or cleared.
                     if exists|kk: int| 0 <= kk < m as int
-                        && (#[trigger] prev_diffs@[kk]).as_nat() == i as nat {
+                        && (#[trigger] prev_diffs@[kk]).1.as_nat() == i as nat {
                         assert(!(T::tag_of(self.data@[i])));
                     } else {
                         assert(T::tag_of(self.data@[i])
@@ -339,7 +339,7 @@ where
 
     fn needs_replayed_indices(&self) -> bool { true }
 
-    fn begin_restore(&mut self, replayed_diffs: &[I]) {
+    fn begin_restore(&mut self, replayed_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
@@ -366,16 +366,16 @@ where
                         == T::value_of(old(self).data@[j]),
                 forall|j: int| 0 <= j < self.data@.len()
                     && (exists|kk: int| 0 <= kk < k as int
-                        && (#[trigger] replayed_diffs@[kk]).as_nat() == j as nat)
+                        && (#[trigger] replayed_diffs@[kk]).1.as_nat() == j as nat)
                     ==> !(#[trigger] T::tag_of(self.data@[j])),
                 forall|j: int| 0 <= j < self.data@.len()
                     && !(exists|kk: int| 0 <= kk < k as int
-                        && (#[trigger] replayed_diffs@[kk]).as_nat() == j as nat)
+                        && (#[trigger] replayed_diffs@[kk]).1.as_nat() == j as nat)
                     ==> #[trigger] T::tag_of(self.data@[j])
                         == T::tag_of(old(self).data@[j]),
             decreases (m - k) as int,
         {
-            let idx = replayed_diffs[k];
+            let idx = replayed_diffs[k].1;
             let iu = idx.as_usize();
             if iu < self.data.len() {
                 let mut r = self.data[iu];
@@ -419,9 +419,59 @@ where
         broadcast use crate::diff_store::lemma_inline_discipline;
         // Backward replay of [lo, hi). Inherently per-element for this store: every
         // write re-encodes through `into_repr` (which is also the tag-clear), so a
-        // raw memcpy of `T` values would skip the tagging and be WRONG here. The
-        // range is materialized ONCE frame-wise (subrange_vec's fast path), so a
-        // compressed log costs O(n), not O(n x cold frames).
+        // raw memcpy of `T` values would skip the tagging and be WRONG here.
+        //
+        // The pairs are BORROWED from the hot tail when the range lives there,
+        // which on the restore path it always does for a live log (empty cold
+        // tier): zero allocation, zero copy, production's shape (design doc
+        // restore-from-compressed-frames-goal.md #1/#4). Only a range dipping
+        // into sealed cold frames materializes, and that is off the live path.
+        if let Some(sl) = diff_log.hot_slice(lo, hi) {
+            proof {
+                assert(sl@ =~= diff_log@.subrange(lo as int, hi as int));
+            }
+            let ghost base = self.data_spec();
+            let mut i: usize = hi;
+            while i > lo
+                invariant
+                    lo <= i <= hi,
+                    hi <= diff_log@.len(),
+                    diff_log.wf(),
+                    sl@ == diff_log@.subrange(lo as int, hi as int),
+                    self.wf_spec(),
+                    self.data@.len() == base.len(),
+                    self.data_spec() == crate::vec::overlay::<T, I>(
+                        base, diff_log@, i as int, hi as int),
+                    forall|j: int| 0 <= j < self.captured_spec().len()
+                        && #[trigger] self.captured_spec()[j]
+                        ==> old(self).captured_spec()[j],
+                decreases i,
+            {
+                i -= 1;
+                let (v, idx) = sl[i - lo];
+                proof {
+                    assert(sl@[(i - lo) as int] == diff_log@[i as int]);
+                }
+                proof {
+                    crate::vec::lemma_overlay_len::<T, I>(base, diff_log@, (i + 1) as int, hi as int);
+                }
+                let ghost pre_caps = self.captured_spec();
+                let iu = idx.as_usize();
+                if iu < self.data.len() {
+                    self.data.set(iu, v.into_repr());
+                }
+                proof {
+                    assert(self.data_spec() =~= crate::vec::overlay::<T, I>(
+                        base, diff_log@, i as int, hi as int));
+                    assert forall|j: int| 0 <= j < self.captured_spec().len()
+                        && #[trigger] self.captured_spec()[j]
+                        implies old(self).captured_spec()[j] by {
+                        assert(pre_caps[j]);
+                    }
+                }
+            }
+            return;
+        }
         let pairs = diff_log.subrange_vec(lo, hi);
         let ghost base = self.data_spec();
         let mut i: usize = hi;
@@ -467,7 +517,7 @@ where
         }
     }
 
-    fn finish_restore(&mut self, current_frame_diffs: &[I], _saved_len: I) {
+    fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], _saved_len: I) {
         broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
@@ -495,11 +545,11 @@ where
                     #[trigger] T::tag_of(self.data@[j])
                         == (T::tag_of(old(self).data@[j])
                             || exists|kk: int| 0 <= kk < k as int
-                                && (#[trigger] current_frame_diffs@[kk]).as_nat()
+                                && (#[trigger] current_frame_diffs@[kk]).1.as_nat()
                                     == j as nat),
             decreases (m - k) as int,
         {
-            let idx = current_frame_diffs[k];
+            let idx = current_frame_diffs[k].1;
             let iu = idx.as_usize();
             if iu < n {
                 let mut r = self.data[iu];
@@ -514,7 +564,7 @@ where
             assert forall|i: int| 0 <= i < _saved_len.as_nat()
                 implies #[trigger] self.captured_spec()[i] == (
                     exists|kk: int| 0 <= kk < current_frame_diffs@.len()
-                        && (#[trigger] current_frame_diffs@[kk]).as_nat() == i as nat
+                        && (#[trigger] current_frame_diffs@[kk]).1.as_nat() == i as nat
                 ) by {
                 // requires (all-clear below saved_len), via the trait view.
                 assert(!(DiffStore::<T, I, TRACK>::captured(&*old(self))[i]));

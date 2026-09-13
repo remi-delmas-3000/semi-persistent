@@ -39,6 +39,10 @@
     clippy::manual_map,             // explicit match is clearer alongside spec annotations
     clippy::derivable_impls,        // hand-written Default documents the niche/empty encoding
     clippy::len_without_is_empty,   // `CaptureBits::len` mirrors a DiffStore length obligation; emptiness is read via `len`
+    // `vec![..]` expands to a let expression, which verus rejects, so the
+    // suggestion is unavailable here. No machine-applicable fix exists, so
+    // this only silences the warning; it fences nothing.
+    clippy::vec_init_then_push,
     clippy::doc_lazy_continuation,        // doc-list wrapping in the design-heavy module comments
     clippy::doc_overindented_list_items,  // same: design-doc-style comment formatting
     // `global size_of usize == 8;` is verus syntax; clippy sees the macro expansion as braces.
@@ -92,6 +96,8 @@ pub mod bplus_tree;
 pub mod canonical_keys;
 pub mod capture_bits;
 pub mod circular_list;
+#[allow(dead_code)]
+pub mod cold_stack;
 pub mod compressed_stack;
 pub mod compression_config;
 pub mod compression_stats;
@@ -99,7 +105,6 @@ pub mod container_id;
 pub mod dense_id;
 pub mod dense_span_map;
 pub mod diff_compress;
-#[allow(dead_code)]
 pub mod diff_log;
 pub mod diff_store;
 pub mod eclasses;
@@ -109,14 +114,17 @@ pub mod external_specs;
 pub mod frame;
 pub mod gen_stamps;
 pub mod guard;
-pub mod history;
-pub mod sync_group;
 pub mod hasher_spec;
+pub mod history;
 pub mod id_factory;
+pub mod sync_group;
 #[macro_use]
 pub mod id_macros;
+pub mod dyn_store;
+pub mod hinted_arena;
 pub mod index_like;
 pub mod inline_store;
+pub mod layered;
 pub mod layered_span_map;
 pub mod list;
 pub mod map;
@@ -127,13 +135,10 @@ pub mod sorted_cursor;
 pub mod sorted_vec_cursor;
 pub mod sparse_set;
 pub mod tagged;
+pub mod trail_store;
 pub mod two_stack_log;
 pub mod union_find;
-pub mod dyn_store;
-pub mod hinted_arena;
-pub mod trail_store;
 pub mod value_compressor;
-pub mod layered;
 pub mod vec;
 
 // ---------------------------------------------------------------------------
@@ -150,13 +155,12 @@ pub use bplus_search::{BinarySearch, Branchless, SearchKind};
 #[cfg(feature = "literal-types")]
 pub use canonical_keys::{BitsF64, CanonicalF64, CanonicalRational};
 pub use circular_list::{CircularList, CircularListToken, RingIter};
-pub use container_id::ContainerId;
-pub use dense_id::{DenseId31, DenseId63};
-pub use dense_span_map::{DenseSpanMap, Span, SpanArena};
 pub use compressed_stack::CompressedStack;
 pub use compression_config::ColumnConfig;
 pub use compression_stats::{CalibrationPolicy, CalibrationStats, FrameStats};
-pub use two_stack_log::TwoStackLog;
+pub use container_id::ContainerId;
+pub use dense_id::{DenseId31, DenseId63};
+pub use dense_span_map::{DenseSpanMap, Span, SpanArena};
 pub use diff_compress::CompressionMode;
 pub use diff_store::DiffStore;
 pub use gen_stamps::GenStamps;
@@ -173,6 +177,7 @@ pub use sorted_cursor::SortedCursor;
 pub use sorted_vec_cursor::SortedVecCursor;
 pub use sparse_set::{SparseSet, SparseSetToken};
 pub use tagged::{BoolTagged, Pair, Tagged};
+pub use two_stack_log::TwoStackLog;
 pub use vec::{ShrinkPolicy, Vec, VecToken, VecView, VecViewIter};
 
 // Production-root parity: names production exports at its crate root, under
@@ -192,16 +197,18 @@ pub mod bitset;
 
 /// Inline capture: flag stolen inside `T::Repr`. Requires `T: Tagged`.
 /// (Production's `VecI` alias, verbatim.)
-pub type VecI<T, I, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression> = Vec<T, I, InlineStore<T, I>, TRACK, VC>;
+pub type VecI<T, I, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression> =
+    Vec<T, I, InlineStore<T, I>, TRACK, VC>;
 
 /// Trail-tracked vector (chronological capture, no runtime flags, plain
 /// diff log): the SMT-search profile. See `trail_store`.
-pub type VecT<T, I, const TRACK: bool = true> = Vec<T, I, crate::trail_store::TrailStore<T, I>, TRACK>;
+pub type VecT<T, I, const TRACK: bool = true> =
+    Vec<T, I, crate::trail_store::TrailStore<T, I>, TRACK>;
 /// Runtime-selectable column: the store kind (frame diffs inline/parallel, or
 /// the chronological trail) is chosen at construction. See `dyn_store`.
 pub type VecD<T, I, const TRACK: bool = true> = Vec<T, I, crate::dyn_store::DynStore<T, I>, TRACK>;
-pub use dyn_store::StoreKind;
 pub use compression_config::env_diff_store_kind;
+pub use dyn_store::StoreKind;
 
 /// Parallel capture: flag in a packed side bitvector. Works with any
 /// `T: Copy`. Production's `VecP` alias accepted `T: Clone`; the verified

@@ -15,12 +15,12 @@
 //! flat view exactly, by the `CompressedStack` push bijection, so no diff is lost
 //! or reordered across the boundary.
 
-use vstd::prelude::*;
-use vstd::multiset::Multiset;
-use crate::index_like::{IndexLike, IndexFromNat};
-use crate::diff_log::DiffLog;
 use crate::compressed_stack::CompressedStack;
 use crate::compression_config::ColumnConfig;
+use crate::diff_log::DiffLog;
+use crate::index_like::{IndexFromNat, IndexLike};
+use vstd::multiset::Multiset;
+use vstd::prelude::*;
 
 verus! {
 

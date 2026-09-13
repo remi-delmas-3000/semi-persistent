@@ -1,5 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+
+// Index-parallel assertions read better against the index than the element.
+#![allow(clippy::needless_range_loop)]
 //! Conformance for the verified index-major run column `RunCol` (the A2
 //! encoder that drops the index column and reconstructs each index via
 //! `IndexLike::checked_add`, carrying a ghost of the write pairs tied to the runs
@@ -14,7 +17,9 @@
 
 use proptest::prelude::*;
 use semi_persistent_containers_verus as verus;
-use verus::diff_compress::{ColdFrame, CompressedFrame, CompressionMode, DeltaFrame, HotFrame, RunCol};
+use verus::diff_compress::{
+    ColdFrame, CompressedFrame, CompressionMode, DeltaFrame, HotFrame, RunCol,
+};
 
 /// Reference restore: apply `(value, index)` pairs to a base column in order,
 /// last write wins. The oracle `restore_runs_into`'s memcpy must reproduce.
@@ -176,7 +181,7 @@ proptest! {
 
         let frame: ColdFrame<u32, u32> = ColdFrame::compress_mode(&diffs, mode);
         let n = frame.entry_len();
-        prop_assert_eq!(n as usize, diffs.len());
+        prop_assert_eq!(n, diffs.len());
 
         // decode_at reconstructs each entry; collect the full decode.
         let mut decoded: Vec<(u32, u32)> = Vec::new();
@@ -286,11 +291,11 @@ fn delta_frame_boundaries_and_bytes() {
         assert_eq!(f.decode_at(i), all_self[i]);
     }
     let edges: Vec<(u32, u32)> = vec![
-        (0, 0),                      // value == index == 0
-        (u32::MAX, 1),               // max value as an exception
-        (0, 2),                      // zero value exception
-        (3, 3),                      // self at small index
-        (u32::MAX, u32::MAX),        // value == index at the top of the domain
+        (0, 0),               // value == index == 0
+        (u32::MAX, 1),        // max value as an exception
+        (0, 2),               // zero value exception
+        (3, 3),               // self at small index
+        (u32::MAX, u32::MAX), // value == index at the top of the domain
     ];
     let fe: DeltaFrame<u32, u32> = DeltaFrame::compress(&edges);
     for i in 0..edges.len() {
@@ -300,6 +305,11 @@ fn delta_frame_boundaries_and_bytes() {
     // F3.3 measured: an all-self-parented frame's delta bytes against plain.
     let plain = all_self.len() * (4 + 4);
     let delta = f.byte_len();
-    println!("delta frame: {} bytes vs plain {} ({}x)", delta, plain, plain as f64 / delta as f64);
+    println!(
+        "delta frame: {} bytes vs plain {} ({}x)",
+        delta,
+        plain,
+        plain as f64 / delta as f64
+    );
     assert!(delta < plain, "delta {delta} !< plain {plain}");
 }

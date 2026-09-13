@@ -12,8 +12,8 @@
 //! (run-coalescing / Elias-Fano / delta-varint) composes on top and is a
 //! separate encoder.
 
+use crate::index_like::{IndexFromNat, IndexLike};
 use vstd::prelude::*;
-use crate::index_like::{IndexLike, IndexFromNat};
 
 verus! {
 
@@ -102,6 +102,162 @@ impl Codes {
             Codes::U32(v) => v[i] as usize,
             Codes::Usize(v) => v[i],
             Codes::Packed { words, bits, .. } => packed_get(words, *bits, i),
+        }
+    }
+
+    /// Exclusive upper bound on the codes a variant can hold. The pool
+    /// operations below are restricted to the byte-width variants: a
+    /// bit-packed pool cannot truncate at an arbitrary code boundary or
+    /// append without read-modify-write word surgery, and pop must stay a
+    /// truncate (ColdStack's bump-allocator property).
+    pub open spec fn width_cap(&self) -> nat {
+        match self {
+            Codes::U8(_) => 0x100,
+            Codes::U16(_) => 0x1_0000,
+            Codes::U32(_) => 0x1_0000_0000,
+            Codes::Usize(_) => usize::MAX as nat + 1,
+            Codes::Packed { .. } => 0,
+        }
+    }
+
+    /// Append one code to a byte-width pool.
+    pub fn push_code(&mut self, c: usize)
+        requires
+            !((*old(self)) is Packed),
+            (c as nat) < old(self).width_cap(),
+        ensures
+            final(self).view() =~= old(self).view().push(c as nat),
+            final(self).width_cap() == old(self).width_cap(),
+            !((*final(self)) is Packed),
+            final(self).wf(),
+    {
+        match self {
+            Codes::U8(v) => v.push(c as u8),
+            Codes::U16(v) => v.push(c as u16),
+            Codes::U32(v) => v.push(c as u32),
+            Codes::Usize(v) => v.push(c),
+            Codes::Packed { .. } => {
+                crate::guard::refuse("Codes::push_code: packed pool");
+            }
+        }
+    }
+
+    /// Truncate a byte-width pool to its first `n` codes.
+    pub fn truncate_codes(&mut self, n: usize)
+        requires
+            !((*old(self)) is Packed),
+            n <= old(self).view().len(),
+        ensures
+            final(self).view() =~= old(self).view().subrange(0, n as int),
+            final(self).width_cap() == old(self).width_cap(),
+            !((*final(self)) is Packed),
+            final(self).wf(),
+    {
+        match self {
+            Codes::U8(v) => v.truncate(n),
+            Codes::U16(v) => v.truncate(n),
+            Codes::U32(v) => v.truncate(n),
+            Codes::Usize(v) => v.truncate(n),
+            Codes::Packed { .. } => {
+                crate::guard::refuse("Codes::truncate_codes: packed pool");
+            }
+        }
+    }
+
+    /// Widen the pool until `dict_len` codes are representable. Monotone: the
+    /// width never narrows, so codes already stored keep their meaning. The
+    /// rewrite is a whole-pool copy, but the width only ever steps U8 -> U16
+    /// -> U32 -> Usize, so at most three rewrites happen over the pool's
+    /// lifetime - amortized O(1) per code.
+    pub fn widen_for(&mut self, dict_len: usize)
+        requires !((*old(self)) is Packed),
+        ensures
+            final(self).view() =~= old(self).view(),
+            !((*final(self)) is Packed),
+            final(self).wf(),
+            (dict_len as nat) <= final(self).width_cap(),
+            old(self).width_cap() <= final(self).width_cap(),
+    {
+        if dict_len <= 0x100 {
+            // Every byte-width variant already holds u8-range codes.
+            proof { assert((dict_len as nat) <= self.width_cap()); }
+            return;
+        }
+        let n = self.len();
+        if dict_len <= 0x1_0000 {
+            match self {
+                Codes::U8(_) => {}
+                _ => { return; }
+            }
+            let mut wide: Vec<u16> = Vec::new();
+            let mut i: usize = 0;
+            while i < n
+                invariant
+                    i <= n,
+                    n == self.view().len(),
+                    (*self) is U8,
+                    self.wf(),
+                    *self == *old(self),
+                    wide@.len() == i as nat,
+                    forall|k: int| 0 <= k < i
+                        ==> (#[trigger] wide@[k]) as nat == self.view()[k],
+                decreases n - i,
+            {
+                let c = self.get(i);
+                proof { assert((c as nat) < old(self).width_cap()); }
+                wide.push(c as u16);
+                i += 1;
+            }
+            *self = Codes::U16(wide);
+        } else if dict_len <= 0x1_0000_0000 {
+            match self {
+                Codes::U8(_) | Codes::U16(_) => {}
+                _ => { return; }
+            }
+            let mut wide: Vec<u32> = Vec::new();
+            let mut i: usize = 0;
+            while i < n
+                invariant
+                    i <= n,
+                    n == self.view().len(),
+                    (*self) is U8 || (*self) is U16,
+                    self.wf(),
+                    *self == *old(self),
+                    wide@.len() == i as nat,
+                    forall|k: int| 0 <= k < i
+                        ==> (#[trigger] wide@[k]) as nat == self.view()[k],
+                decreases n - i,
+            {
+                let c = self.get(i);
+                proof { assert((c as nat) < old(self).width_cap()); }
+                wide.push(c as u32);
+                i += 1;
+            }
+            *self = Codes::U32(wide);
+        } else {
+            if let Codes::Usize(_) = self {
+                return;
+            }
+            let mut wide: Vec<usize> = Vec::new();
+            let mut i: usize = 0;
+            while i < n
+                invariant
+                    i <= n,
+                    n == self.view().len(),
+                    !((*self) is Packed),
+                    !((*self) is Usize),
+                    self.wf(),
+                    *self == *old(self),
+                    wide@.len() == i as nat,
+                    forall|k: int| 0 <= k < i
+                        ==> (#[trigger] wide@[k]) as nat == self.view()[k],
+                decreases n - i,
+            {
+                let c = self.get(i);
+                wide.push(c);
+                i += 1;
+            }
+            *self = Codes::Usize(wide);
         }
     }
 
@@ -475,7 +631,7 @@ pub fn packed_get(words: &Vec<u64>, bits: u8, i: usize) -> (c: usize)
             requires bits == 1u8 || bits == 2u8 || bits == 4u8;
     }
     let mask = (1u64 << (bits as u64)) - 1;
-    (((words[wi] >> shift) & mask)) as usize
+    ((words[wi] >> shift) & mask) as usize
 }
 
 /// An immutable value-only frame: `dict` plus a narrow/bit-packed `codes` column,
@@ -636,6 +792,7 @@ impl<T: Copy, I: IndexLike> DictFrame<T, I> {
 pub fn assign_codes<T: IndexLike>(diffs_vals: &Vec<T>) -> (r: (Vec<T>, Vec<usize>))
     ensures
         r.1@.len() == diffs_vals@.len(),
+        r.0@.len() <= diffs_vals@.len(),
         forall|t: int| 0 <= t < diffs_vals@.len() ==> (#[trigger] r.1@[t]) < r.0@.len(),
         forall|t: int| 0 <= t < diffs_vals@.len()
             ==> r.0@[#[trigger] r.1@[t] as int] == diffs_vals@[t],
@@ -649,6 +806,7 @@ pub fn assign_codes<T: IndexLike>(diffs_vals: &Vec<T>) -> (r: (Vec<T>, Vec<usize
             n == diffs_vals@.len(),
             0 <= t <= n,
             codes@.len() == t,
+            dict@.len() <= t,
             forall|k: int| 0 <= k < t ==> (#[trigger] codes@[k]) < dict@.len(),
             forall|k: int| 0 <= k < t
                 ==> dict@[#[trigger] codes@[k] as int] == diffs_vals@[k],
@@ -1545,7 +1703,225 @@ pub open spec fn unique_idx<T, I: IndexLike>(d: Seq<(T, I)>) -> bool {
             ==> (#[trigger] d[a]).1.as_nat() != (#[trigger] d[b]).1.as_nat()
 }
 
-/// Runtime `unique_idx` check: does the frame write each cell at most once?
+/// The dedupe-first of the length-`k` prefix of `d`, in scan order: entry
+/// `d[i]` is kept iff no earlier entry hits the same index (`first_hitter`).
+/// The recursion is on the prefix end, so the exec scan tracks it with a
+/// single sequence-equality invariant; every property is proven by
+/// induction on this definition, not by loop-invariant quantifiers (which
+/// defeated the solver's instantiation here).
+pub open spec fn dedupe_prefix<T, I: IndexLike>(d: Seq<(T, I)>, k: int) -> Seq<(T, I)>
+    decreases k,
+{
+    if k <= 0 {
+        Seq::empty()
+    } else if crate::vec::first_hitter::<T, I>(d, 0, k - 1, d[k - 1].1.as_nat()) {
+        dedupe_prefix(d, k - 1).push(d[k - 1])
+    } else {
+        dedupe_prefix(d, k - 1)
+    }
+}
+
+/// The positions the kept entries came from, parallel to `dedupe_prefix`.
+pub open spec fn dedupe_positions<T, I: IndexLike>(d: Seq<(T, I)>, k: int) -> Seq<int>
+    decreases k,
+{
+    if k <= 0 {
+        Seq::empty()
+    } else if crate::vec::first_hitter::<T, I>(d, 0, k - 1, d[k - 1].1.as_nat()) {
+        dedupe_positions(d, k - 1).push(k - 1)
+    } else {
+        dedupe_positions(d, k - 1)
+    }
+}
+
+pub open spec fn dedupe_first_spec<T, I: IndexLike>(d: Seq<(T, I)>) -> Seq<(T, I)> {
+    dedupe_prefix(d, d.len() as int)
+}
+
+/// The characterization bundle, by induction on the prefix: the kept
+/// entries are exactly `d` at the recorded positions, each recorded
+/// position is the first hitter of its own index, the recorded positions
+/// are strictly increasing (hence unique entries), and every first-hitter
+/// position of the prefix is recorded.
+pub proof fn lemma_dedupe_prefix_props<T, I: IndexLike>(d: Seq<(T, I)>, k: int)
+    requires 0 <= k <= d.len(),
+    ensures
+        dedupe_prefix(d, k).len() == dedupe_positions(d, k).len(),
+        dedupe_prefix(d, k).len() <= k,
+        forall|t: int| 0 <= t < dedupe_positions(d, k).len() ==> {
+            let p = #[trigger] dedupe_positions(d, k)[t];
+            &&& 0 <= p < k
+            &&& dedupe_prefix(d, k)[t] == d[p]
+            &&& crate::vec::first_hitter::<T, I>(d, 0, p, d[p].1.as_nat())
+        },
+        forall|a: int, b: int|
+            0 <= a < b < dedupe_positions(d, k).len()
+            ==> #[trigger] dedupe_positions(d, k)[a]
+                < #[trigger] dedupe_positions(d, k)[b],
+        forall|p: int| 0 <= p < k
+            && crate::vec::first_hitter::<T, I>(
+                d, 0, p, (#[trigger] d[p]).1.as_nat())
+            ==> dedupe_positions(d, k).contains(p),
+        unique_idx(dedupe_prefix(d, k)),
+    decreases k,
+{
+    if k > 0 {
+        lemma_dedupe_prefix_props(d, k - 1);
+        let prev = dedupe_prefix(d, k - 1);
+        let prevp = dedupe_positions(d, k - 1);
+        if crate::vec::first_hitter::<T, I>(d, 0, k - 1, d[k - 1].1.as_nat()) {
+            let cur = dedupe_prefix(d, k);
+            let curp = dedupe_positions(d, k);
+            assert(cur == prev.push(d[k - 1]));
+            assert(curp == prevp.push(k - 1));
+            // Uniqueness: a kept entry sharing d[k-1]'s index sits at a
+            // recorded first-hitter position below k-1, contradicting
+            // d[k-1]'s own first-hitter fact.
+            assert forall|a: int, b: int|
+                0 <= a < cur.len() && 0 <= b < cur.len() && a != b
+                implies (#[trigger] cur[a]).1.as_nat()
+                    != (#[trigger] cur[b]).1.as_nat() by {
+                if a < cur.len() - 1 && b < cur.len() - 1 {
+                    assert(cur[a] == prev[a]);
+                    assert(cur[b] == prev[b]);
+                } else {
+                    let w = if a < b { a } else { b };
+                    assert(w < cur.len() - 1);
+                    let pw = prevp[w];
+                    assert(cur[w] == prev[w] && prev[w] == d[pw]);
+                    assert(0 <= pw < k - 1);
+                    assert(cur[if a < b { b } else { a }] == d[k - 1]);
+                    if d[pw].1.as_nat() == d[k - 1].1.as_nat() {
+                        assert(false);
+                    }
+                }
+            }
+            // Completeness: contains transfers over push.
+            assert forall|p: int| 0 <= p < k
+                && crate::vec::first_hitter::<T, I>(
+                    d, 0, p, (#[trigger] d[p]).1.as_nat())
+                implies curp.contains(p) by {
+                if p < k - 1 {
+                    assert(prevp.contains(p));
+                    let t0 = choose|t: int| 0 <= t < prevp.len()
+                        && prevp[t] == p;
+                    assert(curp[t0] == p);
+                } else {
+                    assert(curp[curp.len() - 1] == k - 1);
+                }
+            }
+        } else {
+            // Dropped entry: every clause carries verbatim; completeness at
+            // p == k-1 is vacuous because it is not a first hitter.
+            assert(dedupe_prefix(d, k) == prev);
+            assert(dedupe_positions(d, k) == prevp);
+            assert forall|p: int| 0 <= p < k
+                && crate::vec::first_hitter::<T, I>(
+                    d, 0, p, (#[trigger] d[p]).1.as_nat())
+                implies prevp.contains(p) by {
+                if p == k - 1 {
+                    assert(false);
+                }
+            }
+        }
+    }
+}
+
+/// On a unique-index sequence, dedupe-first is the identity: every position
+/// is already the first hitter of its own index. This is what lets the
+/// unique-discipline fold sites ride the dedupe frame rule with kept == m.
+pub proof fn lemma_dedupe_prefix_identity<T, I: IndexLike>(d: Seq<(T, I)>, k: int)
+    requires
+        unique_idx(d),
+        0 <= k <= d.len(),
+    ensures dedupe_prefix(d, k) == d.subrange(0, k),
+    decreases k,
+{
+    if k > 0 {
+        lemma_dedupe_prefix_identity(d, k - 1);
+        assert(crate::vec::first_hitter::<T, I>(d, 0, k - 1, d[k - 1].1.as_nat()));
+        assert(d.subrange(0, k) =~= d.subrange(0, k - 1).push(d[k - 1]));
+    } else {
+        assert(d.subrange(0, 0) =~= Seq::<(T, I)>::empty());
+    }
+}
+
+pub proof fn lemma_dedupe_identity_on_unique<T, I: IndexLike>(d: Seq<(T, I)>)
+    requires unique_idx(d),
+    ensures dedupe_first_spec(d) == d,
+{
+    lemma_dedupe_prefix_identity::<T, I>(d, d.len() as int);
+    assert(d.subrange(0, d.len() as int) =~= d);
+}
+
+/// Keep the chronologically FIRST capture of each index, preserving order.
+/// `overlay` applies a stratum backward, so the first entry for a cell wins
+/// and every later duplicate is inert (`crate::vec::lemma_overlay_dedupe_first`);
+/// dropping them preserves every restore, and the result's unique indices
+/// are what run-coalescing requires. This is the trail discipline's eviction
+/// converter (design doc §7), and on an already-unique stratum it is the
+/// identity. O(n^2) scan; eviction-only, off the write path - the recorded
+/// upgrade trigger is a measured eviction dominated by this pass.
+pub fn dedupe_first<T: Copy, I: IndexLike>(d: &Vec<(T, I)>) -> (r: Vec<(T, I)>)
+    ensures
+        r@ == dedupe_first_spec(d@),
+        unique_idx(r@),
+{
+    let n = d.len();
+    let mut out: Vec<(T, I)> = Vec::new();
+    let mut k: usize = 0;
+    while k < n
+        invariant
+            k <= n,
+            n == d@.len(),
+            out@ == dedupe_prefix(d@, k as int),
+        decreases n - k,
+    {
+        let (_, idx) = d[k];
+        let key = idx.as_usize();
+        let mut j: usize = 0;
+        let mut dup: bool = false;
+        while j < k && !dup
+            invariant
+                j <= k,
+                k < n == d@.len(),
+                key as nat == d@[k as int].1.as_nat(),
+                dup ==> exists|q: int| 0 <= q < k
+                    && (#[trigger] d@[q]).1.as_nat() == d@[k as int].1.as_nat(),
+                !dup ==> crate::vec::first_hitter::<T, I>(
+                    d@, 0, j as int, d@[k as int].1.as_nat()),
+                out@ == dedupe_prefix(d@, k as int),
+            decreases k - j + (if dup { 0int } else { 1int }),
+        {
+            if d[j].1.as_usize() == key {
+                dup = true;
+            } else {
+                j += 1;
+            }
+        }
+        if !dup {
+            out.push(d[k]);
+            proof {
+                assert(crate::vec::first_hitter::<T, I>(
+                    d@, 0, k as int, d@[k as int].1.as_nat()));
+                assert(out@ == dedupe_prefix(d@, k as int + 1));
+            }
+        } else {
+            proof {
+                assert(!crate::vec::first_hitter::<T, I>(
+                    d@, 0, k as int, d@[k as int].1.as_nat()));
+                assert(out@ == dedupe_prefix(d@, k as int + 1));
+            }
+        }
+        k += 1;
+    }
+    proof {
+        lemma_dedupe_prefix_props::<T, I>(d@, n as int);
+    }
+    out
+}
+
+/// Runtime `unique_idx` check does the frame write each cell at most once?
 /// VERIFIED via the verified sort: sort a copy, scan adjacent indices. An
 /// adjacent equal pair falsifies uniqueness of the sorted copy, which
 /// falsifies the input's by the permutation lemma (contrapositive of the
@@ -2588,6 +2964,75 @@ impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for DictFrame<T, I> {
     }
 }
 
+/// The pairs of run `r` have block shape: entry `g + j` is the run's value
+/// `j` landing at `start + j`. Forall form so callers' by-blocks stay
+/// call-free.
+pub proof fn lemma_run_pairs_shape<T: Copy, I: IndexLike>(
+    rc: &RunCol<T, I>, r: int, g: int,
+)
+    requires
+        rc.wf(),
+        0 <= r < rc.runs@.len(),
+        g == run_seq(rc.runs@.subrange(0, r)).len(),
+    ensures
+        g + rc.runs@[r].vals@.len() <= rc.pairs@.len(),
+        forall|j: int| 0 <= j < rc.runs@[r].vals@.len() ==> {
+            &&& (#[trigger] rc.pairs@[g + j]).0 == rc.runs@[r].vals@[j]
+            &&& rc.pairs@[g + j].1.as_nat() == rc.runs@[r].start.as_nat() + j
+            &&& rc.runs@[r].start.as_nat() + j < I::max_nat()
+        },
+{
+    lemma_run_seq_split(rc.runs@, r);
+    reveal_with_fuel(run_seq, 2);
+    assert(rc.runs@.subrange(r, rc.runs@.len() as int)[0] == rc.runs@[r]);
+    assert forall|j: int| 0 <= j < rc.runs@[r].vals@.len() implies {
+        &&& (#[trigger] rc.pairs@[g + j]).0 == rc.runs@[r].vals@[j]
+        &&& rc.pairs@[g + j].1.as_nat() == rc.runs@[r].start.as_nat() + j
+        &&& rc.runs@[r].start.as_nat() + j < I::max_nat()
+    } by {
+        lemma_run_seq_at(rc.runs@, r, j);
+    }
+}
+
+/// Block advancement of `apply_all`: applying a run's pairs (consecutive
+/// indices from `s`, values `vals`) equals one clamped block write. This is
+/// the extensionality that licenses restoring a run with one memcpy.
+pub proof fn lemma_apply_all_write_block<T: Copy, I: IndexLike>(
+    base: Seq<T>, d: Seq<(T, I)>, g: int, s: nat, vals: Seq<T>,
+)
+    requires
+        0 <= g,
+        g + vals.len() <= d.len(),
+        forall|j: int| 0 <= j < vals.len() ==> {
+            &&& (#[trigger] d[g + j]).0 == vals[j]
+            &&& d[g + j].1.as_nat() == s + j
+        },
+    ensures
+        apply_all::<T, I>(base, d.subrange(0, g + vals.len()))
+            == crate::cold_stack::write_block(
+                apply_all::<T, I>(base, d.subrange(0, g)), s, vals),
+    decreases vals.len(),
+{
+    let cur = apply_all::<T, I>(base, d.subrange(0, g));
+    lemma_apply_all_len::<T, I>(base, d.subrange(0, g));
+    if vals.len() == 0 {
+        assert(d.subrange(0, g + 0) =~= d.subrange(0, g));
+        assert(apply_all::<T, I>(base, d.subrange(0, g))
+            =~= crate::cold_stack::write_block(cur, s, vals));
+    } else {
+        let l1 = (vals.len() - 1) as int;
+        lemma_apply_all_write_block::<T, I>(base, d, g, s, vals.subrange(0, l1));
+        let prev = apply_all::<T, I>(base, d.subrange(0, g + l1));
+        assert(d.subrange(0, g + vals.len() as int)
+            =~= d.subrange(0, g + l1).push(d[g + l1]));
+        lemma_apply_all_snoc::<T, I>(base, d, g + l1);
+        lemma_apply_all_len::<T, I>(base, d.subrange(0, g + l1));
+        assert(prev == crate::cold_stack::write_block(cur, s, vals.subrange(0, l1)));
+        assert(apply_all::<T, I>(base, d.subrange(0, g + vals.len() as int))
+            =~= crate::cold_stack::write_block(cur, s, vals));
+    }
+}
+
 /// Index-major run frames restore by SLICED writes: each run's values are contiguous
 /// in the frame AND land at consecutive indices, so a run is one `copy_from_slice`
 /// (a memcpy) instead of `len` scattered stores. `external_body`: the slice copy is a
@@ -2610,6 +3055,8 @@ impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for RunCol<T, I> {
     /// behind a trusted contract. If the restore benchmarks measure the
     /// memcpy delta, the recorded upgrade is a trusted memcpy fast path
     /// behind this same contract with this loop as the verified reference.
+    #[allow(unused_assignments)]
+    #[allow(unused_assignments)]
     fn restore_to(&self, target: &mut Vec<T>) {
         let ghost base = target@;
         let ghost pairs = self.pairs@;
@@ -2630,49 +3077,65 @@ impl<T: Copy, I: IndexLike> CompressedFrame<T, I> for RunCol<T, I> {
         {
             let run_len = self.runs[r].vals.len();
             let start = self.runs[r].start;
-            let mut k: usize = 0;
-            while k < run_len
-                invariant
-                    self.wf(),
-                    pairs == self.pairs@,
-                    nruns == self.runs@.len(),
-                    0 <= r < nruns,
-                    run_len == self.runs@[r as int].vals@.len(),
-                    start == self.runs@[r as int].start,
-                    0 <= k <= run_len,
-                    g == run_seq(self.runs@.subrange(0, r as int)).len() + k,
-                    g <= pairs.len(),
-                    target@ == apply_all::<T, I>(base, pairs.subrange(0, g as int)),
-                    target@.len() == base.len(),
-                decreases run_len - k,
-            {
-                proof {
-                    // pairs[g] is this run's entry k: value verbatim, index
-                    // as_nat == start + k, in range of I.
-                    lemma_run_seq_at(self.runs@, r as int, k as int);
-                    assert(g < pairs.len()) by {
-                        // pairs.len == run_seq(all).len == prefix + rest, and
-                        // this run's entry k sits inside rest's head.
-                        lemma_run_seq_split(self.runs@, r as int);
-                        reveal_with_fuel(run_seq, 2);
-                        assert(self.runs@.subrange(r as int, self.runs@.len() as int)[0]
-                            == self.runs@[r as int]);
-                        assert(run_seq(self.runs@.subrange(r as int, self.runs@.len() as int)).len()
-                            >= self.runs@[r as int].vals@.len());
-                    }
-                    assert(pairs[g as int].0 == self.runs@[r as int].vals@[k as int]);
-                    assert(pairs[g as int].1.as_nat() == start.as_nat() + k);
-                    assert(start.as_nat() + k < I::max_nat());
-                    I::lemma_max_nat_fits_usize();
-                    lemma_apply_all_snoc::<T, I>(base, pairs, g as int);
-                }
-                let idx = start.as_usize() + k;
-                if idx < target.len() {
-                    target.set(idx, self.runs[r].vals[k]);
-                }
-                g += 1;
-                k += 1;
+            let ghost g0 = g as int;
+            let ghost vals = self.runs@[r as int].vals@;
+            let ghost cur = target@;
+            proof {
+                // Antecedent (abduced): this run's pairs have block shape.
+                lemma_run_pairs_shape(self, r as int, g0);
+                // The old per-element loop needed start + k representable in
+                // I for its as_usize stepping; the block copy does all its
+                // arithmetic through `tlen - su`, so no such bound is needed.
+                I::lemma_max_nat_fits_usize();
             }
+            // One clamped memcpy for the whole run, straight from the run's
+            // value vector; entries past the target drop, exactly apply_all's
+            // out-of-range rule. This is the restore the encoding exists for.
+            let su = start.as_usize();
+            let tlen = target.len();
+            if su < tlen {
+                let cl = if run_len <= tlen - su { run_len } else { tlen - su };
+                let src = vstd::slice::slice_subrange(
+                    self.runs[r].vals.as_slice(), 0, cl);
+                let tslice = target.as_mut_slice();
+                let (_, rest) = tslice.split_at_mut(su);
+                let (dst, _) = rest.split_at_mut(cl);
+                dst.copy_from_slice(src);
+                proof {
+                    assert forall|j: int| 0 <= j < target@.len() implies
+                        target@[j] == crate::cold_stack::write_block(
+                            cur, start.as_nat(), vals)[j] by {
+                        if su as int <= j && j < su as int + cl as int {
+                            assert(target@[j] == src@[j - su as int]);
+                        } else if su as int + cl as int <= j
+                            && j < su as int + vals.len() {
+                            // Frame boundary: the clamp fired, and the cut
+                            // tail starts at tlen, past every valid j.
+                            assert(cl < run_len);
+                            assert(su + cl == tlen);
+                            assert(false);
+                        } else {
+                            // Frame: untouched remainder.
+                            assert(target@[j] == cur[j]);
+                        }
+                    }
+                    assert(target@ =~= crate::cold_stack::write_block(
+                        cur, start.as_nat(), vals));
+                }
+            } else {
+                proof {
+                    // Whole window past the target: write_block writes the
+                    // empty in-bounds window.
+                    assert(target@ =~= crate::cold_stack::write_block(
+                        cur, start.as_nat(), vals));
+                }
+            }
+            proof {
+                // Consequent: block advancement of apply_all by the run.
+                lemma_apply_all_write_block::<T, I>(
+                    base, pairs, g0, start.as_nat(), vals);
+            }
+            g += run_len;
             proof {
                 assert(self.runs@.subrange(0, r as int + 1)
                     =~= self.runs@.subrange(0, r as int).push(self.runs@[r as int]));
@@ -2845,8 +3308,8 @@ impl<T: IndexLike, I: IndexLike> DeltaFrame<T, I> {
             }
             i = i + 1;
         }
-        let r = DeltaFrame { idxs, exceptions, pairs: Ghost(diffs@) };
-        r
+
+        DeltaFrame { idxs, exceptions, pairs: Ghost(diffs@) }
     }
 
     /// Deterministic encoded footprint: the index column plus the exception list.
@@ -3017,8 +3480,8 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Col
                 if rc.byte_len() <= plain_bytes {
                     ColdFrame::Runs(rc)
                 } else {
-                    let f = Self::plain_copy(diffs);
-                    f
+
+                    Self::plain_copy(diffs)
                 }
             }
             None => Self::plain_copy(diffs),
@@ -3115,6 +3578,13 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Col
 
     /// Bulk decode: materialize the whole frame's pairs. One pass per mode
     /// (`Plain` copies, `Dict` decodes codes, `Runs` reconstructs indices).
+    ///
+    /// ORACLE-ONLY (design doc §2: "the compressed form IS the restore
+    /// plan"). No production code calls this: restore goes through
+    /// `restore_to`/`restore_range_into` (block writes straight off the
+    /// pools) and the subrange fallback decodes per entry via `decode_at`.
+    /// It exists for tests and differential checks that need the flat pair
+    /// sequence to compare against.
     pub fn decode_exec_cold(&self) -> (r: Vec<(T, I)>)
         requires self.wf(),
         ensures r@ == self.decode(),

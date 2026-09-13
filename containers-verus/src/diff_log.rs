@@ -20,10 +20,10 @@
 //! because each cold frame is written once. The index column stays whole, so the
 //! value compression is invisible to the capture machinery's `indices()` slice.
 
-use vstd::prelude::*;
-use crate::index_like::IndexLike;
-use crate::diff_compress::{ValFrame, RunCol, ColdFrame, sort_frame_by_index};
 use crate::diff_compress::CompressionMode;
+use crate::diff_compress::{ColdFrame, RunCol, ValFrame, sort_frame_by_index};
+use crate::index_like::IndexLike;
+use vstd::prelude::*;
 
 verus! {
 
@@ -557,6 +557,7 @@ pub open spec fn adaptive_len<T: Copy, I: IndexLike, VC: crate::value_compressor
 /// instead of threading an overflow precondition through the hierarchy.
 /// Discharged from the trust ledger 2026-09: formerly `external_body` trusting
 /// the running sum.
+#[inline]
 pub fn adaptive_len_exec<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
     cold: &Vec<ColdFrame<T, I, VC>>, hot: &Vec<(T, I)>,
 ) -> (n: usize)
@@ -616,7 +617,17 @@ pub open spec fn adaptive_at<T: Copy, I: IndexLike, VC: crate::value_compressor:
 /// its mode (`ColdFrame`), with a plain hot pair tail and a cached length (A4).
 pub enum DiffLog<T: Copy, I, VC: crate::value_compressor::ValueCompressor<T> = crate::value_compressor::NoValueCompression> {
     Cols { idxs: DiffIdxs<I>, vals: DiffVals<T> },
-    Adaptive { cold: Vec<ColdFrame<T, I, VC>>, hot: Vec<(T, I)>, len: usize },
+    Adaptive {
+        cold: Vec<ColdFrame<T, I, VC>>,
+        hot: Vec<(T, I)>,
+        len: usize,
+        /// Whether `mark` seals the open stratum into a cold frame (the A4
+        /// Auto tier's behaviour). False for the default live pair log: hot
+        /// frames stay hot until an explicit eviction policy moves them
+        /// (design doc restore-from-compressed-frames-goal.md #6). Policy,
+        /// not representation, so `wf` does not constrain it.
+        auto_seal: bool,
+    },
 }
 
 impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> View for DiffLog<T, I, VC> {
@@ -640,7 +651,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                 &&& vals.len_spec() == idxs.len_spec()
                 &&& (*idxs is Runs ==> *vals is Plain)
             }
-            DiffLog::Adaptive { cold, hot, len } => {
+            DiffLog::Adaptive { cold, hot, len, .. } => {
                 &&& (forall|k: int| 0 <= k < cold@.len() ==> (#[trigger] cold@[k]).wf())
                 &&& *len == adaptive_len(cold@, hot@)
                 // Every sealed frame has unique indices (first-write-wins capture;
@@ -651,6 +662,50 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                 &&& (forall|k: int| 0 <= k < cold@.len()
                         ==> crate::diff_compress::unique_idx((#[trigger] cold@[k]).decode()))
             }
+        }
+    }
+
+    /// Exec form of `is_adaptive` (the spec fn is not callable from exec).
+    #[inline]
+    pub fn is_adaptive_exec(&self) -> (b: bool)
+        ensures b == self.is_adaptive(),
+    {
+        match self {
+            DiffLog::Adaptive { .. } => true,
+            DiffLog::Cols { .. } => false,
+        }
+    }
+
+    /// Exec accessor for the cold-region length (the flat position where the
+    /// hot tail begins). The eviction policy's alignment check reads it;
+    /// only the adaptive representation has an eviction policy.
+    #[inline]
+    pub fn idx_cold_len(&self) -> (n: usize)
+        requires self.wf(), self.is_adaptive(),
+        ensures n as nat == self.idx_cold_len_spec(),
+    {
+        match self {
+            DiffLog::Adaptive { hot, len, .. } => *len - hot.len(),
+            DiffLog::Cols { .. } => { proof { assert(false); } 0 },
+        }
+    }
+
+    /// Whether `mark` seals this column's open stratum (the Auto tier's
+    /// behaviour); false for plain live columns and the column-split form.
+    pub open spec fn auto_seal_spec(&self) -> bool {
+        match self {
+            DiffLog::Cols { .. } => false,
+            DiffLog::Adaptive { auto_seal, .. } => *auto_seal,
+        }
+    }
+
+    #[inline]
+    pub fn auto_seal(&self) -> (b: bool)
+        ensures b == self.auto_seal_spec(),
+    {
+        match self {
+            DiffLog::Cols { .. } => false,
+            DiffLog::Adaptive { auto_seal, .. } => *auto_seal,
         }
     }
 
@@ -678,8 +733,19 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     pub fn new_plain() -> (r: DiffLog<T, I, VC>)
         ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
     {
-        let r = DiffLog::Cols { idxs: DiffIdxs::Plain(Vec::new()), vals: DiffVals::Plain(Vec::new()) };
-        assert(r@ =~= Seq::<(T, I)>::empty());
+        // Live logs are pair-major from birth: an Adaptive log with no cold
+        // frames IS production's `Vec<(T, I)>`, restored by indexing backward
+        // into the hot tail with no allocation (design:
+        // doc/tasks/restore-from-compressed-frames-goal.md #2). The split-column
+        // `Cols` form remains for sealed/value-major columns only. Unlike the
+        // A4 Auto tier (`new_adaptive`), a plain column does NOT seal on mark:
+        // strata stay hot pairs until an eviction policy exists.
+        let r = DiffLog::Adaptive { cold: Vec::new(), hot: Vec::new(), len: 0, auto_seal: false };
+        proof {
+            reveal(cold_adaptive);
+            assert(cold_adaptive(Seq::<ColdFrame<T, I, VC>>::empty()) =~= Seq::<(T, I)>::empty());
+            assert(r@ =~= Seq::<(T, I)>::empty());
+        }
         r
     }
 
@@ -718,7 +784,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     pub fn new_adaptive() -> (r: DiffLog<T, I, VC>)
         ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
     {
-        let r = DiffLog::Adaptive { cold: Vec::new(), hot: Vec::new(), len: 0 };
+        let r = DiffLog::Adaptive { cold: Vec::new(), hot: Vec::new(), len: 0, auto_seal: true };
         proof { reveal(cold_adaptive); }
         assert(cold_adaptive(Seq::<ColdFrame<T, I, VC>>::empty()) =~= Seq::<(T, I)>::empty());
         assert(r@ =~= Seq::<(T, I)>::empty());
@@ -726,6 +792,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     }
 
     /// Number of entries. Reads whichever column is plain (at most one compresses).
+    #[inline]
     pub fn len(&self) -> (n: usize)
         requires self.wf(),
         ensures n == self@.len(),
@@ -764,6 +831,41 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     /// measured as the dominant term of mark's cost at 46 columns, and a
     /// contributor to the allocator churn (about 10%) in the backtrack-heavy
     /// SMT profile.
+    /// Borrow `[lo, hi)` as a PAIR slice when the range lies entirely in the
+    /// hot pair tail, which for a live log (empty cold tier) is always. This is
+    /// the restore path's zero-copy access: the stores walk the returned slice
+    /// backward in place, so restore allocates nothing and never re-zips
+    /// columns (design: doc/tasks/restore-from-compressed-frames-goal.md #1/#4).
+    /// `None` when the range dips into cold frames or the log is column-major;
+    /// those callers fall back to the materializing path.
+    #[inline]
+    pub fn hot_slice(&self, lo: usize, hi: usize) -> (r: Option<&[(T, I)]>)
+        requires self.wf(), lo <= hi <= self@.len(),
+        ensures
+            r matches Some(sl) ==> sl@.len() == hi - lo
+                && forall|k: int| 0 <= k < hi - lo ==> #[trigger] sl@[k] == self@[lo + k],
+    {
+        match self {
+            DiffLog::Adaptive { cold, hot, len, .. } => {
+                let cold_flat = *len - hot.len();
+                proof {
+                    assert(cold_flat == cold_adaptive(cold@).len());
+                }
+                if lo >= cold_flat {
+                    proof {
+                        assert(forall|k: int| 0 <= k < hi - lo
+                            ==> #[trigger] self@[lo + k] == hot@[lo - cold_flat + k]);
+                    }
+                    let sl = vstd::slice::slice_subrange(hot.as_slice(), lo - cold_flat, hi - cold_flat);
+                    Some(sl)
+                } else {
+                    None
+                }
+            }
+            DiffLog::Cols { .. } => None,
+        }
+    }
+
     pub fn index_slice(&self, lo: usize, hi: usize) -> (r: Option<&[I]>)
         requires self.wf(), lo <= hi <= self@.len(),
         ensures
@@ -972,6 +1074,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     }
 
     /// Append `(t, idx)`. Preserves the prefix, extends the view by one.
+    #[inline]
     pub fn push(&mut self, t: T, idx: I)
         requires old(self).wf(),
         ensures final(self).wf(), final(self)@ == old(self)@.push((t, idx)),
@@ -985,11 +1088,21 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                 }
                 assert(self@ =~= old(self)@.push((t, idx)));
             }
-            DiffLog::Adaptive { cold, hot, len } => {
+            DiffLog::Adaptive { cold, hot, len, .. } => {
                 hot.push((t, idx));
-                // `hot` just grew by one within `usize`, and `len == cold_adaptive + hot`;
-                // recompute from the fresh `hot.len()` so no separate counter overflows.
-                *len = adaptive_len_exec(cold, hot);
+                // Increment, not recompute: this is the write path's hot line
+                // (one capture per first write), and the recompute through
+                // `adaptive_len_exec` cost ~3ns per write against production's
+                // bare pair push (cycle_probe, fixed-idx: 51.5 vs 27.7 ns per
+                // 8 writes). The counter is the representability witness, so
+                // the increment needs the trap: a length at usize::MAX cannot
+                // count one more entry, and the divergent arm keeps the
+                // postcondition vacuous there (same idiom as set_index's
+                // bounds refuse).
+                if *len == usize::MAX {
+                    crate::guard::refuse("DiffLog::push: length overflow");
+                }
+                *len = *len + 1;
                 assert(self@ =~= old(self)@.push((t, idx)));
             }
         }
@@ -1245,7 +1358,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         let ghost cold_len = self.idx_cold_len_spec() as int;
         let ghost n = self@.len() as int;
         match self {
-            DiffLog::Adaptive { cold, hot, len: lenf } => {
+            DiffLog::Adaptive { cold, hot, len: lenf, .. } => {
                 let ghost cold0 = cold@;
                 let ghost hot0 = hot@;
                 if crate::compression_stats::shadow_enabled() {
@@ -1300,6 +1413,275 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     /// when runs do not pay. The dictionary modes stay on the `T: IndexLike` entry.
     /// (Body mirrors `compact_adaptive` with the copy-bounded encoder; the shared
     /// seal-with-frame factoring is a noted follow-up.)
+    /// Fold the FRONT `m` hot entries — one closed stratum — into a single
+    /// cold frame, leaving the rest of the hot tail in place. The eviction
+    /// policy's workhorse (design doc §6): sealing exactly one stratum per
+    /// frame keeps Vec frame boundaries aligned with cold frame boundaries,
+    /// so restores stay frame-wise (a boundary landing inside a cold frame
+    /// would degrade to per-element scatter with the cold locate walk).
+    #[verifier::rlimit(600)]
+    pub fn compact_adaptive_front(&mut self, mode: CompressionMode, m: usize)
+        requires
+            old(self).wf(),
+            old(self).is_adaptive(),
+            m as nat <= old(self)@.len() - old(self).idx_cold_len_spec(),
+            crate::diff_compress::unique_idx(old(self)@.subrange(
+                old(self).idx_cold_len_spec() as int,
+                old(self).idx_cold_len_spec() as int + m as int)),
+        ensures
+            final(self).wf(),
+            final(self).is_adaptive(),
+            final(self)@.len() == old(self)@.len(),
+            final(self).idx_cold_len_spec()
+                == old(self).idx_cold_len_spec() + m as nat,
+            final(self)@.subrange(0, old(self).idx_cold_len_spec() as int)
+                == old(self)@.subrange(0, old(self).idx_cold_len_spec() as int),
+            // The folded stratum keeps its write multiset (the codec may
+            // reorder within the frame; unique indices make that inert).
+            final(self)@.subrange(
+                old(self).idx_cold_len_spec() as int,
+                old(self).idx_cold_len_spec() as int + m as int).to_multiset()
+                == old(self)@.subrange(
+                    old(self).idx_cold_len_spec() as int,
+                    old(self).idx_cold_len_spec() as int + m as int).to_multiset(),
+            crate::diff_compress::unique_idx(final(self)@.subrange(
+                old(self).idx_cold_len_spec() as int,
+                old(self).idx_cold_len_spec() as int + m as int)),
+            // The surviving hot tail is untouched, verbatim.
+            final(self)@.subrange(
+                old(self).idx_cold_len_spec() as int + m as int,
+                final(self)@.len() as int)
+                == old(self)@.subrange(
+                    old(self).idx_cold_len_spec() as int + m as int,
+                    old(self)@.len() as int),
+    {
+        let ghost cold_len = self.idx_cold_len_spec() as int;
+        let ghost n = self@.len() as int;
+        match self {
+            DiffLog::Adaptive { cold, hot, len: lenf, .. } => {
+                let ghost cold0 = cold@;
+                let ghost hot0 = hot@;
+                // Split the hot tail: front stratum to seal, rest to keep.
+                let mut front: Vec<(T, I)> = Vec::new();
+                let mut i: usize = 0;
+                while i < m
+                    invariant
+                        i <= m,
+                        m <= hot@.len(),
+                        hot@ == hot0,
+                        front@.len() == i as nat,
+                        forall|q: int| 0 <= q < i ==> #[trigger] front@[q] == hot0[q],
+                    decreases m - i,
+                {
+                    front.push(hot[i]);
+                    i += 1;
+                }
+                let hl = hot.len();
+                let mut rest: Vec<(T, I)> = Vec::new();
+                let mut j: usize = m;
+                while j < hl
+                    invariant
+                        m <= j <= hl,
+                        hl == hot@.len(),
+                        hot@ == hot0,
+                        rest@.len() == (j - m) as nat,
+                        forall|q: int| 0 <= q < j - m ==> #[trigger] rest@[q] == hot0[m + q],
+                    decreases hl - j,
+                {
+                    rest.push(hot[j]);
+                    j += 1;
+                }
+                proof {
+                    assert(front@ =~= hot0.subrange(0, m as int));
+                    assert(rest@ =~= hot0.subrange(m as int, hot0.len() as int));
+                }
+                let f: ColdFrame<T, I, VC> = ColdFrame::compress_mode_copy(&front, mode);
+                let ghost fg = f;
+                proof {
+                    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+                    lemma_cold_adaptive_snoc(cold0, fg);
+                }
+                cold.push(f);
+                *hot = rest;
+                *lenf = adaptive_len_exec(cold, hot);
+                proof {
+                    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+                    assert(cold@ =~= cold0.push(fg));
+                    assert(cold_adaptive(cold@) =~= cold_adaptive(cold0) + fg.decode());
+                    assert(fg.decode().to_multiset() == front@.to_multiset());
+                    assert(fg.decode().to_multiset().len() == front@.to_multiset().len());
+                    assert(fg.decode().len() == front@.len());
+                    assert(cold_len == cold_adaptive(cold0).len());
+                    assert(self@.len() == n);
+                    assert(self@.subrange(0, cold_len) =~= old(self)@.subrange(0, cold_len)) by {
+                        assert forall|i2: int| 0 <= i2 < cold_len implies
+                            self@[i2] == old(self)@[i2] by {}
+                    }
+                    assert(self@.subrange(cold_len, cold_len + m as int) =~= fg.decode()) by {
+                        assert forall|q: int| 0 <= q < fg.decode().len() implies
+                            self@[cold_len + q] == fg.decode()[q] by {}
+                    }
+                    assert(old(self)@.subrange(cold_len, cold_len + m as int)
+                        =~= front@) by {
+                        assert forall|q: int| 0 <= q < m implies
+                            old(self)@[cold_len + q] == front@[q] by {}
+                    }
+                    assert(self@.subrange(cold_len + m as int, n)
+                        =~= old(self)@.subrange(cold_len + m as int, n)) by {
+                        assert forall|q: int| 0 <= q < n - cold_len - m implies
+                            #[trigger] self@[cold_len + m + q]
+                                == old(self)@[cold_len + m + q] by {}
+                    }
+                }
+            }
+            DiffLog::Cols { .. } => { proof { assert(false); } }
+        }
+    }
+
+    /// `compact_adaptive_front` with dedupe-first: fold the front `m` hot
+    /// entries into one cold frame, keeping only the chronologically first
+    /// capture of each index. The stratum may SHRINK (`kept <= m`); for a
+    /// unique-capture column the dedupe is the identity and `kept == m`,
+    /// but the contract never assumes uniqueness - that is deliverable 6's
+    /// point: `dedupe_first`'s ensures supplies what the run encoder
+    /// requires, for both disciplines, and `lemma_overlay_dedupe_first`
+    /// is what justifies the replacement on the restore side.
+    #[verifier::rlimit(600)]
+    #[verifier::spinoff_prover]
+    pub fn compact_adaptive_front_dedupe(&mut self, mode: CompressionMode, m: usize)
+        -> (kept: usize)
+        requires
+            old(self).wf(),
+            old(self).is_adaptive(),
+            m as nat <= old(self)@.len() - old(self).idx_cold_len_spec(),
+        ensures
+            final(self).wf(),
+            final(self).is_adaptive(),
+            kept as nat == crate::diff_compress::dedupe_first_spec(
+                old(self)@.subrange(
+                    old(self).idx_cold_len_spec() as int,
+                    old(self).idx_cold_len_spec() as int + m as int)).len(),
+            kept <= m,
+            final(self)@.len() == old(self)@.len() - (m - kept) as nat,
+            final(self).idx_cold_len_spec()
+                == old(self).idx_cold_len_spec() + kept as nat,
+            final(self)@.subrange(0, old(self).idx_cold_len_spec() as int)
+                == old(self)@.subrange(0, old(self).idx_cold_len_spec() as int),
+            // The folded stratum is a permutation of the dedupe of the old
+            // stratum, with unique indices.
+            final(self)@.subrange(
+                old(self).idx_cold_len_spec() as int,
+                old(self).idx_cold_len_spec() as int + kept as int).to_multiset()
+                == crate::diff_compress::dedupe_first_spec(
+                    old(self)@.subrange(
+                        old(self).idx_cold_len_spec() as int,
+                        old(self).idx_cold_len_spec() as int + m as int)).to_multiset(),
+            crate::diff_compress::unique_idx(final(self)@.subrange(
+                old(self).idx_cold_len_spec() as int,
+                old(self).idx_cold_len_spec() as int + kept as int)),
+            // The surviving hot tail is untouched, verbatim, shifted down.
+            final(self)@.subrange(
+                old(self).idx_cold_len_spec() as int + kept as int,
+                final(self)@.len() as int)
+                == old(self)@.subrange(
+                    old(self).idx_cold_len_spec() as int + m as int,
+                    old(self)@.len() as int),
+    {
+        let ghost cold_len = self.idx_cold_len_spec() as int;
+        let ghost n = self@.len() as int;
+        match self {
+            DiffLog::Adaptive { cold, hot, len: lenf, .. } => {
+                let ghost cold0 = cold@;
+                let ghost hot0 = hot@;
+                // Split the hot tail: front stratum to fold, rest to keep.
+                let mut front: Vec<(T, I)> = Vec::new();
+                let mut i: usize = 0;
+                while i < m
+                    invariant
+                        i <= m,
+                        m <= hot@.len(),
+                        hot@ == hot0,
+                        front@.len() == i as nat,
+                        forall|q: int| 0 <= q < i ==> #[trigger] front@[q] == hot0[q],
+                    decreases m - i,
+                {
+                    front.push(hot[i]);
+                    i += 1;
+                }
+                let hl = hot.len();
+                let mut rest: Vec<(T, I)> = Vec::new();
+                let mut j: usize = m;
+                while j < hl
+                    invariant
+                        m <= j <= hl,
+                        hl == hot@.len(),
+                        hot@ == hot0,
+                        rest@.len() == (j - m) as nat,
+                        forall|q: int| 0 <= q < j - m ==> #[trigger] rest@[q] == hot0[m + q],
+                    decreases hl - j,
+                {
+                    rest.push(hot[j]);
+                    j += 1;
+                }
+                proof {
+                    assert(front@ =~= hot0.subrange(0, m as int));
+                    assert(rest@ =~= hot0.subrange(m as int, hot0.len() as int));
+                }
+                let deduped = crate::diff_compress::dedupe_first(&front);
+                let kept = deduped.len();
+                proof {
+                    crate::diff_compress::lemma_dedupe_prefix_props::<T, I>(
+                        front@, front@.len() as int);
+                }
+                let f: ColdFrame<T, I, VC> = ColdFrame::compress_mode_copy(&deduped, mode);
+                let ghost fg = f;
+                proof {
+                    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+                    lemma_cold_adaptive_snoc(cold0, fg);
+                }
+                cold.push(f);
+                *hot = rest;
+                *lenf = adaptive_len_exec(cold, hot);
+                proof {
+                    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+                    assert(cold@ =~= cold0.push(fg));
+                    assert(cold_adaptive(cold@) =~= cold_adaptive(cold0) + fg.decode());
+                    assert(fg.decode().to_multiset() == deduped@.to_multiset());
+                    assert(fg.decode().to_multiset().len()
+                        == deduped@.to_multiset().len());
+                    assert(fg.decode().len() == deduped@.len());
+                    assert(crate::diff_compress::unique_idx(fg.decode()));
+                    assert(cold_len == cold_adaptive(cold0).len());
+                    assert(self@.len() == n - (m - kept));
+                    assert(self@.subrange(0, cold_len) =~= old(self)@.subrange(0, cold_len)) by {
+                        assert forall|i2: int| 0 <= i2 < cold_len implies
+                            self@[i2] == old(self)@[i2] by {}
+                    }
+                    assert(self@.subrange(cold_len, cold_len + kept as int) =~= fg.decode()) by {
+                        assert forall|q: int| 0 <= q < fg.decode().len() implies
+                            self@[cold_len + q] == fg.decode()[q] by {}
+                    }
+                    assert(old(self)@.subrange(cold_len, cold_len + m as int)
+                        =~= front@) by {
+                        assert forall|q: int| 0 <= q < m implies
+                            old(self)@[cold_len + q] == front@[q] by {}
+                    }
+                    assert(self@.subrange(cold_len + kept as int, n - (m - kept))
+                        =~= old(self)@.subrange(cold_len + m as int, n)) by {
+                        assert forall|q: int| 0 <= q < n - cold_len - m implies
+                            #[trigger] self@[cold_len + kept + q]
+                                == old(self)@[cold_len + m + q] by {}
+                    }
+                }
+                kept
+            }
+            DiffLog::Cols { .. } => {
+                proof { assert(false); }
+                0
+            }
+        }
+    }
+
     pub fn compact_adaptive_copy(&mut self, mode: CompressionMode)
         requires
             old(self).wf(),
@@ -1325,7 +1707,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         let ghost cold_len = self.idx_cold_len_spec() as int;
         let ghost n = self@.len() as int;
         match self {
-            DiffLog::Adaptive { cold, hot, len: lenf } => {
+            DiffLog::Adaptive { cold, hot, len: lenf, .. } => {
                 let ghost cold0 = cold@;
                 let ghost hot0 = hot@;
                 if crate::compression_stats::shadow_enabled() {
@@ -1446,6 +1828,41 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                 old(target)@, self@, lo as int, hi as int),
     {
         let ghost base = target@;
+        // Borrowed fast path: when the range lives in the hot pair tail
+        // (always, for a live log), walk the slice directly. `index(i)` per
+        // element is a cross-crate call with a representation match and a
+        // cold-locate loop header; profiled at 4.4ns/cell against 0.78 for a
+        // direct read, it was the dominant term of ParallelStore's restore.
+        if let Some(sl) = self.hot_slice(lo, hi) {
+            let mut i: usize = hi;
+            while i > lo
+                invariant
+                    lo <= i <= hi,
+                    hi <= self@.len(),
+                    self.wf(),
+                    sl@.len() == hi - lo,
+                    forall|k: int| 0 <= k < hi - lo ==> #[trigger] sl@[k] == self@[lo + k],
+                    target@.len() == base.len(),
+                    target@ == crate::vec::overlay::<T, I>(base, self@, i as int, hi as int),
+                decreases i,
+            {
+                i -= 1;
+                let (v, idx) = sl[i - lo];
+                proof {
+                    assert(sl@[(i - lo) as int] == self@[i as int]);
+                    crate::vec::lemma_overlay_len::<T, I>(base, self@, (i + 1) as int, hi as int);
+                }
+                let iu = idx.as_usize();
+                if iu < target.len() {
+                    target.set(iu, v);
+                }
+                proof {
+                    assert(target@ =~= crate::vec::overlay::<T, I>(
+                        base, self@, i as int, hi as int));
+                }
+            }
+            return;
+        }
         let mut i: usize = hi;
         while i > lo
             invariant
@@ -1491,7 +1908,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
             DiffLog::Cols { .. } => {
                 self.restore_scatter(lo, hi, target);
             }
-            DiffLog::Adaptive { cold, hot, len } => {
+            DiffLog::Adaptive { cold, hot, len, .. } => {
                 // The fast path decomposes a SUFFIX [lo, len) frame by frame; a
                 // proper sub-suffix (hi < len) only arises off the restore path, so
                 // it takes the scattered baseline.
@@ -1666,7 +2083,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     {
         proof { reveal(cold_adaptive); }
         match self {
-            DiffLog::Adaptive { cold, hot, len } => {
+            DiffLog::Adaptive { cold, hot, len, .. } => {
                 let ghost d = self@;
                 let mut out: Vec<(T, I)> = Vec::new();
                 // `done` is the exclusive end of the emitted range: out == d[lo, done).
@@ -1718,20 +2135,16 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                         // Wholly outside the range: skip; done's clamp is unchanged
                         // or already saturated.
                     } else {
-                        // Overlaps [lo, hi): emit the in-range slice [s, e) of this frame.
-                        let s = if lo > start { lo - start } else { 0 };
+                        // Overlaps [lo, hi): emit the in-range slice [s, e) of
+                        // this frame, one decode_at per entry. No bulk
+                        // decode_exec_cold here: that materialization is
+                        // oracle-only (design doc §2), and this fallback is
+                        // itself off the restore fast path (restore_overlay's
+                        // store implementations go through hot_slice or
+                        // restore_range_into).
+                        let s = lo.saturating_sub(start);
                         let e = if hi < fend { hi - start } else { flen };
-                        if s == 0 && e == flen {
-                            // Whole frame in range: one bulk decode.
-                            let mut dec = cold[k].decode_exec_cold();
-                            let ghost pre_out = out@;
-                            out.append(&mut dec);
-                            proof {
-                                assert(out@ =~= pre_out + fr.decode());
-                                assert(out@ =~= d.subrange(lo as int, fend as int));
-                                done = fend as int;
-                            }
-                        } else {
+                        {
                             let mut q: usize = s;
                             proof {
                                 assert(done == (start + s) as int);
@@ -1870,6 +2283,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     /// Truncate to `n` entries. Keeps whole cold frames up to `n`; a partial frame
     /// (when `n` falls inside a cold frame) is decoded into a fresh plain tail, and
     /// the hot tail is truncated when `n` is in it. Preserves the kept prefix's view.
+    #[inline]
     pub fn truncate(&mut self, n: usize)
         requires old(self).wf(), n <= old(self)@.len(),
         ensures final(self).wf(), final(self)@ == old(self)@.subrange(0, n as int),
@@ -2043,7 +2457,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
             }
         }
         }
-        DiffLog::Adaptive { cold, hot, len: lenf } => {
+        DiffLog::Adaptive { cold, hot, len: lenf, .. } => {
             proof { reveal(cold_adaptive); }
             assert(cold_adaptive(cold@).len() + hot@.len() == len);
             let cold_len = len - hot.len();

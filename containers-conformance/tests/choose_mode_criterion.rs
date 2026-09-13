@@ -15,17 +15,29 @@ use verus::diff_compress::choose_mode;
 // returns IndexRunsSorted (its cost is the sorted run count, which the sorted
 // encoder achieves), but the write-order IndexRuns is the same family.
 fn is_runs(m: CompressionMode) -> bool {
-    matches!(m, CompressionMode::IndexRuns | CompressionMode::IndexRunsSorted)
+    matches!(
+        m,
+        CompressionMode::IndexRuns | CompressionMode::IndexRunsSorted
+    )
 }
-fn is_dict(m: CompressionMode) -> bool { matches!(m, CompressionMode::ValueDict) }
-fn is_none(m: CompressionMode) -> bool { matches!(m, CompressionMode::None) }
+fn is_dict(m: CompressionMode) -> bool {
+    matches!(m, CompressionMode::ValueDict)
+}
+fn is_none(m: CompressionMode) -> bool {
+    matches!(m, CompressionMode::None)
+}
 
 #[test]
 fn clustered_indices_pick_index_major() {
     // One contiguous run of 500 cells, each a distinct value. Index-major drops
     // the index column (1 run); value-major cannot help (all values distinct).
-    let diffs: Vec<(u32, u32)> = (0..500u32).map(|i| (i.wrapping_mul(2654435761), i)).collect();
-    assert!(is_runs(choose_mode::<u32, u32>(&diffs)), "clustered indices -> IndexRuns");
+    let diffs: Vec<(u32, u32)> = (0..500u32)
+        .map(|i| (i.wrapping_mul(2654435761), i))
+        .collect();
+    assert!(
+        is_runs(choose_mode::<u32, u32>(&diffs)),
+        "clustered indices -> IndexRuns"
+    );
 }
 
 #[test]
@@ -36,8 +48,9 @@ fn repeated_values_scattered_indices_pick_value_major() {
     // = 2141 < plain 4000, so the honest selector picks ValueDict. (At the old usize
     // codes this was 6016 > plain and it wrongly picked None — the packed-codes fix
     // is exactly what lets the selector choose value-major here.)
-    let diffs: Vec<(u32, u32)> =
-        (0..500u32).map(|i| ((i % 4) as u32, i.wrapping_mul(7) % 100_000)).collect();
+    let diffs: Vec<(u32, u32)> = (0..500u32)
+        .map(|i| ((i % 4), i.wrapping_mul(7) % 100_000))
+        .collect();
     assert!(
         is_dict(choose_mode::<u32, u32>(&diffs)),
         "few distinct, scattered, narrow codes -> ValueDict (now a win)"
@@ -51,11 +64,41 @@ fn scattered_unique_picks_plain() {
     let diffs: Vec<(u32, u32)> = (0..500u32)
         .map(|i| (i.wrapping_mul(2654435761), i.wrapping_mul(7) % 100_000))
         .collect();
-    assert!(is_none(choose_mode::<u32, u32>(&diffs)), "scattered + unique -> None (plain)");
+    assert!(
+        is_none(choose_mode::<u32, u32>(&diffs)),
+        "scattered + unique -> None (plain)"
+    );
 }
 
 #[test]
 fn empty_frame_picks_none() {
     let diffs: Vec<(u32, u32)> = Vec::new();
     assert!(is_none(choose_mode::<u32, u32>(&diffs)));
+}
+
+#[test]
+fn mostly_singleton_runs_pick_plain() {
+    // The restore term (design doc §5). 100 groups of 5 entries: one pair of
+    // consecutive indices plus three isolated ones, so n=500 and runs=400
+    // (average run length 1.25). With u64 values AND u64 indices the sizes
+    // are: plain = 500*16 = 8000, runs = 400*8 + 500*8 = 7200, dict = 500*8
+    // + 1000 + 500*8 = 9000 — on size alone the run encoding wins. But
+    // restoring it would pay the per-run block-copy setup once per ~1.25
+    // elements, worse than one sequential pass, so the selector must reject
+    // it: average run length < 2 fails the coalescing requirement and the
+    // frame stays Plain.
+    let mut diffs: Vec<(u64, u64)> = Vec::new();
+    let mut v: u64 = 1;
+    for g in 0..100u64 {
+        let base = 20 * g;
+        for off in [0u64, 1, 5, 8, 11] {
+            diffs.push((v.wrapping_mul(0x9E3779B97F4A7C15), base + off));
+            v += 1;
+        }
+    }
+    assert_eq!(diffs.len(), 500);
+    assert!(
+        is_none(choose_mode::<u64, u64>(&diffs)),
+        "singleton-heavy frame must stay Plain despite the smaller run encoding"
+    );
 }

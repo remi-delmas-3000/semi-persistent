@@ -1,5 +1,10 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+
+// Same: the counter is written for the assertion, not read inline.
+#![allow(unused_assignments)]
+// The node counter is kept for the memory-parity assertion it feeds.
+#![allow(unused_variables)]
 //! ListArena differential trace: production vs verus on identical randomized
 //! operation sequences (new_list / append / prepend / len / iter / splice /
 //! mark / restore) with typed 31-bit ids on both sides. The container pair

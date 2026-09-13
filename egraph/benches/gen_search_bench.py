@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Generate synthetic versioning-heavy saturation programs.
 
 The shipped corpus exercises `push`/`pop` only shallowly (35 pushes across
