@@ -1845,14 +1845,22 @@ where
     /// scaffolded mutators during the exec-locked phase and discharged
     /// per-theorem afterwards (goal doc, deliverables 5-6).
     pub open(crate) spec fn repr_ok(&self) -> bool {
-        // T1/T2: the hot pool tiles into hot_stack extents; a trail store's
-        // stratum slice IS the ghost stratum, a unique store's equals
-        // dedupe_first_spec of it. T3: each cold frame's runs decode to a
-        // sorted unique permutation of dedupe_first_spec of its ghost
-        // stratum. T4: the orphan prefix is the cold top's ghost extension.
-        // Stated opaquely during scaffolding; the clauses land with their
-        // theorems.
-        true
+        // The OPEN-FRAME abstraction (T1/T2), the piece push_frame's
+        // prepare_mark and the capture bridge need: the physical diff_log
+        // open slice and the ghost open stratum carry the SAME SET OF
+        // INDICES. Identity for the trail discipline; dedupe_first preserves
+        // the index set for unique capture. (The closed-frame cold clauses
+        // T3/T4 land with restore_frame's discharge, D6.)
+        &&& (self.trail_frames@.len() > 0 ==> {
+                let top = (self.trail_frames@.len() - 1) as int;
+                let phys_lo = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
+                forall|j: nat| #![trigger captured_in_range::<T, I>(
+                        self.diff_log@, phys_lo, self.diff_log@.len() as int, j)]
+                    captured_in_range::<T, I>(
+                        self.diff_log@, phys_lo, self.diff_log@.len() as int, j)
+                    == captured_in_range::<T, I>(
+                        self.full_trail@, self.g_start(top), self.full_trail@.len() as int, j)
+            })
     }
 
     pub open(crate) spec fn wf(&self) -> bool {
