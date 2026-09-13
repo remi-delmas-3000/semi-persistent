@@ -3496,6 +3496,71 @@ where
             }
     }
 
+    /// The re-materialized top cold frame's `frame_inv_range`: after restore
+    /// decodes cold frame `f`'s runs back into the diff_log stratum `[lo, hi)`
+    /// (each covered cell `c` getting an entry `(cold_value(f,c), c)` via
+    /// `try_from_usize`, whose `as_nat` is `c`), that stratum reconstructs
+    /// `snapshots[f]`. A covered cell's lowest hitter carries
+    /// `cold_value(f,c) == snapshots[f][c]` (cold_reconstructs); an uncovered
+    /// cell is absent from the stratum and keeps the layer value. The stratum
+    /// characterization (every entry names a covered cell and holds its cold
+    /// value; every covered saved cell is present) is what the body's decode
+    /// loop establishes; `repr_ok` run-uniqueness is not needed for the value,
+    /// since every entry for a cell holds the same `cold_value`.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_remat_frame_inv(&self, f: int, lo: int, hi: int)
+        requires
+            0 <= f < self.trail_frames@.len(),
+            0 <= lo <= hi <= self.diff_log@.len(),
+            self.cold_reconstructs(f),
+            // (C1) every stratum entry names a covered saved cell of f and holds
+            // its cold value.
+            forall|k: int| lo <= k < hi ==> {
+                let c = (#[trigger] self.diff_log@[k]).1.as_nat();
+                &&& self.cold_covered(f, c)
+                &&& (c as int) < self.snapshots@[f].len() as int
+                &&& self.diff_log@[k].0 == self.cold_value(f, c)
+            },
+            // (C2) every covered saved cell is present in the stratum.
+            forall|c: int| 0 <= c < self.snapshots@[f].len() as int
+                && #[trigger] self.cold_covered(f, c as nat)
+                ==> captured_in_range::<T, I>(self.diff_log@, lo, hi, c as nat),
+            // coverage: uncovered saved cells lie within the layer above.
+            forall|c: int| 0 <= c < self.snapshots@[f].len() as int
+                && !(#[trigger] self.cold_covered(f, c as nat))
+                ==> c < self.layer_above_at(f).len() as int,
+        ensures
+            frame_inv_range::<T, I>(
+                self.layer_above_at(f), self.diff_log@, lo, hi,
+                self.snapshots@[f], self.snapshots@[f].len()),
+    {
+        let above = self.layer_above_at(f);
+        let snap = self.snapshots@[f];
+        let saved = snap.len();
+        assert(self.g_saved_len(f) == saved);
+        assert forall|j: int| 0 <= j < saved as int implies
+            #[trigger] frame_cell_inv::<T, I>(above, self.diff_log@, lo, hi, snap, j) by {
+            let _ = self.cold_value(f, j as nat);
+            if captured_in_range::<T, I>(self.diff_log@, lo, hi, j as nat) {
+                lemma_lowest_hitter::<T, I>(self.diff_log@, lo, hi, j as nat);
+                let p = choose|p: int| lo <= p < hi
+                    && (#[trigger] self.diff_log@[p]).1.as_nat() == j as nat
+                    && first_hitter::<T, I>(self.diff_log@, lo, p, j as nat);
+                // p is an entry, so by (C1) it names covered cell j with value
+                // cold_value(f,j); cold_reconstructs pins that to snap[j].
+                assert(self.cold_covered(f, j as nat));
+                assert(self.diff_log@[p].0 == self.cold_value(f, j as nat));
+                assert(self.cold_value(f, j as nat) == snap[j]);
+            } else {
+                // not present ==> (C2 contrapositive) not covered ==> layer.
+                assert(!self.cold_covered(f, j as nat));
+                assert(j < above.len() as int);
+                assert(snap[j] == above[j]);
+            }
+        }
+    }
+
     /// One step of the cold-target reconstruction: replaying cold frame `f`'s
     /// runs onto data that already equals `snapshots[f+1]` (the layer above `f`)
     /// yields `snapshots[f]`. A covered cell takes the run value
