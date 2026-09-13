@@ -829,3 +829,30 @@ restore_frame remaining, updated:
      stateable once (1) lands.
   3. The wf re-establishment on the truncated + re-materialized state.
   4. Cold telescoping via (2) + restore_run's proven contract.
+
+## Correction: IndexFromNat NOT needed for the cold path (2026-09-13)
+
+The prior finding (cold decode requires IndexFromNat) is RETRACTED. It assumed
+the decode must construct each index via I::from_nat (IndexFromNat). But
+frame_inv_range reads only `diffs[k].1.as_nat()`, and IndexLike::try_from_usize
+already ensures `r is Some ==> r->Some_0.as_nat() == n` - so the re-materialized
+diff_log entries (built by restore's re-materialization via try_from_usize)
+carry `.1.as_nat() == cell index` for IndexLike, no from_nat, no subtrait bound.
+
+Consequence: restore_frame stays generic over IndexLike (no API-wide
+IndexFromNat ripple through its ~10 callers). The cold path is provable as:
+  - compress_all_hot ensures a POINTWISE cold-reconstruction property (ledgered
+    against the D2 belt): for each cold frame f and cell c < saved_len(f), if a
+    run of f covers c then its value == snapshots[f][c] (captured), else
+    snapshots[f][c] == layer_above(f)[c] (uncaptured).
+  - restore's re-materialization produces a diff_log stratum whose entries have
+    .1.as_nat() == c and .0 == snapshots[f][c] for covered cells, and runs are
+    sorted/non-overlapping so each cell's entry is its unique first hitter.
+    frame_inv_range over that stratum then follows from the pointwise ensure.
+
+So restore_frame's remaining discharge, corrected (all for IndexLike, no bound):
+  1. compress_all_hot's pointwise cold-reconstruction ensure (ledgered).
+  2. re-materialization's diff_log-stratum frame_inv_range from (1) + the
+     try_from_usize as_nat ensure + run uniqueness.
+  3. wf re-establishment on the truncated + re-materialized state.
+  4. cold telescoping / hot reconstruction chaining (lemmas already proven).
