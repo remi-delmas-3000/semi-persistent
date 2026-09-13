@@ -4433,7 +4433,12 @@ where
         let saved_len = self.frame_saved_len_exec(target_index);
 
         // Resize to the restore target first; replay clamps, never grows.
-        self.store.resize_default(saved_len);
+        // Gated: resize_default pays O(len) flag bookkeeping even at equal
+        // length, which the churn profile (restore at unchanged length)
+        // measured as a size-scaling regression.
+        if self.store.len().as_usize() != saved_len.as_usize() {
+            self.store.resize_default(saved_len);
+        }
 
         if target_index >= k {
             // HOT target: replay the pool suffix backward, then truncate.
