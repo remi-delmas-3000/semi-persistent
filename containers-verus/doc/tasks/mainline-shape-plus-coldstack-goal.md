@@ -636,3 +636,32 @@ Ordered remaining work, updated:
   2. Physical frame_inv_range (or the unique per-stratum dedupe bridge).
   3. Physical telescoping reconstruction lemma; restore_frame body proof.
   4. wf re-establishment on the truncated state; cold-run path.
+
+## Ceiling broken; trail-discipline reconstruction PROVEN (2026-09-13, cont.)
+
+Real forward motion, three committed increments (workspace 2177/0):
+
+1. push_frame ghost frame_inv_range extracted into lemma_push_frame_ghost_inv
+   (de1b2e8) - relieves the SMT solver ceiling so further wf clauses fit.
+2. Trail frame-alignment invariant (e9fb569): hot_stack[i].start +
+   g_start(cold_count) == g_start(cold_count+i) for !unique. With the ceiling
+   relieved this now verifies (it did not before).
+3. Trail reconstruction PROVEN (d4f8a7d): lemma_overlay_congruent (equal windows
+   -> equal overlay at any offset) + lemma_reconstruct_trail
+   (overlay(base, diff_log, hf.start, n)[j] == snapshots[target][j] for a hot
+   target under the append-always discipline). This is the D5 "trail hot =
+   identity" equivalence discharged for restore.
+
+So restore_frame's HOT path for the TRAIL discipline is now fully backed by a
+proven lemma. Remaining before restore_frame can drop external_body:
+  - UNIQUE-discipline reconstruction (parallel_store, inline_store): the
+    analog of lemma_reconstruct_trail. diff_log is the per-stratum dedupe of
+    the ghost, so overlay(diff_log suffix) == overlay(ghost suffix) via
+    lemma_overlay_dedupe_first once diff_log stratum == dedupe_first(ghost
+    stratum) is a maintained invariant (per-stratum, only the top changes per
+    write). This is the remaining reconstruction half.
+  - restore_frame body: preconditions (begin_restore named-slots, resize),
+    then chain lemma_reconstruct_trail/unique through restore_overlay's ensure,
+    then wf re-establishment on the truncated state (frame_inv_range survivors
+    via shift, the two bridges + alignment re-derived, capture bridges via
+    finish_restore), then the cold-run path.
