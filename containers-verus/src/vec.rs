@@ -5585,6 +5585,46 @@ where
         }
     }
 
+    /// Unique-discipline reconstruction, lifted to every shared-prefix cell:
+    /// the first-write-wins analog of `lemma_reconstruct_hot_trail_all`. With
+    /// `base == self.view()` the per-cell `lemma_phys_cell_eq_overlay`
+    /// base-agreement hypothesis is trivial, so replaying the physical diff_log
+    /// suffix `[phys_hot_start(hidx), n)` reconstructs `snapshots[target][j]`
+    /// for every cell `j` present in both the current view and the target saved
+    /// region. This is the D5 first-write-wins equivalence discharged for the
+    /// restore path; the grow region (j >= view.len()) is handled from the
+    /// captured diff entries, as in the trail wrapper.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_reconstruct_hot_unique_all(&self, target: int)
+        requires
+            self.wf(),
+            self.store.unique_capture_spec(),
+            self.cold_stack@.len() <= target < self.trail_frames@.len(),
+            self.hot_stack@.len() > 0,
+            (target - self.cold_stack@.len() as int) < self.hot_stack@.len(),
+        ensures
+            forall|j: int| 0 <= j < self.snapshots@[target].len() as int
+                && j < self.view().len()
+                ==> #[trigger] overlay::<T, I>(
+                        self.view(), self.diff_log@,
+                        self.phys_hot_start(target - self.cold_stack@.len() as int),
+                        self.diff_log@.len() as int)[j]
+                    == self.snapshots@[target][j],
+    {
+        let cc = self.cold_stack@.len() as int;
+        let hidx = target - cc;
+        assert forall|j: int| 0 <= j < self.snapshots@[target].len() as int
+            && j < self.view().len() implies
+            #[trigger] overlay::<T, I>(
+                self.view(), self.diff_log@,
+                self.phys_hot_start(hidx),
+                self.diff_log@.len() as int)[j]
+            == self.snapshots@[target][j] by {
+            self.lemma_phys_cell_eq_overlay(self.view(), hidx, j);
+        }
+    }
+
     /// Trail-discipline reconstruction, lifted to every shared-prefix cell:
     /// with `base == self.view()` the per-cell `lemma_reconstruct_trail`
     /// base-agreement hypothesis is trivial, so replaying the physical diff_log
