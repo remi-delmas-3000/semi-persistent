@@ -175,3 +175,27 @@ Sequencing: ghost model + wf rephrasing first (the hot-path proofs are
 mainline-shaped and port); then T1/T2 (small), T3 (the commit-20 assets
 attach), T4 (new, one lemma); then the scaffolding ledger discharges
 against the ghost-level contracts.
+
+
+## D3 result (2026-09-13, packed normalize)
+
+mark_churn/verus control-corrected vs prod, same-run (the saved mainline
+baseline's machine had drifted; within-run control is the honest metric):
++6.4% (1k), -1.0% (100k), +5.1% (1M, clean re-run) - all within +-8%.
+restore_replay/verified 27% faster than its legacy control (232 vs 318 us
+on a loaded machine; ratio matches the earlier 142/208 clean read).
+Controls move together across runs (machine load), so absolute cross-run
+comparison is not used. Packed-key normalize adopted; numbers in the
+perf(vec) commit.
+
+## D5 status (in progress): ghost trail not yet maintained by mutators
+
+The layout and specs are ghost-rephrased (full_trail/trail_frames fields,
+wf/wf_for_snap/stratum specs over the ghost, bounds+monotone lemmas
+ported). REMAINING OBLIGATION before any spec proves: the exec mutators
+(push, push_frame, pop, set_index, restore_frame, compress_all_hot) must
+update full_trail/trail_frames as ghost writes mirroring the physical ops,
+and the ~24 lemma-body references to the removed `frames` field must move
+to g_start/g_end/g_saved_len. Then repr_ok's opaque clauses land with
+their T1-T4 theorems. This is the deferred proof grind, now the critical
+path; exec is unaffected and green.
