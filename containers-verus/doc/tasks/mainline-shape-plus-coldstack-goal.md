@@ -581,3 +581,28 @@ per the goal it is on the restore path and must be proven, not ledgered.
 
 cargo verus verify: 2176 verified, 0 errors. D7 (clippy -D warnings, ~18 in the
 new cold-stack code + D2 tests; full battery) follows restore_frame.
+
+## Physical frame_inv_range invariant: maintenance mapped (2026-09-13, cont.)
+
+Attempted the physical frame_inv_range wf clause (forall hot frame i:
+frame_inv_range over diff_log at [phys_hot_start(i), phys_hot_end(i)) against
+snapshots[cold_count+i]). Findings, to resume from:
+
+- set_index needs NO new code: its existing physical-bridge proof already lets
+  the SMT derive phys_frame_inv_range for the write path, both disciplines.
+- push, maybe_shrink, lemma_forks_change_preserves_wf, with_store_mode: proven
+  with a one-block transfer (inputs pinned / vacuous), using a new lemma
+  lemma_frame_inv_range_grow_layer (frame_inv_range under a grown layer - the
+  captured arm never reads the layer; uncaptured cells agree on the preserved
+  prefix). push is the layer-grow case; the others are pin-transfers.
+- pop and push_frame remain: each needs a ~100-line physical mirror of its
+  ghost frame_inv_range block (pop shrinks the view and captures the popped
+  cell; push_frame opens/closes strata). The trail bridge gives the !unique
+  case via lemma_frame_inv_range_shift; the unique case mirrors the ghost
+  first-hitter reasoning over the deduped stratum.
+
+Then restore_frame's hot reconstruction reads phys_frame_inv_range through a
+physical analog of lemma_cell_eq_overlay, followed by the post-truncation wf
+re-establishment (now including phys_frame_inv_range for survivors) and the
+cold path. D7's clippy -D warnings gate is green (commit 28a6708); the full
+15-gate battery is blocked only on restore_frame's discharge.
