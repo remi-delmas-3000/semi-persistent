@@ -4241,6 +4241,86 @@ where
         }
     }
 
+    /// Ghost `frame_inv_range` for the whole new stack after a mark, extracted
+    /// from `push_frame` so its SMT query stays small (the reconstruction
+    /// forall depends only on the ghost state - full_trail/trail_frames/
+    /// snapshots/view - not the physical stacks, so compression is irrelevant
+    /// here). The new top frame's stratum is empty; the previous top's layer
+    /// flips from the view to the just-pushed snapshot (== the view); deeper
+    /// frames are untouched.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(1000)]
+    pub(crate) proof fn lemma_push_frame_ghost_inv(&self, old_self: Self, old_view: Seq<T>)
+        requires
+            old_self.wf_for_snap(),
+            self.full_trail@ == old_self.full_trail@,
+            self.trail_frames@ == old_self.trail_frames@.push(
+                old_self.full_trail@.len() as nat),
+            self.snapshots@ == old_self.snapshots@.push(old_view),
+            self.view() == old_view,
+            old_self.view() == old_view,
+        ensures
+            forall|k: int| 0 <= k < self.trail_frames@.len() ==>
+                #[trigger] frame_inv_range::<T, I>(
+                    self.layer_above_at(k), self.full_trail@, self.g_start(k),
+                    self.g_end(k), self.snapshots@[k], self.snapshots@[k].len()),
+    {
+        let diffs = self.full_trail@;
+        let snaps = self.snapshots@;
+        let old_snaps = old_self.snapshots@;
+        let tf = self.trail_frames@;
+        let new_top = (tf.len() - 1) as int;
+        assert forall|k: int| 0 <= k < tf.len() implies
+            #[trigger] frame_inv_range::<T, I>(
+                self.layer_above_at(k), diffs, self.g_start(k),
+                self.g_end(k), snaps[k], snaps[k].len())
+        by {
+            let lo = self.g_start(k);
+            let hi = self.g_end(k);
+            if k == new_top {
+                assert(hi == diffs.len());
+                assert(lo == diffs.len());
+                assert(self.layer_above_at(k) == self.view());
+                assert(snaps[k] == old_view);
+                assert forall|j: int| #![trigger snaps[k][j]]
+                    0 <= j < snaps[k].len() as int implies
+                    snaps[k][j] == self.layer_above_at(k)[j]
+                by {}
+            } else if k + 1 == new_top {
+                assert(old_self.frame_inv_range_holds(k));
+                assert(old_self.trail_frames@[k] == self.trail_frames@[k]);
+                assert(old_snaps[k] == snaps[k]);
+                assert(hi == diffs.len());
+                assert(old_self.g_end(k) == diffs.len());
+                assert(self.layer_above_at(k) == snaps[k + 1]);
+                assert(snaps[k + 1] == old_view);
+                assert(old_self.layer_above_at(k) == old_view);
+                assert(self.layer_above_at(k) == old_self.layer_above_at(k));
+                old_self.lemma_diff_start_le_n(k);
+                lemma_frame_inv_range_local::<T, I>(
+                    self.layer_above_at(k), diffs, diffs,
+                    lo, hi, snaps[k], snaps[k].len());
+            } else {
+                assert(old_self.frame_inv_range_holds(k));
+                assert(old_self.trail_frames@[k] == self.trail_frames@[k]);
+                assert(old_snaps[k] == snaps[k]);
+                assert(self.layer_above_at(k) == snaps[k + 1]);
+                assert(old_self.layer_above_at(k) == old_snaps[k + 1]);
+                assert(self.layer_above_at(k) == old_self.layer_above_at(k));
+                assert(hi == old_self.g_end(k));
+                assert(hi == old_self.g_start(k + 1));
+                old_self.lemma_diff_start_le_n(k + 1);
+                old_self.lemma_diff_start_monotone(k, k + 1);
+                lemma_frame_inv_range_local::<T, I>(
+                    self.layer_above_at(k), diffs, diffs,
+                    lo, hi, snaps[k], snaps[k].len());
+            }
+            assert(frame_inv_range::<T, I>(
+                self.layer_above_at(k), diffs, lo, hi, snaps[k],
+                snaps[k].len()));
+        }
+    }
+
     /// Mark a snapshot point. Returns a token that can be passed to
     /// `restore` to roll back to the current state.
     ///
@@ -4489,67 +4569,9 @@ where
                 // empty physical stratum ⇒ RHS false; prepare_mark ⇒ LHS false.
             }
 
-            // Re-establish the per-frame frame_inv_range for the new stack.
-            assert forall|k: int| 0 <= k < tf.len() implies
-                #[trigger] frame_inv_range::<T, I>(
-                    self.layer_above_at(k), diffs, self.g_start(k),
-                    self.g_end(k), snaps[k], snaps[k].len())
-            by {
-                let lo = self.g_start(k);
-                let hi = self.g_end(k);
-                if k == new_top {
-                    // New frame: stratum [diff_start, diff_start) is empty,
-                    // layer == snapshot == view. All cells uncaptured ⇒
-                    // view[j] == snap[j] trivially.
-                    assert(hi == diffs.len());
-                    assert(lo == diffs.len());
-                    assert(self.layer_above_at(k) == self.view());
-                    assert(snaps[k] == old_view);
-                    // Empty stratum: prove frame_inv_range from scratch.
-                    assert forall|j: int| #![trigger snaps[k][j]]
-                        0 <= j < snaps[k].len() as int implies
-                        snaps[k][j] == self.layer_above_at(k)[j]
-                    by {
-                        // no entry in [lo, hi) since the range is empty
-                    }
-                } else if k + 1 == new_top {
-                    // Previous top frame: stratum unchanged; layer flips from
-                    // old view to snaps[new_top] == old_view. Equal, so the
-                    // old frame_inv_range transfers.
-                    assert(old(self).frame_inv_range_holds(k));
-                    assert(old(self).trail_frames@[k] == self.trail_frames@[k]);
-                    assert(old_snaps[k] == snaps[k]);
-                    assert(hi == diffs.len());
-                    assert(old(self).g_end(k) == diffs.len());
-                    assert(self.layer_above_at(k) == snaps[k + 1]);
-                    assert(snaps[k + 1] == old_view);
-                    assert(old(self).layer_above_at(k) == old_view);
-                    assert(self.layer_above_at(k) == old(self).layer_above_at(k));
-                    old(self).lemma_diff_start_le_n(k);
-                    lemma_frame_inv_range_local::<T, I>(
-                        self.layer_above_at(k), diffs, diffs,
-                        lo, hi, snaps[k], snaps[k].len());
-                } else {
-                    // Deeper frames: stratum and layer (a surviving snapshot)
-                    // unchanged.
-                    assert(old(self).frame_inv_range_holds(k));
-                    assert(old(self).trail_frames@[k] == self.trail_frames@[k]);
-                    assert(old_snaps[k] == snaps[k]);
-                    assert(self.layer_above_at(k) == snaps[k + 1]);
-                    assert(old(self).layer_above_at(k) == old_snaps[k + 1]);
-                    assert(self.layer_above_at(k) == old(self).layer_above_at(k));
-                    assert(hi == old(self).g_end(k));
-                    assert(hi == old(self).g_start(k + 1));
-                    old(self).lemma_diff_start_le_n(k + 1);
-                    old(self).lemma_diff_start_monotone(k, k + 1);
-                    lemma_frame_inv_range_local::<T, I>(
-                        self.layer_above_at(k), diffs, diffs,
-                        lo, hi, snaps[k], snaps[k].len());
-                }
-                assert(frame_inv_range::<T, I>(
-                    self.layer_above_at(k), diffs, lo, hi, snaps[k],
-                    snaps[k].len()));
-            }
+            // Re-establish the per-frame frame_inv_range via the extracted
+            // ghost-only lemma (keeps push_frame's SMT query small).
+            self.lemma_push_frame_ghost_inv(*old(self), old_view);
             // Re-establish the store capture-length bridge at the end (it can be lost
             // across the heavy frame_inv_range forall above).
             self.store.lemma_wf_captured_len();
