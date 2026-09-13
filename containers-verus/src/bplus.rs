@@ -6313,6 +6313,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         Ok(Self::from_sorted(keys))
     }
 
+    #[verifier::rlimit(100)]
     pub fn insert(&mut self, key: K) -> (added: bool)
         requires
             old(self).wf(),

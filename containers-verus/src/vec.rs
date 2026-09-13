@@ -1888,6 +1888,13 @@ where
         // reads this to slice [hf.start, diff_log.len()) for any target frame.
         &&& (forall|i: int| 0 <= i < self.hot_stack@.len() ==>
                 (#[trigger] self.hot_stack@[i]).start as int <= self.diff_log@.len())
+        // Hot-frame starts are monotone: frame i+1 opens no earlier than frame
+        // i (each opens at the log length, which grows). With the bound above
+        // this tiles the physical log; the tiling is the physical analog of the
+        // ghost trail_frames boundaries restore_frame reconstructs against.
+        &&& (forall|i: int| 0 <= i && i + 1 < self.hot_stack@.len() ==>
+                (#[trigger] self.hot_stack@[i]).start
+                    <= self.hot_stack@[i + 1].start)
         // The open (top) frame is always hot: mark opens a hot frame, and
         // compression moves closed frames to cold but push_frame re-opens a
         // hot one. So a live stack always has at least one hot frame.
