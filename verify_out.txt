@@ -1,0 +1,224 @@
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:172:5
+    |
+172 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:189:5
+    |
+189 |     static KIND: std::sync::OnceLock<crate::dyn_store::StoreKind> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:237:5
+    |
+237 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:247:5
+    |
+247 | /     static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+248 | |         std::sync::OnceLock::new();
+    | |__________________________________^
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/vec.rs:5110:17
+     |
+5110 |                 assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+     |                 ^^^^^^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/vec.rs:5111:21
+     |
+5111 |                     self.hot_stack@[i].start as int + gs == self.g_start(cc + i) by {
+     |                     ^^^^^^^^^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/vec.rs:1448:52
+     |
+1448 |       assert forall|k: int| 0 <= k < r.len() implies exists|p: int|
+     |  ____________________________________________________^
+1449 | |         0 <= p < sold.len() && #[trigger] r[k] == sold[p]
+1450 | |         && first_hitter::<T, I>(sold, 0, p, sold[p].1.as_nat()) by {
+     | |_______________________________________________________________^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/vec.rs:1449:51
+     |
+1449 |         0 <= p < sold.len() && #[trigger] r[k] == sold[p]
+     |                                                   ^^^^^^^
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/vec.rs:1462:17
+     |
+1462 |           let p = choose|p: int| 0 <= p < sold.len()
+     |  _________________^
+1463 | |             && #[trigger] r[k - lo] == sold[p]
+1464 | |             && first_hitter::<T, I>(sold, 0, p, sold[p].1.as_nat());
+     | |___________________________________________________________________^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/vec.rs:1463:40
+     |
+1463 |             && #[trigger] r[k - lo] == sold[p]
+     |                                        ^^^^^^^
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/vec.rs:1476:21
+     |
+1476 |               let p = choose|p: int| 0 <= p < sold.len()
+     |  _____________________^
+1477 | |                 && #[trigger] r[k - lo] == sold[p]
+1478 | |                 && first_hitter::<T, I>(sold, 0, p, sold[p].1.as_nat());
+     | |_______________________________________________________________________^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/vec.rs:1477:44
+     |
+1477 |                 && #[trigger] r[k - lo] == sold[p]
+     |                                            ^^^^^^^
+
+note: automatically chose triggers for this expression:
+   --> containers-verus/src/hinted_arena.rs:461:25
+    |
+461 |                   None => forall|j: int| 0 <= j < self.view().len()
+    |  _________________________^
+462 | |                     ==> !T::eq_spec(&(#[trigger] self.view()[j]), t),
+    | |____________________________________________________________________^
+
+note:   trigger 1 of 1:
+   --> containers-verus/src/hinted_arena.rs:462:38
+    |
+462 |                     ==> !T::eq_spec(&(#[trigger] self.view()[j]), t),
+    |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+   --> containers-verus/src/hinted_arena.rs:474:21
+    |
+474 |                     assert forall|j: int| 0 <= j < self.view().len()
+    |                     ^^^^^^
+
+note:   trigger 1 of 1:
+   --> containers-verus/src/hinted_arena.rs:475:46
+    |
+475 |                         implies !T::eq_spec(&(#[trigger] self.view()[j]), t) by {
+    |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+   --> containers-verus/src/hinted_arena.rs:526:21
+    |
+526 |                     assert forall|j: int| 0 <= j < self.view().len()
+    |                     ^^^^^^
+
+note:   trigger 1 of 1:
+   --> containers-verus/src/hinted_arena.rs:527:46
+    |
+527 |                         implies !T::eq_spec(&(#[trigger] self.view()[j]), t) by {
+    |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+   --> containers-verus/src/layered.rs:564:17
+    |
+564 |                 forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note:   trigger 1 of 1:
+   --> containers-verus/src/layered.rs:564:47
+    |
+564 |                 forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
+    |                                               ^^^^^^^
+
+note: automatically chose triggers for this expression:
+   --> containers-verus/src/cold_stack.rs:729:29
+    |
+729 | ...                   assert forall|j: int| 0 <= j < target@.len() implies
+    |                       ^^^^^^
+
+note:   trigger 1 of 1:
+   --> containers-verus/src/cold_stack.rs:730:33
+    |
+730 | ...                   target@[j] == write_block(pre_run, start as nat, vals)[j] by {
+    |                       ^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+   --> containers-verus/src/cold_stack.rs:915:29
+    |
+915 | ...                   assert forall|q: int| 0 <= q < target@.len() implies
+    |                       ^^^^^^
+
+note:   trigger 1 of 1:
+   --> containers-verus/src/cold_stack.rs:916:33
+    |
+916 | ...                   target@[q] == write_block(pre_run, start as nat, vals)[q] by {
+    |                       ^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/diff_compress.rs:3105:21
+     |
+3105 |                     assert forall|j: int| 0 <= j < target@.len() implies
+     |                     ^^^^^^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/diff_compress.rs:3106:25
+     |
+3106 |                         target@[j] == crate::cold_stack::write_block(
+     |                         ^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/diff_compress.rs:2191:9
+     |
+2191 |         assert forall|t: int| 0 <= t < diffs@.len() implies
+     |         ^^^^^^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/diff_compress.rs:2192:13
+     |
+2192 |             rf.decode()[t] == (diffs@[t].0, diffs@[t].1.as_nat()) by {
+     |             ^^^^^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/diff_compress.rs:2027:9
+     |
+2027 |         assert forall|a: int, b: int| 0 <= a < b < usized@.len() implies
+     |         ^^^^^^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/diff_compress.rs:2028:13
+     |
+2028 |             usized@[a].1 < usized@[b].1 by {
+     |             ^^^^^^^^^^     ^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/diff_compress.rs:2040:9
+     |
+2040 |         assert forall|t: int| 0 <= t < s@.len() implies
+     |         ^^^^^^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/diff_compress.rs:2041:13
+     |
+2041 |             rf.decode()[t] == (s@[t].0, s@[t].1.as_nat()) by {
+     |             ^^^^^^^^^^^^^^
+
+note: Verus printed one or more automatically chosen quantifier triggers
+      because it had low confidence in the chosen triggers.
+      To suppress these messages, do one of the following:
+        (1) manually annotate a single desired trigger using #[trigger]
+            (example: forall|i: int, j: int| f(i) && #[trigger] g(i) && #[trigger] h(j)),
+        (2) manually annotate multiple desired triggers using #![trigger ...]
+            (example: forall|i: int| #![trigger f(i)] #![trigger g(i)] f(i) && g(i)),
+        (3) accept the automatically chosen trigger using #![auto]
+            (example: forall|i: int, j: int| #![auto] f(i) && g(i) && h(j))
+        (4) use the --triggers-mode silent command-line option to suppress all printing of triggers.
+      (Note: triggers are used by the underlying SMT theorem prover to instantiate quantifiers;
+      the theorem prover instantiates a quantifier whenever some expression matches the
+      pattern specified by one of the quantifier's triggers.)
+    --> containers-verus/src/vec.rs:5110:17
+     |
+5110 |                 assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+     |                 ^^^^^^
+
+warning: `semi-persistent-containers-verus` (lib) generated 4 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.14s

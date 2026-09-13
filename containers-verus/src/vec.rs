@@ -2256,6 +2256,25 @@ where
         }
     }
 
+    /// Physical hot-frame starts are monotone non-decreasing: for `a <= b`,
+    /// `hot_stack[a].start <= hot_stack[b].start`. The range analog of the
+    /// adjacent clause in `wf_for_snap`, by upward induction like
+    /// `lemma_diff_start_monotone` but over the physical stack.
+    pub(crate) proof fn lemma_hot_start_monotone(&self, a: int, b: int)
+        requires
+            self.wf_for_snap(),
+            0 <= a <= b < self.hot_stack@.len(),
+        ensures
+            self.hot_stack@[a].start <= self.hot_stack@[b].start,
+        decreases b - a,
+    {
+        if a < b {
+            self.lemma_hot_start_monotone(a, b - 1);
+            assert(0 <= b - 1 && (b - 1) + 1 < self.hot_stack@.len());
+            assert(self.hot_stack@[b - 1].start <= self.hot_stack@[b].start);
+        }
+    }
+
     // NOTE (pop into marked region): `lemma_saved_len_le_active` ("top frame is the
     // longest"), `lemma_saved_len_monotone` ("saved_len non-decreasing"), and
     // `lemma_saved_len_le_view` ("every saved_len <= view.len()") were DELETED
@@ -5423,6 +5442,85 @@ where
     {
         // Retired: seal-on-mark contradicted the buffered-eviction policy
         // (goal doc §6) and is gone for good; A2b's eviction replaces it.
+    }
+
+    /// wf re-establishment, part 2 (unique): for a HOT target the surviving hot
+    /// frames keep their physical `frame_inv_range` after diff_log is truncated
+    /// to `hf_start`. Each survivor's physical stratum lies within `[0, hf_start)`
+    /// (its end is the next survivor's start, and the top survivor's end is the
+    /// new log length `hf_start`), so `lemma_frame_inv_range_local` transfers it.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_restore_survivors_phys(
+        &self, old_self: Self, target: int, hf_start: int,
+    )
+        requires
+            old_self.wf(),
+            old_self.store.unique_capture_spec(),
+            self.store.unique_capture_spec(),
+            old_self.cold_stack@.len() <= target < old_self.trail_frames@.len(),
+            // HOT target: surviving hot frames are old_self.hot_stack[0, target-k).
+            self.cold_stack@ == old_self.cold_stack@,
+            self.hot_stack@ == old_self.hot_stack@.subrange(
+                0, target - old_self.cold_stack@.len() as int),
+            hf_start == old_self.hot_stack@[target - old_self.cold_stack@.len() as int].start,
+            self.diff_log@ == old_self.diff_log@.subrange(0, hf_start),
+            self.snapshots@ == old_self.snapshots@.subrange(0, target),
+            self.trail_frames@ == old_self.trail_frames@.subrange(0, target),
+            self.view() == old_self.snapshots@[target as int],
+        ensures
+            forall|i: int| 0 <= i < self.hot_stack@.len()
+                ==> #[trigger] self.phys_frame_inv_range_holds(i),
+    {
+        let cc = old_self.cold_stack@.len() as int;
+        assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+            #[trigger] self.phys_frame_inv_range_holds(i) by {
+            assert(old_self.phys_frame_inv_range_holds(i));
+            let plo = self.phys_hot_start(i);
+            let phi = self.phys_hot_end(i);
+            assert(self.hot_stack@[i].start == old_self.hot_stack@[i].start);
+            assert(plo == old_self.phys_hot_start(i));
+            if i + 1 < self.hot_stack@.len() {
+                assert(self.hot_stack@[i + 1].start == old_self.hot_stack@[i + 1].start);
+                assert(phi == old_self.phys_hot_end(i));
+                // inner survivor: its end <= the top survivor's end == hf_start.
+                assert(self.hot_stack@[i + 1].start <= hf_start) by {
+                    old_self.lemma_hot_start_monotone(i + 1, target - cc);
+                }
+            } else {
+                // top survivor: end is the new log length hf_start.
+                assert(phi == self.diff_log@.len());
+                assert(phi == hf_start);
+                assert(old_self.phys_hot_end(i) == old_self.hot_stack@[target - cc].start);
+                assert(old_self.phys_hot_end(i) == hf_start);
+            }
+            assert(phi <= hf_start);
+            assert(phi == old_self.phys_hot_end(i));
+            let g = cc + i;
+            assert(self.snapshots@[g] == old_self.snapshots@[g]);
+            // layer_above_at(g) matches old for g in [cc, target): for an inner
+            // survivor (g+1 < target) both read snapshots[g+1] (subrange prefix);
+            // for the top survivor (g+1 == target) new reads view() while old
+            // reads snapshots[target], and view() == old.snapshots[target].
+            assert(self.trail_frames@.len() == target);
+            if g + 1 < target {
+                assert(self.layer_above_at(g) == self.snapshots@[g + 1]);
+                assert(self.snapshots@[g + 1] == old_self.snapshots@[g + 1]);
+                assert(old_self.layer_above_at(g) == old_self.snapshots@[g + 1]);
+            } else {
+                assert(g + 1 == target);
+                assert(self.layer_above_at(g) == self.view());
+                assert(old_self.layer_above_at(g) == old_self.snapshots@[target as int]);
+            }
+            assert(self.layer_above_at(g) == old_self.layer_above_at(g));
+            assert forall|m: int| plo <= m < phi implies
+                #[trigger] self.diff_log@[m] == old_self.diff_log@[m] by {
+                assert(self.diff_log@[m] == old_self.diff_log@.subrange(0, hf_start)[m]);
+            }
+            lemma_frame_inv_range_local::<T, I>(
+                self.layer_above_at(g), old_self.diff_log@, self.diff_log@,
+                plo, phi, self.snapshots@[g], self.snapshots@[g].len());
+        }
     }
 
     /// wf re-establishment, part 1: after restore truncates the ghost trail to
