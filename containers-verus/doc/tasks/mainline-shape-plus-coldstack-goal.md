@@ -339,3 +339,31 @@ DEFINITIVE COMPLETION SPEC (one coherent refactor, not incremental):
 Status: D1-D4 done; D5 at 91/1 in vec with the completion spec above; D6-D7
 pending. cargo verus verify is NOT at 0 errors. Commit 20 (053caca, 15/15
 gates) is the verified baseline.
+
+
+## Dual-bridge state (2026-09-13): set_index+pop verified, 90/2 in vec
+
+The dual-bridge architecture is landed and PROVEN for set_index and pop:
+wf carries the physical capture bridge (over diff_log@/hot_top.start, for
+prepare_mark) and the ghost bridge (over full_trail@, for reconstruction),
+plus two structural invariants that surfaced and are true by construction:
+hot-frame extent (hot_top.start <= diff_log.len()) and open-frame-is-hot
+(tf.len()>0 ==> hot_stack.len()>0). 90 vec obligations verify.
+
+REMAINING (2 vec functions, then D6/D7):
+- push (1): its physical-bridge REENTERED case (j == old_len, a
+  mark_captured into a popped-but-marked slot) is NOT a mechanical copy of
+  the ghost case - it depends on whether the store appends the reentered
+  index to the PHYSICAL diff_log (first-write in the new stratum). Needs the
+  store capture/mark_captured postcondition, per discipline. The non-
+  reentered part duplicates set_index's physical bridge cleanly.
+- push_frame (17): the physical/ghost offset split - prepare_mark discharges
+  from the physical bridge (now in wf); the wf re-establishment for the new
+  empty frame follows the set_index template with g_start(new)=full_trail.len,
+  hot_top.start=diff_log.len separately.
+- D6: restore_frame/compress_all_hot/normalize/restore_run + store
+  restore_overlay loops - prove or trust-ledger, zero external_body on the
+  restore path.
+- D7: 15-gate battery.
+
+cargo verus verify NOT at 0 errors. Commit 20 (053caca, 15/15) is baseline.
