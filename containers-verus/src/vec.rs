@@ -1907,6 +1907,26 @@ where
         &&& (TRACK ==> forall|j: int| 0 <= j < self.view().len()
                 && #[trigger] self.store.captured()[j]
                 ==> tf.len() > 0 && j < self.active_saved_len.as_nat())
+        // INDEX-SET equality over the full marked region [0, active): the
+        // physical diff_log open slice and the ghost open stratum name the
+        // same indices - even for popped-but-marked slots the two bridges
+        // (gated at view.len()) cannot reach. Maintained op-by-op (a write
+        // adds an index to both slices or to neither, as SETS). This is what
+        // push's reentered case needs: the ghost has the popped slot (its
+        // pop entry persists), so the physical does too.
+        &&& (self.hot_stack@.len() > 0 ==>
+                forall|j: int| #![trigger captured_in_range::<T, I>(
+                        self.full_trail@, self.g_start((tf.len() - 1) as int),
+                        self.full_trail@.len() as int, j as nat)]
+                    0 <= j < self.active_saved_len.as_nat() ==>
+                    captured_in_range::<T, I>(
+                        self.diff_log@,
+                        self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int,
+                        self.diff_log@.len() as int, j as nat)
+                    == captured_in_range::<T, I>(
+                        self.full_trail@,
+                        self.g_start((tf.len() - 1) as int),
+                        self.full_trail@.len() as int, j as nat))
     }
 
     /// `wf` is preserved by a change to `forks` alone. Every `wf` conjunct except
@@ -1951,9 +1971,16 @@ where
             assert(old_self.frame_inv_range_holds(k));
         }
         assert(self.wf_for_snap());
-        // diff_log.wf() transfers by structural equality with old_self.
-        // wf's captured-bridge and no-stray foralls read store.captured()/view/
-        // frames/active/diffs — all pinned, so they carry directly.
+        // Index-set equality: forks pins diff_log/hot_stack/full_trail/
+        // trail_frames, so it carries from old_self.wf().
+        if self.hot_stack@.len() > 0 {
+            let top = (self.trail_frames@.len() - 1) as int;
+            let phys_lo = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
+            assert forall|j: int| 0 <= j < self.active_saved_len.as_nat() implies
+                captured_in_range::<T, I>(self.diff_log@, phys_lo, self.diff_log@.len() as int, j as nat)
+                == captured_in_range::<T, I>(self.full_trail@, self.g_start(top), self.full_trail@.len() as int, j as nat)
+            by {}
+        }
         assert(self.wf());
     }
 
@@ -2426,6 +2453,16 @@ where
             assert(self.cold_stack@ == old(self).cold_stack@);
             assert(self.hot_stack@ == old(self).hot_stack@);
             assert(self.repr_ok());
+            // Index-set equality: all inputs (diff_log/hot_stack/full_trail/
+            // trail_frames) are pinned == old, which satisfied it via old wf.
+            if self.hot_stack@.len() > 0 {
+                let top = (self.trail_frames@.len() - 1) as int;
+                let phys_lo = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
+                assert forall|j: int| 0 <= j < self.active_saved_len.as_nat() implies
+                    captured_in_range::<T, I>(self.diff_log@, phys_lo, self.diff_log@.len() as int, j as nat)
+                    == captured_in_range::<T, I>(self.full_trail@, self.g_start(top), self.full_trail@.len() as int, j as nat)
+                by {}
+            }
         }
     }
 
