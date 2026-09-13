@@ -131,3 +131,47 @@ position) beats the tuple sorts at every measured size on the unique shape:
 replaces the ~20% slower stable sort + fold) is still to be measured, and
 adoption is gated on it. T stays opaque under the packed scheme; 31-bit
 IndexLike packs, wide indices keep the comparison path.
+
+## The proof architecture (deliverable 5 of the hardening goal, ruled 2026-09-13)
+
+One ghost model, four abstraction maps. The ghost diff stores everything
+explicitly: every tracked write, in temporal order, duplicates included.
+
+    ghost full_trail: Seq<(T, I)>     // (old_value, index) per write, all of them
+    ghost trail_frames: Seq<nat>      // stratum start offsets, one per mark
+
+Maintained at the container layer, independent of the store discipline:
+set pushes (old_value, i) whenever a frame is live, mark pushes a boundary,
+restore truncates both to the target boundary. Restore correctness is stated
+ONCE, against the ghost: overlaying stratum k of full_trail (first-entry-
+wins, backward application) onto the layer above reconstructs snapshot k.
+Every wf clause about reconstruction reads full_trail, never a physical
+representation.
+
+Each physical representation then carries an abstraction theorem relating
+its bytes to its ghost stratum, and correctness flows through overlay
+equivalence:
+
+- T1, trail hot frame: the pool slice IS the ghost stratum - identity.
+  Capture appends to both equally; nothing to transport.
+- T2, unique-capture hot frame: the pool slice equals
+  dedupe_first_spec(ghost stratum) - the capture flag check is an ONLINE
+  dedupe (inductive per write: flag set iff the cell already appears in the
+  stratum, so the skip keeps exactly the first capture). Overlay-equal by
+  lemma_overlay_dedupe_first (proved, commit 20, no hypotheses).
+- T3, cold frame: the runs decoding is a sorted unique-index permutation of
+  dedupe_first_spec(ghost stratum) - the normalize hook's postcondition plus
+  the translation's. Overlay-equal by composing the dedupe lemma with
+  order-independence of unique write sets (lemma_apply_all_eq_overlay) and
+  the write_block extensionality chain for the memcpy restore (both proved,
+  commit 20).
+- T4, the orphan extension: the cold top frame's ghost stratum splits as
+  sealed-part ++ pool-extension; the fold's covered-cell drop is
+  dedupe-first across the concatenation (the sealed entries are the
+  chronologically earlier captures, so first-entry-wins keeps them), the
+  same lemma family as T2.
+
+Sequencing: ghost model + wf rephrasing first (the hot-path proofs are
+mainline-shaped and port); then T1/T2 (small), T3 (the commit-20 assets
+attach), T4 (new, one lemma); then the scaffolding ledger discharges
+against the ghost-level contracts.
