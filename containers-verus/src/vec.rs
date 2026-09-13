@@ -2071,6 +2071,22 @@ where
         // slice and ghost open stratum name the same indices over [0,active),
         // reaching the popped-marked slots the view-gated bridges cannot.
         &&& self.index_set_ok()
+        // TRAIL sequence bridge: under the append-always (non-unique)
+        // discipline the physical diff_log IS the ghost trail's hot suffix -
+        // every hot write is recorded in both, in lockstep, and compression
+        // truncates diff_log exactly where it migrates frames to cold. This is
+        // the D5 "trail hot = identity" commuting equivalence as an invariant;
+        // restore_frame's hot reconstruction over diff_log derives from the
+        // ghost reconstruction through it. (The unique discipline's diff_log is
+        // dedupe_first of the same suffix; its bridge is per-stratum.)
+        &&& (!self.store.unique_capture_spec() ==>
+                if self.hot_stack@.len() > 0 {
+                    self.diff_log@ == self.full_trail@.subrange(
+                        self.g_start((tf.len() - self.hot_stack@.len()) as int),
+                        self.full_trail@.len() as int)
+                } else {
+                    self.diff_log@.len() == 0
+                })
     }
 
     /// `wf` is preserved by a change to `forks` alone. Every `wf` conjunct except
@@ -2528,6 +2544,8 @@ where
             final(self).full_trail@ == old(self).full_trail@,
             final(self).snapshots@ == old(self).snapshots@,
             final(self).active_saved_len == old(self).active_saved_len,
+            final(self).cold_stack@ == old(self).cold_stack@,
+            final(self).hot_stack@ == old(self).hot_stack@,
     {
         let ghost ms_pre = *self;
         match policy {
@@ -2946,6 +2964,7 @@ where
         true
     }
 
+    #[verifier::rlimit(300)]
     #[inline(always)]
     pub(crate) fn push(&mut self, value: T)
         requires
@@ -3228,6 +3247,9 @@ where
         // data_last == value of the slot being removed (defined when nonempty).
         let ghost data_last: T = old(self).store.data()[
             if old_view.len() > 0 { old_view.len() - 1 } else { 0 } as int];
+        // The (value, index) pair capture appends when it fires; threaded to
+        // the final proof for the trail sequence-bridge maintenance.
+        let ghost pushed_e: (T, I) = arbitrary();
         if TRACK && self.depth_exec() > 0 && len.as_usize() > 0
             && len.as_usize() - 1 < self.active_saved_len.as_usize()
         {
@@ -3248,6 +3270,7 @@ where
             let ghost old_full_p = self.full_trail@;
             self.store.capture(last_i, active, &mut self.diff_log);
             proof {
+                pushed_e = (data_last, last_i);
                 // Ghost trail records the reentered-slot capture.
                 if (last as int) < active.as_nat() as int {
                     self.full_trail@ = old_full_p.push((data_last, last_i));
@@ -3660,6 +3683,33 @@ where
                     assert(old(self).frame_inv_range_holds(k));
                     assert(self.layer_above_at(k) == old(self).layer_above_at(k));
                 }
+            }
+
+            // TRAIL sequence bridge maintenance (!unique): pop captures the
+            // popped cell into both logs in lockstep (or neither), so diff_log
+            // stays the ghost trail's hot suffix. pop touches no frame stack.
+            assert(self.store.unique_capture_spec()
+                == old(self).store.unique_capture_spec());
+            assert(self.hot_stack@ == old(self).hot_stack@);
+            if !self.store.unique_capture_spec() && self.hot_stack@.len() > 0 {
+                let gt = self.full_trail@;
+                let old_gt = old(self).full_trail@;
+                let diffs = self.diff_log@;
+                let cc = (tf.len() - self.hot_stack@.len()) as int;
+                let gs = self.g_start(cc);
+                old(self).lemma_diff_start_le_n(cc);
+                assert(gs <= old_gt.len());
+                assert(old_diffs == old_gt.subrange(gs, old_gt.len() as int));
+                if captured_marked {
+                    assert(diffs == old_diffs.push(pushed_e));
+                    assert(gt == old_gt.push(pushed_e));
+                    assert(gt.subrange(gs, gt.len() as int)
+                        =~= old_gt.subrange(gs, old_gt.len() as int).push(pushed_e));
+                } else {
+                    assert(diffs == old_diffs);
+                    assert(gt == old_gt);
+                }
+                assert(diffs =~= gt.subrange(gs, gt.len() as int));
             }
         }
         r
@@ -4146,6 +4196,31 @@ where
                     }
                 }
             }
+
+            // TRAIL sequence bridge maintenance (!unique): the physical log and
+            // the ghost trail append in lockstep in the marked region (or
+            // neither changes), so diff_log stays the ghost trail's hot suffix.
+            assert(self.store.unique_capture_spec()
+                == old(self).store.unique_capture_spec());
+            assert(self.hot_stack@ == old(self).hot_stack@);
+            if !self.store.unique_capture_spec() && self.hot_stack@.len() > 0 {
+                let cc = (tf.len() - self.hot_stack@.len()) as int;
+                let gs = self.g_start(cc);
+                old(self).lemma_diff_start_le_n(cc);
+                assert(gs <= old_gt.len());
+                assert(old_diffs == old_gt.subrange(gs, old_gt.len() as int));
+                if iu < active_n as int {
+                    assert(diffs == old_diffs.push((old_view[iu], i)));
+                    assert(gt == old_gt.push((old_view[iu], i)));
+                    assert(gt.subrange(gs, gt.len() as int)
+                        =~= old_gt.subrange(gs, old_gt.len() as int)
+                            .push((old_view[iu], i)));
+                } else {
+                    assert(diffs == old_diffs);
+                    assert(gt == old_gt);
+                }
+                assert(diffs =~= gt.subrange(gs, gt.len() as int));
+            }
         }
     }
 
@@ -4160,7 +4235,7 @@ where
     /// and its layer flips from `view` to the new `snapshots[top]`, which
     /// equals the view — so its frame_inv_range transfers.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(500)]
+    #[verifier::rlimit(1800)]
     /// The per-vector core of `mark`: push a frame, no genealogy. Shared fork
     /// history (doc 10) drives this from a `SyncGroup` while one `History` owns
     /// the branch/depth bookkeeping; `mark` is the standalone wrapper that adds
@@ -4461,6 +4536,54 @@ where
             // Re-establish the store capture-length bridge at the end (it can be lost
             // across the heavy frame_inv_range forall above).
             self.store.lemma_wf_captured_len();
+
+            // TRAIL sequence bridge maintenance (!unique). Two cases: with
+            // compression the log emptied and the sole new frame's ghost start
+            // is the just-pushed boundary (== full_trail.len()), so the hot
+            // suffix is empty; without it diff_log and full_trail are unchanged
+            // and the new empty top frame does not move the hot-suffix start.
+            assert(self.store.unique_capture_spec()
+                == old(self).store.unique_capture_spec());
+            if !self.store.unique_capture_spec() {
+                // The frame-count bridge makes the hot-suffix index cc equal to
+                // cold_stack.len() in both states.
+                assert(self.cold_stack@.len() + self.hot_stack@.len()
+                    == self.trail_frames@.len());
+                let cc = (self.trail_frames@.len() - self.hot_stack@.len()) as int;
+                assert(cc == self.cold_stack@.len());
+                let gs = self.g_start(cc);
+                if do_compress {
+                    assert(self.diff_log@.len() == 0);
+                    assert(self.hot_stack@.len() == 1);
+                    assert(cc == (self.trail_frames@.len() - 1) as int);
+                    assert(gs == self.full_trail@.len());
+                    assert(self.diff_log@
+                        =~= self.full_trail@.subrange(gs, self.full_trail@.len() as int));
+                } else {
+                    assert(self.diff_log@ == old(self).diff_log@);
+                    assert(self.full_trail@ == old(self).full_trail@);
+                    assert(self.cold_stack@ == old(self).cold_stack@);
+                    assert(old(self).cold_stack@.len() + old(self).hot_stack@.len()
+                        == old(self).trail_frames@.len());
+                    let old_cc = (old(self).trail_frames@.len()
+                        - old(self).hot_stack@.len()) as int;
+                    assert(old_cc == old(self).cold_stack@.len());
+                    assert(cc == old_cc);
+                    if old(self).hot_stack@.len() > 0 {
+                        assert(cc < old(self).trail_frames@.len());
+                        assert(self.trail_frames@[cc] == old(self).trail_frames@[cc]);
+                        assert(gs == old(self).g_start(old_cc));
+                        assert(old(self).diff_log@ == old(self).full_trail@.subrange(
+                            old(self).g_start(old_cc),
+                            old(self).full_trail@.len() as int));
+                    } else {
+                        // depth-0 first mark: old log empty, new suffix empty.
+                        assert(old(self).diff_log@.len() == 0);
+                    }
+                    assert(self.diff_log@
+                        =~= self.full_trail@.subrange(gs, self.full_trail@.len() as int));
+                }
+            }
         }
     }
 
