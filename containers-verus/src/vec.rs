@@ -6265,6 +6265,131 @@ where
     /// that frame's old layer), so `lemma_frame_inv_range_shift` transfers it.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(400)]
+    /// wf re-establishment: after a HOT-target truncation the surviving frames
+    /// keep their `frame_iso` (per-frame index-set equality). Discipline-agnostic
+    /// - each survivor's physical stratum lies within `[0, hf_start)` and its
+    /// ghost stratum within `[0, b)`, both preserved prefixes of the old logs,
+    /// so `captured_in_range` reads the same entries and `old_self.frame_iso`
+    /// (a wf clause) transfers. This is what makes restore's unique branch sound:
+    /// the promoted survivors inherit their index-set equality directly.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(500)]
+    pub(crate) proof fn lemma_restore_survivors_frame_iso(
+        &self, old_self: Self, target: int, hf_start: int, b: int,
+    )
+        requires
+            old_self.wf(),
+            old_self.cold_stack@.len() < target < old_self.trail_frames@.len(),
+            self.cold_stack@ == old_self.cold_stack@,
+            self.hot_stack@ == old_self.hot_stack@.subrange(
+                0, target - old_self.cold_stack@.len() as int),
+            self.trail_frames@ == old_self.trail_frames@.subrange(0, target),
+            self.snapshots@ == old_self.snapshots@.subrange(0, target),
+            hf_start == old_self.hot_stack@[target - old_self.cold_stack@.len() as int].start,
+            b == old_self.g_start(target),
+            self.diff_log@ == old_self.diff_log@.subrange(0, hf_start),
+            self.full_trail@ == old_self.full_trail@.subrange(0, b),
+        ensures
+            forall|f: int| 0 <= f < self.hot_stack@.len() ==> #[trigger] self.frame_iso(f),
+    {
+        let cc = old_self.cold_stack@.len() as int;
+        assert(cc + self.hot_stack@.len() == self.trail_frames@.len());
+        assert(hf_start <= old_self.diff_log@.len()) by {
+            assert(old_self.hot_stack@[target - cc].start <= old_self.diff_log@.len());
+        }
+        assert(b <= old_self.full_trail@.len()) by {
+            old_self.lemma_diff_start_le_n(target);
+        }
+        assert forall|f: int| 0 <= f < self.hot_stack@.len() implies
+            #[trigger] self.frame_iso(f) by {
+            let ps = self.phys_hot_start(f);
+            let pe = self.phys_hot_end(f);
+            let gs = self.g_start(cc + f);
+            let ge = self.g_end(cc + f);
+            assert(old_self.frame_iso(f));
+            // stratum bounds/values match old_self on the shared prefix.
+            assert(ps == old_self.phys_hot_start(f)) by {
+                assert(self.hot_stack@[f].start == old_self.hot_stack@[f].start);
+            }
+            assert(gs == old_self.g_start(cc + f)) by {
+                assert(self.trail_frames@[cc + f] == old_self.trail_frames@[cc + f]);
+            }
+            // physical stratum end within hf_start.
+            assert(pe <= hf_start) by {
+                if f + 1 < self.hot_stack@.len() {
+                    assert(pe == self.hot_stack@[f + 1].start);
+                    assert(self.hot_stack@[f + 1].start == old_self.hot_stack@[f + 1].start);
+                    old_self.lemma_hot_start_monotone(f + 1, target - cc);
+                } else {
+                    assert(pe == self.diff_log@.len());
+                    assert(self.diff_log@.len() == hf_start);
+                }
+            }
+            assert(pe == old_self.phys_hot_end(f)) by {
+                if f + 1 < self.hot_stack@.len() {
+                    assert(self.hot_stack@[f + 1].start == old_self.hot_stack@[f + 1].start);
+                } else {
+                    assert(old_self.phys_hot_end(f) == old_self.hot_stack@[target - cc].start);
+                }
+            }
+            // ghost stratum end within b.
+            assert(cc + f + 1 <= target);
+            assert(ge == old_self.g_end(cc + f)) by {
+                if cc + f + 1 < target {
+                    assert(self.trail_frames@[cc + f + 1] == old_self.trail_frames@[cc + f + 1]);
+                } else {
+                    assert(cc + f + 1 == target);
+                    assert(ge == self.full_trail@.len());
+                    assert(self.full_trail@.len() == b);
+                    assert(old_self.g_end(cc + f) == old_self.g_start(target));
+                }
+            }
+            assert(ge <= b) by {
+                if cc + f + 1 < target {
+                    old_self.lemma_diff_start_monotone(cc + f + 1, target);
+                    assert(old_self.g_end(cc + f) == old_self.g_start(cc + f + 1));
+                }
+            }
+            assert forall|j: int| 0 <= j < self.snapshots@[cc + f].len() as int implies
+                #[trigger] captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat)
+                == captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat) by {
+                assert(self.snapshots@[cc + f] == old_self.snapshots@[cc + f]);
+                // physical prefix agreement (pe <= hf_start <= old diff_log len).
+                assert(captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat)
+                    == captured_in_range::<T, I>(old_self.diff_log@, ps, pe, j as nat)) by {
+                    if captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat) {
+                        let kk = choose|kk: int| ps <= kk < pe && 0 <= kk < self.diff_log@.len()
+                            && (#[trigger] self.diff_log@[kk]).1.as_nat() == j as nat;
+                        assert(self.diff_log@[kk] == old_self.diff_log@.subrange(0, hf_start)[kk]);
+                        assert(captured_in_range::<T, I>(old_self.diff_log@, ps, pe, j as nat));
+                    }
+                    if captured_in_range::<T, I>(old_self.diff_log@, ps, pe, j as nat) {
+                        let kk = choose|kk: int| ps <= kk < pe && 0 <= kk < old_self.diff_log@.len()
+                            && (#[trigger] old_self.diff_log@[kk]).1.as_nat() == j as nat;
+                        assert(self.diff_log@[kk] == old_self.diff_log@.subrange(0, hf_start)[kk]);
+                        assert(captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat));
+                    }
+                }
+                // ghost prefix agreement (ge <= b <= old full_trail len).
+                assert(captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat)
+                    == captured_in_range::<T, I>(old_self.full_trail@, gs, ge, j as nat)) by {
+                    if captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat) {
+                        let kk = choose|kk: int| gs <= kk < ge && 0 <= kk < self.full_trail@.len()
+                            && (#[trigger] self.full_trail@[kk]).1.as_nat() == j as nat;
+                        assert(self.full_trail@[kk] == old_self.full_trail@.subrange(0, b)[kk]);
+                        assert(captured_in_range::<T, I>(old_self.full_trail@, gs, ge, j as nat));
+                    }
+                    if captured_in_range::<T, I>(old_self.full_trail@, gs, ge, j as nat) {
+                        let kk = choose|kk: int| gs <= kk < ge && 0 <= kk < old_self.full_trail@.len()
+                            && (#[trigger] old_self.full_trail@[kk]).1.as_nat() == j as nat;
+                        assert(self.full_trail@[kk] == old_self.full_trail@.subrange(0, b)[kk]);
+                        assert(captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat));
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) proof fn lemma_restore_survivors_frame_inv(&self, old_self: Self, target: int)
         requires
             old_self.wf_for_snap(),
