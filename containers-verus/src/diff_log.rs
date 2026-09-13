@@ -27,523 +27,6 @@ use vstd::prelude::*;
 
 verus! {
 
-/// The concatenated value sequence of the cold frames, in order (mirrors
-/// `compressed_stack::decode_all` for the value-only frames). Opaque so the `Vec`
-/// wf check (which reaches it through `DiffLog::wf`/`@`) does not unfold the
-/// recursion; the lemmas below `reveal_with_fuel` it where they need its definition.
-#[verifier::opaque]
-pub open spec fn cold_vals<T: Copy>(cold: Seq<ValFrame<T>>) -> Seq<T>
-    decreases cold.len(),
-{
-    if cold.len() == 0 {
-        Seq::empty()
-    } else {
-        cold[0].decode() + cold_vals(cold.subrange(1, cold.len() as int))
-    }
-}
-
-/// Appending a cold frame extends the concatenation by exactly that frame's decode.
-pub proof fn lemma_cold_vals_snoc<T: Copy>(cold: Seq<ValFrame<T>>, f: ValFrame<T>)
-    ensures cold_vals(cold.push(f)) == cold_vals(cold) + f.decode(),
-    decreases cold.len(),
-{
-    reveal_with_fuel(cold_vals, 2);
-    if cold.len() == 0 {
-        assert(cold.push(f) =~= seq![f]);
-        assert(cold_vals(cold) =~= Seq::<T>::empty());
-        assert(cold_vals(cold.push(f)) =~= f.decode());
-    } else {
-        let tail = cold.subrange(1, cold.len() as int);
-        lemma_cold_vals_snoc(tail, f);
-        assert(cold.push(f)[0] == cold[0]);
-        assert(cold.push(f).subrange(1, cold.push(f).len() as int) =~= tail.push(f));
-        let a = cold[0].decode();
-        let b = cold_vals(tail);
-        let c = f.decode();
-        assert(a + (b + c) =~= (a + b) + c);
-    }
-}
-
-/// `cold_vals(cold)[i]` is the value at offset `i - base` in the frame `k` whose
-/// prefix length is `base == cold_vals(cold[0..k]).len()`. The random-access bridge
-/// `index()` needs to read one cold entry.
-pub proof fn lemma_cold_vals_at<T: Copy>(cold: Seq<ValFrame<T>>, k: int, i: int)
-    requires
-        0 <= k < cold.len(),
-        cold_vals(cold.subrange(0, k)).len() <= i,
-        i < cold_vals(cold.subrange(0, k)).len() + cold[k].decode().len(),
-    ensures
-        cold_vals(cold)[i] == cold[k].decode()[i - cold_vals(cold.subrange(0, k)).len()],
-    decreases cold.len(),
-{
-    reveal_with_fuel(cold_vals, 2);
-    let head = cold[0];
-    let rest = cold.subrange(1, cold.len() as int);
-    if k == 0 {
-        assert(cold.subrange(0, 0) =~= Seq::<ValFrame<T>>::empty());
-        // i < head.decode().len() (from the requires), and cold_vals(cold)
-        // == head.decode() + cold_vals(rest), so index i is in the head.
-        assert(i < head.decode().len());
-        assert(cold_vals(cold) == head.decode() + cold_vals(rest));
-        assert(cold_vals(cold)[i] == head.decode()[i]);
-    } else {
-        // Strip the head; recurse on `rest`, `k-1`, `i - head.decode().len()`.
-        assert(cold.subrange(0, k).subrange(1, k) =~= rest.subrange(0, k - 1));
-        // cold_vals(cold[0..k]) == head.decode() + cold_vals(rest[0..k-1]).
-        assert(cold_vals(cold.subrange(0, k))
-            =~= head.decode() + cold_vals(rest.subrange(0, k - 1)));
-        let base = cold_vals(cold.subrange(0, k)).len();
-        let hl = head.decode().len();
-        assert(base == hl + cold_vals(rest.subrange(0, k - 1)).len());
-        assert(i >= hl);
-        lemma_cold_vals_at(rest, k - 1, i - hl);
-        assert(rest[k - 1] == cold[k]);
-        // i is in range: i < base + cold[k].decode().len() <= cold_vals(cold).len().
-        lemma_cold_vals_split(cold, k);
-        assert(cold.subrange(k, cold.len() as int)[0] == cold[k]);
-        assert(cold_vals(cold.subrange(k, cold.len() as int))
-            == cold[k].decode() + cold_vals(cold.subrange(k, cold.len() as int).subrange(1, cold.subrange(k, cold.len() as int).len() as int)));
-        assert(i < cold_vals(cold).len());
-        assert(cold_vals(cold) == head.decode() + cold_vals(rest));
-        assert(cold_vals(cold)[i] == cold_vals(rest)[i - hl]);
-    }
-}
-
-/// The value column: plain, or value-major (immutable cold frames + hot tail).
-pub enum DiffVals<T> {
-    Plain(Vec<T>),
-    Dict { cold: Vec<ValFrame<T>>, tail: Vec<T> },
-}
-
-impl<T: Copy> DiffVals<T> {
-    /// Number of values.
-    pub open spec fn len_spec(self) -> nat {
-        match self {
-            DiffVals::Plain(v) => v@.len(),
-            DiffVals::Dict { cold, tail } => cold_vals(cold@).len() + tail@.len(),
-        }
-    }
-
-    /// The value at position `i`: cold-frame decode below the tail, direct read in it.
-    pub open spec fn val_at(self, i: int) -> T {
-        match self {
-            DiffVals::Plain(v) => v@[i],
-            DiffVals::Dict { cold, tail } =>
-                if i < cold_vals(cold@).len() {
-                    cold_vals(cold@)[i]
-                } else {
-                    tail@[i - cold_vals(cold@).len()]
-                },
-        }
-    }
-
-    /// Every cold frame is well-formed (its codes index its dictionary).
-    pub open spec fn wf(self) -> bool {
-        match self {
-            DiffVals::Plain(_) => true,
-            DiffVals::Dict { cold, .. } =>
-                forall|k: int| 0 <= k < cold@.len() ==> (#[trigger] cold@[k]).wf(),
-        }
-    }
-}
-
-/// The index-major dual of `cold_vals`: concatenate each cold `RunCol` frame's
-/// index projection (`idx_seq`). A `RunCol<(), I>` frame stores only run starts and
-/// zero-size values, so its `idx_seq` is the whole reconstructed index sequence, and
-/// the stored index column is dropped down to one `start` per run. Opaque so the
-/// `Vec` wf check does not unfold the recursion.
-#[verifier::opaque]
-pub open spec fn cold_idxs<I: IndexLike>(cold: Seq<RunCol<(), I>>) -> Seq<I>
-    decreases cold.len(),
-{
-    if cold.len() == 0 {
-        Seq::empty()
-    } else {
-        cold[0].idx_seq() + cold_idxs(cold.subrange(1, cold.len() as int))
-    }
-}
-
-/// Appending a cold frame extends the concatenation by exactly that frame's `idx_seq`.
-pub proof fn lemma_cold_idxs_snoc<I: IndexLike>(cold: Seq<RunCol<(), I>>, f: RunCol<(), I>)
-    ensures cold_idxs(cold.push(f)) == cold_idxs(cold) + f.idx_seq(),
-    decreases cold.len(),
-{
-    reveal_with_fuel(cold_idxs, 2);
-    if cold.len() == 0 {
-        assert(cold.push(f) =~= seq![f]);
-        assert(cold_idxs(cold) =~= Seq::<I>::empty());
-        assert(cold_idxs(cold.push(f)) =~= f.idx_seq());
-    } else {
-        let tail = cold.subrange(1, cold.len() as int);
-        lemma_cold_idxs_snoc(tail, f);
-        assert(cold.push(f)[0] == cold[0]);
-        assert(cold.push(f).subrange(1, cold.push(f).len() as int) =~= tail.push(f));
-        let a = cold[0].idx_seq();
-        let b = cold_idxs(tail);
-        let c = f.idx_seq();
-        assert(a + (b + c) =~= (a + b) + c);
-    }
-}
-
-/// `cold_idxs(cold)[i]` is the index at offset `i - base` in frame `k` whose prefix
-/// length is `base == cold_idxs(cold[0..k]).len()`. The random-access bridge `index`.
-pub proof fn lemma_cold_idxs_at<I: IndexLike>(cold: Seq<RunCol<(), I>>, k: int, i: int)
-    requires
-        0 <= k < cold.len(),
-        cold_idxs(cold.subrange(0, k)).len() <= i,
-        i < cold_idxs(cold.subrange(0, k)).len() + cold[k].idx_seq().len(),
-    ensures
-        cold_idxs(cold)[i] == cold[k].idx_seq()[i - cold_idxs(cold.subrange(0, k)).len()],
-    decreases cold.len(),
-{
-    reveal_with_fuel(cold_idxs, 2);
-    let head = cold[0];
-    let rest = cold.subrange(1, cold.len() as int);
-    if k == 0 {
-        assert(cold.subrange(0, 0) =~= Seq::<RunCol<(), I>>::empty());
-        assert(i < head.idx_seq().len());
-        assert(cold_idxs(cold) == head.idx_seq() + cold_idxs(rest));
-        assert(cold_idxs(cold)[i] == head.idx_seq()[i]);
-    } else {
-        assert(cold.subrange(0, k).subrange(1, k) =~= rest.subrange(0, k - 1));
-        assert(cold_idxs(cold.subrange(0, k))
-            =~= head.idx_seq() + cold_idxs(rest.subrange(0, k - 1)));
-        let base = cold_idxs(cold.subrange(0, k)).len();
-        let hl = head.idx_seq().len();
-        assert(base == hl + cold_idxs(rest.subrange(0, k - 1)).len());
-        assert(i >= hl);
-        lemma_cold_idxs_at(rest, k - 1, i - hl);
-        assert(rest[k - 1] == cold[k]);
-        lemma_cold_idxs_split(cold, k);
-        assert(cold.subrange(k, cold.len() as int)[0] == cold[k]);
-        assert(i < cold_idxs(cold).len());
-        assert(cold_idxs(cold) == head.idx_seq() + cold_idxs(rest));
-        assert(cold_idxs(cold)[i] == cold_idxs(rest)[i - hl]);
-    }
-}
-
-/// The first `rem` indices of frame `k` are entries `[base, base+rem)` of the whole
-/// concatenation, `base == cold_idxs(cold[0..k]).len()`. For the truncate partial case.
-pub proof fn lemma_cold_idxs_at_prefix<I: IndexLike>(cold: Seq<RunCol<(), I>>, k: int, rem: int)
-    requires
-        0 <= k < cold.len(),
-        0 <= rem <= cold[k].idx_seq().len(),
-    ensures
-        forall|t: int| 0 <= t < rem ==>
-            cold_idxs(cold)[cold_idxs(cold.subrange(0, k)).len() + t] == cold[k].idx_seq()[t],
-{
-    let base = cold_idxs(cold.subrange(0, k)).len();
-    assert forall|t: int| 0 <= t < rem implies
-        cold_idxs(cold)[base + t] == cold[k].idx_seq()[t] by {
-        lemma_cold_idxs_at(cold, k, base + t);
-    }
-}
-
-/// `cold_idxs` splits at any frame boundary.
-pub proof fn lemma_cold_idxs_split<I: IndexLike>(cold: Seq<RunCol<(), I>>, k: int)
-    requires 0 <= k <= cold.len(),
-    ensures
-        cold_idxs(cold) == cold_idxs(cold.subrange(0, k))
-            + cold_idxs(cold.subrange(k, cold.len() as int)),
-    decreases cold.len(),
-{
-    reveal_with_fuel(cold_idxs, 2);
-    if cold.len() == 0 {
-        assert(cold.subrange(0, k) =~= Seq::<RunCol<(), I>>::empty());
-        assert(cold.subrange(k, cold.len() as int) =~= Seq::<RunCol<(), I>>::empty());
-        assert(cold_idxs(cold) =~= Seq::<I>::empty());
-    } else if k == 0 {
-        assert(cold.subrange(0, 0) =~= Seq::<RunCol<(), I>>::empty());
-        assert(cold.subrange(0, cold.len() as int) =~= cold);
-    } else {
-        let head = cold[0];
-        let rest = cold.subrange(1, cold.len() as int);
-        lemma_cold_idxs_split(rest, k - 1);
-        assert(cold.subrange(0, k).subrange(1, k) =~= rest.subrange(0, k - 1));
-        assert(cold.subrange(0, k)[0] == head);
-        assert(cold_idxs(cold.subrange(0, k))
-            =~= head.idx_seq() + cold_idxs(rest.subrange(0, k - 1)));
-        assert(cold.subrange(k, cold.len() as int) =~= rest.subrange(k - 1, rest.len() as int));
-        let a = head.idx_seq();
-        let b = cold_idxs(rest.subrange(0, k - 1));
-        let c = cold_idxs(rest.subrange(k - 1, rest.len() as int));
-        assert(a + (b + c) =~= (a + b) + c);
-    }
-}
-
-// ===========================================================================
-// cold_adaptive: the per-frame-adaptive cold tier's concatenation. Each cold frame
-// is a `ColdFrame` (plain / value-major / index-major, chosen per frame), so the
-// concatenation of their `decode()`s is the flat write sequence of the cold region.
-// Mirrors cold_idxs/cold_vals; the four lemmas are the same shape.
-// ===========================================================================
-
-/// Flat write sequence of the adaptive cold tier: concatenate each frame's `decode()`.
-#[verifier::opaque]
-pub open spec fn cold_adaptive<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(cold: Seq<ColdFrame<T, I, VC>>) -> Seq<(T, I)>
-    decreases cold.len(),
-{
-    if cold.len() == 0 {
-        Seq::empty()
-    } else {
-        cold[0].decode() + cold_adaptive(cold.subrange(1, cold.len() as int))
-    }
-}
-
-/// Appending a cold frame extends the concatenation by exactly that frame's `decode()`.
-pub proof fn lemma_cold_adaptive_snoc<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
-    cold: Seq<ColdFrame<T, I, VC>>, f: ColdFrame<T, I, VC>,
-)
-    ensures cold_adaptive(cold.push(f)) == cold_adaptive(cold) + f.decode(),
-    decreases cold.len(),
-{
-    reveal_with_fuel(cold_adaptive, 2);
-    if cold.len() == 0 {
-        assert(cold.push(f) =~= seq![f]);
-        assert(cold_adaptive(cold) =~= Seq::<(T, I)>::empty());
-        assert(cold_adaptive(cold.push(f)) =~= f.decode());
-    } else {
-        let tail = cold.subrange(1, cold.len() as int);
-        lemma_cold_adaptive_snoc(tail, f);
-        assert(cold.push(f)[0] == cold[0]);
-        assert(cold.push(f).subrange(1, cold.push(f).len() as int) =~= tail.push(f));
-        let a = cold[0].decode();
-        let b = cold_adaptive(tail);
-        let c = f.decode();
-        assert(a + (b + c) =~= (a + b) + c);
-    }
-}
-
-/// `cold_adaptive(cold)[i]` lands in frame `k` at offset `i - base`, where
-/// `base == cold_adaptive(cold[0..k]).len()`. The random-access bridge `index` needs.
-pub proof fn lemma_cold_adaptive_at<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
-    cold: Seq<ColdFrame<T, I, VC>>, k: int, i: int,
-)
-    requires
-        0 <= k < cold.len(),
-        cold_adaptive(cold.subrange(0, k)).len() <= i,
-        i < cold_adaptive(cold.subrange(0, k)).len() + cold[k].decode().len(),
-    ensures
-        cold_adaptive(cold)[i] == cold[k].decode()[i - cold_adaptive(cold.subrange(0, k)).len()],
-    decreases cold.len(),
-{
-    reveal_with_fuel(cold_adaptive, 2);
-    let head = cold[0];
-    let rest = cold.subrange(1, cold.len() as int);
-    if k == 0 {
-        assert(cold.subrange(0, 0) =~= Seq::<ColdFrame<T, I, VC>>::empty());
-        assert(i < head.decode().len());
-        assert(cold_adaptive(cold) == head.decode() + cold_adaptive(rest));
-        assert(cold_adaptive(cold)[i] == head.decode()[i]);
-    } else {
-        assert(cold.subrange(0, k).subrange(1, k) =~= rest.subrange(0, k - 1));
-        assert(cold_adaptive(cold.subrange(0, k))
-            =~= head.decode() + cold_adaptive(rest.subrange(0, k - 1)));
-        let base = cold_adaptive(cold.subrange(0, k)).len();
-        let hl = head.decode().len();
-        assert(base == hl + cold_adaptive(rest.subrange(0, k - 1)).len());
-        assert(i >= hl);
-        lemma_cold_adaptive_at(rest, k - 1, i - hl);
-        assert(rest[k - 1] == cold[k]);
-        lemma_cold_adaptive_split(cold, k);
-        assert(cold.subrange(k, cold.len() as int)[0] == cold[k]);
-        assert(i < cold_adaptive(cold).len());
-        assert(cold_adaptive(cold) == head.decode() + cold_adaptive(rest));
-        assert(cold_adaptive(cold)[i] == cold_adaptive(rest)[i - hl]);
-    }
-}
-
-/// The first `rem` entries of frame `k` are entries `[base, base+rem)` of the whole
-/// concatenation, `base == cold_adaptive(cold[0..k]).len()`. For truncate.
-pub proof fn lemma_cold_adaptive_at_prefix<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
-    cold: Seq<ColdFrame<T, I, VC>>, k: int, rem: int,
-)
-    requires
-        0 <= k < cold.len(),
-        0 <= rem <= cold[k].decode().len(),
-    ensures
-        forall|t: int| 0 <= t < rem ==>
-            cold_adaptive(cold)[cold_adaptive(cold.subrange(0, k)).len() + t] == cold[k].decode()[t],
-{
-    let base = cold_adaptive(cold.subrange(0, k)).len();
-    assert forall|t: int| 0 <= t < rem implies
-        cold_adaptive(cold)[base + t] == cold[k].decode()[t] by {
-        lemma_cold_adaptive_at(cold, k, base + t);
-    }
-}
-
-/// `cold_adaptive` splits at any frame boundary.
-pub proof fn lemma_cold_adaptive_split<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
-    cold: Seq<ColdFrame<T, I, VC>>, k: int,
-)
-    requires 0 <= k <= cold.len(),
-    ensures
-        cold_adaptive(cold) == cold_adaptive(cold.subrange(0, k))
-            + cold_adaptive(cold.subrange(k, cold.len() as int)),
-    decreases cold.len(),
-{
-    reveal_with_fuel(cold_adaptive, 2);
-    if cold.len() == 0 {
-        assert(cold.subrange(0, k) =~= Seq::<ColdFrame<T, I, VC>>::empty());
-        assert(cold.subrange(k, cold.len() as int) =~= Seq::<ColdFrame<T, I, VC>>::empty());
-        assert(cold_adaptive(cold) =~= Seq::<(T, I)>::empty());
-    } else if k == 0 {
-        assert(cold.subrange(0, 0) =~= Seq::<ColdFrame<T, I, VC>>::empty());
-        assert(cold.subrange(0, cold.len() as int) =~= cold);
-    } else {
-        let head = cold[0];
-        let rest = cold.subrange(1, cold.len() as int);
-        lemma_cold_adaptive_split(rest, k - 1);
-        assert(cold.subrange(0, k).subrange(1, k) =~= rest.subrange(0, k - 1));
-        assert(cold.subrange(0, k)[0] == head);
-        assert(cold_adaptive(cold.subrange(0, k))
-            =~= head.decode() + cold_adaptive(rest.subrange(0, k - 1)));
-        assert(cold.subrange(k, cold.len() as int) =~= rest.subrange(k - 1, rest.len() as int));
-        let a = head.decode();
-        let b = cold_adaptive(rest.subrange(0, k - 1));
-        let c = cold_adaptive(rest.subrange(k - 1, rest.len() as int));
-        assert(a + (b + c) =~= (a + b) + c);
-    }
-}
-
-/// The index column: plain (contiguous, kept whole), or index-major (immutable cold
-/// `RunCol` frames that drop the stored index column to run starts + a hot tail).
-pub enum DiffIdxs<I> {
-    Plain(Vec<I>),
-    Runs { cold: Vec<RunCol<(), I>>, tail: Vec<I> },
-}
-
-impl<I: IndexLike> DiffIdxs<I> {
-    /// Number of indices.
-    pub open spec fn len_spec(self) -> nat {
-        match self {
-            DiffIdxs::Plain(v) => v@.len(),
-            DiffIdxs::Runs { cold, tail } => cold_idxs(cold@).len() + tail@.len(),
-        }
-    }
-
-    /// The index at position `i`: cold-frame reconstruct below the tail, direct in it.
-    pub open spec fn idx_at(self, i: int) -> I {
-        match self {
-            DiffIdxs::Plain(v) => v@[i],
-            DiffIdxs::Runs { cold, tail } =>
-                if i < cold_idxs(cold@).len() {
-                    cold_idxs(cold@)[i]
-                } else {
-                    tail@[i - cold_idxs(cold@).len()]
-                },
-        }
-    }
-
-    /// Every cold frame is well-formed (its ghost pairs match its runs by `as_nat`).
-    pub open spec fn wf(self) -> bool {
-        match self {
-            DiffIdxs::Plain(_) => true,
-            DiffIdxs::Runs { cold, .. } =>
-                forall|k: int| 0 <= k < cold@.len() ==> (#[trigger] cold@[k]).wf(),
-        }
-    }
-
-    /// Whether this is the run-compressed variant (for variant-preservation ensures).
-    pub open spec fn is_runs(self) -> bool {
-        self is Runs
-    }
-
-    /// Length of the cold (already-folded) prefix: `cold_idxs(cold@).len()` for the
-    /// run-compressed variant, else the whole plain length. The boundary below which a
-    /// sorted tail flush leaves `@` untouched.
-    pub open spec fn cold_len_spec(self) -> nat {
-        match self {
-            DiffIdxs::Plain(v) => v@.len(),
-            DiffIdxs::Runs { cold, .. } => cold_idxs(cold@).len(),
-        }
-    }
-}
-
-impl<I: IndexLike> DiffIdxs<I> {
-    /// The index at position `i`. Plain: direct read. Runs: reconstruct from the cold
-    /// frame containing `i` (walk frames by cached length), or the hot tail. Mirrors
-    /// the value cold walk in `DiffVals`/`DiffLog::index`.
-    pub fn idx_at_exec(&self, i: usize) -> (r: I)
-        requires self.wf(), i < self.len_spec(),
-        ensures r == self.idx_at(i as int),
-    {
-        match self {
-            DiffIdxs::Plain(v) => v[i],
-            DiffIdxs::Runs { cold, tail } => {
-                proof { reveal(cold_idxs); }
-                // Walk cold frames carrying the within-frame offset `d == i - prefix_k`,
-                // stopping at the frame that contains `i` or when cold is exhausted
-                // (then `i` is in the hot tail). No total length is computed.
-                let mut d: usize = i;
-                let mut k: usize = 0;
-                while k < cold.len() && cold[k].entry_len() <= d
-                    invariant
-                        0 <= k <= cold@.len(),
-                        self.wf(),
-                        forall|kk: int| 0 <= kk < cold@.len() ==> (#[trigger] cold@[kk]).wf(),
-                        i == d + cold_idxs(cold@.subrange(0, k as int)).len(),
-                        i < self.len_spec(),
-                    decreases cold@.len() - k,
-                {
-                    let flen = cold[k].entry_len();
-                    proof {
-                        assert(flen == cold@[k as int].idx_seq().len());
-                        assert(cold@.subrange(0, k + 1)
-                            =~= cold@.subrange(0, k as int).push(cold@[k as int]));
-                        lemma_cold_idxs_snoc(cold@.subrange(0, k as int), cold@[k as int]);
-                        assert(cold_idxs(cold@.subrange(0, (k + 1) as int)).len()
-                            == cold_idxs(cold@.subrange(0, k as int)).len() + flen);
-                    }
-                    d = d - flen;
-                    k = k + 1;
-                }
-                if k < cold.len() {
-                    // Frame k contains i: prefix_k <= i < prefix_k + len_k.
-                    proof {
-                        lemma_cold_idxs_split(cold@, (k + 1) as int);
-                        assert(cold@.subrange(0, k + 1)
-                            =~= cold@.subrange(0, k as int).push(cold@[k as int]));
-                        lemma_cold_idxs_snoc(cold@.subrange(0, k as int), cold@[k as int]);
-                        // i < cold_idxs(cold@).len(), so idx_at reads the cold concatenation.
-                        assert(i < cold_idxs(cold@).len());
-                        lemma_cold_idxs_at(cold@, k as int, i as int);
-                    }
-                    cold[k].idx_at(d)
-                } else {
-                    // Cold exhausted: prefix_k == cold_idxs(cold@).len(), so d == i - it.
-                    proof {
-                        assert(cold@.subrange(0, k as int) =~= cold@);
-                        // i >= cold_idxs(cold@).len(), idx_at reads tail@[i - that] == tail@[d].
-                    }
-                    tail[d]
-                }
-            }
-        }
-    }
-
-    /// Append one index. Plain: push. Runs: push to the hot tail.
-    pub fn push_idx(&mut self, idx: I)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            final(self).len_spec() == old(self).len_spec() + 1,
-            forall|j: int| 0 <= j < old(self).len_spec()
-                ==> final(self).idx_at(j) == old(self).idx_at(j),
-            final(self).idx_at(old(self).len_spec() as int) == idx,
-            final(self).is_runs() == old(self).is_runs(),
-    {
-        match self {
-            DiffIdxs::Plain(v) => {
-                v.push(idx);
-            }
-            DiffIdxs::Runs { tail, .. } => {
-                tail.push(idx);
-            }
-        }
-    }
-}
-
 /// The adaptive tier's flat length: cold frames' concatenation plus the hot pair tail.
 pub open spec fn adaptive_len<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
     cold: Seq<ColdFrame<T, I, VC>>, hot: Seq<(T, I)>,
@@ -616,7 +99,6 @@ pub open spec fn adaptive_at<T: Copy, I: IndexLike, VC: crate::value_compressor:
 /// `Adaptive` is a per-frame cold tier where each finalized frame independently picks
 /// its mode (`ColdFrame`), with a plain hot pair tail and a cached length (A4).
 pub enum DiffLog<T: Copy, I, VC: crate::value_compressor::ValueCompressor<T> = crate::value_compressor::NoValueCompression> {
-    Cols { idxs: DiffIdxs<I>, vals: DiffVals<T> },
     Adaptive {
         cold: Vec<ColdFrame<T, I, VC>>,
         hot: Vec<(T, I)>,
@@ -627,6 +109,9 @@ pub enum DiffLog<T: Copy, I, VC: crate::value_compressor::ValueCompressor<T> = c
         /// (design doc restore-from-compressed-frames-goal.md #6). Policy,
         /// not representation, so `wf` does not constrain it.
         auto_seal: bool,
+        /// The column's preferred cold encoding, chosen at construction
+        /// (production parity for the retired fixed-mode columns).
+        mode_hint: CompressionMode,
     },
 }
 
@@ -634,8 +119,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Vie
     type V = Seq<(T, I)>;
     open spec fn view(&self) -> Seq<(T, I)> {
         match self {
-            DiffLog::Cols { idxs, vals } =>
-                Seq::new(idxs.len_spec(), |i: int| (vals.val_at(i), idxs.idx_at(i))),
             DiffLog::Adaptive { cold, hot, .. } =>
                 Seq::new(adaptive_len(cold@, hot@), |i: int| adaptive_at(cold@, hot@, i)),
         }
@@ -645,12 +128,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Vie
 impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> DiffLog<T, I, VC> {
     pub open spec fn wf(&self) -> bool {
         match self {
-            DiffLog::Cols { idxs, vals } => {
-                &&& vals.wf()
-                &&& idxs.wf()
-                &&& vals.len_spec() == idxs.len_spec()
-                &&& (*idxs is Runs ==> *vals is Plain)
-            }
             DiffLog::Adaptive { cold, hot, len, .. } => {
                 &&& (forall|k: int| 0 <= k < cold@.len() ==> (#[trigger] cold@[k]).wf())
                 &&& *len == adaptive_len(cold@, hot@)
@@ -672,7 +149,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     {
         match self {
             DiffLog::Adaptive { .. } => true,
-            DiffLog::Cols { .. } => false,
         }
     }
 
@@ -686,7 +162,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     {
         match self {
             DiffLog::Adaptive { hot, len, .. } => *len - hot.len(),
-            DiffLog::Cols { .. } => { proof { assert(false); } 0 },
         }
     }
 
@@ -694,7 +169,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     /// behaviour); false for plain live columns and the column-split form.
     pub open spec fn auto_seal_spec(&self) -> bool {
         match self {
-            DiffLog::Cols { .. } => false,
             DiffLog::Adaptive { auto_seal, .. } => *auto_seal,
         }
     }
@@ -704,7 +178,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         ensures b == self.auto_seal_spec(),
     {
         match self {
-            DiffLog::Cols { .. } => false,
             DiffLog::Adaptive { auto_seal, .. } => *auto_seal,
         }
     }
@@ -712,7 +185,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     /// Whether the index column is run-compressed (`Cols` with index-major runs).
     /// Field-layout-independent accessor; false for the adaptive representation.
     pub open spec fn is_runs_idx(&self) -> bool {
-        self is Cols && self->Cols_idxs is Runs
+        false
     }
 
     /// Whether this is the per-frame-adaptive representation.
@@ -724,7 +197,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     /// adaptive cold tier's length.
     pub open spec fn idx_cold_len_spec(&self) -> nat {
         match self {
-            DiffLog::Cols { idxs, .. } => idxs.cold_len_spec(),
             DiffLog::Adaptive { cold, .. } => cold_adaptive(cold@).len(),
         }
     }
@@ -740,7 +212,20 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         // `Cols` form remains for sealed/value-major columns only. Unlike the
         // A4 Auto tier (`new_adaptive`), a plain column does NOT seal on mark:
         // strata stay hot pairs until an eviction policy exists.
-        let r = DiffLog::Adaptive { cold: Vec::new(), hot: Vec::new(), len: 0, auto_seal: false };
+        Self::new_with_hint(CompressionMode::None, false)
+    }
+
+    /// The one constructor: empty tiered log with a mode hint and the
+    /// seal-on-mark policy bit. The legacy per-mode constructors map here;
+    /// the column-split representations are retired (exec-first
+    /// convergence, one live representation).
+    pub fn new_with_hint(hint: CompressionMode, auto_seal: bool) -> (r: DiffLog<T, I, VC>)
+        ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
+    {
+        let r = DiffLog::Adaptive {
+            cold: Vec::new(), hot: Vec::new(), len: 0,
+            auto_seal, mode_hint: hint,
+        };
         proof {
             reveal(cold_adaptive);
             assert(cold_adaptive(Seq::<ColdFrame<T, I, VC>>::empty()) =~= Seq::<(T, I)>::empty());
@@ -754,14 +239,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     pub fn new_dict() -> (r: DiffLog<T, I, VC>)
         ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
     {
-        let r = DiffLog::Cols {
-            idxs: DiffIdxs::Plain(Vec::new()),
-            vals: DiffVals::Dict { cold: Vec::new(), tail: Vec::new() },
-        };
-        proof { reveal(cold_vals); }
-        assert(cold_vals(Seq::<ValFrame<T>>::empty()) =~= Seq::<T>::empty());
-        assert(r@ =~= Seq::<(T, I)>::empty());
-        r
+        Self::new_with_hint(CompressionMode::ValueDict, false)
     }
 
     /// A fresh empty index-major log (the `IndexRuns` representation): no cold index
@@ -769,14 +247,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     pub fn new_runs() -> (r: DiffLog<T, I, VC>)
         ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
     {
-        let r = DiffLog::Cols {
-            idxs: DiffIdxs::Runs { cold: Vec::new(), tail: Vec::new() },
-            vals: DiffVals::Plain(Vec::new()),
-        };
-        proof { reveal(cold_idxs); }
-        assert(cold_idxs(Seq::<RunCol<(), I>>::empty()) =~= Seq::<I>::empty());
-        assert(r@ =~= Seq::<(T, I)>::empty());
-        r
+        Self::new_with_hint(CompressionMode::IndexRunsSorted, false)
     }
 
     /// A fresh empty per-frame-adaptive log (the `Auto` representation): no cold
@@ -784,11 +255,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     pub fn new_adaptive() -> (r: DiffLog<T, I, VC>)
         ensures r.wf(), r@ == Seq::<(T, I)>::empty(),
     {
-        let r = DiffLog::Adaptive { cold: Vec::new(), hot: Vec::new(), len: 0, auto_seal: true };
-        proof { reveal(cold_adaptive); }
-        assert(cold_adaptive(Seq::<ColdFrame<T, I, VC>>::empty()) =~= Seq::<(T, I)>::empty());
-        assert(r@ =~= Seq::<(T, I)>::empty());
-        r
+        Self::new_with_hint(CompressionMode::Auto, true)
     }
 
     /// Number of entries. Reads whichever column is plain (at most one compresses).
@@ -798,16 +265,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         ensures n == self@.len(),
     {
         match self {
-            DiffLog::Cols { idxs, vals } => {
-                match idxs {
-                    DiffIdxs::Plain(v) => v.len(),
-                    DiffIdxs::Runs { .. } => match vals {
-                        DiffVals::Plain(vv) => vv.len(),
-                        // Unreachable: wf gives idxs is Runs ==> vals is Plain.
-                        DiffVals::Dict { .. } => { assert(false); 0 }
-                    },
-                }
-            }
             DiffLog::Adaptive { len, .. } => *len,
         }
     }
@@ -862,7 +319,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                     None
                 }
             }
-            DiffLog::Cols { .. } => None,
         }
     }
 
@@ -873,19 +329,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                 && forall|k: int| 0 <= k < hi - lo ==> #[trigger] sl@[k] == self@[lo + k].1,
     {
         match self {
-            DiffLog::Cols { idxs, vals } => {
-                match idxs {
-                    DiffIdxs::Plain(v) => {
-                        proof {
-                            assert(forall|k: int| 0 <= k < hi - lo
-                                ==> #[trigger] v@[lo + k] == self@[lo + k].1);
-                        }
-                        let sl = vstd::slice::slice_subrange(v.as_slice(), lo, hi);
-                        Some(sl)
-                    }
-                    DiffIdxs::Runs { .. } => None,
-                }
-            }
             DiffLog::Adaptive { .. } => None,
         }
     }
@@ -941,29 +384,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     #[verifier::external_body]
     pub fn heap_bytes(&self) -> usize {
         match self {
-            DiffLog::Cols { idxs, vals } => {
-                let vbytes = match vals {
-                    DiffVals::Plain(v) => v.capacity() * core::mem::size_of::<T>(),
-                    DiffVals::Dict { cold, tail } => {
-                        let mut b = tail.capacity() * core::mem::size_of::<T>();
-                        for f in cold.iter() {
-                            b += f.byte_len();
-                        }
-                        b
-                    }
-                };
-                let ibytes = match idxs {
-                    DiffIdxs::Plain(v) => v.capacity() * core::mem::size_of::<I>(),
-                    DiffIdxs::Runs { cold, tail } => {
-                        let mut b = tail.capacity() * core::mem::size_of::<I>();
-                        for f in cold.iter() {
-                            b += f.byte_len();
-                        }
-                        b
-                    }
-                };
-                ibytes + vbytes
-            }
             DiffLog::Adaptive { cold, hot, .. } => {
                 let mut b = hot.capacity() * (core::mem::size_of::<T>() + core::mem::size_of::<I>());
                 for f in cold.iter() {
@@ -982,55 +402,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         ensures e == self@[i as int],
     {
         match self {
-            DiffLog::Cols { idxs, vals } => {
-                let idx = idxs.idx_at_exec(i);
-                let total = self.len();
-                match vals {
-                    DiffVals::Plain(v) => (v[i], idx),
-                    DiffVals::Dict { cold, tail } => {
-                        let tl = tail.len();
-                        proof { reveal(cold_vals); }
-                        assert(vals.len_spec() == total);
-                        let cold_len = total - tl;
-                        assert(cold_len == cold_vals(cold@).len());
-                        if i < cold_len {
-                            let clen = cold.len();
-                            let mut d: usize = i;
-                            let mut k: usize = 0;
-                            while cold[k].len() <= d
-                                invariant
-                                    0 <= k <= cold@.len(),
-                                    k < cold@.len(),
-                                    cold@.len() == clen,
-                                    forall|kk: int| 0 <= kk < cold@.len() ==> (#[trigger] cold@[kk]).wf(),
-                                    i == d + cold_vals(cold@.subrange(0, k as int)).len(),
-                                    i < cold_vals(cold@).len(),
-                                decreases cold@.len() - k,
-                            {
-                                let flen = cold[k].len();
-                                proof {
-                                    assert(flen == cold@[k as int].decode().len());
-                                    assert(cold@.subrange(0, k + 1)
-                                        =~= cold@.subrange(0, k as int).push(cold@[k as int]));
-                                    lemma_cold_vals_snoc(cold@.subrange(0, k as int), cold@[k as int]);
-                                    assert(cold_vals(cold@.subrange(0, (k + 1) as int)).len()
-                                        == cold_vals(cold@.subrange(0, k as int)).len() + flen);
-                                    assert(flen <= d);
-                                    assert(cold_vals(cold@.subrange(0, (k + 1) as int)).len() <= i);
-                                    assert(cold@.subrange(0, cold@.len() as int) =~= cold@);
-                                    assert(k + 1 < cold@.len());
-                                }
-                                d = d - flen;
-                                k = k + 1;
-                            }
-                            proof { lemma_cold_vals_at(cold@, k as int, i as int); }
-                            (cold[k].decode_at(d), idx)
-                        } else {
-                            (tail[i - cold_len], idx)
-                        }
-                    }
-                }
-            }
             DiffLog::Adaptive { cold, hot, .. } => {
                 proof { reveal(cold_adaptive); }
                 let mut d: usize = i;
@@ -1080,14 +451,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         ensures final(self).wf(), final(self)@ == old(self)@.push((t, idx)),
     {
         match self {
-            DiffLog::Cols { idxs, vals } => {
-                idxs.push_idx(idx);
-                match vals {
-                    DiffVals::Plain(v) => v.push(t),
-                    DiffVals::Dict { tail, .. } => tail.push(t),
-                }
-                assert(self@ =~= old(self)@.push((t, idx)));
-            }
             DiffLog::Adaptive { cold, hot, len, .. } => {
                 hot.push((t, idx));
                 // Increment, not recompute: this is the write path's hot line
@@ -1118,58 +481,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         ensures final(self).wf(), final(self)@ == old(self)@,
     {
         match self {
-            DiffLog::Cols { idxs, vals } => {
-                // Index-major fold: coalesce the hot index tail into one immutable cold
-                // RunCol frame, dropping the stored index column to run starts.
-                match idxs {
-                    DiffIdxs::Plain(_) => {}
-                    DiffIdxs::Runs { cold, tail } => {
-                        let ghost cold0 = cold@;
-                        let ghost tail0 = tail@;
-                        let mut pairs: Vec<((), I)> = Vec::new();
-                        let mut j: usize = 0;
-                        while j < tail.len()
-                            invariant
-                                0 <= j <= tail@.len(),
-                                pairs@.len() == j,
-                                forall|k: int| 0 <= k < j ==> #[trigger] pairs@[k] == ((), tail@[k]),
-                            decreases tail@.len() - j,
-                        {
-                            pairs.push(((), tail[j]));
-                            j += 1;
-                        }
-                        let f: RunCol<(), I> = RunCol::compress(&pairs);
-                        let ghost fg = f;
-                        proof {
-                            assert(f.idx_seq() =~= tail0);
-                            lemma_cold_idxs_snoc(cold0, fg);
-                        }
-                        cold.push(f);
-                        *tail = Vec::new();
-                        proof {
-                            assert(cold@ =~= cold0.push(fg));
-                            assert(cold_idxs(cold@) =~= cold_idxs(cold0) + tail0);
-                        }
-                    }
-                }
-                // Value-major fold: coalesce the hot value tail into one cold frame.
-                match vals {
-                    DiffVals::Plain(_) => {}
-                    DiffVals::Dict { cold, tail } => {
-                        let ghost cold0 = cold@;
-                        let ghost tail0 = tail@;
-                        let f = ValFrame::compress(tail);
-                        let ghost fg = f;
-                        proof { lemma_cold_vals_snoc(cold0, fg); }
-                        cold.push(f);
-                        *tail = Vec::new();
-                        proof {
-                            assert(cold@ =~= cold0.push(fg));
-                            assert(cold_vals(cold@) =~= cold_vals(cold0) + tail0);
-                        }
-                    }
-                }
-            }
             // Adaptive: no write-order fold here (its mark path is mark_and_compact_adaptive);
             // a no-op preserves the view.
             DiffLog::Adaptive { .. } => {}
@@ -1210,120 +521,18 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
             crate::diff_compress::unique_idx(final(self)@.subrange(
                 old(self).idx_cold_len_spec() as int, final(self)@.len() as int)),
     {
-        proof { reveal(cold_idxs); }
-        let ghost n: int = self@.len() as int;
-        let ghost ts: int = self.idx_cold_len_spec() as int;
-        match self {
-            DiffLog::Cols { idxs: DiffIdxs::Runs { cold, tail }, vals: DiffVals::Plain(vals) } => {
-                let ghost cold0 = cold@;
-                let ghost vals0 = vals@;
-                let ghost tail0 = tail@;
-                let tl = tail.len();
-                let base = vals.len() - tl;  // == ts == cold_idxs(cold@).len()
-                assert(base == ts);
-                // Gather the tail's (value, index) pairs in capture order, indexing
-                // the value column absolutely (i = base + q) to avoid an overflow check.
-                let mut pairs: Vec<(T, I)> = Vec::new();
-                let vlen = vals.len();
-                let mut i: usize = base;
-                while i < vlen
-                    invariant
-                        base <= i <= vlen,
-                        vlen == vals@.len(),
-                        tl == tail@.len(),
-                        base + tl == vals@.len(),
-                        vals@ == vals0,
-                        tail@ == tail0,
-                        pairs@.len() == i - base,
-                        forall|q: int| 0 <= q < i - base ==>
-                            #[trigger] pairs@[q] == (vals0[base + q], tail0[q]),
-                    decreases vlen - i,
-                {
-                    pairs.push((vals[i], tail[i - base]));
-                    i += 1;
-                }
-                assert(pairs@ =~= Seq::new(tl as nat, |q: int| (vals0[base + q], tail0[q])));
-                // Sort by index (multiset-preserving permutation).
-                let sorted = sort_frame_by_index(&pairs);
-                assert(sorted@.to_multiset() == pairs@.to_multiset());
-                // Write sorted values back into the plain value tail (absolute index).
-                let mut iw: usize = base;
-                while iw < vlen
-                    invariant
-                        base <= iw <= vlen,
-                        vlen == vals@.len(),
-                        sorted@.len() == tl,
-                        base + tl == vals@.len(),
-                        forall|q: int| 0 <= q < iw - base ==> #[trigger] vals@[base + q] == sorted@[q].0,
-                        forall|q: int| 0 <= q < base ==> #[trigger] vals@[q] == vals0[q],
-                        forall|q: int| iw - base <= q < tl ==> #[trigger] vals@[base + q] == vals0[base + q],
-                    decreases vlen - iw,
-                {
-                    vals.set(iw, sorted[iw - base].0);
-                    iw += 1;
-                }
-                // Fold the sorted indices into one cold RunCol frame ((),index pairs).
-                let mut idx_pairs: Vec<((), I)> = Vec::new();
-                let mut p: usize = 0;
-                while p < tl
-                    invariant
-                        0 <= p <= tl,
-                        sorted@.len() == tl,
-                        idx_pairs@.len() == p,
-                        forall|q: int| 0 <= q < p ==> #[trigger] idx_pairs@[q] == ((), sorted@[q].1),
-                    decreases tl - p,
-                {
-                    idx_pairs.push(((), sorted[p].1));
-                    p += 1;
-                }
-                assert(idx_pairs@ =~= Seq::new(tl as nat, |q: int| ((), sorted@[q].1)));
-                let f: RunCol<(), I> = RunCol::compress(&idx_pairs);
-                let ghost fg = f;
-                proof {
-                    // f.idx_seq() == the sorted index column.
-                    assert(f.idx_seq() =~= Seq::new(tl as nat, |q: int| sorted@[q].1));
-                    lemma_cold_idxs_snoc(cold0, fg);
-                }
-                cold.push(f);
-                *tail = Vec::new();
-                proof {
-                    assert(cold@ =~= cold0.push(fg));
-                    assert(cold_idxs(cold@) =~= cold_idxs(cold0) + fg.idx_seq());
-                    let idxseq = fg.idx_seq();
-                    // cold_idxs is unchanged below ts and equals the sorted indices above.
-                    assert forall|i: int| 0 <= i < ts implies
-                        cold_idxs(cold@)[i] == cold_idxs(cold0)[i] by {}
-                    assert forall|q: int| 0 <= q < tl implies
-                        cold_idxs(cold@)[ts + q] == sorted@[q].1 by {
-                        assert(cold_idxs(cold@)[ts + q] == idxseq[q]);
-                    }
-                    // Prefix [0, ts) of the view is untouched.
-                    assert(self@.subrange(0, ts) =~= old(self)@.subrange(0, ts)) by {
-                        assert forall|i: int| 0 <= i < ts implies
-                            self@[i] == old(self)@[i] by {}
-                    }
-                    // Region [ts, n): new view == sorted, old view == pairs (capture order).
-                    assert(self@.subrange(ts, n) =~= sorted@) by {
-                        assert forall|q: int| 0 <= q < tl implies
-                            self@[ts + q] == sorted@[q] by {}
-                    }
-                    assert(old(self)@.subrange(ts, n) =~= pairs@) by {
-                        assert forall|q: int| 0 <= q < tl implies
-                            old(self)@[ts + q] == pairs@[q] by {}
-                    }
-                    assert(self@.subrange(ts, n).to_multiset()
-                        == old(self)@.subrange(ts, n).to_multiset());
-                    // Uniqueness carries: old region == pairs (unique by requires),
-                    // sort preserves unique, new region == sorted.
-                    assert(crate::diff_compress::unique_idx(pairs@));
-                    assert(crate::diff_compress::unique_idx(sorted@));
-                    assert(crate::diff_compress::unique_idx(self@.subrange(ts, n)));
-                }
-            }
-            _ => {
-                // Unreachable: requires idxs is Runs, and wf gives vals is Plain then.
-                assert(false);
-            }
+        // Retired representation: the sorted fold rides the tiered dedupe
+        // fold (identity dedupe on the unique stratum, then the sorted run
+        // encoder). `is_runs_idx` is constantly false now, so the requires
+        // is unsatisfiable and no verified caller exists; the body stays
+        // behavior-correct for the runtime harnesses that still call it.
+        let cl = match self {
+            DiffLog::Adaptive { hot, len, .. } => *len - hot.len(),
+        };
+        let n2 = self.len();
+        if n2 > cl {
+            let _ = self.compact_adaptive_front_dedupe(
+                CompressionMode::IndexRunsSorted, n2 - cl);
         }
     }
 
@@ -1403,7 +612,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                     }
                 }
             }
-            DiffLog::Cols { .. } => { proof { assert(false); } }
         }
     }
 
@@ -1534,7 +742,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                     }
                 }
             }
-            DiffLog::Cols { .. } => { proof { assert(false); } }
         }
     }
 
@@ -1675,10 +882,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                 }
                 kept
             }
-            DiffLog::Cols { .. } => {
-                proof { assert(false); }
-                0
-            }
         }
     }
 
@@ -1746,7 +949,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                     }
                 }
             }
-            DiffLog::Cols { .. } => { proof { assert(false); } }
         }
     }
 
@@ -1758,20 +960,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         ensures final(self).wf(), final(self)@ == old(self)@,
     {
         match self {
-            DiffLog::Cols { idxs, vals } => {
-                match idxs {
-                    DiffIdxs::Plain(v) =>
-                        crate::parallel_store::shrink_vec_capacity(v, factor, headroom),
-                    DiffIdxs::Runs { tail, .. } =>
-                        crate::parallel_store::shrink_vec_capacity(tail, factor, headroom),
-                }
-                match vals {
-                    DiffVals::Plain(v) =>
-                        crate::parallel_store::shrink_vec_capacity(v, factor, headroom),
-                    DiffVals::Dict { tail, .. } =>
-                        crate::parallel_store::shrink_vec_capacity(tail, factor, headroom),
-                }
-            }
             DiffLog::Adaptive { hot, .. } =>
                 crate::parallel_store::shrink_vec_capacity(hot, factor, headroom),
         }
@@ -1789,11 +977,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     #[verifier::external_body]
     pub fn cold_frame_count(&self) -> usize {
         match self {
-            DiffLog::Cols { idxs, vals } => {
-                let a = match idxs { DiffIdxs::Runs { cold, .. } => cold.len(), _ => 0 };
-                let b = match vals { DiffVals::Dict { cold, .. } => cold.len(), _ => 0 };
-                if a > b { a } else { b }
-            }
             DiffLog::Adaptive { cold, .. } => cold.len(),
         }
     }
@@ -1808,7 +991,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         ensures b == (self.is_adaptive() && self.idx_cold_len_spec() == ds),
     {
         match self {
-            DiffLog::Cols { .. } => false,
             DiffLog::Adaptive { hot, len, .. } => {
                 proof { reveal(cold_adaptive); }
                 *len - hot.len() == ds
@@ -1905,9 +1087,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                 old(target)@, self@, lo as int, hi as int),
     {
         match self {
-            DiffLog::Cols { .. } => {
-                self.restore_scatter(lo, hi, target);
-            }
             DiffLog::Adaptive { cold, hot, len, .. } => {
                 // The fast path decomposes a SUFFIX [lo, len) frame by frame; a
                 // proper sub-suffix (hi < len) only arises off the restore path, so
@@ -2241,10 +1420,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
                 }
                 out
             }
-            DiffLog::Cols { .. } => {
-                proof { assert(false); }
-                Vec::new()
-            }
         }
     }
 
@@ -2257,26 +1432,35 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
         ensures final(self).wf(), final(self)@ == old(self)@.subrange(n as int, old(self)@.len() as int),
     {
         let len = self.len();
-        let mut new_idxs: Vec<I> = Vec::new();
-        let mut new_vals: Vec<T> = Vec::new();
+        let (hint, seal) = match self {
+            DiffLog::Adaptive { auto_seal, mode_hint, .. } => (*mode_hint, *auto_seal),
+        };
+        let mut pairs: Vec<(T, I)> = Vec::new();
         let mut i: usize = n;
         while i < len
             invariant
                 n <= i <= len,
                 len == self@.len(),
                 self.wf(),
-                new_idxs@.len() == i - n,
-                new_vals@.len() == i - n,
-                forall|k: int| 0 <= k < i - n ==> new_idxs@[k] == self@[n + k].1,
-                forall|k: int| 0 <= k < i - n ==> new_vals@[k] == self@[n + k].0,
+                pairs@.len() == i - n,
+                forall|k: int| 0 <= k < i - n ==> #[trigger] pairs@[k] == self@[n + k],
             decreases len - i,
         {
-            let (v, idx) = self.index(i);
-            new_vals.push(v);
-            new_idxs.push(idx);
+            let e = self.index(i);
+            pairs.push(e);
             i += 1;
         }
-        *self = DiffLog::Cols { idxs: DiffIdxs::Plain(new_idxs), vals: DiffVals::Plain(new_vals) };
+        let plen = pairs.len();
+        let r = DiffLog::Adaptive {
+            cold: Vec::new(), hot: pairs, len: plen,
+            auto_seal: seal, mode_hint: hint,
+        };
+        proof {
+            reveal(cold_adaptive);
+            assert(cold_adaptive(Seq::<ColdFrame<T, I, VC>>::empty())
+                =~= Seq::<(T, I)>::empty());
+        }
+        *self = r;
         assert(self@ =~= old(self)@.subrange(n as int, old(self)@.len() as int));
     }
 
@@ -2290,173 +1474,6 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Dif
     {
         let len = self.len();
         match self {
-        DiffLog::Cols { idxs, vals } => {
-        // Index side: Plain truncates in place; Runs mirrors the value partial-frame
-        // logic (keep whole cold frames, decode the split frame's kept prefix).
-        match idxs {
-            DiffIdxs::Plain(v) => {
-                v.truncate(n);
-            }
-            DiffIdxs::Runs { cold, tail } => {
-                proof { reveal(cold_idxs); }
-                assert(cold_idxs(cold@).len() + tail@.len() == len);
-                let cold_len = len - tail.len();
-                assert(cold_len == cold_idxs(cold@).len());
-                if n >= cold_len {
-                    tail.truncate(n - cold_len);
-                    proof { assert(cold_idxs(cold@).len() == cold_len); }
-                } else {
-                    let ghost cold_all = cold@;
-                    let clen = cold.len();
-                    let mut d: usize = n;
-                    let mut k: usize = 0;
-                    while cold[k].entry_len() <= d
-                        invariant
-                            0 <= k <= cold@.len(),
-                            k < cold@.len(),
-                            cold@.len() == clen,
-                            cold@ == cold_all,
-                            forall|kk: int| 0 <= kk < cold@.len() ==> (#[trigger] cold@[kk]).wf(),
-                            n == d + cold_idxs(cold@.subrange(0, k as int)).len(),
-                            n < cold_idxs(cold@).len(),
-                        decreases cold@.len() - k,
-                    {
-                        let flen = cold[k].entry_len();
-                        proof {
-                            assert(flen == cold@[k as int].idx_seq().len());
-                            assert(cold@.subrange(0, k + 1)
-                                =~= cold@.subrange(0, k as int).push(cold@[k as int]));
-                            lemma_cold_idxs_snoc(cold@.subrange(0, k as int), cold@[k as int]);
-                            assert(cold_idxs(cold@.subrange(0, (k + 1) as int)).len()
-                                == cold_idxs(cold@.subrange(0, k as int)).len() + flen);
-                            assert(flen <= d);
-                            assert(cold_idxs(cold@.subrange(0, (k + 1) as int)).len() <= n);
-                            assert(cold@.subrange(0, cold@.len() as int) =~= cold@);
-                            assert(k + 1 < cold@.len());
-                        }
-                        d = d - flen;
-                        k = k + 1;
-                    }
-                    let ghost off = cold_idxs(cold_all.subrange(0, k as int)).len();
-                    let mut new_tail: Vec<I> = Vec::new();
-                    let mut j: usize = 0;
-                    while j < d
-                        invariant
-                            0 <= j <= d,
-                            k < cold_all.len(),
-                            cold@ == cold_all,
-                            forall|kk: int| 0 <= kk < cold@.len() ==> (#[trigger] cold@[kk]).wf(),
-                            d <= cold_all[k as int].idx_seq().len(),
-                            new_tail@.len() == j,
-                            forall|t: int| 0 <= t < j ==>
-                                #[trigger] new_tail@[t] == cold_all[k as int].idx_seq()[t],
-                        decreases d - j,
-                    {
-                        new_tail.push(cold[k].idx_at(j));
-                        j += 1;
-                    }
-                    cold.truncate(k);
-                    *tail = new_tail;
-                    proof {
-                        assert(cold@ =~= cold_all.subrange(0, k as int));
-                        lemma_cold_idxs_split(cold_all, k as int);
-                        assert(cold_idxs(cold@).len() == off);
-                        lemma_cold_idxs_at_prefix(cold_all, k as int, d as int);
-                    }
-                }
-            }
-        }
-        // Value side: Plain truncates in place; Dict mirrors the same partial-frame
-        // logic. At most one side is compressed (the other is a plain Vec truncate).
-        match vals {
-            DiffVals::Plain(v) => {
-                v.truncate(n);
-                assert(self@ =~= old(self)@.subrange(0, n as int));
-            }
-            DiffVals::Dict { cold, tail } => {
-                proof { reveal(cold_vals); }
-                let cold_len = len - tail.len();
-                assert(cold_len == cold_vals(cold@).len());
-                if n >= cold_len {
-                    // `n` is in (or at the start of) the hot tail: keep all cold.
-                    tail.truncate(n - cold_len);
-                    proof {
-                        assert(cold_vals(cold@).len() == cold_len);
-                    }
-                    assert(self@ =~= old(self)@.subrange(0, n as int));
-                } else {
-                    // `n` is within the cold region: walk to the frame containing
-                    // `n`, keep whole frames before it, decode its kept prefix into a
-                    // fresh plain tail, drop the rest. (Vec restores to a frame
-                    // boundary, `rem == 0`, so the decode loop is usually empty; the
-                    // mid-frame `rem > 0` path is correct but off the Vec path.)
-                    let ghost cold_all = cold@;
-                    let clen = cold.len();
-                    // Carry the remaining offset `d` (subtraction only). `d == n - prefix_k`.
-                    let mut d: usize = n;
-                    let mut k: usize = 0;
-                    while cold[k].len() <= d
-                        invariant
-                            0 <= k <= cold@.len(),
-                            k < cold@.len(),
-                            cold@.len() == clen,
-                            cold@ == cold_all,
-                            forall|kk: int| 0 <= kk < cold@.len() ==> (#[trigger] cold@[kk]).wf(),
-                            n == d + cold_vals(cold@.subrange(0, k as int)).len(),
-                            n < cold_vals(cold@).len(),
-                        decreases cold@.len() - k,
-                    {
-                        let flen = cold[k].len();
-                        proof {
-                            assert(flen == cold@[k as int].decode().len());
-                            assert(cold@.subrange(0, k + 1)
-                                =~= cold@.subrange(0, k as int).push(cold@[k as int]));
-                            lemma_cold_vals_snoc(cold@.subrange(0, k as int), cold@[k as int]);
-                            assert(cold_vals(cold@.subrange(0, (k + 1) as int)).len()
-                                == cold_vals(cold@.subrange(0, k as int)).len() + flen);
-                            assert(flen <= d);
-                            assert(cold_vals(cold@.subrange(0, (k + 1) as int)).len() <= n);
-                            assert(cold@.subrange(0, cold@.len() as int) =~= cold@);
-                            assert(k + 1 < cold@.len());
-                        }
-                        d = d - flen;
-                        k = k + 1;
-                    }
-                    // `d == n - prefix_k == rem`; decode frame k's kept prefix [0, d).
-                    let ghost off = cold_vals(cold_all.subrange(0, k as int)).len();
-                    let mut new_tail: Vec<T> = Vec::new();
-                    let mut j: usize = 0;
-                    while j < d
-                        invariant
-                            0 <= j <= d,
-                            k < cold_all.len(),
-                            cold@ == cold_all,
-                            forall|kk: int| 0 <= kk < cold@.len() ==> (#[trigger] cold@[kk]).wf(),
-                            d <= cold_all[k as int].decode().len(),
-                            new_tail@.len() == j,
-                            forall|t: int| 0 <= t < j ==>
-                                #[trigger] new_tail@[t] == cold_all[k as int].decode()[t],
-                        decreases d - j,
-                    {
-                        new_tail.push(cold[k].decode_at(j));
-                        j += 1;
-                    }
-                    // Keep frames [0, k) in place (no clone), set the decoded tail.
-                    cold.truncate(k);
-                    *tail = new_tail;
-                    proof {
-                        assert(cold@ =~= cold_all.subrange(0, k as int));
-                        lemma_cold_vals_split(cold_all, k as int);
-                        // cold_vals(cold@) is the length-`off` prefix of cold_vals(cold_all),
-                        // and n == off + d.
-                        assert(cold_vals(cold@).len() == off);
-                        lemma_cold_vals_at_prefix(cold_all, k as int, d as int);
-                    }
-                    assert(self@ =~= old(self)@.subrange(0, n as int));
-                }
-            }
-        }
-        }
         DiffLog::Adaptive { cold, hot, len: lenf, .. } => {
             proof { reveal(cold_adaptive); }
             assert(cold_adaptive(cold@).len() + hot@.len() == len);
