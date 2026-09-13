@@ -764,3 +764,31 @@ lemma_phys_cell_eq_overlay for the two hot disciplines); its body is not yet
 discharged (wf re-establishment on the truncated state; cold-run telescoping via
 compress_all_hot's ledgered reconstruction). It remains external_body - NOT
 claimed proven - pending the body assembly.
+
+## restore_frame body: open-frame-is-hot tension surfaced (2026-09-13)
+
+Building the wf re-establishment for restore_frame's post-state surfaces a
+design point that external_body had hidden: restoring to a COLD target
+(target < cold_count, or target == cold_count) truncates hot_stack to empty
+while trail_frames.len() == target > 0. wf_for_snap's open-frame-is-hot clause
+(tf.len() > 0 ==> hot_stack.len() > 0) then FAILS - the surviving top frame is
+cold, but the invariant says a live stack always has a hot frame.
+
+This is not mere proof volume; it needs a design decision, one of:
+  (a) restore re-opens the target as an empty HOT frame (migrate the cold top
+      back to the hot tier / push a fresh hot frame at the restored length), so
+      the top is always hot - matches "mark opens a hot frame" and keeps the
+      invariant. This changes restore_frame's tail (it currently only refreshes
+      active_saved_len + finish_restore, never re-opening).
+  (b) relax open-frame-is-hot to permit a cold top in the post-restore state,
+      with the next mark re-opening a hot frame - but every mutator's proof
+      reads this clause, so relaxing it ripples widely.
+
+(a) is the likely-correct design (a restored vector should be ready for the next
+write/mark with a hot open frame). It means restore_frame's HOT and COLD paths
+both end by opening a hot frame at the target's saved_len, and the wf
+re-establishment then has a genuine (empty) hot top to satisfy the invariant.
+
+This is the remaining restore_frame body work, now understood to include a tail
+redesign (re-open a hot frame) ahead of the wf re-establishment and the cold
+telescoping. All reconstruction lemmas remain proven and reusable.
