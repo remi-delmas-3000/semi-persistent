@@ -5425,6 +5425,68 @@ where
         // (goal doc §6) and is gone for good; A2b's eviction replaces it.
     }
 
+    /// wf re-establishment, part 1: after restore truncates the ghost trail to
+    /// the target frame's boundary, the surviving frames [0, target) keep their
+    /// `frame_inv_range`. Each survivor's stratum lies within the retained prefix
+    /// [0, b), its layer is unchanged (an inner snapshot, or - for the new top
+    /// frame target-1 - the view, which restore sets to snapshots[target] ==
+    /// that frame's old layer), so `lemma_frame_inv_range_shift` transfers it.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_restore_survivors_frame_inv(&self, old_self: Self, target: int)
+        requires
+            old_self.wf_for_snap(),
+            0 <= target < old_self.trail_frames@.len(),
+            self.trail_frames@ == old_self.trail_frames@.subrange(0, target),
+            self.full_trail@ == old_self.full_trail@.subrange(
+                0, old_self.trail_frames@[target] as int),
+            self.snapshots@ == old_self.snapshots@.subrange(0, target),
+            self.view() == old_self.snapshots@[target as int],
+        ensures
+            forall|k: int| 0 <= k < target ==> #[trigger] self.frame_inv_range_holds(k),
+    {
+        let b = old_self.trail_frames@[target] as int;
+        old_self.lemma_diff_start_le_n(target);
+        assert(b <= old_self.full_trail@.len());
+        assert forall|k: int| 0 <= k < target implies
+            #[trigger] self.frame_inv_range_holds(k) by {
+            assert(old_self.frame_inv_range_holds(k));
+            let lo = self.g_start(k);
+            let hi = self.g_end(k);
+            // Boundaries match old_self: trail_frames prefix preserved.
+            assert(self.trail_frames@[k] == old_self.trail_frames@[k]);
+            assert(lo == old_self.g_start(k));
+            old_self.lemma_diff_start_le_n(k);
+            if k + 1 < target {
+                assert(self.trail_frames@[k + 1] == old_self.trail_frames@[k + 1]);
+                assert(hi == old_self.g_start(k + 1));
+                old_self.lemma_diff_start_monotone(k + 1, target);
+                assert(hi <= b);
+                assert(self.layer_above_at(k) == self.snapshots@[k + 1]);
+                assert(self.layer_above_at(k) == old_self.layer_above_at(k));
+            } else {
+                // k == target - 1: g_end is the truncation point b; layer is
+                // the view == snapshots[target] == old layer_above(target-1).
+                assert(hi == self.full_trail@.len());
+                assert(hi == b);
+                assert(self.layer_above_at(k) == self.view());
+                assert(old_self.layer_above_at(k) == old_self.snapshots@[target as int]);
+                assert(self.layer_above_at(k) == old_self.layer_above_at(k));
+            }
+            assert(old_self.g_end(k) == hi);
+            assert(self.snapshots@[k] == old_self.snapshots@[k]);
+            assert(lo <= hi <= b);
+            // Windows agree: self.full_trail == old.subrange(0,b), stratum in [0,b).
+            assert forall|q: int| 0 <= q < hi - lo implies
+                #[trigger] self.full_trail@[lo + q] == old_self.full_trail@[lo + q] by {
+                assert(self.full_trail@[lo + q] == old_self.full_trail@.subrange(0, b)[lo + q]);
+            }
+            lemma_frame_inv_range_shift::<T, I>(
+                self.layer_above_at(k), old_self.full_trail@, self.full_trail@,
+                lo, lo, hi - lo, self.snapshots@[k], self.g_saved_len(k));
+        }
+    }
+
     /// Trail-discipline reconstruction: for a hot target under the append-always
     /// discipline, replaying the physical diff_log suffix `[hf.start, n)`
     /// reconstructs `snapshots[target]`. The trail bridge makes that suffix
