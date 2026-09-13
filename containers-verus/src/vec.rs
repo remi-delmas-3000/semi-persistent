@@ -5558,6 +5558,45 @@ where
             self.snapshots = Ghost(self.snapshots@.subrange(0, target_index as int));
         }
 
+        // Re-materialize the top cold frame as hot when the restore left a
+        // cold top (target <= cold_count), so the open frame is always hot
+        // (production parity: a restored vector is ready for the next capture,
+        // and Vec::wf's open-frame-is-hot invariant holds). View-preserving:
+        // store.data is already reconstructed; this only moves the top frame's
+        // representation from the cold pools back into diff_log, popping it off
+        // the cold stack and pushing it as a hot frame (depth unchanged).
+        let dnow = self.depth_exec();
+        let know = self.cold_stack.len();
+        if dnow > 0 && dnow <= know {
+            let topc = self.cold_stack[dnow - 1];
+            let hstart = self.diff_log.len();
+            let mut rr = topc.runs_start;
+            while rr < topc.runs_start + topc.runs_len {
+                let run = self.cold_index_runs[rr];
+                let b = run.base.as_usize();
+                let mut q = 0;
+                while q < run.len {
+                    if let Some(ix) = I::try_from_usize(b + q) {
+                        self.diff_log.push((self.cold_value_pool[run.start + q], ix));
+                    }
+                    q += 1;
+                }
+                rr += 1;
+            }
+            let hend = self.diff_log.len();
+            let vcut = if topc.runs_len > 0 || topc.runs_start < self.cold_index_runs.len() {
+                self.cold_index_runs[topc.runs_start].start
+            } else {
+                self.cold_value_pool.len()
+            };
+            self.cold_index_runs.truncate(topc.runs_start);
+            self.cold_value_pool.truncate(vcut);
+            self.cold_stack.truncate(dnow - 1);
+            self.hot_stack.push(crate::frame::HotFrame {
+                saved_len: topc.saved_len, start: hstart, end: hend,
+            });
+        }
+
         // New top frame: refresh active_saved_len and rebuild flags.
         let depth2 = self.depth_exec();
         if depth2 > 0 {
