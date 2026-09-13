@@ -1824,8 +1824,8 @@ where
         &&& (tf.len() > 0 ==> tf[0] == 0)
         &&& (tf.len() > 0 ==> tf[(tf.len() - 1) as int] <= n)
         // Ghost stratum boundaries are monotone in the ghost trail.
-        &&& (forall|k: int| 0 <= k && k + 1 < tf.len() ==>
-                #[trigger] tf[k] <= #[trigger] tf[k + 1])
+        &&& (forall|k: int| #![trigger tf[k]] 0 <= k && k + 1 < tf.len() ==>
+                tf[k] <= tf[k + 1])
         // THE restore-correctness statement, once, against the ghost trail
         // (proof architecture: every physical representation relates to
         // full_trail by an abstraction theorem; reconstruction only ever
@@ -1905,9 +1905,9 @@ where
             self.store == old_self.store,
             self.trail_frames@ == old_self.trail_frames@,
             self.full_trail@ == old_self.full_trail@,
-            // Full structural equality (not just `@`): `diff_log.wf()` is a wf
-            // conjunct now, and it reads the concrete idxs/vals, not the view.
             self.diff_log == old_self.diff_log,
+            self.hot_stack@ == old_self.hot_stack@,
+            self.cold_stack@ == old_self.cold_stack@,
             self.snapshots@ == old_self.snapshots@,
             self.active_saved_len == old_self.active_saved_len,
         ensures
@@ -1924,21 +1924,15 @@ where
         assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
             #[trigger] frame_inv_range::<T, I>(
                 self.layer_above_at(k),
-                self.diff_log@,
+                self.full_trail@,
                 self.g_start(k),
-                self.stratum_end(k),
+                self.g_end(k),
                 self.snapshots@[k],
-                self.g_saved_len(k))
+                self.snapshots@[k].len())
         by {
             assert(self.layer_above_at(k) == old_self.layer_above_at(k));
-            assert(self.stratum_end(k) == old_self.stratum_end(k));
-            assert(frame_inv_range::<T, I>(
-                old_self.layer_above_at(k),
-                old_self.diff_log@,
-                old_self.g_start(k),
-                old_self.stratum_end(k),
-                old_self.snapshots@[k],
-                old_self.g_saved_len(k)));
+            assert(self.g_end(k) == old_self.g_end(k));
+            assert(old_self.frame_inv_range_holds(k));
         }
         assert(self.wf_for_snap());
         // diff_log.wf() transfers by structural equality with old_self.
@@ -1995,7 +1989,9 @@ where
     {
         if a < b {
             self.lemma_diff_start_monotone(a, b - 1);
-            // adjacent step (b-1, b) from wf_for_snap's monotone clause
+            // adjacent step (b-1, b) from wf_for_snap's monotone clause;
+            // the bound makes k = b-1 an instantiation the trigger accepts.
+            assert(0 <= b - 1 && (b - 1) + 1 < self.trail_frames@.len());
             assert(self.trail_frames@[b - 1] <= self.trail_frames@[b]);
         }
     }
@@ -2353,7 +2349,20 @@ where
         match policy {
             ShrinkPolicy::Never => {}
             ShrinkPolicy::IfOverallocated { factor, headroom } => {
+                let ghost pre = *self;
                 self.store.shrink_if(factor, headroom);
+                proof {
+                    // repr_ok reads diff_log@/hot_stack@/full_trail@/g_start,
+                    // none of which shrink_if touches (it changes store
+                    // capacity only, preserving data()/captured()).
+                    assert(self.diff_log@ == pre.diff_log@);
+                    assert(self.hot_stack@ == pre.hot_stack@);
+                    assert(self.cold_stack@ == pre.cold_stack@);
+                    assert(self.full_trail@ == pre.full_trail@);
+                    // repr_ok reads only those (all pinned == pre, which
+                    // satisfied it via old wf), so it carries by congruence.
+                    assert(self.repr_ok());
+                }
                 // Production parity: the same overallocation check applies to
                 // the diff log at mark time (shrink-at-mark ratcheting).
                 // Observably inert (contract: element sequence unchanged).
@@ -2389,6 +2398,18 @@ where
             assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
                 self.layer_above_at(k) == old(self).layer_above_at(k)
                 && self.stratum_end(k) == old(self).stratum_end(k) by {}
+            // Reconstruction forall transfers pointwise (all args pinned).
+            assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
+                #[trigger] frame_inv_range::<T, I>(
+                    self.layer_above_at(k), self.full_trail@, self.g_start(k),
+                    self.g_end(k), self.snapshots@[k], self.snapshots@[k].len())
+            by {
+                assert(old(self).frame_inv_range_holds(k));
+            }
+            // Frame-count bridge and repr_ok carry (stacks/log/trail pinned).
+            assert(self.cold_stack@ == old(self).cold_stack@);
+            assert(self.hot_stack@ == old(self).hot_stack@);
+            assert(self.repr_ok());
         }
     }
 
@@ -2951,14 +2972,16 @@ where
         assert(old_self.frame_inv_range_holds(k));
         let above_old = old_self.view();
         let above_new = self.view();
-        let diffs = self.diff_log@;
+        // Reconstruction is over the ghost trail; self.full_trail@ ==
+        // old_self.full_trail@ (requires), so `diffs` is the old stratum.
+        let diffs = self.full_trail@;
         let lo = self.g_start(k);
-        let hi = self.stratum_end(k);
+        let hi = self.g_end(k);
         let snap = self.snapshots@[k];
-        let sl = self.g_saved_len(k);
+        let sl = snap.len();
         assert(self.layer_above_at(k) == above_new);
         assert(old_self.layer_above_at(k) == above_old);
-        assert(self.stratum_end(k) == old_self.stratum_end(k));
+        assert(self.g_end(k) == old_self.g_end(k));
         // Per-cell transfer: same diffs/snap; view prefix preserved & longer.
         assert forall|j: int| 0 <= j < sl as int implies
             #[trigger] frame_cell_inv::<T, I>(above_new, diffs, lo, hi, snap, j)
