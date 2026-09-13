@@ -5585,6 +5585,43 @@ where
         }
     }
 
+    /// Trail-discipline reconstruction, lifted to every shared-prefix cell:
+    /// with `base == self.view()` the per-cell `lemma_reconstruct_trail`
+    /// base-agreement hypothesis is trivial, so replaying the physical diff_log
+    /// suffix `[hf.start, n)` reconstructs `snapshots[target][j]` for every cell
+    /// `j` present in both the current view and the target saved region. The
+    /// body composes this with `restore_overlay`'s ensure (post.data ==
+    /// overlay(pre.view, diff_log, hf.start, n)); cells beyond the current view
+    /// length (the pop-then-restore grow region) are captured in the tail and
+    /// handled from the diff entries directly, not this shared-prefix wrapper.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_reconstruct_hot_trail_all(&self, target: int)
+        requires
+            self.wf(),
+            !self.store.unique_capture_spec(),
+            self.cold_stack@.len() <= target < self.trail_frames@.len(),
+            self.hot_stack@.len() > 0,
+        ensures
+            forall|j: int| 0 <= j < self.g_saved_len(target) as int
+                && j < self.view().len()
+                ==> #[trigger] overlay::<T, I>(
+                        self.view(), self.diff_log@,
+                        self.hot_stack@[target - self.cold_stack@.len() as int].start as int,
+                        self.diff_log@.len() as int)[j]
+                    == self.snapshots@[target][j],
+    {
+        assert forall|j: int| 0 <= j < self.g_saved_len(target) as int
+            && j < self.view().len() implies
+            #[trigger] overlay::<T, I>(
+                self.view(), self.diff_log@,
+                self.hot_stack@[target - self.cold_stack@.len() as int].start as int,
+                self.diff_log@.len() as int)[j]
+            == self.snapshots@[target][j] by {
+            self.lemma_reconstruct_trail(target, self.view(), j);
+        }
+    }
+
     /// Trail-discipline reconstruction: for a hot target under the append-always
     /// discipline, replaying the physical diff_log suffix `[hf.start, n)`
     /// reconstructs `snapshots[target]`. The trail bridge makes that suffix
