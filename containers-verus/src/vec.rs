@@ -145,7 +145,6 @@ pub open(crate) spec fn frame_inv<T, I: IndexLike>(
 // `diffs[lo]` on top of `overlay(base, diffs, lo+1, hi)`, so the lower
 // index ends up outermost (winning). This is exactly the loop's result.
 
-/// Replay `diffs[lo..hi]` over `base` in reverse-index-wins order.
 // ---------------------------------------------------------------------------
 // Bare-log helpers (exec-first convergence, goal doc mainline-shape-plus-
 // coldstack). The hot log is a bare `std::vec::Vec<(T, I)>` again - mainline's
@@ -154,6 +153,8 @@ pub open(crate) spec fn frame_inv<T, I: IndexLike>(
 // (there is no cold region inside the log); the Option shape is kept so the
 // call sites' fallback structure survives until the cold stack lands (A2b).
 
+// Explicit lifetime kept for clarity of the borrow the Option carries.
+#[allow(clippy::needless_lifetimes)]
 pub(crate) fn log_hot_slice<'a, T: Copy, I: IndexLike>(
     d: &'a std::vec::Vec<(T, I)>, lo: usize, hi: usize,
 ) -> (r: Option<&'a [(T, I)]>)
@@ -199,31 +200,6 @@ pub(crate) fn log_index<T: Copy, I: IndexLike>(
     d[i]
 }
 
-pub(crate) fn log_index_range<T: Copy, I: IndexLike>(
-    d: &std::vec::Vec<(T, I)>, lo: usize, hi: usize,
-) -> (r: std::vec::Vec<I>)
-    requires lo <= hi <= d@.len(),
-    ensures
-        r@.len() == hi - lo,
-        forall|k: int| 0 <= k < r@.len() ==> #[trigger] r@[k] == d@[lo + k].1,
-{
-    let mut out: std::vec::Vec<I> = std::vec::Vec::new();
-    let mut i: usize = lo;
-    while i < hi
-        invariant
-            lo <= i <= hi,
-            hi <= d@.len(),
-            out@.len() == i - lo,
-            forall|k: int| 0 <= k < i - lo ==> #[trigger] out@[k] == d@[lo + k].1,
-        decreases hi - i,
-    {
-        let (_, idx) = d[i];
-        out.push(idx);
-        i += 1;
-    }
-    out
-}
-
 /// Diagnostic byte count of the bare log (capacity-based, mirrors the old
 /// DiffLog::heap_bytes).
 #[verifier::external_body]
@@ -249,6 +225,8 @@ pub(crate) fn log_shrink_capacity<T: Copy, I: IndexLike>(
 /// their runs, appended to `out`. EXEC-FIRST SCAFFOLD (inline-store flag
 /// protocols only; never on the raw restore path).
 #[verifier::external_body]
+// Index loops walk the run/value pools by offset; the index is load-bearing.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn cold_pairs_scaffold<T: Copy, I: IndexLike>(
     cold_stack: &std::vec::Vec<crate::frame::ColdFrameHdr<I>>,
     runs: &std::vec::Vec<crate::frame::IndexRun<I>>,
@@ -326,6 +304,8 @@ pub(crate) fn cold_pools_shrink_scaffold<T: Copy, I: IndexLike>(
 /// Diagnostic: the index spans of the cold frames [lo_f, hi_f), expanded.
 /// EXEC-FIRST SCAFFOLD.
 #[verifier::external_body]
+// Index loops walk the run/value pools by offset; the index is load-bearing.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn pending_cold_indices_scaffold<I: IndexLike>(
     cold_stack: &std::vec::Vec<crate::frame::ColdFrameHdr<I>>,
     runs: &std::vec::Vec<crate::frame::IndexRun<I>>,
@@ -1728,8 +1708,12 @@ where
     /// in temporal order, duplicates included, regardless of the store's
     /// capture discipline. Restore correctness is stated once against this;
     /// each physical representation carries an abstraction theorem to it.
+    // Ghost-only: read exclusively by spec/proof code (wf, the bridges), which
+    // clippy erases, so it reports them unread.
+    #[allow(dead_code)]
     pub(crate) full_trail: Ghost<Seq<(T, I)>>,
     /// Stratum start offsets into full_trail, one per mark.
+    #[allow(dead_code)]
     pub(crate) trail_frames: Ghost<Seq<nat>>,
     /// The saved_len of the topmost (active) frame, cached for the hot path.
     /// `I::min()` when the stack is empty. Mirrors production.
@@ -4833,7 +4817,7 @@ where
             });
         }
         self.hot_stack.clear();
-        self.diff_log.truncate(0);
+        self.diff_log.clear();
     }
 
     pub(crate) fn evict_cold_frame(&mut self)
@@ -4972,13 +4956,11 @@ where
                     self.store.restore_run(run.base, vals);
                 }
             }
-            self.diff_log.truncate(0);
+            self.diff_log.clear();
             self.hot_stack.clear();
             // Truncate the cold pools to the target frame's own offsets.
             let tgt = self.cold_stack[target_index];
-            let vcut = if tgt.runs_len > 0 {
-                self.cold_index_runs[tgt.runs_start].start
-            } else if tgt.runs_start < self.cold_index_runs.len() {
+            let vcut = if tgt.runs_len > 0 || tgt.runs_start < self.cold_index_runs.len() {
                 self.cold_index_runs[tgt.runs_start].start
             } else {
                 self.cold_value_pool.len()
@@ -5001,7 +4983,7 @@ where
         if depth2 > 0 {
             let k2 = self.cold_stack.len();
             self.active_saved_len = self.frame_saved_len_exec(depth2 - 1);
-            if depth2 - 1 >= k2 {
+            if depth2 > k2 {
                 let top = self.hot_stack[depth2 - 1 - k2];
                 let tstart = top.start;
                 let tlen = self.diff_log.len();

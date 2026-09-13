@@ -153,7 +153,7 @@ fn trail_churn_below_buffer_tracks_model() {
         }
         // Half the rounds roll back immediately (churn), half keep going
         // one more frame deep before rolling back both.
-        if seed % 2 == 0 {
+        if seed.is_multiple_of(2) {
             v.try_restore(t).expect("restore");
             model = snap.clone();
         } else {
@@ -168,12 +168,19 @@ fn trail_churn_below_buffer_tracks_model() {
                 model[idx as usize] = seed;
             }
             v.try_restore(t2).expect("restore2");
-            model = snap2;
+            // Intermediate check: restore2 lands the state at t2 exactly.
+            for (i, &expected) in snap2.iter().enumerate().take(LEN) {
+                assert_eq!(
+                    v.get_index(i as u32),
+                    expected,
+                    "cell {i} diverged after restore2"
+                );
+            }
             v.try_restore(t).expect("restore1");
             model = snap;
         }
-        for i in 0..LEN {
-            assert_eq!(v.get_index(i as u32), model[i], "cell {i} diverged");
+        for (i, &expected) in model.iter().enumerate().take(LEN) {
+            assert_eq!(v.get_index(i as u32), expected, "cell {i} diverged");
         }
     }
 }
