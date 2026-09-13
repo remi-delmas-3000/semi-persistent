@@ -1864,6 +1864,70 @@ where
         true
     }
 
+    /// The physical/ghost open-slice index-set equality (a wf conjunct),
+    /// factored so mutators that leave diff_log/hot_stack/full_trail/
+    /// trail_frames unchanged transfer it via one lemma instead of
+    /// re-deriving the forall (which otherwise triggers-fights per call).
+    pub open(crate) spec fn index_set_ok(&self) -> bool {
+        self.hot_stack@.len() > 0 ==>
+            forall|j: int| #![trigger captured_in_range::<T, I>(
+                    self.full_trail@,
+                    self.g_start((self.trail_frames@.len() - 1) as int),
+                    self.full_trail@.len() as int, j as nat)]
+                0 <= j < self.active_saved_len.as_nat() ==>
+                captured_in_range::<T, I>(
+                    self.diff_log@,
+                    self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int,
+                    self.diff_log@.len() as int, j as nat)
+                == captured_in_range::<T, I>(
+                    self.full_trail@,
+                    self.g_start((self.trail_frames@.len() - 1) as int),
+                    self.full_trail@.len() as int, j as nat)
+    }
+
+    /// index_set_ok transfers between states agreeing on the four fields it
+    /// reads. The one place the forall is instantiated; every pinned-field
+    /// mutator calls this.
+    pub(crate) proof fn lemma_index_set_transfer(&self, other: Self)
+        requires
+            other.index_set_ok(),
+            self.diff_log@ == other.diff_log@,
+            self.hot_stack@ == other.hot_stack@,
+            self.full_trail@ == other.full_trail@,
+            self.trail_frames@ == other.trail_frames@,
+            self.active_saved_len == other.active_saved_len,
+        ensures self.index_set_ok(),
+    {
+        if self.hot_stack@.len() > 0 {
+            assert(other.hot_stack@.len() > 0);
+            assert forall|j: int| #![trigger captured_in_range::<T, I>(
+                    self.full_trail@,
+                    self.g_start((self.trail_frames@.len() - 1) as int),
+                    self.full_trail@.len() as int, j as nat)]
+                0 <= j < self.active_saved_len.as_nat() implies
+                captured_in_range::<T, I>(
+                    self.diff_log@,
+                    self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int,
+                    self.diff_log@.len() as int, j as nat)
+                == captured_in_range::<T, I>(
+                    self.full_trail@,
+                    self.g_start((self.trail_frames@.len() - 1) as int),
+                    self.full_trail@.len() as int, j as nat)
+            by {
+                // other satisfies index_set_ok with the identical terms
+                // (all four fields equal), so each instance transfers.
+                assert(captured_in_range::<T, I>(
+                    other.diff_log@,
+                    other.hot_stack@[(other.hot_stack@.len() - 1) as int].start as int,
+                    other.diff_log@.len() as int, j as nat)
+                    == captured_in_range::<T, I>(
+                        other.full_trail@,
+                        other.g_start((other.trail_frames@.len() - 1) as int),
+                        other.full_trail@.len() as int, j as nat));
+            }
+        }
+    }
+
     pub open(crate) spec fn wf(&self) -> bool {
         let tf = self.trail_frames@;
 
@@ -1907,26 +1971,10 @@ where
         &&& (TRACK ==> forall|j: int| 0 <= j < self.view().len()
                 && #[trigger] self.store.captured()[j]
                 ==> tf.len() > 0 && j < self.active_saved_len.as_nat())
-        // INDEX-SET equality over the full marked region [0, active): the
-        // physical diff_log open slice and the ghost open stratum name the
-        // same indices - even for popped-but-marked slots the two bridges
-        // (gated at view.len()) cannot reach. Maintained op-by-op (a write
-        // adds an index to both slices or to neither, as SETS). This is what
-        // push's reentered case needs: the ghost has the popped slot (its
-        // pop entry persists), so the physical does too.
-        &&& (self.hot_stack@.len() > 0 ==>
-                forall|j: int| #![trigger captured_in_range::<T, I>(
-                        self.full_trail@, self.g_start((tf.len() - 1) as int),
-                        self.full_trail@.len() as int, j as nat)]
-                    0 <= j < self.active_saved_len.as_nat() ==>
-                    captured_in_range::<T, I>(
-                        self.diff_log@,
-                        self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int,
-                        self.diff_log@.len() as int, j as nat)
-                    == captured_in_range::<T, I>(
-                        self.full_trail@,
-                        self.g_start((tf.len() - 1) as int),
-                        self.full_trail@.len() as int, j as nat))
+        // INDEX-SET equality (factored spec fn): physical diff_log open
+        // slice and ghost open stratum name the same indices over [0,active),
+        // reaching the popped-marked slots the view-gated bridges cannot.
+        &&& self.index_set_ok()
     }
 
     /// `wf` is preserved by a change to `forks` alone. Every `wf` conjunct except
@@ -1972,8 +2020,8 @@ where
             assert(old_self.frame_inv_range_holds(k));
         }
         assert(self.wf_for_snap());
-        // Index-set equality carries: forks pins diff_log/hot_stack/
-        // full_trail/trail_frames, so it transfers from old_self.wf().
+        // Index-set equality transfers (forks pins the four fields it reads).
+        self.lemma_index_set_transfer(old_self);
         assert(self.wf());
     }
 
@@ -2383,6 +2431,7 @@ where
             final(self).snapshots@ == old(self).snapshots@,
             final(self).active_saved_len == old(self).active_saved_len,
     {
+        let ghost ms_pre = *self;
         match policy {
             ShrinkPolicy::Never => {}
             ShrinkPolicy::IfOverallocated { factor, headroom } => {
@@ -2450,10 +2499,8 @@ where
             // Index-set equality: all inputs (diff_log/hot_stack/full_trail/
             // trail_frames) are pinned == old, which satisfied it via old wf.
             if self.hot_stack@.len() > 0 {
-                // Index-set equality carries: diff_log/hot_stack/full_trail/
-                // trail_frames are all pinned == old (asserted above), so the
-                // clause transfers from old wf by congruence.
-                assert(self.diff_log@ == old(self).diff_log@);
+                // Index-set equality transfers (all four fields pinned).
+                self.lemma_index_set_transfer(ms_pre);
             }
         }
     }
@@ -2931,6 +2978,8 @@ where
             // j == old_len (only relevant when old_len < active) the
             // mark_captured set it true, matching captured_in_range (snap was
             // captured by the earlier pop — coverage).
+            // Index-set equality transfers (push touches neither log).
+            self.lemma_index_set_transfer(old_self);
             self.store.lemma_wf_captured_len();
             if tf.len() > 0 {
                 let top = (tf.len() - 1) as int;
