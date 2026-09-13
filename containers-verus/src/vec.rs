@@ -1629,6 +1629,13 @@ where
     /// Some(b) = at mark, when more than b hot frames exist, pass
     /// compress=true (the buffered eviction policy).
     pub(crate) hot_buffer: Option<usize>,
+    /// THE ghost diff (proof architecture, goal doc): every tracked write,
+    /// in temporal order, duplicates included, regardless of the store's
+    /// capture discipline. Restore correctness is stated once against this;
+    /// each physical representation carries an abstraction theorem to it.
+    pub(crate) full_trail: Ghost<Seq<(T, I)>>,
+    /// Stratum start offsets into full_trail, one per mark.
+    pub(crate) trail_frames: Ghost<Seq<nat>>,
     /// The saved_len of the topmost (active) frame, cached for the hot path.
     /// `I::min()` when the stack is empty. Mirrors production.
     pub(crate) active_saved_len: I,
@@ -1658,7 +1665,26 @@ where
     /// frame counts through this — the `frames` field is `pub(crate)`
     /// (privacy closeout).
     pub open(crate) spec fn depth_spec(&self) -> nat {
-        self.frames@.len()
+        self.trail_frames@.len()
+    }
+
+    /// Ghost stratum bounds: frame k's writes are
+    /// full_trail[g_start(k), g_end(k)).
+    pub open(crate) spec fn g_start(&self, k: int) -> int {
+        self.trail_frames@[k] as int
+    }
+
+    pub open(crate) spec fn g_end(&self, k: int) -> int {
+        if k + 1 < self.trail_frames@.len() {
+            self.trail_frames@[k + 1] as int
+        } else {
+            self.full_trail@.len() as int
+        }
+    }
+
+    /// Frame k's saved_len, ghost form: pinned by its snapshot's length.
+    pub open(crate) spec fn g_saved_len(&self, k: int) -> nat {
+        self.snapshots@[k].len()
     }
 
     /// Diff-log length (spec counterpart of `diff_log_len()`).
@@ -1670,8 +1696,8 @@ where
     /// index-major fold's alignment: for a run-compressed log compacted at every mark,
     /// the DiffLog cold region ends exactly here (the tail is the open frame's stratum).
     pub open(crate) spec fn top_diff_start_spec(&self) -> int {
-        if self.frames@.len() > 0 {
-            self.frames@[(self.frames@.len() - 1) as int].diff_start as int
+        if self.trail_frames@.len() > 0 {
+            self.g_start((self.trail_frames@.len() - 1) as int)
         } else {
             0
         }
@@ -1682,14 +1708,14 @@ where
     /// validity reduces to frame liveness. Kept under its historical name so
     /// composite validity chains read unchanged.
     pub open(crate) spec fn is_token_valid_spec(&self, token: VecToken) -> bool {
-        token.frame_idx < self.frames@.len()
+        token.frame_idx < self.trail_frames@.len()
     }
 
     /// The mark-depth quantity the depth-headroom contracts are phrased over.
     /// Post-H2 the container tracks no genealogy, so this is the live frame
     /// depth (the stamp-array length it used to be lived on `GenStamps`).
     pub open(crate) spec fn fork_count_spec(&self) -> nat {
-        self.frames@.len()
+        self.trail_frames@.len()
     }
 
     /// "Restorable now": the full runtime-checkable STRUCTURAL precondition of
@@ -1699,14 +1725,14 @@ where
     /// every member instead of once per member.
     pub open(crate) spec fn is_restorable_spec(&self, token: VecToken) -> bool {
         &&& TRACK
-        &&& token.frame_idx < self.frames@.len()
-        &&& self.frames@.len() < u32::MAX
+        &&& token.frame_idx < self.trail_frames@.len()
+        &&& self.trail_frames@.len() < u32::MAX
     }
 
     /// The "layer above" frame `k`: snapshots[k+1] for inner frames, or the
     /// current view for the topmost frame.
     pub open(crate) spec fn layer_above_at(&self, k: int) -> Seq<T> {
-        if k + 1 < self.frames@.len() {
+        if k + 1 < self.trail_frames@.len() {
             self.snapshots@[k + 1]
         } else {
             self.view()
@@ -1715,11 +1741,7 @@ where
 
     /// End of frame `k`'s stratum.
     pub open(crate) spec fn stratum_end(&self, k: int) -> int {
-        if k + 1 < self.frames@.len() {
-            self.frames@[k + 1].diff_start as int
-        } else {
-            self.diff_log@.len() as int
-        }
+        self.g_end(k)
     }
 
     /// Well-formedness at arbitrary stack depth.
@@ -1748,83 +1770,80 @@ where
     /// central reconstruction lemma is stated over `wf_for_snap`, lettng
     /// restore invoke it on the resized (non-`wf`, but `wf_for_snap`) state.
     pub open(crate) spec fn wf_for_snap(&self) -> bool {
-        let frames = self.frames@;
-        let diffs = self.diff_log@;
+        let gt = self.full_trail@;
+        let tf = self.trail_frames@;
         let snaps = self.snapshots@;
-        let n = diffs.len();
+        let n = gt.len();
 
         &&& self.store.wf()
-        &&& snaps.len() == frames.len()
-        // TRACK=false ⟹ no frames, ever: `mark` (the only frame-pusher)
-        // requires TRACK. Carrying it in wf lets the exec hot paths gate
-        // their tracking work on `TRACK &&` — a const-generic the compiler
-        // folds away at monomorphization (production-parity erasure).
-        &&& (!TRACK ==> frames.len() == 0)
-        &&& (frames.len() == 0 ==> n == 0)
-        &&& (frames.len() > 0 ==> frames[0].diff_start == 0)
-        &&& (frames.len() > 0 ==> frames[(frames.len() - 1) as int].diff_start <= n)
-        // NOTE (pop into marked region): the top-frame "view is full"
-        // (`frames[top].saved_len <= view.len()`) and `saved_len` monotonicity
-        // clauses are DELIBERATELY ABSENT. After a pop into the marked region
-        // the view is shorter than saved_len; and `mark` after a deep pop
-        // records a short length, so a newer frame can have a SMALLER
-        // saved_len than its parent. Both facts are replaced by the per-frame
-        // COVERAGE encoded in `frame_cell_inv`'s uncaptured arm
-        // (uncaptured j ==> j < layer_above.len()), which is all the
-        // reconstruction proof needs. `diff_start` monotonicity DOES still
-        // hold (the diff log only grows) and is kept.
-        &&& (forall|k: int| 0 <= k && k + 1 < frames.len() ==>
-                #[trigger] frames[k].diff_start <= #[trigger] frames[k + 1].diff_start)
-        &&& (forall|k: int| 0 <= k < frames.len() ==>
-                #[trigger] snaps[k].len() == #[trigger] frames[k].saved_len.as_nat())
-        &&& (forall|k: int| 0 <= k < frames.len() ==>
+        &&& snaps.len() == tf.len()
+        // TRACK=false => no frames, ever (mark, the only frame-pusher,
+        // requires TRACK) - production-parity erasure.
+        &&& (!TRACK ==> tf.len() == 0)
+        &&& (tf.len() == 0 ==> n == 0)
+        &&& (tf.len() > 0 ==> tf[0] == 0)
+        &&& (tf.len() > 0 ==> tf[(tf.len() - 1) as int] <= n)
+        // Ghost stratum boundaries are monotone in the ghost trail.
+        &&& (forall|k: int| 0 <= k && k + 1 < tf.len() ==>
+                #[trigger] tf[k] <= #[trigger] tf[k + 1])
+        // THE restore-correctness statement, once, against the ghost trail
+        // (proof architecture: every physical representation relates to
+        // full_trail by an abstraction theorem; reconstruction only ever
+        // reads the ghost). frame_inv_range is Seq-level and unchanged.
+        &&& (forall|k: int| 0 <= k < tf.len() ==>
                 #[trigger] frame_inv_range::<T, I>(
                     self.layer_above_at(k),
-                    diffs,
-                    frames[k].diff_start as int,
-                    self.stratum_end(k),
+                    gt,
+                    self.g_start(k),
+                    self.g_end(k),
                     snaps[k],
-                    frames[k].saved_len.as_nat()))
+                    snaps[k].len()))
+    }
+
+    /// The physical representations' abstraction to the ghost trail (the
+    /// T1-T4 theorems of the proof architecture). Opaque; maintained by the
+    /// scaffolded mutators during the exec-locked phase and discharged
+    /// per-theorem afterwards (goal doc, deliverables 5-6).
+    #[verifier::opaque]
+    pub open(crate) spec fn repr_ok(&self) -> bool {
+        // T1/T2: the hot pool tiles into hot_stack extents; a trail store's
+        // stratum slice IS the ghost stratum, a unique store's equals
+        // dedupe_first_spec of it. T3: each cold frame's runs decode to a
+        // sorted unique permutation of dedupe_first_spec of its ghost
+        // stratum. T4: the orphan prefix is the cold top's ghost extension.
+        // Stated opaquely during scaffolding; the clauses land with their
+        // theorems.
+        true
     }
 
     pub open(crate) spec fn wf(&self) -> bool {
-        let frames = self.frames@;
-        let diffs = self.diff_log@;
+        let tf = self.trail_frames@;
 
         &&& self.wf_for_snap()
-        // active_saved_len caches the top frame's saved_len.
-        &&& (frames.len() == 0 ==> self.active_saved_len == I::min_spec())
-        &&& (frames.len() > 0 ==>
-                self.active_saved_len == frames[(frames.len() - 1) as int].saved_len)
-        // Capture-flag bridge: store.captured()[j] is set iff j has been
-        // captured in the TOP stratum. Only meaningful when a frame is live.
-        // Restricted to j < min(active_saved_len, view.len()): the store only
-        // tracks flags for *present* cells. Cells popped out of the marked
-        // region (j in [view.len(), active)) have no store flag — their
-        // captured-ness lives in the diff log and is enforced by the coverage
-        // clause inside frame_cell_inv.
+        &&& self.repr_ok()
+        // active_saved_len caches the top frame's saved_len (== its
+        // snapshot's length, the ghost form).
+        &&& (tf.len() == 0 ==> self.active_saved_len == I::min_spec())
+        &&& (tf.len() > 0 ==>
+                self.active_saved_len.as_nat()
+                    == self.g_saved_len((tf.len() - 1) as int))
+        // Capture-flag bridge, over the ghost trail: a set flag names a cell
+        // captured in the top ghost stratum. Holds for BOTH disciplines
+        // (the trail store's flags are ghost and first-capture-tracking).
         &&& self.store.captured().len() == self.view().len()
-        &&& (frames.len() > 0 ==>
+        &&& (tf.len() > 0 ==>
                 forall|j: int|
                     0 <= j < self.active_saved_len.as_nat() && j < self.view().len() ==>
                     #[trigger] self.store.captured()[j]
                         == captured_in_range::<T, I>(
-                            diffs,
-                            frames[(frames.len() - 1) as int].diff_start as int,
-                            diffs.len() as int,
+                            self.full_trail@,
+                            self.g_start((tf.len() - 1) as int),
+                            self.full_trail@.len() as int,
                             j as nat))
-        // NO STRAY FLAGS (the sparse-clear enabler, production's implicit
-        // invariant): every set capture flag lies in the trackable region —
-        // below the active saved length with a live frame — where the bridge
-        // above ties it to a diff-log entry. Flags never survive outside it:
-        // capture/force_capture guard on i < saved_len, mark_captured fires
-        // only for reentered (in-marked) slots, prepare_mark/finish_restore
-        // (re)build from diff entries, push appends false, pop/truncate
-        // retire. This is what lets `prepare_mark` clear O(diffs) slots
-        // instead of sweeping O(len).
+        // No stray flags: every set flag lies in the trackable region.
         &&& (TRACK ==> forall|j: int| 0 <= j < self.view().len()
                 && #[trigger] self.store.captured()[j]
-                ==> frames.len() > 0 && j < self.active_saved_len.as_nat())
+                ==> tf.len() > 0 && j < self.active_saved_len.as_nat())
     }
 
     /// `wf` is preserved by a change to `forks` alone. Every `wf` conjunct except
@@ -1854,7 +1873,7 @@ where
         assert(old_self.wf_for_snap());
         // wf_for_snap's frame_inv_range forall: its args are pinned fields or the
         // helpers layer_above_at/stratum_end, which read only pinned fields.
-        assert forall|k: int| 0 <= k < self.frames@.len() implies
+        assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
             #[trigger] frame_inv_range::<T, I>(
                 self.layer_above_at(k),
                 self.diff_log@,
@@ -1881,357 +1900,20 @@ where
         assert(self.wf());
     }
 
-    /// `wf` is preserved by a change to the diff-log REPRESENTATION alone, provided
-    /// the diff-log VIEW and its own `wf` are preserved (what `DiffLog::compact_tail`
-    /// guarantees: `final@ == old@` and `final.wf()`). Unlike
-    /// `lemma_forks_change_preserves_wf` this does NOT require structural diff-log
-    /// equality — only `diff_log@` equality plus `diff_log.wf()` — because every `wf`
-    /// conjunct reads the diff log only through `@` (frame_inv_range, the bridges) or
-    /// through `diff_log.wf()`. This is the frame rule the value-major compaction
-    /// needs: recompressing the value column is invisible to the Vec invariant.
-    pub(crate) proof fn lemma_diff_log_rep_change_preserves_wf(&self, old_self: Self)
-        requires
-            old_self.wf(),
-            self.store == old_self.store,
-            self.frames@ == old_self.frames@,
-            self.diff_log@ == old_self.diff_log@,
-            self.snapshots@ == old_self.snapshots@,
-            self.active_saved_len == old_self.active_saved_len,
-        ensures
-            self.wf(),
-    {
-        assert(self.view() == old_self.view());
-        assert(self.store.captured() == old_self.store.captured());
-        assert(old_self.wf_for_snap());
-        assert forall|k: int| 0 <= k < self.frames@.len() implies
-            #[trigger] frame_inv_range::<T, I>(
-                self.layer_above_at(k),
-                self.diff_log@,
-                self.frames@[k].diff_start as int,
-                self.stratum_end(k),
-                self.snapshots@[k],
-                self.frames@[k].saved_len.as_nat())
-        by {
-            assert(self.layer_above_at(k) == old_self.layer_above_at(k));
-            assert(self.stratum_end(k) == old_self.stratum_end(k));
-            assert(frame_inv_range::<T, I>(
-                old_self.layer_above_at(k),
-                old_self.diff_log@,
-                old_self.frames@[k].diff_start as int,
-                old_self.stratum_end(k),
-                old_self.snapshots@[k],
-                old_self.frames@[k].saved_len.as_nat()));
-        }
-        assert(self.wf_for_snap());
-        assert(self.wf());
-    }
 
-    /// `wf` is preserved by a diff-log change that PERMUTES each frame's stratum
-    /// (same per-stratum write multiset, same new per-stratum uniqueness), not just
-    /// an exact-`@` representation change. The Vec invariant reads the diff log only
-    /// through `frame_inv_range` (quantifiers over each stratum) and the bridge's
-    /// `captured_in_range` (existential over the top stratum), both of which depend
-    /// on a stratum's multiset, not its order. This is what a sorted (reordering)
-    /// cold flush needs: `compact_tail_sorted` permutes exactly the just-closed
-    /// stratum while preserving its multiset and uniqueness.
-    #[verifier::rlimit(1000)]
-    #[verifier::spinoff_prover]
-    pub(crate) proof fn lemma_diff_log_rep_change_preserves_wf_multiset(&self, old_self: Self)
-        requires
-            old_self.wf(),
-            self.store == old_self.store,
-            self.frames@ == old_self.frames@,
-            self.diff_log@.len() == old_self.diff_log@.len(),
-            self.snapshots@ == old_self.snapshots@,
-            self.active_saved_len == old_self.active_saved_len,
-            // Each frame's stratum is permuted: same multiset, and the new stratum is
-            // still unique-indexed.
-            forall|k: int| 0 <= k < self.frames@.len() ==>
-                self.diff_log@.subrange(
-                    #[trigger] self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset()
-                == old_self.diff_log@.subrange(
-                    self.frames@[k].diff_start as int, self.stratum_end(k)).to_multiset(),
-            forall|k: int| 0 <= k < self.frames@.len() ==>
-                (forall|a: int, b: int|
-                    #[trigger] self.frames@[k].diff_start as int <= a < self.stratum_end(k)
-                    && self.frames@[k].diff_start as int <= b < self.stratum_end(k)
-                    && a != b
-                    ==> (#[trigger] self.diff_log@[a]).1.as_nat()
-                        != (#[trigger] self.diff_log@[b]).1.as_nat()),
-        ensures
-            self.wf(),
-    {
-        assert(self.view() == old_self.view());
-        assert(self.store.captured() == old_self.store.captured());
-        assert(old_self.wf_for_snap());
-        // Per-frame: frame_inv_range carries under the stratum permutation.
-        assert forall|k: int| 0 <= k < self.frames@.len() implies
-            #[trigger] frame_inv_range::<T, I>(
-                self.layer_above_at(k),
-                self.diff_log@,
-                self.frames@[k].diff_start as int,
-                self.stratum_end(k),
-                self.snapshots@[k],
-                self.frames@[k].saved_len.as_nat())
-        by {
-            let lo = self.frames@[k].diff_start as int;
-            let hi = self.stratum_end(k);
-            old_self.lemma_stratum_bounds(k);
-            assert(self.layer_above_at(k) == old_self.layer_above_at(k));
-            assert(self.stratum_end(k) == old_self.stratum_end(k));
-            assert(frame_inv_range::<T, I>(
-                old_self.layer_above_at(k),
-                old_self.diff_log@,
-                lo, hi,
-                old_self.snapshots@[k],
-                old_self.frames@[k].saved_len.as_nat()));
-            lemma_frame_inv_range_multiset::<T, I>(
-                self.layer_above_at(k),
-                old_self.diff_log@,
-                self.diff_log@,
-                lo, hi,
-                self.snapshots@[k],
-                self.frames@[k].saved_len.as_nat());
-        }
-        assert(self.wf_for_snap());
-        // Bridge: captured_in_range over the top stratum survives the permutation.
-        assert(self.diff_log.wf());
-        if self.frames@.len() > 0 {
-            let top = (self.frames@.len() - 1) as int;
-            assert(self.stratum_end(top) == self.diff_log@.len());
-            assert forall|j: int|
-                0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
-                #[trigger] self.store.captured()[j]
-                    == captured_in_range::<T, I>(
-                        self.diff_log@,
-                        self.frames@[top].diff_start as int,
-                        self.diff_log@.len() as int,
-                        j as nat)
-            by {
-                self.lemma_diff_start_le_n(top);
-                lemma_captured_in_range_multiset::<T, I>(
-                    old_self.diff_log@,
-                    self.diff_log@,
-                    self.frames@[top].diff_start as int,
-                    self.stratum_end(top),
-                    j as nat);
-            }
-        }
-        assert(self.wf());
-    }
 
-    /// The dedupe frame rule: `wf` survives replacing stratum `b` with a
-    /// unique-index permutation of its dedupe-first, shifting every later
-    /// frame down by the dropped count. The restore-side justification is
-    /// `frame_cell_inv`'s first-hitter form: dedupe-first keeps exactly the
-    /// entries reconstruction pins (`lemma_frame_inv_range_dedupe`), and
-    /// every other stratum is verbatim up to a uniform shift
-    /// (`lemma_frame_inv_range_shift`). No uniqueness of the OLD stratum is
-    /// assumed anywhere - this is what lets eviction serve the trail
-    /// discipline and what retires `Vec::wf`'s stratum_unique clause
-    /// (deliverables 5 and 6).
-    #[verifier::rlimit(1200)]
-    #[verifier::spinoff_prover]
-    pub(crate) proof fn lemma_diff_log_rep_change_preserves_wf_dedupe(
-        &self, old_self: Self, b: int, m: nat, kept: nat,
-    )
-        requires
-            old_self.wf(),
-            self.store == old_self.store,
-            self.snapshots@ == old_self.snapshots@,
-            self.active_saved_len == old_self.active_saved_len,
-            0 <= b < old_self.frames@.len(),
-            self.frames@.len() == old_self.frames@.len(),
-            kept <= m,
-            // Stratum b was exactly [ds, ds + m) in the old log.
-            old_self.frames@[b].diff_start as int + m as int == old_self.stratum_end(b),
-            // Frames at or below b are verbatim; above b only diff_start
-            // moves, down by the dropped count.
-            forall|k: int| 0 <= k <= b ==> #[trigger] self.frames@[k] == old_self.frames@[k],
-            forall|k: int| b < k < self.frames@.len() ==> {
-                &&& (#[trigger] self.frames@[k]).saved_len == old_self.frames@[k].saved_len
-                &&& self.frames@[k].diff_start as int
-                    == old_self.frames@[k].diff_start as int - (m - kept) as int
-            },
-            self.diff_log@.len() as int
-                == old_self.diff_log@.len() as int - (m - kept) as int,
-            // Log content: prefix verbatim, stratum b dedupe-permuted,
-            // suffix verbatim shifted.
-            forall|x: int| 0 <= x < old_self.frames@[b].diff_start as int
-                ==> #[trigger] self.diff_log@[x] == old_self.diff_log@[x],
-            kept == crate::diff_compress::dedupe_first_spec(
-                old_self.diff_log@.subrange(
-                    old_self.frames@[b].diff_start as int,
-                    old_self.frames@[b].diff_start as int + m as int)).len(),
-            self.diff_log@.subrange(
-                old_self.frames@[b].diff_start as int,
-                old_self.frames@[b].diff_start as int + kept as int).to_multiset()
-                == crate::diff_compress::dedupe_first_spec(
-                    old_self.diff_log@.subrange(
-                        old_self.frames@[b].diff_start as int,
-                        old_self.frames@[b].diff_start as int + m as int)).to_multiset(),
-            crate::diff_compress::unique_idx(self.diff_log@.subrange(
-                old_self.frames@[b].diff_start as int,
-                old_self.frames@[b].diff_start as int + kept as int)),
-            forall|q: int| 0 <= q
-                < old_self.diff_log@.len() as int
-                    - (old_self.frames@[b].diff_start as int + m as int)
-                ==> #[trigger] self.diff_log@[
-                        old_self.frames@[b].diff_start as int + kept as int + q]
-                    == old_self.diff_log@[
-                        old_self.frames@[b].diff_start as int + m as int + q],
-        ensures
-            self.wf(),
-    {
-        let ds = old_self.frames@[b].diff_start as int;
-        let delta = (m - kept) as int;
-        let n_old = old_self.diff_log@.len() as int;
-        let n_new = self.diff_log@.len() as int;
-        let nf = self.frames@.len() as int;
-        assert(self.view() == old_self.view());
-        assert(self.store.captured() == old_self.store.captured());
-        assert(old_self.wf_for_snap());
-        old_self.lemma_stratum_bounds(b);
-        // Per-frame reconstruction invariant.
-        assert forall|k: int| 0 <= k < nf implies
-            #[trigger] frame_inv_range::<T, I>(
-                self.layer_above_at(k),
-                self.diff_log@,
-                self.frames@[k].diff_start as int,
-                self.stratum_end(k),
-                self.snapshots@[k],
-                self.frames@[k].saved_len.as_nat())
-        by {
-            old_self.lemma_stratum_bounds(k);
-            assert(self.layer_above_at(k) == old_self.layer_above_at(k));
-            assert(frame_inv_range::<T, I>(
-                old_self.layer_above_at(k),
-                old_self.diff_log@,
-                old_self.frames@[k].diff_start as int,
-                old_self.stratum_end(k),
-                old_self.snapshots@[k],
-                old_self.frames@[k].saved_len.as_nat()));
-            if k < b {
-                // Verbatim range at the same positions: the whole stratum
-                // sits below ds.
-                assert(self.stratum_end(k) == old_self.stratum_end(k));
-                old_self.lemma_diff_start_monotone(k + 1, b);
-                assert(old_self.stratum_end(k) <= ds);
-                let lo0 = old_self.frames@[k].diff_start as int;
-                let cnt0 = old_self.stratum_end(k) - lo0;
-                assert forall|q: int| 0 <= q < cnt0 implies
-                    #[trigger] self.diff_log@[lo0 + q]
-                        == old_self.diff_log@[lo0 + q] by {}
-                lemma_frame_inv_range_shift::<T, I>(
-                    self.layer_above_at(k),
-                    old_self.diff_log@, self.diff_log@,
-                    lo0, lo0, cnt0,
-                    self.snapshots@[k],
-                    self.frames@[k].saved_len.as_nat());
-            } else if k == b {
-                assert(self.stratum_end(b) == ds + kept as int);
-                lemma_frame_inv_range_dedupe::<T, I>(
-                    self.layer_above_at(b),
-                    old_self.diff_log@, self.diff_log@,
-                    ds, m, kept,
-                    self.snapshots@[b],
-                    self.frames@[b].saved_len.as_nat());
-            } else {
-                // Verbatim range shifted down by delta.
-                assert(self.frames@[k].diff_start as int
-                    == old_self.frames@[k].diff_start as int - delta);
-                assert(self.stratum_end(k) == old_self.stratum_end(k) - delta);
-                let lo1 = old_self.frames@[k].diff_start as int;
-                let cnt = old_self.stratum_end(k) - lo1;
-                assert forall|q: int| 0 <= q < cnt implies
-                    #[trigger] self.diff_log@[(lo1 - delta) + q]
-                        == old_self.diff_log@[lo1 + q] by {
-                    old_self.lemma_diff_start_monotone(b + 1, k);
-                    assert(lo1 >= ds + m as int);
-                    assert(self.diff_log@[ds + kept as int + ((lo1 + q) - (ds + m as int))]
-                        == old_self.diff_log@[ds + m as int + ((lo1 + q) - (ds + m as int))]);
-                }
-                lemma_frame_inv_range_shift::<T, I>(
-                    self.layer_above_at(k),
-                    old_self.diff_log@, self.diff_log@,
-                    lo1, lo1 - delta, cnt,
-                    self.snapshots@[k],
-                    self.frames@[k].saved_len.as_nat());
-            }
-        }
-        // wf_for_snap's scalar clauses.
-        assert(self.snapshots@.len() == self.frames@.len());
-        if self.frames@.len() > 0 {
-            assert(self.frames@[0].diff_start == old_self.frames@[0].diff_start);
-            let top = nf - 1;
-            if top > b {
-                old_self.lemma_diff_start_monotone(b + 1, top);
-                assert(self.frames@[top].diff_start as int <= n_new);
-            } else {
-                assert(self.frames@[top].diff_start as int <= n_new);
-            }
-        }
-        assert forall|k: int| 0 <= k && k + 1 < nf implies
-            #[trigger] self.frames@[k].diff_start
-                <= #[trigger] self.frames@[k + 1].diff_start by {
-            if k + 1 <= b {
-            } else if k == b {
-                assert(old_self.frames@[b + 1].diff_start as int >= ds + m as int);
-            } else {
-            }
-        }
-        assert(self.wf_for_snap());
-        // Capture-flag bridge over the top stratum.
-        if self.frames@.len() > 0 {
-            let top = nf - 1;
-            assert(self.stratum_end(top) == n_new);
-            assert forall|j: int|
-                0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
-                #[trigger] self.store.captured()[j]
-                    == captured_in_range::<T, I>(
-                        self.diff_log@,
-                        self.frames@[top].diff_start as int,
-                        n_new,
-                        j as nat)
-            by {
-                old_self.lemma_diff_start_le_n(top);
-                if top > b {
-                    let lo1 = old_self.frames@[top].diff_start as int;
-                    let cnt = n_old - lo1;
-                    old_self.lemma_diff_start_monotone(b + 1, top);
-                    assert forall|q: int| 0 <= q < cnt implies
-                        #[trigger] self.diff_log@[(lo1 - delta) + q]
-                            == old_self.diff_log@[lo1 + q] by {
-                        assert(self.diff_log@[ds + kept as int + ((lo1 + q) - (ds + m as int))]
-                            == old_self.diff_log@[ds + m as int + ((lo1 + q) - (ds + m as int))]);
-                    }
-                    lemma_captured_in_range_shift::<T, I>(
-                        old_self.diff_log@, self.diff_log@,
-                        lo1, lo1 - delta, cnt, j as nat);
-                } else {
-                    // b is the top frame: the folded stratum IS the top
-                    // stratum, and its captured set is preserved by the
-                    // dedupe (soundness/completeness of the kept set).
-                    assert(top == b);
-                    lemma_captured_in_range_dedupe::<T, I>(
-                        old_self.diff_log@, self.diff_log@, ds, m, kept, j as nat);
-                }
-            }
-        }
-        assert(self.wf());
-    }
 
     /// `stratum_end(k)` is in range: `diff_start(k) <= stratum_end(k) <= diff_log.len()`.
     pub(crate) proof fn lemma_stratum_bounds(&self, k: int)
         requires
             self.wf_for_snap(),
-            0 <= k < self.frames@.len(),
+            0 <= k < self.trail_frames@.len(),
         ensures
             self.frames@[k].diff_start as int <= self.stratum_end(k),
             self.stratum_end(k) <= self.diff_log@.len(),
     {
-        if k + 1 < self.frames@.len() {
-            assert(self.frames@[k].diff_start <= self.frames@[k + 1].diff_start);
+        if k + 1 < self.trail_frames@.len() {
+            self.lemma_diff_start_monotone(k, k + 1);
             self.lemma_diff_start_le_n(k + 1);
         } else {
             self.lemma_diff_start_le_n(k);
@@ -2243,17 +1925,14 @@ where
     pub(crate) proof fn lemma_diff_start_le_n(&self, k: int)
         requires
             self.wf_for_snap(),
-            0 <= k < self.frames@.len(),
+            0 <= k < self.trail_frames@.len(),
         ensures
-            self.frames@[k].diff_start <= self.diff_log@.len(),
-        decreases self.frames@.len() - k,
+            self.trail_frames@[k] <= self.full_trail@.len(),
+        decreases self.trail_frames@.len() - k,
     {
-        let frames = self.frames@;
-        if k + 1 < frames.len() {
-            self.lemma_diff_start_le_n(k + 1);
-            assert(frames[k].diff_start <= frames[k + 1].diff_start);
-        } else {
-            // top frame: bounded directly by wf.
+        let tf = self.trail_frames@;
+        if k < tf.len() - 1 {
+            self.lemma_diff_start_monotone(k, (tf.len() - 1) as int);
         }
     }
 
@@ -2262,17 +1941,14 @@ where
     pub(crate) proof fn lemma_diff_start_monotone(&self, a: int, b: int)
         requires
             self.wf_for_snap(),
-            0 <= a <= b < self.frames@.len(),
+            0 <= a <= b < self.trail_frames@.len(),
         ensures
-            self.frames@[a].diff_start <= self.frames@[b].diff_start,
+            self.trail_frames@[a] <= self.trail_frames@[b],
         decreases b - a,
     {
-        let frames = self.frames@;
+        decreases_when(a <= b);
         if a < b {
             self.lemma_diff_start_monotone(a, b - 1);
-            // wf gives the adjacent step at k = b-1 (since b < frames.len()).
-            assert(0 <= b - 1 && (b - 1) + 1 < frames.len());
-            assert(frames[b - 1].diff_start <= frames[(b - 1) + 1].diff_start);
         }
     }
 
@@ -2313,8 +1989,8 @@ where
     pub(crate) proof fn lemma_cell_eq_overlay(&self, base: Seq<T>, k: int, j: int)
         requires
             self.wf_for_snap(),
-            0 <= k < self.frames@.len(),
-            0 <= j < self.frames@[k].saved_len.as_nat(),
+            0 <= k < self.trail_frames@.len(),
+            0 <= j < self.g_saved_len(k) as int,
             (j as nat) < base.len(),
             // base agrees with the view on the shared prefix
             forall|m: int| 0 <= m < base.len() && m < self.view().len()
@@ -2325,7 +2001,7 @@ where
                 self.frames@[k].diff_start as int,
                 self.diff_log@.len() as int)[j]
                 == self.snapshots@[k][j],
-        decreases self.frames@.len() - k,
+        decreases self.trail_frames@.len() - k,
     {
         let frames = self.frames@;
         let diffs = self.diff_log@;
@@ -2405,7 +2081,7 @@ where
     /// the plain sequence transitions on the view. The empty diff/frame/fork
     /// fields and runtime guards remain in the executable struct.
     pub open(crate) spec fn untracked(&self) -> bool {
-        self.frames@.len() == 0
+        self.trail_frames@.len() == 0
     }
 
     /// `wf` forces an empty diff log when the frame stack is empty.
@@ -2592,6 +2268,8 @@ where
             cold_value_pool: std::vec::Vec::new(),
             cold_index_runs: std::vec::Vec::new(),
             hot_buffer,
+            full_trail: Ghost(Seq::empty()),
+            trail_frames: Ghost(Seq::empty()),
             active_saved_len: <I as IndexLike>::min(),
             phantom: core::marker::PhantomData,
             snapshots: Ghost(Seq::empty()),
@@ -2643,7 +2321,7 @@ where
                 // no-stray-flags transfers pointwise (same flags, same frames).
                 assert forall|j: int| 0 <= j < self.view().len()
                     && #[trigger] self.store.captured()[j]
-                    implies self.frames@.len() > 0
+                    implies self.trail_frames@.len() > 0
                         && j < self.active_saved_len.as_nat() by {
                     assert(old(self).store.captured()[j]);
                 }
@@ -2652,13 +2330,13 @@ where
                 // frame-quantified conjunct is vacuous; the one
                 // unconditional captured() fact (its length) comes from the
                 // trait's wf lemma, not from pointwise preservation.
-                assert(self.frames@.len() == 0);
+                assert(self.trail_frames@.len() == 0);
                 self.store.lemma_wf_captured_len();
             }
             assert(self.diff_log@ == old(self).diff_log@);
             assert(self.frames@ == old(self).frames@);
             assert(self.snapshots@ == old(self).snapshots@);
-            assert forall|k: int| 0 <= k < self.frames@.len() implies
+            assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
                 self.layer_above_at(k) == old(self).layer_above_at(k)
                 && self.stratum_end(k) == old(self).stratum_end(k) by {}
         }
@@ -3042,18 +2720,18 @@ where
         let reentered = TRACK
             && self.depth_exec() > 0
             && old_len.as_usize() < self.active_saved_len.as_usize();
-        let ghost has_frame = TRACK && self.frames@.len() > 0;
+        let ghost has_frame = TRACK && self.trail_frames@.len() > 0;
         let ghost in_marked = old_len.as_nat() < self.active_saved_len.as_nat();
         proof {
             // TRACK=false: wf pins frames empty, so has_frame is false either way.
             if !TRACK {
-                assert(self.frames@.len() == 0);
+                assert(self.trail_frames@.len() == 0);
             }
         }
         proof {
             assert(in_marked == (old_len.as_nat() < self.active_saved_len.as_nat()));
-            assert(has_frame == (self.frames@.len() > 0));
-            assert(reentered == (self.frames@.len() > 0
+            assert(has_frame == (self.trail_frames@.len() > 0));
+            assert(reentered == (self.trail_frames@.len() > 0
                 && old_len.as_nat() < self.active_saved_len.as_nat()));
         }
         // push appended captured()[old_len] == false (TRACK-conditional:
@@ -3081,7 +2759,7 @@ where
                 // a live frame and old_len < active.
                 assert forall|j: int| 0 <= j < self.view().len()
                     && #[trigger] self.store.captured()[j]
-                    implies self.frames@.len() > 0
+                    implies self.trail_frames@.len() > 0
                         && j < self.active_saved_len.as_nat() by {
                     if j < old_len.as_nat() as int {
                         assert(old_self.store.captured()[j]);
@@ -3186,11 +2864,11 @@ where
     pub open(crate) spec fn frame_inv_range_holds(&self, k: int) -> bool {
         frame_inv_range::<T, I>(
             self.layer_above_at(k),
-            self.diff_log@,
-            self.frames@[k].diff_start as int,
-            self.stratum_end(k),
+            self.full_trail@,
+            self.g_start(k),
+            self.g_end(k),
             self.snapshots@[k],
-            self.frames@[k].saved_len.as_nat())
+            self.g_saved_len(k))
     }
 
     /// Carry the top frame's `frame_inv_range` across a push (old_self had wf;
@@ -3207,8 +2885,8 @@ where
             old_self.view().len() <= self.view().len(),
             (forall|j: int| 0 <= j < old_self.view().len() ==>
                 #[trigger] self.view()[j] == old_self.view()[j]),
-            0 <= k < self.frames@.len(),
-            k + 1 == self.frames@.len(),
+            0 <= k < self.trail_frames@.len(),
+            k + 1 == self.trail_frames@.len(),
         ensures
             self.frame_inv_range_holds(k),
     {
@@ -4056,8 +3734,8 @@ where
                     implies exists|k: int| 0 <= k < prev_suffix@.len()
                         && (#[trigger] prev_suffix@[k]).1.as_nat() == j as nat by {
                     // no-stray: live frame and j < active.
-                    assert(self.frames@.len() > 0 && j < self.active_saved_len.as_nat());
-                    let top = (self.frames@.len() - 1) as int;
+                    assert(self.trail_frames@.len() > 0 && j < self.active_saved_len.as_nat());
+                    let top = (self.trail_frames@.len() - 1) as int;
                     self.store.lemma_wf_captured_len();
                     assert(j < self.view().len());
                     // bridge: captured_in_range(diffs, top.diff_start, |diffs|, j).
