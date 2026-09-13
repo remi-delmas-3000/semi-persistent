@@ -4271,7 +4271,7 @@ where
             // diff_log is untouched by prepare_mark/frames.push/snapshots, so its
             // wf (established by maybe_shrink) persists; do not re-derive it (the
             // value-major cold_vals representation is opaque here).
-    
+
             // saved_len monotonicity is NO LONGER a wf clause (pop into marked region:
             // mark-after-deep-pop can record a SMALLER saved_len than the
             // parent). So nothing to prove here for saved_len.
