@@ -4437,11 +4437,14 @@ where
 
         if target_index >= k {
             // HOT target: replay the pool suffix backward, then truncate.
+            // The replayed-indices slice is BORROWED from the pool - zero
+            // copy, zero allocation; materializing here was measured 3x on
+            // mark_churn (the campaign's original defect class).
             let hf = self.hot_stack[target_index - k];
             let n = self.diff_log.len();
             if self.store.needs_replayed_indices() {
-                let replayed = log_subrange_vec(&self.diff_log, hf.start, n);
-                self.store.begin_restore(replayed.as_slice());
+                self.store.begin_restore(vstd::slice::slice_subrange(
+                    self.diff_log.as_slice(), hf.start, n));
             } else {
                 let empty: std::vec::Vec<(T, I)> = std::vec::Vec::new();
                 self.store.begin_restore(empty.as_slice());
@@ -4498,9 +4501,11 @@ where
             self.active_saved_len = self.frame_saved_len_exec(depth2 - 1);
             if depth2 - 1 >= k2 {
                 let top = self.hot_stack[depth2 - 1 - k2];
-                let surviving = log_subrange_vec(
-                    &self.diff_log, top.start, self.diff_log.len());
-                self.store.finish_restore(surviving.as_slice(), self.active_saved_len);
+                let tstart = top.start;
+                let tlen = self.diff_log.len();
+                self.store.finish_restore(
+                    vstd::slice::slice_subrange(self.diff_log.as_slice(), tstart, tlen),
+                    self.active_saved_len);
             } else {
                 // Cold top: materialize its pairs for the flag rebuild
                 // (inline store only reads it; raw stores wholesale-clear).
