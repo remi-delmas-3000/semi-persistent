@@ -269,6 +269,39 @@ pub(crate) fn cold_pairs_scaffold<T: Copy, I: IndexLike>(
     }
 }
 
+/// Sorted iteration order for one frame slice, uniform for both capture
+/// disciplines: keys are (index, position) with position in the low bits,
+/// so an unstable sort is temporally exact and keep-first-per-cell is a
+/// free adjacent compare during the walk (identity on unique input).
+/// Packed u64 keys when the index width and frame length fit (measured
+/// -9% unique / -20..-36% trail-shaped vs tuple sorts, normalize_bench);
+/// wide indices fall back to a position sort by looked-up key. T is never
+/// packed, compared, or moved here. EXEC-FIRST SCAFFOLD.
+#[verifier::external_body]
+pub(crate) fn frame_sort_order<T: Copy, I: IndexLike>(
+    frame: &[(T, I)], keys: &mut std::vec::Vec<u64>, wide: &mut std::vec::Vec<usize>,
+) -> bool {
+    let n = frame.len();
+    if n < u32::MAX as usize
+        && <I as IndexLike>::max().as_usize() <= u32::MAX as usize
+    {
+        keys.clear();
+        keys.extend(
+            frame
+                .iter()
+                .enumerate()
+                .map(|(j, p)| ((p.1.as_usize() as u64) << 32) | j as u64),
+        );
+        keys.sort_unstable();
+        true
+    } else {
+        wide.clear();
+        wide.extend(0..n);
+        wide.sort_by_key(|&j| (frame[j].1.as_usize(), j));
+        false
+    }
+}
+
 /// Capacity release for the cold pools (ruled reclaim). EXEC-FIRST SCAFFOLD.
 #[verifier::external_body]
 pub(crate) fn cold_pools_shrink_scaffold<T: Copy, I: IndexLike>(
@@ -3986,34 +4019,38 @@ where
     /// EXEC-FIRST SCAFFOLD: proofs attach at lock time.
     #[verifier::external_body]
     pub(crate) fn compress_all_hot(&mut self) {
-        // Orphan prefix first: after a cold-target restore cleared the hot
-        // stack, writes captured under the (cold) top frame sit in
-        // pool[0 .. hot_stack[0].start) with no HotFrame owner - they are
-        // that cold frame's stratum continuing in the pool (mainline's "top
-        // stratum extends to the log end", in two-stack form). Fold them
-        // into the cold top frame before the hot frames migrate, or the
-        // pool truncation below destroys their undo pairs (found by the
-        // trail semi-persistence proptest, minimal case: marks past the
-        // buffer, restore into cold, write, marks past the buffer again).
+        let mut keys: std::vec::Vec<u64> = std::vec::Vec::new();
+        let mut wide: std::vec::Vec<usize> = std::vec::Vec::new();
+
+        // Orphan prefix first (see the goal doc finding): writes captured
+        // under a cold top frame are that frame's stratum continuing in the
+        // pool; fold them into it, dropping cells its sealed (older,
+        // first-entry-wins) runs already cover.
         let orphan_end = if self.hot_stack.len() > 0 {
             self.hot_stack[0].start
         } else {
-            0
+            self.diff_log.len()
         };
         if orphan_end > 0 && self.cold_stack.len() > 0 {
-            let kept = self
-                .store
-                .normalize_frame(&mut self.diff_log[0..orphan_end]);
+            let packed = frame_sort_order(&self.diff_log[0..orphan_end], &mut keys, &mut wide);
             let top_c = self.cold_stack.len() - 1;
             let hdr = self.cold_stack[top_c];
+            let m = orphan_end;
             let mut extra_runs: usize = 0;
-            let mut q: usize = 0;
-            while q < kept {
-                let (v0, idx0) = self.diff_log[q];
-                // The frame's sealed entries are OLDER captures of the same
-                // stratum: under first-entry-wins they beat the extension,
-                // so any cell already covered by an existing run is dropped.
-                let iu = idx0.as_usize();
+            let mut t = 0usize;
+            let mut last_idx = usize::MAX;
+            let mut cur_run: Option<(I, usize, usize)> = None; // (base, vstart, len)
+            while t < m {
+                let pos = if packed { (keys[t] & 0xFFFF_FFFF) as usize } else { wide[t] };
+                let (v, idx) = self.diff_log[pos];
+                let iu = idx.as_usize();
+                t += 1;
+                if iu == last_idx {
+                    continue; // keep-first: later duplicate of the same cell
+                }
+                last_idx = iu;
+                // Covered by the frame's sealed runs? The sealed captures
+                // are chronologically earlier; they win.
                 let mut covered = false;
                 for r in hdr.runs_start..hdr.runs_start + hdr.runs_len {
                     let run = self.cold_index_runs[r];
@@ -4024,43 +4061,31 @@ where
                     }
                 }
                 if covered {
-                    q += 1;
+                    // A covered cell also breaks any open run.
+                    if let Some((base, vstart, len)) = cur_run.take() {
+                        self.cold_index_runs.push(crate::frame::IndexRun { base, start: vstart, len });
+                        extra_runs += 1;
+                    }
                     continue;
                 }
-                // Open a run at q over uncovered, consecutive cells.
-                let vstart = self.cold_value_pool.len();
-                self.cold_value_pool.push(v0);
-                let mut prev = iu;
-                let mut len: usize = 1;
-                q += 1;
-                while q < kept {
-                    let (v, idx) = self.diff_log[q];
-                    let ju = idx.as_usize();
-                    if ju != prev + 1 {
-                        break;
+                match cur_run {
+                    Some((base, vstart, len)) if base.as_usize() + len == iu => {
+                        self.cold_value_pool.push(v);
+                        cur_run = Some((base, vstart, len + 1));
                     }
-                    let mut cov2 = false;
-                    for r in hdr.runs_start..hdr.runs_start + hdr.runs_len {
-                        let run = self.cold_index_runs[r];
-                        let b = run.base.as_usize();
-                        if ju >= b && ju < b + run.len {
-                            cov2 = true;
-                            break;
+                    _ => {
+                        if let Some((base, vstart, len)) = cur_run.take() {
+                            self.cold_index_runs.push(crate::frame::IndexRun { base, start: vstart, len });
+                            extra_runs += 1;
                         }
+                        let vstart = self.cold_value_pool.len();
+                        self.cold_value_pool.push(v);
+                        cur_run = Some((idx, vstart, 1));
                     }
-                    if cov2 {
-                        break;
-                    }
-                    self.cold_value_pool.push(v);
-                    prev = ju;
-                    len += 1;
-                    q += 1;
                 }
-                self.cold_index_runs.push(crate::frame::IndexRun {
-                    base: idx0,
-                    start: vstart,
-                    len,
-                });
+            }
+            if let Some((base, vstart, len)) = cur_run.take() {
+                self.cold_index_runs.push(crate::frame::IndexRun { base, start: vstart, len });
                 extra_runs += 1;
             }
             if extra_runs > 0 {
@@ -4069,35 +4094,49 @@ where
                 self.cold_stack.set(top_c, h2);
             }
         }
+
+        // Migrate every hot frame, oldest first. One uniform normalize for
+        // both disciplines (keep-first is the identity on unique strata);
+        // translation reads frame[pos] through the sorted keys, so T moves
+        // exactly once - pool slice to cold pool.
         let hn = self.hot_stack.len();
         for j in 0..hn {
             let f = self.hot_stack[j];
-            let kept = self.store.normalize_frame(&mut self.diff_log[f.start..f.end]);
+            let packed = frame_sort_order(&self.diff_log[f.start..f.end], &mut keys, &mut wide);
+            let m = f.end - f.start;
             let runs_start = self.cold_index_runs.len();
             let mut runs_len: usize = 0;
-            let mut q = f.start;
-            let end = f.start + kept;
-            while q < end {
-                let (v0, idx0) = self.diff_log[q];
-                let base = idx0;
-                let vstart = self.cold_value_pool.len();
-                self.cold_value_pool.push(v0);
-                let mut prev = idx0.as_usize();
-                let mut len: usize = 1;
-                q += 1;
-                while q < end {
-                    let (v, idx) = self.diff_log[q];
-                    if idx.as_usize() != prev + 1 {
-                        break;
-                    }
-                    self.cold_value_pool.push(v);
-                    prev += 1;
-                    len += 1;
-                    q += 1;
+            let mut t = 0usize;
+            let mut last_idx = usize::MAX;
+            let mut cur_run: Option<(I, usize, usize)> = None;
+            while t < m {
+                let pos = f.start
+                    + if packed { (keys[t] & 0xFFFF_FFFF) as usize } else { wide[t] };
+                let (v, idx) = self.diff_log[pos];
+                let iu = idx.as_usize();
+                t += 1;
+                if iu == last_idx {
+                    continue;
                 }
-                self.cold_index_runs.push(crate::frame::IndexRun {
-                    base, start: vstart, len,
-                });
+                last_idx = iu;
+                match cur_run {
+                    Some((base, vstart, len)) if base.as_usize() + len == iu => {
+                        self.cold_value_pool.push(v);
+                        cur_run = Some((base, vstart, len + 1));
+                    }
+                    _ => {
+                        if let Some((base, vstart, len)) = cur_run.take() {
+                            self.cold_index_runs.push(crate::frame::IndexRun { base, start: vstart, len });
+                            runs_len += 1;
+                        }
+                        let vstart = self.cold_value_pool.len();
+                        self.cold_value_pool.push(v);
+                        cur_run = Some((idx, vstart, 1));
+                    }
+                }
+            }
+            if let Some((base, vstart, len)) = cur_run.take() {
+                self.cold_index_runs.push(crate::frame::IndexRun { base, start: vstart, len });
                 runs_len += 1;
             }
             self.cold_stack.push(crate::frame::ColdFrameHdr {
