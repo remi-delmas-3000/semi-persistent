@@ -944,6 +944,44 @@ pub(crate) proof fn lemma_overlay_split<T, I: IndexLike>(
     }
 }
 
+/// `overlay` congruence: two diff sequences whose windows agree element-wise
+/// give the same overlay, even at different offsets. `overlay` reads only
+/// `diffs[lo..hi]`, so equal windows produce equal results. This is what maps
+/// restore_frame's physical replay of `diff_log[hf.start..n]` onto the ghost
+/// reconstruction of `full_trail[g_start(target)..m]` under the trail bridge +
+/// frame-alignment invariants (the two windows are then equal).
+pub(crate) proof fn lemma_overlay_congruent<T, I: IndexLike>(
+    base: Seq<T>, d1: Seq<(T, I)>, d2: Seq<(T, I)>,
+    lo1: int, lo2: int, cnt: int,
+)
+    requires
+        0 <= lo1, 0 <= lo2, 0 <= cnt,
+        lo1 + cnt <= d1.len(),
+        lo2 + cnt <= d2.len(),
+        forall|t: int| 0 <= t < cnt ==> #[trigger] d1[lo1 + t] == d2[lo2 + t],
+    ensures
+        overlay::<T, I>(base, d1, lo1, lo1 + cnt)
+            == overlay::<T, I>(base, d2, lo2, lo2 + cnt),
+    decreases cnt,
+{
+    if cnt <= 0 {
+    } else {
+        // Peel the front entry off both (front-recursion on lo).
+        assert forall|t: int| 0 <= t < cnt - 1 implies
+            #[trigger] d1[(lo1 + 1) + t] == d2[(lo2 + 1) + t] by {
+            assert(d1[lo1 + (t + 1)] == d2[lo2 + (t + 1)]);
+            assert((lo1 + 1) + t == lo1 + (t + 1));
+            assert((lo2 + 1) + t == lo2 + (t + 1));
+        }
+        lemma_overlay_congruent::<T, I>(base, d1, d2, lo1 + 1, lo2 + 1, cnt - 1);
+        lemma_overlay_len::<T, I>(base, d1, lo1 + 1, lo1 + cnt);
+        lemma_overlay_len::<T, I>(base, d2, lo2 + 1, lo2 + cnt);
+        assert(d1[lo1] == d2[lo2]) by {
+            assert(d1[lo1 + 0] == d2[lo2 + 0]);
+        }
+    }
+}
+
 /// Appending an entry at position `hi` whose index is ALREADY hit somewhere
 /// in `[lo, hi)` does not change the overlay of the range: first-entry-wins
 /// means the earlier hitter shadows the appended duplicate. This is the
@@ -4943,6 +4981,63 @@ where
     {
         // Retired: seal-on-mark contradicted the buffered-eviction policy
         // (goal doc §6) and is gone for good; A2b's eviction replaces it.
+    }
+
+    /// Trail-discipline reconstruction: for a hot target under the append-always
+    /// discipline, replaying the physical diff_log suffix `[hf.start, n)`
+    /// reconstructs `snapshots[target]`. The trail bridge makes that suffix
+    /// element-equal to the ghost stratum `[g_start(target), m)` (via the frame
+    /// alignment for the offset), so `lemma_overlay_congruent` maps the physical
+    /// overlay onto the ghost overlay, which `lemma_cell_eq_overlay` reconstructs.
+    /// This is the D5 "trail hot = identity" equivalence discharged for restore.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_reconstruct_trail(&self, target: int, base: Seq<T>, j: int)
+        requires
+            self.wf(),
+            !self.store.unique_capture_spec(),
+            self.cold_stack@.len() <= target < self.trail_frames@.len(),
+            self.hot_stack@.len() > 0,
+            0 <= j < self.g_saved_len(target) as int,
+            (j as nat) < base.len(),
+            forall|m: int| 0 <= m < base.len() && m < self.view().len()
+                ==> #[trigger] base[m] == self.view()[m],
+        ensures
+            overlay::<T, I>(
+                base, self.diff_log@,
+                self.hot_stack@[target - self.cold_stack@.len() as int].start as int,
+                self.diff_log@.len() as int)[j]
+                == self.snapshots@[target][j],
+    {
+        let cc = self.cold_stack@.len() as int;
+        let hidx = target - cc;
+        let hf_start = self.hot_stack@[hidx].start as int;
+        let n = self.diff_log@.len() as int;
+        let m = self.full_trail@.len() as int;
+        let gs_cc = self.g_start(cc);
+        let gst = self.g_start(target);
+        // frame-count bridge: cc == tf.len - hot.len (the trail-bridge index).
+        assert(cc == (self.trail_frames@.len() - self.hot_stack@.len()) as int);
+        // trail bridge: diff_log is the ghost hot suffix from gs_cc.
+        assert(self.diff_log@ == self.full_trail@.subrange(gs_cc, m));
+        self.lemma_diff_start_le_n(cc);
+        assert(n == m - gs_cc);
+        // alignment: hf_start + gs_cc == gst.
+        assert(hf_start + gs_cc == gst);
+        // window equality: diff_log[hf_start + t] == full_trail[gst + t].
+        assert forall|t: int| 0 <= t < n - hf_start implies
+            #[trigger] self.diff_log@[hf_start + t] == self.full_trail@[gst + t] by {
+            assert(self.diff_log@[hf_start + t]
+                == self.full_trail@.subrange(gs_cc, m)[hf_start + t]);
+            assert(self.full_trail@.subrange(gs_cc, m)[hf_start + t]
+                == self.full_trail@[gs_cc + (hf_start + t)]);
+            assert(gs_cc + (hf_start + t) == gst + t);
+        }
+        lemma_overlay_congruent::<T, I>(
+            base, self.diff_log@, self.full_trail@, hf_start, gst, n - hf_start);
+        assert(hf_start + (n - hf_start) == n);
+        assert(gst + (n - hf_start) == m);
+        self.lemma_cell_eq_overlay(base, target, j);
     }
 
     /// The genealogy-free core of `restore`: reconstruct the vector to the state
