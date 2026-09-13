@@ -3004,8 +3004,13 @@ where
                 assert(last_i.as_nat() < active.as_nat());
                 assert(self.store.data()[last as int] == data_last);
             }
+            let ghost old_full_p = self.full_trail@;
             self.store.capture(last_i, active, &mut self.diff_log);
             proof {
+                // Ghost trail records the reentered-slot capture.
+                if (last as int) < active.as_nat() as int {
+                    self.full_trail@ = old_full_p.push((data_last, last_i));
+                }
                 // capture's outcome at index `last`, by discipline:
                 //  - if !old.captured[last]: appended (data_last, last_i);
                 //  - else, unique store: no-op;
@@ -3357,8 +3362,16 @@ where
         let ghost was_captured0 = self.store.captured()[iu];
         if TRACK && self.depth_exec() > 0 {
             let active = self.active_saved_len;
+            let ghost old_full = self.full_trail@;
             self.store.capture(i, active, &mut self.diff_log);
             proof {
+                // Ghost trail: record this write iff it is a genuine tracked
+                // capture (in the marked region). Representation-independent -
+                // the physical diff_log dedupes under the unique discipline,
+                // full_trail never does.
+                if iu < active_n as int {
+                    self.full_trail@ = old_full.push((old_view[iu], i));
+                }
                 // Surface capture's per-discipline outcome explicitly.
                 if iu < active_n as int && !was_captured0 {
                     assert(self.diff_log@ == old_diffs.push((old_view[iu], i)));
@@ -3822,6 +3835,12 @@ where
             }
         }
         self.snapshots = Ghost(self.snapshots@.push(old_view));
+        proof {
+            // Ghost trail: a mark opens a new stratum at the current trail
+            // length. Compression below does not touch the ghost, so the
+            // boundary is stable across representation changes.
+            self.trail_frames@ = self.trail_frames@.push(self.full_trail@.len() as nat);
+        }
         let open_start = self.diff_log.len();
         self.hot_stack.push(crate::frame::HotFrame {
             saved_len, start: open_start, end: open_start,
@@ -4297,7 +4316,14 @@ where
             self.cold_value_pool.truncate(vcut);
             self.cold_stack.truncate(target_index);
         }
-        self.snapshots = Ghost(Seq::empty());
+        proof {
+            // Ghost trail truncates to the target frame's boundary; the
+            // snapshots stack keeps its restored prefix.
+            let b = self.trail_frames@[target_index as int] as int;
+            self.full_trail@ = self.full_trail@.subrange(0, b);
+            self.trail_frames@ = self.trail_frames@.subrange(0, target_index as int);
+            self.snapshots = Ghost(self.snapshots@.subrange(0, target_index as int));
+        }
 
         // New top frame: refresh active_saved_len and rebuild flags.
         let depth2 = self.depth_exec();
