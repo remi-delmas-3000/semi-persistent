@@ -367,3 +367,35 @@ REMAINING (2 vec functions, then D6/D7):
 - D7: 15-gate battery.
 
 cargo verus verify NOT at 0 errors. Commit 20 (053caca, 15/15) is baseline.
+
+
+## push reentered case: a design decision on the physical bridge (2026-09-13)
+
+Diagnosed to root: mark_captured(i) only sets the flag
+(captured().update(i,true)); it does NOT append to diff_log. So when push
+reenters a popped-but-marked slot old_len, the log entry naming old_len
+came from the EARLIER pop's capture and must still be present. The ghost
+bridge proves captured_in_range(full_trail, old_len) via frame_inv_range's
+captured arm (the reconstruction invariant, over full_trail). The physical
+bridge needs captured_in_range(diff_log, old_len) - for which there is no
+physical analog of frame_inv_range.
+
+So the dual-bridge has an asymmetric maintenance cost: the physical bridge's
+reentered case is not derivable from the ghost bridge alone (that would be
+circular with the index-set equality it is meant to support). The two clean
+options, to decide before continuing:
+  (A) add a PHYSICAL frame_inv_range clause to wf (doubles the
+      reconstruction invariant, but every mutator proof already has the
+      ghost version as a template);
+  (B) prove an index-set-PRESERVATION lemma across pop/push (the physical
+      and ghost open slices gain/lose the same indices per op) and derive
+      the physical bridge from the ghost one + that lemma.
+(B) is less duplication but a genuinely new inductive lemma; (A) is more
+mechanical. This is the one remaining DESIGN choice; set_index (no reenter)
+and pop already verify with the dual bridge, so the non-reentered paths are
+settled either way.
+
+Definitive remaining after the choice: push (reentered), push_frame (offset
+split, discharges from the physical bridge), D6 (restore-path discharge),
+D7 (battery). cargo verus verify NOT at 0 errors; commit 20 (053caca,
+15/15) is the verified baseline.
