@@ -274,3 +274,37 @@ discharge (D6) follow. NEXT SESSION: land the open-frame repr clause, thread
 it through the three proven mutators, finish push_frame, then D6/D7.
 
 Commit 20 (053caca) remains the fully-verified checkpoint beneath.
+
+
+## D5 near-complete: 91 verified, push_frame the sole vec obligation (2026-09-13)
+
+The ghost-model port of vec is essentially done: set_index, push, pop, the
+whole lemma family (bounds/monotone/le_n/cell_eq/forks/saved_len),
+maybe_shrink, with_store_mode, and the exec accessors ALL verify over
+full_trail@ (91 obligations, 1 function left). Key fixes: single-trigger on
+wf_for_snap's boundary-monotone clause; the mutator template (frame_inv_range
++ capture bridge over full_trail@, unconditional ghost append, aligned
+triggers); forks/maybe_shrink pin the new stacks. repr_ok reverted to `true`
+(its open-frame clause was the wrong mechanism - see below).
+
+SOLE REMAINING vec obligation - push_frame's prepare_mark: it consumes the
+PHYSICAL diff_log open slice, so it needs the PHYSICAL capture bridge
+  captured()[j] <==> captured_in_range(diff_log@, hot_top.start, diff_log.len(), j)
+which is a STORE-level fact (capture appends j to diff_log exactly when it
+sets the flag; the flag persists). This is not a vec-local proof: it is a
+DiffStore INTERFACE ADDITION - a spec fn + ensures on the trait, proved in
+inline/parallel/trail store impls (each already maintains it; it was the
+pre-ghost wf bridge). With it, push_frame's prepare_mark discharges
+directly, and the ghost<->physical index-set equality becomes a derived
+two-bridge consequence rather than a maintained invariant.
+
+FINISH LINE (crisp):
+  1. DiffStore: add fn captured_matches_log spec + ensures on capture/
+     prepare_mark/begin_restore/finish_restore; prove in the 3 stores.
+  2. push_frame: discharge prepare_mark from it; vec verifies 0 errors.
+  3. D6: restore_frame + compress_all_hot + normalize/restore_run + the
+     store restore_overlay loops - prove or trust-ledger (zero external_body
+     on the restore path via the split_at_mut/copy_from_slice chain).
+  4. D7: full 15-gate battery.
+
+Commit 20 (053caca) remains the fully-verified baseline beneath.

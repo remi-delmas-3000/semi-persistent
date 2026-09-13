@@ -1845,22 +1845,14 @@ where
     /// scaffolded mutators during the exec-locked phase and discharged
     /// per-theorem afterwards (goal doc, deliverables 5-6).
     pub open(crate) spec fn repr_ok(&self) -> bool {
-        // The OPEN-FRAME abstraction (T1/T2), the piece push_frame's
-        // prepare_mark and the capture bridge need: the physical diff_log
-        // open slice and the ghost open stratum carry the SAME SET OF
-        // INDICES. Identity for the trail discipline; dedupe_first preserves
-        // the index set for unique capture. (The closed-frame cold clauses
-        // T3/T4 land with restore_frame's discharge, D6.)
-        &&& (self.trail_frames@.len() > 0 ==> {
-                let top = (self.trail_frames@.len() - 1) as int;
-                let phys_lo = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
-                forall|j: nat| #![trigger captured_in_range::<T, I>(
-                        self.diff_log@, phys_lo, self.diff_log@.len() as int, j)]
-                    captured_in_range::<T, I>(
-                        self.diff_log@, phys_lo, self.diff_log@.len() as int, j)
-                    == captured_in_range::<T, I>(
-                        self.full_trail@, self.g_start(top), self.full_trail@.len() as int, j)
-            })
+        // Deferred to D6 (cold-frame T3/T4 clauses for restore_frame's
+        // discharge). The OPEN-FRAME physical<->ghost relation push_frame's
+        // prepare_mark needs is carried DIRECTLY by wf's physical capture
+        // bridge (below) rather than here: prepare_mark reads the physical
+        // diff_log slice, and the physical bridge names its flags. The
+        // ghost/physical index-set equality is then a derived consequence of
+        // the two bridges, not a separately maintained invariant.
+        true
     }
 
     pub open(crate) spec fn wf(&self) -> bool {
