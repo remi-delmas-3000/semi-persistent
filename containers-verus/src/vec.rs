@@ -146,6 +146,105 @@ pub open(crate) spec fn frame_inv<T, I: IndexLike>(
 // index ends up outermost (winning). This is exactly the loop's result.
 
 /// Replay `diffs[lo..hi]` over `base` in reverse-index-wins order.
+// ---------------------------------------------------------------------------
+// Bare-log helpers (exec-first convergence, goal doc mainline-shape-plus-
+// coldstack). The hot log is a bare `std::vec::Vec<(T, I)>` again - mainline's
+// field - and these free functions carry the small verified surface the
+// container and stores read it through. `log_hot_slice` always succeeds now
+// (there is no cold region inside the log); the Option shape is kept so the
+// call sites' fallback structure survives until the cold stack lands (A2b).
+
+pub(crate) fn log_hot_slice<'a, T: Copy, I: IndexLike>(
+    d: &'a std::vec::Vec<(T, I)>, lo: usize, hi: usize,
+) -> (r: Option<&'a [(T, I)]>)
+    requires lo <= hi <= d@.len(),
+    ensures
+        r is Some,
+        r matches Some(sl) ==> sl@ == d@.subrange(lo as int, hi as int),
+{
+    Some(vstd::slice::slice_subrange(d.as_slice(), lo, hi))
+}
+
+pub(crate) fn log_subrange_vec<T: Copy, I: IndexLike>(
+    d: &std::vec::Vec<(T, I)>, lo: usize, hi: usize,
+) -> (r: std::vec::Vec<(T, I)>)
+    requires lo <= hi <= d@.len(),
+    ensures r@ == d@.subrange(lo as int, hi as int),
+{
+    let mut out: std::vec::Vec<(T, I)> = std::vec::Vec::new();
+    let mut i: usize = lo;
+    while i < hi
+        invariant
+            lo <= i <= hi,
+            hi <= d@.len(),
+            out@ =~= d@.subrange(lo as int, i as int),
+        decreases hi - i,
+    {
+        out.push(d[i]);
+        proof {
+            assert(out@ =~= d@.subrange(lo as int, i as int + 1));
+        }
+        i += 1;
+    }
+    proof { assert(out@ =~= d@.subrange(lo as int, hi as int)); }
+    out
+}
+
+pub(crate) fn log_index<T: Copy, I: IndexLike>(
+    d: &std::vec::Vec<(T, I)>, i: usize,
+) -> (e: (T, I))
+    requires i < d@.len(),
+    ensures e == d@[i as int],
+{
+    d[i]
+}
+
+pub(crate) fn log_index_range<T: Copy, I: IndexLike>(
+    d: &std::vec::Vec<(T, I)>, lo: usize, hi: usize,
+) -> (r: std::vec::Vec<I>)
+    requires lo <= hi <= d@.len(),
+    ensures
+        r@.len() == hi - lo,
+        forall|k: int| 0 <= k < r@.len() ==> #[trigger] r@[k] == d@[lo + k].1,
+{
+    let mut out: std::vec::Vec<I> = std::vec::Vec::new();
+    let mut i: usize = lo;
+    while i < hi
+        invariant
+            lo <= i <= hi,
+            hi <= d@.len(),
+            out@.len() == i - lo,
+            forall|k: int| 0 <= k < i - lo ==> #[trigger] out@[k] == d@[lo + k].1,
+        decreases hi - i,
+    {
+        let (_, idx) = d[i];
+        out.push(idx);
+        i += 1;
+    }
+    out
+}
+
+/// Diagnostic byte count of the bare log (capacity-based, mirrors the old
+/// DiffLog::heap_bytes).
+#[verifier::external_body]
+pub(crate) fn log_heap_bytes<T: Copy, I: IndexLike>(d: &std::vec::Vec<(T, I)>) -> usize {
+    d.capacity() * core::mem::size_of::<(T, I)>()
+}
+
+/// Capacity release for the bare log: shrink when capacity exceeds
+/// `factor * len + headroom`. View-preserving; capacity is unmodeled.
+#[verifier::external_body]
+pub(crate) fn log_shrink_capacity<T: Copy, I: IndexLike>(
+    d: &mut std::vec::Vec<(T, I)>, factor: usize, headroom: usize,
+)
+    ensures d@ == old(d)@,
+{
+    let cap_target = d.len().saturating_mul(factor).saturating_add(headroom);
+    if d.capacity() > cap_target {
+        d.shrink_to(cap_target);
+    }
+}
+
 pub open(crate) spec fn overlay<T, I: IndexLike>(
     base: Seq<T>,
     diffs: Seq<(T, I)>,

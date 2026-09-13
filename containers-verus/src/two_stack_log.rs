@@ -17,7 +17,6 @@
 
 use crate::compressed_stack::CompressedStack;
 use crate::compression_config::ColumnConfig;
-use crate::diff_log::DiffLog;
 use crate::index_like::{IndexFromNat, IndexLike};
 use vstd::multiset::Multiset;
 use vstd::prelude::*;
@@ -28,7 +27,7 @@ pub struct TwoStackLog<T: Copy, I> {
     /// Compressed, read-only bottom (older finalized frames).
     pub cold: CompressedStack<T, I>,
     /// Plain, mutable top (recent frames, including the active one).
-    pub hot: DiffLog<T, I>,
+    pub hot: std::vec::Vec<(T, I)>,
     /// Start offset of each hot frame within `hot@`. `hot_starts[0] == 0`; the
     /// last frame is the active one, its diffs `hot@[hot_starts.last()..]`.
     pub hot_starts: Vec<usize>,
@@ -45,7 +44,6 @@ impl<T: IndexLike, I: IndexFromNat> View for TwoStackLog<T, I> {
 impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
     pub open spec fn wf(&self) -> bool {
         &&& self.cold.wf()
-        &&& self.hot.wf()
         // There is always at least the active frame; it opens at the hot front,
         // so the frames tile `hot@` in order.
         &&& self.hot_starts@.len() > 0
@@ -101,7 +99,7 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
         hot_starts.push(0);
         let r = TwoStackLog {
             cold: CompressedStack::new(),
-            hot: DiffLog::new_plain(),
+            hot: std::vec::Vec::new(),
             hot_starts,
             config,
         };
@@ -139,7 +137,7 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
     {
         let ghost hot0 = self.hot@;
         let ghost L = self.hot_starts@.len();
-        self.hot.push(t, idx);
+        self.hot.push((t, idx));
         assert(self@ =~= old(self)@.push((t, idx)));
         assert(self.hot@ =~= hot0.push((t, idx)));
         assert forall|k: int| 0 <= k < self.hot_starts@.len() implies
@@ -273,7 +271,6 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
                 k < self.hot_starts@.len(),
                 self.hot@ == hot0,
                 self.hot_starts@ == starts0,
-                self.hot.wf(),
                 starts0[0] == 0,
                 L == starts0.len(),
                 forall|j: int| 0 <= j < L ==> #[trigger] starts0[j] <= hot0.len(),
@@ -290,7 +287,7 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
             let lo = self.hot_starts[f];
             let hi = self.hot_starts[f + 1];
             assert(lo <= hi <= hot0.len());
-            let diffs = self.hot.subrange_vec(lo, hi);
+            let diffs = crate::vec::log_subrange_vec(&self.hot, lo, hi);
             // For f < k <= L-1, old hot frame f is exactly this slice's multiset.
             assert(lo == starts0[f as int]);
             assert(hi == starts0[f as int + 1]);
@@ -319,7 +316,7 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
         assert(m == starts0[k as int]);
         assert(self.cold.frame_msets()
             =~= cold0_msets + Seq::new(k as nat, |j: int| old(self).hot_frame_mset(j)));
-        self.hot.drop_front(m);
+        two_stack_drop_front(&mut self.hot, m);
         assert(self.hot@ =~= hot0.subrange(m as int, hot0.len() as int));
 
         // Rebuild hot_starts: keep frames [k, len), rebased by `m`.
@@ -495,13 +492,26 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
 
     /// Heap bytes held by the uncompressed (hot) top.
     pub fn hot_bytes(&self) -> usize {
-        self.hot.heap_bytes()
+        crate::vec::log_heap_bytes(&self.hot)
     }
 
     /// Heap bytes held by the compressed (cold) bottom.
     pub fn cold_bytes(&self) -> usize {
         self.cold.heap_bytes()
     }
+}
+
+
+/// Drop the first `m` entries of the bare hot log (the two-stack fold's
+/// front consumption). EXEC-FIRST SCAFFOLD contract.
+pub(crate) fn two_stack_drop_front<T: Copy, I: crate::index_like::IndexLike>(
+    d: &mut std::vec::Vec<(T, I)>, m: usize,
+)
+    requires m <= old(d)@.len(),
+    ensures d@ == old(d)@.subrange(m as int, old(d)@.len() as int),
+{
+    let tail = crate::vec::log_subrange_vec(d, m, d.len());
+    *d = tail;
 }
 
 } // verus!

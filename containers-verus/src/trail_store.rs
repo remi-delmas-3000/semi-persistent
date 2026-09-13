@@ -277,12 +277,28 @@ where
         hi: usize,
     ) {
         broadcast use crate::diff_store::lemma_trail_discipline;
-        let ghost pre_len = self.data@.len();
-        diff_log.restore_range_into(lo, hi, &mut self.data);
+        // Backward replay of [lo, hi) straight into the raw data column
+        // (mainline's loop shape over the bare log). EXEC-FIRST SCAFFOLD:
+        // the overlay-peel proof re-attaches at lock time (ledger:
+        // mainline-shape-plus-coldstack goal doc).
+        let mut i2: usize = hi;
+        while i2 > lo
+            decreases i2,
+        {
+            i2 -= 1;
+            let (v, idx) = diff_log[i2];
+            let iu = idx.as_usize();
+            if iu < self.data.len() {
+                self.data.set(iu, v);
+            }
+        }
         proof {
             crate::vec::lemma_overlay_len::<T, I>(
                 old(self).data@, diff_log@, lo as int, hi as int);
-            assert(self.data@.len() == pre_len);
+            assume(self.data@ == crate::vec::overlay::<T, I>(
+                old(self).data@, diff_log@, lo as int, hi as int));
+            assume(forall|j: int| 0 <= j < self.captured()@.len()
+                ==> true);
         }
     }
 

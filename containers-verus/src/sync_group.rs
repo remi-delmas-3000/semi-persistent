@@ -146,7 +146,9 @@ where
     }
 
     fn cold_frames(&self) -> usize {
-        self.diff_log.cold_frame_count()
+        // A2a: no cold tier on the bare log yet; the count returns with the
+        // cold stack (A2b).
+        0
     }
 
     #[verifier::external_body]

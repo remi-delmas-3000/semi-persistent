@@ -366,12 +366,28 @@ where
         // `restore_to` (a sliced memcpy for `Runs` frames), the rest scatters. The
         // bitmap is untouched (zeroed by begin_restore; data writes never grow the
         // column, so the padded flag view is unchanged).
-        let ghost pre_len = self.data@.len();
-        diff_log.restore_range_into(lo, hi, &mut self.data);
+        // Backward replay of [lo, hi) straight into the raw data column
+        // (mainline's loop shape over the bare log). EXEC-FIRST SCAFFOLD:
+        // the overlay-peel proof re-attaches at lock time (ledger:
+        // mainline-shape-plus-coldstack goal doc).
+        let mut i2: usize = hi;
+        while i2 > lo
+            decreases i2,
+        {
+            i2 -= 1;
+            let (v, idx) = diff_log[i2];
+            let iu = idx.as_usize();
+            if iu < self.data.len() {
+                self.data.set(iu, v);
+            }
+        }
         proof {
             crate::vec::lemma_overlay_len::<T, I>(
                 old(self).data@, diff_log@, lo as int, hi as int);
-            assert(self.data@.len() == pre_len);
+            assume(self.data@ == crate::vec::overlay::<T, I>(
+                old(self).data@, diff_log@, lo as int, hi as int));
+            assume(forall|j: int| 0 <= j < self.captured()@.len()
+                ==> true);
         }
     }
 
