@@ -1,0 +1,80 @@
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:172:5
+    |
+172 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_config.rs:189:5
+    |
+189 |     static KIND: std::sync::OnceLock<crate::dyn_store::StoreKind> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:237:5
+    |
+237 |     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: verus-related attribute has no effect because item is already marked external
+   --> containers-verus/src/compression_stats.rs:247:5
+    |
+247 | /     static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+248 | |         std::sync::OnceLock::new();
+    | |__________________________________^
+
+warning: using ==> in `assert forall` does not currently assume the antecedent in the body; consider using `implies` instead of `==>`
+    --> containers-verus/src/vec.rs:7032:13
+     |
+7032 |             assert forall|j: int| 0 <= j < self.store.captured().len()
+     |             ^^^^^^
+     |
+     = help: If you didn't mean to assume the antecedent, we're very curious to hear why! To tell us, please open an issue on the Verus issue tracker on github with the title `Don't always make assert forall assume the antecedent`. If no one opens such an issue, we'll soon change the behavior of Verus to always assume the antecedent of the outermost implication
+
+note: verifying module vec, function semi_persistent_containers_verus::vec::Vec::lemma_cold_replay_step_l (selected functions)
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/vec.rs:3621:13
+     |
+3621 | /             forall|c: int| 0 <= c < ln && c < self.snapshots@[f].len() as int
+3622 | |                 ==> data_after[c] == self.snapshots@[f][c],
+     | |__________________________________________________________^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/vec.rs:3622:21
+     |
+3622 |                 ==> data_after[c] == self.snapshots@[f][c],
+     |                     ^^^^^^^^^^^^^
+
+note: automatically chose triggers for this expression:
+    --> containers-verus/src/vec.rs:3625:9
+     |
+3625 |         assert forall|c: int| 0 <= c < ln && c < self.snapshots@[f].len() as int implies
+     |         ^^^^^^
+
+note:   trigger 1 of 1:
+    --> containers-verus/src/vec.rs:3626:13
+     |
+3626 |             data_after[c] == self.snapshots@[f][c] by {
+     |             ^^^^^^^^^^^^^
+
+note: Verus printed one or more automatically chosen quantifier triggers
+      because it had low confidence in the chosen triggers.
+      To suppress these messages, do one of the following:
+        (1) manually annotate a single desired trigger using #[trigger]
+            (example: forall|i: int, j: int| f(i) && #[trigger] g(i) && #[trigger] h(j)),
+        (2) manually annotate multiple desired triggers using #![trigger ...]
+            (example: forall|i: int| #![trigger f(i)] #![trigger g(i)] f(i) && g(i)),
+        (3) accept the automatically chosen trigger using #![auto]
+            (example: forall|i: int, j: int| #![auto] f(i) && g(i) && h(j))
+        (4) use the --triggers-mode silent command-line option to suppress all printing of triggers.
+      (Note: triggers are used by the underlying SMT theorem prover to instantiate quantifiers;
+      the theorem prover instantiates a quantifier whenever some expression matches the
+      pattern specified by one of the quantifier's triggers.)
+    --> containers-verus/src/vec.rs:3625:9
+     |
+3625 |         assert forall|c: int| 0 <= c < ln && c < self.snapshots@[f].len() as int implies
+     |         ^^^^^^
+
+warning: `semi-persistent-containers-verus` (lib) generated 5 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s

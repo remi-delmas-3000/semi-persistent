@@ -3581,6 +3581,62 @@ where
     /// invariant `data == snapshots[f]` bottoms out at `snapshots[target]`. The
     /// replay effect and the coverage bound (uncovered saved cells lie within
     /// the layer) are what the body's run loop and compress's `repr_ok` supply.
+    /// Fixed-length telescope step for the cold reconstruction. Unlike
+    /// `lemma_cold_replay_step` (stated over the full `snapshots[f].len()`), this
+    /// reconstructs over the fixed live-data length `ln == saved_len(target)`,
+    /// so it composes across the newest-first loop even when intermediate
+    /// `snapshots[f]` vary in length: only cells `c < min(ln, snapshots[f].len())`
+    /// are pinned; cells beyond `snapshots[f].len()` are "pending" (restored by
+    /// an older frame). `restore_run` clamps writes to `ln`, and `cold_covered`
+    /// entries lie in the saved region, so the invariant chains. Bottoms out at
+    /// `f == target` where `snapshots[target].len() == ln`, giving full data.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_cold_replay_step_l(
+        &self, f: int, ln: int, data_before: Seq<T>, data_after: Seq<T>,
+    )
+        requires
+            0 <= f,
+            f + 1 < self.trail_frames@.len(),
+            self.cold_reconstructs(f),
+            // cold_covered cells lie in the frame's saved region (runs within
+            // saved_len; from compress's repr_ok).
+            forall|c: int| 0 <= c && #[trigger] self.cold_covered(f, c as nat)
+                ==> c < self.snapshots@[f].len() as int,
+            // coverage: uncovered saved cells lie within the layer above.
+            forall|c: int| 0 <= c < self.snapshots@[f].len() as int
+                && !(#[trigger] self.cold_covered(f, c as nat))
+                ==> c < self.snapshots@[f + 1].len() as int,
+            // in-invariant: data_before matches the layer on [0, min(ln, layer.len)).
+            forall|c: int| 0 <= c < ln && c < self.snapshots@[f + 1].len() as int
+                ==> #[trigger] data_before[c] == self.snapshots@[f + 1][c],
+            // replay effect over [0, ln): covered -> cold_value, else unchanged.
+            forall|c: int| 0 <= c < ln
+                ==> #[trigger] data_after[c] == if self.cold_covered(f, c as nat) {
+                        self.cold_value(f, c as nat)
+                    } else {
+                        data_before[c]
+                    },
+        ensures
+            forall|c: int| 0 <= c < ln && c < self.snapshots@[f].len() as int
+                ==> data_after[c] == self.snapshots@[f][c],
+    {
+        assert(self.layer_above_at(f) == self.snapshots@[f + 1]);
+        assert forall|c: int| 0 <= c < ln && c < self.snapshots@[f].len() as int implies
+            data_after[c] == self.snapshots@[f][c] by {
+            assert(self.g_saved_len(f) == self.snapshots@[f].len());
+            let _ = self.cold_value(f, c as nat);
+            if self.cold_covered(f, c as nat) {
+                assert(self.cold_value(f, c as nat) == self.snapshots@[f][c]);
+            } else {
+                assert(c < self.snapshots@[f + 1].len() as int);
+                assert(data_after[c] == data_before[c]);
+                assert(data_before[c] == self.snapshots@[f + 1][c]);
+                assert(self.snapshots@[f][c] == self.layer_above_at(f)[c]);
+            }
+        }
+    }
+
     #[verifier::spinoff_prover]
     #[verifier::rlimit(300)]
     pub(crate) proof fn lemma_cold_replay_step(
