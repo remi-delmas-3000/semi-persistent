@@ -1981,6 +1981,21 @@ where
     /// T1-T4 theorems of the proof architecture). Opaque; maintained by the
     /// scaffolded mutators during the exec-locked phase and discharged
     /// per-theorem afterwards (goal doc, deliverables 5-6).
+    /// Within each cold frame the index runs are sorted by base and cell-disjoint
+    /// (run r ends at or before run r+1 begins). A named spec fn so callers that
+    /// don't need it (e.g. push_frame after compress) carry it opaquely rather
+    /// than instantiating the nested forall - the raw forall in an ensure blew up
+    /// push_frame's query. restore_cold unfolds it.
+    pub open(crate) spec fn cold_runs_disjoint(&self) -> bool {
+        forall|f: int, r: int|
+            0 <= f < self.cold_stack@.len()
+            && (#[trigger] self.cold_stack@[f]).runs_start <= r
+            && r + 1 < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len
+            ==> (#[trigger] self.cold_index_runs@[r]).base.as_nat()
+                + self.cold_index_runs@[r].len
+                <= self.cold_index_runs@[r + 1].base.as_nat()
+    }
+
     pub open(crate) spec fn repr_ok(&self) -> bool {
         // Cold-pool structural well-formedness (D6). compress_all_hot lays the
         // cold tier out as a contiguous partition: index runs are appended in
@@ -5752,6 +5767,12 @@ where
             forall|f: int| 0 <= f < final(self).cold_stack@.len()
                 ==> (#[trigger] final(self).cold_stack@[f]).saved_len.as_nat()
                     == final(self).snapshots@[f].len(),
+            // Within each cold frame the index runs are sorted by base and
+            // cell-disjoint (opaque spec fn so callers carry it cheaply without
+            // instantiating the nested forall). Ledgered (compress lays out
+            // sorted unique cells); restore_cold's inner run loop unfolds it so
+            // restore_run windows compose and cold_value's covering run is unique.
+            final(self).cold_runs_disjoint(),
     {
         let mut keys: std::vec::Vec<u64> = std::vec::Vec::new();
         let mut wide: std::vec::Vec<usize> = std::vec::Vec::new();
