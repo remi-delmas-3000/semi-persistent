@@ -511,18 +511,6 @@ where
 
     // -- maintenance ---------------------------------------------------------
 
-    /// Normalize one closed frame's diff slice in place for compression:
-    /// sort by index; the trail discipline first keeps only the
-    /// chronologically FIRST entry per cell (stable sort, then a first-of-
-    /// group compaction) and returns the kept length. Unique disciplines
-    /// return the full length (no ties exist). Called ONLY from the
-    /// compression pass, so mark without compression stays O(1) for trail.
-    /// EXEC-FIRST SCAFFOLD: contracts attach at lock time.
-    #[verifier::external_body]
-    fn normalize_frame(&self, frame: &mut [(T, I)]) -> usize {
-        frame.sort_unstable_by_key(|p| p.1.as_usize());
-        frame.len()
-    }
 
     /// Restore one cold run: write `values` into the live column starting at
     /// `base`, clamped to the current length. The default is per-element

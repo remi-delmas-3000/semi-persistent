@@ -131,3 +131,84 @@ position) beats the tuple sorts at every measured size on the unique shape:
 replaces the ~20% slower stable sort + fold) is still to be measured, and
 adoption is gated on it. T stays opaque under the packed scheme; 31-bit
 IndexLike packs, wide indices keep the comparison path.
+
+## The proof architecture (deliverable 5 of the hardening goal, ruled 2026-09-13)
+
+One ghost model, four abstraction maps. The ghost diff stores everything
+explicitly: every tracked write, in temporal order, duplicates included.
+
+    ghost full_trail: Seq<(T, I)>     // (old_value, index) per write, all of them
+    ghost trail_frames: Seq<nat>      // stratum start offsets, one per mark
+
+Maintained at the container layer, independent of the store discipline:
+set pushes (old_value, i) whenever a frame is live, mark pushes a boundary,
+restore truncates both to the target boundary. Restore correctness is stated
+ONCE, against the ghost: overlaying stratum k of full_trail (first-entry-
+wins, backward application) onto the layer above reconstructs snapshot k.
+Every wf clause about reconstruction reads full_trail, never a physical
+representation.
+
+Each physical representation then carries an abstraction theorem relating
+its bytes to its ghost stratum, and correctness flows through overlay
+equivalence:
+
+- T1, trail hot frame: the pool slice IS the ghost stratum - identity.
+  Capture appends to both equally; nothing to transport.
+- T2, unique-capture hot frame: the pool slice equals
+  dedupe_first_spec(ghost stratum) - the capture flag check is an ONLINE
+  dedupe (inductive per write: flag set iff the cell already appears in the
+  stratum, so the skip keeps exactly the first capture). Overlay-equal by
+  lemma_overlay_dedupe_first (proved, commit 20, no hypotheses).
+- T3, cold frame: the runs decoding is a sorted unique-index permutation of
+  dedupe_first_spec(ghost stratum) - the normalize hook's postcondition plus
+  the translation's. Overlay-equal by composing the dedupe lemma with
+  order-independence of unique write sets (lemma_apply_all_eq_overlay) and
+  the write_block extensionality chain for the memcpy restore (both proved,
+  commit 20).
+- T4, the orphan extension: the cold top frame's ghost stratum splits as
+  sealed-part ++ pool-extension; the fold's covered-cell drop is
+  dedupe-first across the concatenation (the sealed entries are the
+  chronologically earlier captures, so first-entry-wins keeps them), the
+  same lemma family as T2.
+
+Sequencing: ghost model + wf rephrasing first (the hot-path proofs are
+mainline-shaped and port); then T1/T2 (small), T3 (the commit-20 assets
+attach), T4 (new, one lemma); then the scaffolding ledger discharges
+against the ghost-level contracts.
+
+
+## D3 result (2026-09-13, packed normalize)
+
+mark_churn/verus control-corrected vs prod, same-run (the saved mainline
+baseline's machine had drifted; within-run control is the honest metric):
++6.4% (1k), -1.0% (100k), +5.1% (1M, clean re-run) - all within +-8%.
+restore_replay/verified 27% faster than its legacy control (232 vs 318 us
+on a loaded machine; ratio matches the earlier 142/208 clean read).
+Controls move together across runs (machine load), so absolute cross-run
+comparison is not used. Packed-key normalize adopted; numbers in the
+perf(vec) commit.
+
+## D5 status (in progress): ghost trail not yet maintained by mutators
+
+The layout and specs are ghost-rephrased (full_trail/trail_frames fields,
+wf/wf_for_snap/stratum specs over the ghost, bounds+monotone lemmas
+ported). REMAINING OBLIGATION before any spec proves: the exec mutators
+(push, push_frame, pop, set_index, restore_frame, compress_all_hot) must
+update full_trail/trail_frames as ghost writes mirroring the physical ops,
+and the ~24 lemma-body references to the removed `frames` field must move
+to g_start/g_end/g_saved_len. Then repr_ok's opaque clauses land with
+their T1-T4 theorems. This is the deferred proof grind, now the critical
+path; exec is unaffected and green.
+
+
+## ALGORITHM LOCK (D4, 2026-09-13)
+
+The exec algorithm is LOCKED at this commit. The ruled layout and its
+lifecycle (mark-driven compression with the packed-key normalize, orphan
+fold, tier-aware restore, both capture disciplines through one path) are
+final; the proof phase (D5-D7) attaches to this shape and may not change
+it except to fix a defect a proof exposes (which would reopen the lock
+with a recorded reason). Lock bar met: 27/27 conformance binaries, trail
+semi-persistence proptests at 256 cases, 38/38 in-crate tests, D3
+benchmarks control-corrected in band. Everything below the lock is proof
+work against fixed code.
