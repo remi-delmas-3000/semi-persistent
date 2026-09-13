@@ -5444,6 +5444,81 @@ where
         // (goal doc §6) and is gone for good; A2b's eviction replaces it.
     }
 
+    /// wf re-establishment, part 4 (trail index_set_ok): under the append-always
+    /// discipline, the trail sequence-bridge and frame alignment (part 3) force
+    /// `index_set_ok` directly. The top frame's physical slice
+    /// `[hot_top.start, n)` and its ghost stratum `[g_start(top), m)` are
+    /// element-equal via the bridge (diff_log[t] == full_trail[g_start(cc)+t])
+    /// shifted by the alignment offset (hot_top.start + g_start(cc) ==
+    /// g_start(top)), so an index appears in one slice iff it appears in the
+    /// other - `captured_in_range` agrees cell for cell. No append framing (this
+    /// is the truncation path); the bijection `k <-> g_start(cc)+k` is exact.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_restore_index_set_ok_trail(&self)
+        requires
+            !self.store.unique_capture_spec(),
+            self.hot_stack@.len() > 0,
+            // trail sequence-bridge (part 3 establishes this for the final state)
+            self.diff_log@ == self.full_trail@.subrange(
+                self.g_start((self.trail_frames@.len() - self.hot_stack@.len()) as int),
+                self.full_trail@.len() as int),
+            // frame alignment (part 3)
+            forall|i: int| 0 <= i < self.hot_stack@.len() ==>
+                (#[trigger] self.hot_stack@[i]).start as int
+                    + self.g_start((self.trail_frames@.len() - self.hot_stack@.len()) as int)
+                    == self.g_start((self.trail_frames@.len() - self.hot_stack@.len()) + i),
+            // the top frame boundary: g_start(cc) + diff_log.len() == full_trail.len()
+            self.g_start((self.trail_frames@.len() - self.hot_stack@.len()) as int)
+                + self.diff_log@.len() == self.full_trail@.len(),
+            self.hot_stack@.len() <= self.trail_frames@.len(),
+        ensures
+            self.index_set_ok(),
+    {
+        let cc = (self.trail_frames@.len() - self.hot_stack@.len()) as int;
+        let gcc = self.g_start(cc);
+        let top_h = (self.hot_stack@.len() - 1) as int;
+        let top_g = (self.trail_frames@.len() - 1) as int;
+        let phys_lo = self.hot_stack@[top_h].start as int;
+        let ghost_lo = self.g_start(top_g);
+        let n = self.diff_log@.len() as int;
+        let m = self.full_trail@.len() as int;
+        // top_g == cc + top_h, so alignment at i = top_h gives ghost_lo == phys_lo + gcc.
+        assert(top_g == cc + top_h);
+        assert(phys_lo + gcc == ghost_lo) by {
+            assert(self.hot_stack@[top_h].start as int + gcc == self.g_start(cc + top_h));
+        }
+        assert(gcc + n == m);
+        assert forall|j: int| #![trigger captured_in_range::<T, I>(
+                self.full_trail@, ghost_lo, m, j as nat)]
+            0 <= j < self.active_saved_len.as_nat() implies
+            captured_in_range::<T, I>(self.diff_log@, phys_lo, n, j as nat)
+            == captured_in_range::<T, I>(self.full_trail@, ghost_lo, m, j as nat) by {
+            // (==>) a physical hitter k maps to ghost hitter gcc+k.
+            if captured_in_range::<T, I>(self.diff_log@, phys_lo, n, j as nat) {
+                let k = choose|k: int| phys_lo <= k < n && 0 <= k < self.diff_log@.len()
+                    && (#[trigger] self.diff_log@[k]).1.as_nat() == j as nat;
+                assert(self.diff_log@[k] == self.full_trail@.subrange(gcc, m)[k]);
+                assert(self.full_trail@.subrange(gcc, m)[k] == self.full_trail@[gcc + k]);
+                assert(ghost_lo <= gcc + k < m);
+                assert(self.full_trail@[gcc + k].1.as_nat() == j as nat);
+                assert(captured_in_range::<T, I>(self.full_trail@, ghost_lo, m, j as nat));
+            }
+            // (<==) a ghost hitter k' in [ghost_lo, m) maps to physical hitter k'-gcc.
+            if captured_in_range::<T, I>(self.full_trail@, ghost_lo, m, j as nat) {
+                let kp = choose|kp: int| ghost_lo <= kp < m && 0 <= kp < self.full_trail@.len()
+                    && (#[trigger] self.full_trail@[kp]).1.as_nat() == j as nat;
+                let k = kp - gcc;
+                assert(phys_lo <= k < n);
+                assert(self.diff_log@[k] == self.full_trail@.subrange(gcc, m)[k]);
+                assert(self.full_trail@.subrange(gcc, m)[k] == self.full_trail@[gcc + k]);
+                assert(gcc + k == kp);
+                assert(self.diff_log@[k].1.as_nat() == j as nat);
+                assert(captured_in_range::<T, I>(self.diff_log@, phys_lo, n, j as nat));
+            }
+        }
+    }
+
     /// wf re-establishment, part 3 (structural + trail bridges): for a HOT
     /// target with survivors (target > cold_count, so no re-materialization),
     /// after truncation the frame-count and length bridges hold, and under the
