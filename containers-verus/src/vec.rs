@@ -1981,6 +1981,21 @@ where
     /// T1-T4 theorems of the proof architecture). Opaque; maintained by the
     /// scaffolded mutators during the exec-locked phase and discharged
     /// per-theorem afterwards (goal doc, deliverables 5-6).
+    /// Within each cold frame the index runs are sorted by base and cell-disjoint
+    /// (run r ends at or before run r+1 begins). A named spec fn so callers that
+    /// don't need it (e.g. push_frame after compress) carry it opaquely rather
+    /// than instantiating the nested forall - the raw forall in an ensure blew up
+    /// push_frame's query. restore_cold unfolds it.
+    pub open(crate) spec fn cold_runs_disjoint(&self) -> bool {
+        forall|f: int, r: int|
+            0 <= f < self.cold_stack@.len()
+            && (#[trigger] self.cold_stack@[f]).runs_start <= r
+            && r + 1 < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len
+            ==> (#[trigger] self.cold_index_runs@[r]).base.as_nat()
+                + self.cold_index_runs@[r].len
+                <= self.cold_index_runs@[r + 1].base.as_nat()
+    }
+
     pub open(crate) spec fn repr_ok(&self) -> bool {
         // Cold-pool structural well-formedness (D6). compress_all_hot lays the
         // cold tier out as a contiguous partition: index runs are appended in
@@ -3581,6 +3596,62 @@ where
     /// invariant `data == snapshots[f]` bottoms out at `snapshots[target]`. The
     /// replay effect and the coverage bound (uncovered saved cells lie within
     /// the layer) are what the body's run loop and compress's `repr_ok` supply.
+    /// Fixed-length telescope step for the cold reconstruction. Unlike
+    /// `lemma_cold_replay_step` (stated over the full `snapshots[f].len()`), this
+    /// reconstructs over the fixed live-data length `ln == saved_len(target)`,
+    /// so it composes across the newest-first loop even when intermediate
+    /// `snapshots[f]` vary in length: only cells `c < min(ln, snapshots[f].len())`
+    /// are pinned; cells beyond `snapshots[f].len()` are "pending" (restored by
+    /// an older frame). `restore_run` clamps writes to `ln`, and `cold_covered`
+    /// entries lie in the saved region, so the invariant chains. Bottoms out at
+    /// `f == target` where `snapshots[target].len() == ln`, giving full data.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_cold_replay_step_l(
+        &self, f: int, ln: int, data_before: Seq<T>, data_after: Seq<T>,
+    )
+        requires
+            0 <= f,
+            f + 1 < self.trail_frames@.len(),
+            self.cold_reconstructs(f),
+            // cold_covered cells lie in the frame's saved region (runs within
+            // saved_len; from compress's repr_ok).
+            forall|c: int| 0 <= c && #[trigger] self.cold_covered(f, c as nat)
+                ==> c < self.snapshots@[f].len() as int,
+            // coverage: uncovered saved cells lie within the layer above.
+            forall|c: int| 0 <= c < self.snapshots@[f].len() as int
+                && !(#[trigger] self.cold_covered(f, c as nat))
+                ==> c < self.snapshots@[f + 1].len() as int,
+            // in-invariant: data_before matches the layer on [0, min(ln, layer.len)).
+            forall|c: int| 0 <= c < ln && c < self.snapshots@[f + 1].len() as int
+                ==> #[trigger] data_before[c] == self.snapshots@[f + 1][c],
+            // replay effect over [0, ln): covered -> cold_value, else unchanged.
+            forall|c: int| 0 <= c < ln
+                ==> #[trigger] data_after[c] == if self.cold_covered(f, c as nat) {
+                        self.cold_value(f, c as nat)
+                    } else {
+                        data_before[c]
+                    },
+        ensures
+            forall|c: int| 0 <= c < ln && c < self.snapshots@[f].len() as int
+                ==> data_after[c] == self.snapshots@[f][c],
+    {
+        assert(self.layer_above_at(f) == self.snapshots@[f + 1]);
+        assert forall|c: int| 0 <= c < ln && c < self.snapshots@[f].len() as int implies
+            data_after[c] == self.snapshots@[f][c] by {
+            assert(self.g_saved_len(f) == self.snapshots@[f].len());
+            let _ = self.cold_value(f, c as nat);
+            if self.cold_covered(f, c as nat) {
+                assert(self.cold_value(f, c as nat) == self.snapshots@[f][c]);
+            } else {
+                assert(c < self.snapshots@[f + 1].len() as int);
+                assert(data_after[c] == data_before[c]);
+                assert(data_before[c] == self.snapshots@[f + 1][c]);
+                assert(self.snapshots@[f][c] == self.layer_above_at(f)[c]);
+            }
+        }
+    }
+
     #[verifier::spinoff_prover]
     #[verifier::rlimit(300)]
     pub(crate) proof fn lemma_cold_replay_step(
@@ -5696,6 +5767,12 @@ where
             forall|f: int| 0 <= f < final(self).cold_stack@.len()
                 ==> (#[trigger] final(self).cold_stack@[f]).saved_len.as_nat()
                     == final(self).snapshots@[f].len(),
+            // Within each cold frame the index runs are sorted by base and
+            // cell-disjoint (opaque spec fn so callers carry it cheaply without
+            // instantiating the nested forall). Ledgered (compress lays out
+            // sorted unique cells); restore_cold's inner run loop unfolds it so
+            // restore_run windows compose and cold_value's covering run is unique.
+            final(self).cold_runs_disjoint(),
     {
         let mut keys: std::vec::Vec<u64> = std::vec::Vec::new();
         let mut wide: std::vec::Vec<usize> = std::vec::Vec::new();
@@ -6636,6 +6713,55 @@ where
             }
         }
         assert(self.wf());
+    }
+
+    /// COLD survivors keep their ghost `frame_inv_range`: for a cold-target
+    /// restore the surviving frames `[0, target-1)` (frame `target-1` is
+    /// re-materialized separately) read only the ghost prefix
+    /// `full_trail[0, g_start(target-1))`, which the re-mat dedupe update leaves
+    /// unchanged. Needs only PREFIX agreement (not full subrange equality),
+    /// since the top frame's stratum is replaced by its deduped decode.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(500)]
+    pub(crate) proof fn lemma_restore_cold_survivors_frame_inv(
+        &self, old_self: Self, target: int,
+    )
+        requires
+            old_self.wf_for_snap(),
+            0 < target <= old_self.cold_stack@.len(),
+            self.trail_frames@ == old_self.trail_frames@.subrange(0, target),
+            self.snapshots@ == old_self.snapshots@.subrange(0, target),
+            old_self.g_start((target - 1) as int) <= self.full_trail@.len(),
+            forall|m: int| 0 <= m < old_self.g_start((target - 1) as int)
+                ==> #[trigger] self.full_trail@[m] == old_self.full_trail@[m],
+        ensures
+            forall|k: int| 0 <= k < target - 1 ==> #[trigger] self.frame_inv_range_holds(k),
+    {
+        let bnd = old_self.g_start((target - 1) as int);
+        old_self.lemma_diff_start_le_n((target - 1) as int);
+        assert forall|k: int| 0 <= k < target - 1 implies
+            #[trigger] self.frame_inv_range_holds(k) by {
+            assert(old_self.frame_inv_range_holds(k));
+            let lo = self.g_start(k);
+            let hi = self.g_end(k);
+            assert(self.trail_frames@[k] == old_self.trail_frames@[k]);
+            assert(lo == old_self.g_start(k));
+            old_self.lemma_diff_start_le_n(k);
+            // k+1 < target, so g_end reads the (preserved) trail_frames boundary.
+            assert(self.trail_frames@[k + 1] == old_self.trail_frames@[k + 1]);
+            assert(hi == old_self.g_start(k + 1));
+            old_self.lemma_diff_start_monotone(k + 1, (target - 1) as int);
+            assert(hi <= bnd);
+            assert(self.layer_above_at(k) == self.snapshots@[k + 1]);
+            assert(self.layer_above_at(k) == old_self.layer_above_at(k));
+            assert(self.snapshots@[k] == old_self.snapshots@[k]);
+            assert(lo <= hi <= bnd);
+            assert forall|q: int| lo <= q < hi implies
+                #[trigger] self.full_trail@[q] == old_self.full_trail@[q] by {}
+            lemma_frame_inv_range_local::<T, I>(
+                self.layer_above_at(k), old_self.full_trail@, self.full_trail@,
+                lo, hi, self.snapshots@[k], self.snapshots@[k].len());
+        }
     }
 
     pub(crate) proof fn lemma_restore_survivors_frame_inv(&self, old_self: Self, target: int)
