@@ -2071,6 +2071,16 @@ where
                 } else {
                     self.diff_log@.len() == 0
                 })
+        // TRAIL frame alignment: the physical hot-frame boundaries mirror the
+        // ghost boundaries shifted by the cold prefix. Each hot frame opens at
+        // diff_log.len(), which the trail bridge makes full_trail.len() -
+        // g_start(cold_count); this lets restore_frame map a hot target's
+        // physical stratum [hf.start, n) to its ghost stratum exactly.
+        &&& (!self.store.unique_capture_spec() ==>
+                forall|i: int| 0 <= i < self.hot_stack@.len() ==>
+                    (#[trigger] self.hot_stack@[i]).start as int
+                        + self.g_start((tf.len() - self.hot_stack@.len()) as int)
+                        == self.g_start((tf.len() - self.hot_stack@.len()) + i))
     }
 
     /// `wf` is preserved by a change to `forks` alone. Every `wf` conjunct except
@@ -4453,10 +4463,17 @@ where
         // cadence (ruled design: mark drives hot -> cold migration through
         // the hot_buffer policy knob).
         let hl = self.hot_stack.len();
+        let ghost hot_at_entry = self.hot_stack@;
+        proof { assert(hot_at_entry == old(self).hot_stack@); }
         if hl > 0 {
             let mut top_f = self.hot_stack[hl - 1];
             top_f.end = self.diff_log.len();
             self.hot_stack.set(hl - 1, top_f);
+            // The close touches only .end: every frame's .start is preserved.
+            proof {
+                assert(forall|i: int| 0 <= i < self.hot_stack@.len() ==>
+                    #[trigger] self.hot_stack@[i].start == hot_at_entry[i].start);
+            }
         }
         let do_compress = match self.hot_buffer {
             Some(b) => self.hot_stack.len() > b,
@@ -4621,6 +4638,51 @@ where
                     }
                     assert(self.diff_log@
                         =~= self.full_trail@.subrange(gs, self.full_trail@.len() as int));
+                }
+                // TRAIL frame alignment maintenance.
+                assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                    self.hot_stack@[i].start as int + gs == self.g_start(cc + i) by {
+                    if do_compress {
+                        assert(self.hot_stack@.len() == 1);
+                        assert(self.hot_stack@[0].start == 0);
+                        assert(cc + i == cc);
+                        assert(gs == self.full_trail@.len());
+                    } else {
+                        let old_cc = (old(self).trail_frames@.len()
+                            - old(self).hot_stack@.len()) as int;
+                        assert(cc == old_cc);
+                        if i < old(self).hot_stack@.len() {
+                            // old_hot > 0 here, so old_cc is a valid frame index.
+                            assert(gs == old(self).g_start(old_cc)) by {
+                                assert(cc < self.trail_frames@.len());
+                                assert(self.trail_frames@[cc] == old(self).trail_frames@[cc]);
+                            }
+                            assert(self.hot_stack@[i].start == old(self).hot_stack@[i].start);
+                            assert(old(self).hot_stack@[i].start as int
+                                + old(self).g_start(old_cc)
+                                == old(self).g_start(old_cc + i));
+                            assert(self.g_start(cc + i) == old(self).g_start(old_cc + i)) by {
+                                assert(cc + i < old(self).trail_frames@.len());
+                                assert(self.trail_frames@[cc + i]
+                                    == old(self).trail_frames@[cc + i]);
+                            }
+                        } else {
+                            assert(i == old(self).hot_stack@.len() as int);
+                            assert(self.hot_stack@[i].start as int == old(self).diff_log@.len());
+                            assert(self.g_start(cc + i) == self.full_trail@.len());
+                            if old(self).hot_stack@.len() > 0 {
+                                assert(gs == old(self).g_start(old_cc)) by {
+                                    assert(cc < self.trail_frames@.len());
+                                    assert(self.trail_frames@[cc] == old(self).trail_frames@[cc]);
+                                }
+                                assert(old(self).diff_log@.len() + gs
+                                    == self.full_trail@.len());
+                            } else {
+                                assert(old(self).diff_log@.len() == 0);
+                                assert(gs == self.full_trail@.len());
+                            }
+                        }
+                    }
                 }
             }
         }
