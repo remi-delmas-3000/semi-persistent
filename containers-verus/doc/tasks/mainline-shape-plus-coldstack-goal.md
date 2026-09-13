@@ -723,3 +723,44 @@ REMAINING - restore_frame body (the last step to drop external_body):
      (its runs decode to the frame snapshot) composed with restore_run's proven
      data contract; or trust-ledger compress_all_hot against the D2 belt.
 Then flip restore_frame off external_body and run the D7 battery.
+
+## D6 trust ledger (2026-09-13)
+
+Deliverable 6 allows each scaffold to be "either proven OR moved to the trust
+ledger with a named differential belt and a one-line justification." The
+restore-path memcpy hooks are PROVEN (restore_run + restore_overlay in both raw
+stores, via the commit-20 split_at_mut/copy_from_slice chain). The
+compression-path scaffolds below are trust-ledgered.
+
+NAMED DIFFERENTIAL BELT (shared by all ledgered items): the conformance suite
+(128/128 across the binaries, 0 failed) plus the two D2 proptests -
+trail_semi_persistence (random writes/marks/restores-to-any-token/pushes vs a
+snapshot-stack model, differentially checked every op, crossing HOT_BUFFER so
+compression fires mid-sequence) and trail_compression (duplicate-heavy frames
+past HOT_BUFFER, checking the log shrinks and every restore reproduces its
+snapshot, plus the deep-unwind variant restoring every depth). These exercise
+exactly the compress -> cold-pool -> restore round trip the scaffolds implement.
+
+Ledgered items (external_body, trusted, covered by the belt above):
+  - compress_all_hot: builds the cold tier (dedupe-first per stratum, sorted
+    index runs). Justification: its ensures (repr_ok, frame_inv_range_holds
+    preserved, view/ghost unchanged) are the properties restore reads; the
+    run-construction correctness is exercised end-to-end by trail_compression's
+    shrink+restore checks past HOT_BUFFER.
+  - frame_sort_order (packed-key normalize): justification: a pure sort/group of
+    a stratum's positions; every restore that follows a compression in the belt
+    checks the resulting order reconstructs the snapshot.
+  - cold_pairs_scaffold / pending_cold_indices_scaffold: materialize a cold
+    frame's (value,index) pairs from its runs for the flag rebuild.
+    Justification: read-only decoders whose output feeds finish_restore, checked
+    by every post-compression restore in the belt.
+  - cold_pools_shrink_scaffold: capacity-only reclamation (final@ == old@ ensures
+    proven for the value/run pools). Justification: shrink_to changes capacity,
+    not the logical sequence, which its ensures already pin.
+
+DISPUTED ITEM - restore_frame: named in D6's list AND on the restore path. Its
+reconstruction correctness is now proven (lemma_reconstruct_trail /
+lemma_phys_cell_eq_overlay for the two hot disciplines); its body is not yet
+discharged (wf re-establishment on the truncated state; cold-run telescoping via
+compress_all_hot's ledgered reconstruction). It remains external_body - NOT
+claimed proven - pending the body assembly.
