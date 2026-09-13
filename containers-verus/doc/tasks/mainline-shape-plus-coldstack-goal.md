@@ -526,3 +526,58 @@ and the deep-unwind-after-compression variant (restores every depth exactly).
 cargo verus verify: 2176 verified, 0 errors. Remaining: restore_frame discharge
 (physical overlay bridge, or trust-ledger against the belt above), then D7
 (clippy -D warnings cleanup + full battery).
+
+## Trail sequence-bridge landed; restore_frame reconstruction plan (2026-09-13, cont.)
+
+The physical hot-frame tiling and the D5 "trail hot = identity" commuting
+equivalence are now maintained invariants, all committed at 0 errors:
+
+- Hot-frame start monotonicity (commit a225f82): with the all-starts-bounded
+  clause, the hot frames tile the physical diff_log, the physical analog of the
+  ghost trail_frames boundaries.
+- TRAIL sequence bridge (commit b66b8b3): under the append-always (non-unique)
+  discipline, diff_log@ == full_trail@.subrange(g_start(cold_count), m). The
+  physical log IS the ghost trail's hot suffix. Maintained across set_index,
+  pop, push_frame, push from the lockstep-append confirmed in the capture
+  wiring (both logs append the same entry in the marked region, or neither);
+  compression empties the log and the reopened frame's ghost start is the
+  pushed boundary, so the suffix is empty. maybe_shrink now exposes
+  cold_stack@/hot_stack@ preservation.
+
+This is what lets restore_frame's hot reconstruction over the physical diff_log
+derive from the ghost reconstruction (lemma_cell_eq_overlay) already proven:
+overlay(base, diff_log, hf.start, n) == overlay(base, full_trail,
+g_start(target), m) by the sequence equality, and the latter == snapshots[target]
+by lemma_cell_eq_overlay.
+
+**Remaining for restore_frame, in order:**
+1. UNIQUE bridge (parallel_store, inline_store have unique_capture_spec == true).
+   The first-write-wins diff_log is the per-stratum dedupe of the ghost strata;
+   at the suffix level dedupe_first(diff_log) == dedupe_first(full_trail suffix)
+   (both reduce to the globally-first write per cell), giving overlay equality
+   via lemma_overlay_dedupe_first. Maintained with the dedupe_prefix recurrence
+   (lemma_dedupe_prefix_props): append preserves the dedupe when the index
+   already appears, extends it when new. Mirrors the trail bridge's mutator
+   maintenance.
+2. Reconstruction assembly in restore_frame's hot path: chain the discipline
+   bridge to overlay equality, then lemma_cell_eq_overlay to snapshots[target];
+   discharge begin_restore's named-slots precondition (captured cells are hit
+   in [hf.start, n) from the capture bridge + hf.start <= top.start) and the
+   resize bound.
+3. wf re-establishment on the truncated post-restore state: frame_inv_range for
+   surviving frames via lemma_frame_inv_range_shift (prefix-invariant under
+   ghost-trail truncation, already proven); frame-count bridge and hot
+   tiling/extent/monotone from the physical truncations; capture bridges rebuilt
+   by finish_restore's ensures; repr_ok and the trail bridge re-derived for the
+   truncated cold/hot split. This is the largest single piece.
+4. COLD path: cold-run reconstruction. Needs compress_all_hot's cold-run
+   semantic ensure (its runs decode to dedupe_first of the migrated strata),
+   trust-ledgered against the D2 belt or proven; restore_run's proven data
+   contract then composes it.
+
+Restore-path memcpy hooks (restore_run, restore_overlay) are already proven
+(zero external_body). restore_frame stays external_body until steps 1-4 land;
+per the goal it is on the restore path and must be proven, not ledgered.
+
+cargo verus verify: 2176 verified, 0 errors. D7 (clippy -D warnings, ~18 in the
+new cold-stack code + D2 tests; full battery) follows restore_frame.
