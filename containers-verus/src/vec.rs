@@ -841,6 +841,27 @@ pub(crate) proof fn lemma_frame_inv_range_local<T, I: IndexLike>(
 /// `da`/`db` agree there, the per-cell invariant transfers. Isolated so the
 /// quantifier instantiation is local and the equality is by function
 /// congruence on `captured_in_range` + the witness entry.
+pub(crate) proof fn lemma_frame_inv_range_grow_layer<T, I: IndexLike>(
+    above_old: Seq<T>, above_new: Seq<T>, diffs: Seq<(T, I)>,
+    lo: int, hi: int, snap: Seq<T>, saved_len: nat,
+)
+    requires
+        frame_inv_range::<T, I>(above_old, diffs, lo, hi, snap, saved_len),
+        above_old.len() <= above_new.len(),
+        forall|j: int| 0 <= j < above_old.len() ==> #[trigger] above_new[j] == above_old[j],
+    ensures
+        frame_inv_range::<T, I>(above_new, diffs, lo, hi, snap, saved_len),
+{
+    assert forall|j: int| 0 <= j < saved_len as int implies
+        #[trigger] frame_cell_inv::<T, I>(above_new, diffs, lo, hi, snap, j)
+    by {
+        assert(frame_cell_inv::<T, I>(above_old, diffs, lo, hi, snap, j));
+        if !captured_in_range::<T, I>(diffs, lo, hi, j as nat) {
+            assert(above_new[j] == above_old[j]);
+        }
+    }
+}
+
 pub(crate) proof fn lemma_frame_cell_inv_local<T, I: IndexLike>(
     above: Seq<T>, da: Seq<(T, I)>, db: Seq<(T, I)>,
     lo: int, hi: int, snap: Seq<T>, j: int,
@@ -2119,6 +2140,9 @@ where
                     (#[trigger] self.hot_stack@[i]).start as int
                         + self.g_start((tf.len() - self.hot_stack@.len()) as int)
                         == self.g_start((tf.len() - self.hot_stack@.len()) + i))
+        &&& (self.store.unique_capture_spec() ==>
+                forall|i: int| 0 <= i < self.hot_stack@.len() ==>
+                    #[trigger] self.phys_frame_inv_range_holds(i))
     }
 
     /// `wf` is preserved by a change to `forks` alone. Every `wf` conjunct except
@@ -2168,6 +2192,12 @@ where
         assert(self.wf_for_snap());
         // Index-set equality transfers (forks pins the four fields it reads).
         self.lemma_index_set_transfer(old_self);
+        if self.store.unique_capture_spec() {
+            assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                #[trigger] self.phys_frame_inv_range_holds(i) by {
+                assert(old_self.phys_frame_inv_range_holds(i));
+            }
+        }
         assert(self.wf());
     }
 
@@ -2555,6 +2585,8 @@ where
             assert(v.snapshots@.len() == 0);
             // Empty container: no hot frames, so phys_frame_inv_range is vacuous.
             assert(v.hot_stack@.len() == 0);
+            assert forall|i: int| 0 <= i < v.hot_stack@.len() implies
+                #[trigger] v.phys_frame_inv_range_holds(i) by {}
         }
         v
     }
@@ -2646,6 +2678,12 @@ where
             assert(self.cold_stack@ == old(self).cold_stack@);
             assert(self.hot_stack@ == old(self).hot_stack@);
             assert(self.repr_ok());
+            if self.store.unique_capture_spec() {
+                assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                    #[trigger] self.phys_frame_inv_range_holds(i) by {
+                    assert(old(self).phys_frame_inv_range_holds(i));
+                }
+            }
             // Index-set equality: all inputs (diff_log/hot_stack/full_trail/
             // trail_frames) are pinned == old, which satisfied it via old wf.
             if self.hot_stack@.len() > 0 {
@@ -3121,6 +3159,26 @@ where
                     // top frame: layer is view, changed by push but prefix
                     // preserved. Coverage-based (no saved_len <= view bound).
                     self.lemma_saved_len_le_view_from(old_self, k);
+                }
+            }
+            assert(self.diff_log@ == old_self.diff_log@);
+            assert(self.hot_stack@ == old_self.hot_stack@);
+            assert(self.cold_stack@ == old_self.cold_stack@);
+            if self.store.unique_capture_spec() {
+                assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                    #[trigger] self.phys_frame_inv_range_holds(i) by {
+                    assert(old_self.phys_frame_inv_range_holds(i));
+                    let g = self.cold_stack@.len() + i;
+                    if g + 1 < tf.len() {
+                        assert(self.layer_above_at(g) == old_self.layer_above_at(g));
+                    } else {
+                        assert(self.layer_above_at(g) == self.view());
+                        assert(old_self.layer_above_at(g) == old_view);
+                        lemma_frame_inv_range_grow_layer::<T, I>(
+                            old_view, self.view(), self.diff_log@,
+                            self.phys_hot_start(i), self.phys_hot_end(i),
+                            self.snapshots@[g], self.snapshots@[g].len());
+                    }
                 }
             }
             // Bridge: store.push appended captured()[old_len]==false; if we
@@ -3776,6 +3834,124 @@ where
                 }
                 assert(diffs =~= gt.subrange(gs, gt.len() as int));
             }
+            // UNIQUE physical frame_inv_range maintenance: inner frames'
+            // strata are unchanged; the top stratum's popped cell new_len is now
+            // captured (a first-write appends its first hitter, a duplicate is a
+            // no-op so the earlier one survives), and cells above new_len were
+            // already captured (coverage).
+            if self.store.unique_capture_spec() && self.hot_stack@.len() > 0
+                && old_view.len() == 0 {
+                // pop of an empty view is a no-op: transfer every frame.
+                assert forall|fidx: int| 0 <= fidx < self.hot_stack@.len() implies
+                    #[trigger] self.phys_frame_inv_range_holds(fidx) by {
+                    assert(old(self).phys_frame_inv_range_holds(fidx));
+                }
+            }
+            if self.store.unique_capture_spec() && self.hot_stack@.len() > 0
+                && old_view.len() > 0 {
+                let ph = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
+                let diffs = self.diff_log@;
+                let n = diffs.len() as int;
+                let g_top = (tf.len() - 1) as int;
+                let sl = self.g_saved_len(g_top);
+                let snap = self.snapshots@[g_top];
+                let new_len = (old_view.len() - 1) as int;
+                let active_n = self.active_saved_len.as_nat() as int;
+                assert(sl == active_n);
+                assert forall|fidx: int| 0 <= fidx < self.hot_stack@.len() implies
+                    #[trigger] self.phys_frame_inv_range_holds(fidx) by {
+                    let g = self.cold_stack@.len() + fidx;
+                    assert(old(self).phys_frame_inv_range_holds(fidx));
+                    if fidx < self.hot_stack@.len() - 1 {
+                        assert(self.phys_hot_start(fidx) == old(self).phys_hot_start(fidx));
+                        assert(self.phys_hot_end(fidx) == old(self).phys_hot_end(fidx));
+                        assert(self.phys_hot_end(fidx) <= old_diffs.len());
+                        assert(self.snapshots@[g] == old(self).snapshots@[g]);
+                        assert(self.layer_above_at(g) == old(self).layer_above_at(g));
+                        lemma_frame_inv_range_local::<T, I>(
+                            self.layer_above_at(g), old_diffs, diffs,
+                            self.phys_hot_start(fidx), self.phys_hot_end(fidx),
+                            self.snapshots@[g], self.snapshots@[g].len());
+                    } else {
+                        assert(self.phys_hot_start(fidx) == ph);
+                        assert(self.phys_hot_end(fidx) == n);
+                        assert(self.layer_above_at(g) == self.view());
+                        assert(ph <= old_diffs.len());
+                        assert(old(self).phys_hot_end(fidx) == old_diffs.len());
+                        assert forall|j: int| 0 <= j < sl as int implies
+                            #[trigger] frame_cell_inv::<T, I>(self.view(), diffs, ph, n, snap, j)
+                        by {
+                            lemma_frame_inv_arm_at::<T, I>(
+                                old_view, old_diffs, ph, old_diffs.len() as int, snap, sl, j);
+                            if j < new_len {
+                                assert(self.view()[j] == old_view[j]);
+                                lemma_captured_in_range_append_other::<T, I>(
+                                    old_diffs, diffs, ph, j as nat, new_len as nat);
+                            } else if j == new_len {
+                                assert(j < active_n);
+                                assert(captured_marked);
+                                if old_store_captured[j] {
+                                    assert(diffs == old_diffs);
+                                    assert(old(self).store.captured()[j]
+                                        == captured_in_range::<T, I>(
+                                            old_diffs, ph, old_diffs.len() as int, j as nat));
+                                    assert(captured_in_range::<T, I>(
+                                        old_diffs, ph, old_diffs.len() as int, j as nat));
+                                    assert(frame_cell_inv::<T, I>(
+                                        old_view, old_diffs, ph, old_diffs.len() as int, snap, j));
+                                    let p = choose|p: int| ph <= p < old_diffs.len() as int
+                                        && (#[trigger] old_diffs[p]).1.as_nat() == j as nat
+                                        && old_diffs[p].0 == snap[j]
+                                        && first_hitter::<T, I>(old_diffs, ph, p, j as nat);
+                                    assert(diffs[p] == old_diffs[p]);
+                                    assert(first_hitter::<T, I>(diffs, ph, p, j as nat)) by {
+                                        assert forall|q: int| ph <= q < p implies
+                                            (#[trigger] diffs[q]).1.as_nat() != j as nat by {
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
+                                    assert(captured_in_range::<T, I>(diffs, ph, n, j as nat));
+                                } else {
+                                    assert(diffs == old_diffs.push(pushed_e));
+                                    assert(pushed_e.1.as_nat() == new_len as nat);
+                                    assert(pushed_e.0 == data_last);
+                                    assert(!captured_in_range::<T, I>(
+                                        old_diffs, ph, old_diffs.len() as int, j as nat)) by {
+                                        assert(j < old_view.len());
+                                        assert(old(self).store.captured()[j] == false);
+                                        assert(old(self).store.captured()[j]
+                                            == captured_in_range::<T, I>(
+                                                old_diffs, ph, old_diffs.len() as int, j as nat));
+                                    }
+                                    assert(frame_cell_inv::<T, I>(
+                                        old_view, old_diffs, ph, old_diffs.len() as int, snap, j));
+                                    assert(old_view[j] == snap[j]);
+                                    assert(data_last == old_view[j]);
+                                    let p = old_diffs.len() as int;
+                                    assert(diffs.subrange(0, p) == old_diffs);
+                                    assert(diffs[p].1.as_nat() == j as nat);
+                                    assert(diffs[p].0 == snap[j]);
+                                    assert(first_hitter::<T, I>(diffs, ph, p, j as nat)) by {
+                                        assert forall|q: int| ph <= q < p implies
+                                            (#[trigger] diffs[q]).1.as_nat() != j as nat by {
+                                            assert(diffs.subrange(0, p)[q] == diffs[q]);
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
+                                    assert(captured_in_range::<T, I>(diffs, ph, n, j as nat));
+                                }
+                            } else {
+                                assert(j >= old_view.len());
+                                assert(captured_in_range::<T, I>(
+                                    old_diffs, ph, old_diffs.len() as int, j as nat));
+                                lemma_captured_in_range_append_other::<T, I>(
+                                    old_diffs, diffs, ph, j as nat, new_len as nat);
+                            }
+                        }
+                        assert(frame_inv_range::<T, I>(self.view(), diffs, ph, n, snap, sl));
+                    }
+                }
+            }
         }
         r
     }
@@ -4286,6 +4462,124 @@ where
                 }
                 assert(diffs =~= gt.subrange(gs, gt.len() as int));
             }
+            // UNIQUE physical frame_inv_range maintenance: inner frames'
+            // physical strata are unchanged (the append is at the top);
+            // the top stratum's captured cells keep their first hitter (a
+            // first-write appends it, a duplicate is dropped so the earlier one
+            // survives), and its uncaptured cells read the view, changed only
+            // at the captured index iu.
+            if self.store.unique_capture_spec() && self.hot_stack@.len() > 0 {
+                let ph = self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int;
+                let n = diffs.len() as int;
+                let g_top = (tf.len() - 1) as int;
+                let sl = self.g_saved_len(g_top);
+                let snap = self.snapshots@[g_top];
+                assert(sl == active_n);
+                assert forall|fidx: int| 0 <= fidx < self.hot_stack@.len() implies
+                    #[trigger] self.phys_frame_inv_range_holds(fidx) by {
+                    let g = self.cold_stack@.len() + fidx;
+                    assert(old(self).phys_frame_inv_range_holds(fidx));
+                    if fidx < self.hot_stack@.len() - 1 {
+                        assert(self.phys_hot_start(fidx) == old(self).phys_hot_start(fidx));
+                        assert(self.phys_hot_end(fidx) == old(self).phys_hot_end(fidx));
+                        assert(self.phys_hot_end(fidx) <= old_diffs.len());
+                        assert(self.snapshots@[g] == old(self).snapshots@[g]);
+                        assert(self.layer_above_at(g) == old(self).layer_above_at(g));
+                        lemma_frame_inv_range_local::<T, I>(
+                            self.layer_above_at(g), old_diffs, diffs,
+                            self.phys_hot_start(fidx), self.phys_hot_end(fidx),
+                            self.snapshots@[g], self.snapshots@[g].len());
+                    } else {
+                        assert(self.phys_hot_start(fidx) == ph);
+                        assert(self.phys_hot_end(fidx) == n);
+                        assert(self.layer_above_at(g) == self.view());
+                        assert(ph <= old_diffs.len());
+                        assert(old(self).phys_hot_end(fidx) == old_diffs.len());
+                        assert forall|j: int| 0 <= j < sl as int implies
+                            #[trigger] frame_cell_inv::<T, I>(self.view(), diffs, ph, n, snap, j)
+                        by {
+                            lemma_frame_inv_arm_at::<T, I>(
+                                old_view, old_diffs, ph, old_diffs.len() as int, snap, sl, j);
+                            if j == iu {
+                                if !was_captured0 {
+                                    assert(diffs == old_diffs.push((old_view[iu], i)));
+                                    assert(!captured_in_range::<T, I>(
+                                        old_diffs, ph, old_diffs.len() as int, iu as nat)) by {
+                                        assert(old(self).store.captured()[iu] == false);
+                                    }
+                                    assert(old_view[iu] == snap[iu]);
+                                    let np = old_diffs.len() as int;
+                                    assert(ph <= np < n);
+                                    assert(diffs[np].1.as_nat() == iu as nat);
+                                    assert(diffs[np].0 == snap[iu]);
+                                    assert(first_hitter::<T, I>(diffs, ph, np, iu as nat)) by {
+                                        assert forall|q: int| ph <= q < np implies
+                                            (#[trigger] diffs[q]).1.as_nat() != iu as nat by {
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
+                                } else {
+                                    assert(diffs == old_diffs);
+                                    assert(old(self).store.captured()[iu] == true);
+                                    assert(captured_in_range::<T, I>(
+                                        old_diffs, ph, old_diffs.len() as int, iu as nat));
+                                    let p = choose|p: int| ph <= p < old_diffs.len() as int
+                                        && (#[trigger] old_diffs[p]).1.as_nat() == iu as nat
+                                        && old_diffs[p].0 == snap[iu]
+                                        && first_hitter::<T, I>(old_diffs, ph, p, iu as nat);
+                                    assert(diffs[p] == old_diffs[p]);
+                                    assert(first_hitter::<T, I>(diffs, ph, p, iu as nat)) by {
+                                        assert forall|q: int| ph <= q < p implies
+                                            (#[trigger] diffs[q]).1.as_nat() != iu as nat by {
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
+                                }
+                            } else {
+                                assert(captured_in_range::<T, I>(diffs, ph, n, j as nat)
+                                    == captured_in_range::<T, I>(
+                                        old_diffs, ph, old_diffs.len() as int, j as nat)) by {
+                                    if captured_in_range::<T, I>(diffs, ph, n, j as nat) {
+                                        let p = choose|p: int| ph <= p < n && 0 <= p < diffs.len()
+                                            && (#[trigger] diffs[p]).1.as_nat() == j as nat;
+                                        if p < old_diffs.len() {
+                                            assert(diffs[p] == old_diffs[p]);
+                                        } else {
+                                            assert(diffs[p].1.as_nat() == iu as nat);
+                                        }
+                                    }
+                                    if captured_in_range::<T, I>(
+                                        old_diffs, ph, old_diffs.len() as int, j as nat) {
+                                        let p = choose|p: int|
+                                            ph <= p < old_diffs.len() as int && 0 <= p < old_diffs.len()
+                                            && (#[trigger] old_diffs[p]).1.as_nat() == j as nat;
+                                        assert(diffs[p] == old_diffs[p]);
+                                    }
+                                }
+                                if captured_in_range::<T, I>(diffs, ph, n, j as nat) {
+                                    let p = choose|p: int|
+                                        ph <= p < old_diffs.len() as int && 0 <= p < old_diffs.len()
+                                        && (#[trigger] old_diffs[p]).1.as_nat() == j as nat
+                                        && old_diffs[p].0 == snap[j]
+                                        && first_hitter::<T, I>(old_diffs, ph, p, j as nat);
+                                    assert(diffs[p] == old_diffs[p]);
+                                    assert(first_hitter::<T, I>(diffs, ph, p, j as nat)) by {
+                                        assert forall|q: int| ph <= q < p implies
+                                            (#[trigger] diffs[q]).1.as_nat() != j as nat by {
+                                            assert(diffs[q] == old_diffs[q]);
+                                        }
+                                    }
+                                } else {
+                                    assert((j as nat) < old_view.len());
+                                    assert(self.view()[j] == old_view[j]);
+                                    assert((j as nat) < self.view().len());
+                                }
+                            }
+                        }
+                        assert(frame_inv_range::<T, I>(self.view(), diffs, ph, n, snap, sl));
+                    }
+                }
+            }
         }
     }
 
@@ -4720,6 +5014,31 @@ where
                                 assert(gs == self.full_trail@.len());
                             }
                         }
+                    }
+                }
+            }
+            if self.store.unique_capture_spec() {
+                assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                    #[trigger] self.phys_frame_inv_range_holds(i) by {
+                    let g = self.cold_stack@.len() + i;
+                    if i == self.hot_stack@.len() - 1 {
+                        assert(self.phys_hot_start(i) == self.diff_log@.len());
+                        assert(self.phys_hot_end(i) == self.diff_log@.len());
+                        assert(self.layer_above_at(g) == self.view());
+                        assert(self.snapshots@[g] == old_view);
+                    } else {
+                        assert(!do_compress);
+                        assert(self.diff_log@ == old(self).diff_log@);
+                        assert(self.cold_stack@ == old(self).cold_stack@);
+                        assert(old(self).phys_frame_inv_range_holds(i));
+                        assert(self.phys_hot_start(i) == old(self).phys_hot_start(i));
+                        assert(self.phys_hot_end(i) == old(self).phys_hot_end(i));
+                        assert(self.snapshots@[g] == old(self).snapshots@[g]);
+                        assert(self.layer_above_at(g) == old(self).layer_above_at(g));
+                        lemma_frame_inv_range_local::<T, I>(
+                            self.layer_above_at(g), old(self).diff_log@, self.diff_log@,
+                            self.phys_hot_start(i), self.phys_hot_end(i),
+                            self.snapshots@[g], self.snapshots@[g].len());
                     }
                 }
             }
