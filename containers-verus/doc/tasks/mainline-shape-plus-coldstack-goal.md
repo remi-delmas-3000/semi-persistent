@@ -199,3 +199,16 @@ and the ~24 lemma-body references to the removed `frames` field must move
 to g_start/g_end/g_saved_len. Then repr_ok's opaque clauses land with
 their T1-T4 theorems. This is the deferred proof grind, now the critical
 path; exec is unaffected and green.
+
+
+## ALGORITHM LOCK (D4, 2026-09-13)
+
+The exec algorithm is LOCKED at this commit. The ruled layout and its
+lifecycle (mark-driven compression with the packed-key normalize, orphan
+fold, tier-aware restore, both capture disciplines through one path) are
+final; the proof phase (D5-D7) attaches to this shape and may not change
+it except to fix a defect a proof exposes (which would reopen the lock
+with a recorded reason). Lock bar met: 27/27 conformance binaries, trail
+semi-persistence proptests at 256 cases, 38/38 in-crate tests, D3
+benchmarks control-corrected in band. Everything below the lock is proof
+work against fixed code.
