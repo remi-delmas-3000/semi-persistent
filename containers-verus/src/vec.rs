@@ -6948,26 +6948,54 @@ where
         }
     }
 
+    /// The genealogy-free core of `restore`: reconstruct to frame `target_index`.
+    /// Dispatches by tier: a HOT target (`target > cold_count`) goes through the
+    /// fully-proven `restore_hot`; a COLD target (`target <= cold_count`, which
+    /// re-materializes the surviving cold top) goes through `restore_cold`.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(200)]
-    #[verifier::external_body]
     pub(crate) fn restore_frame(&mut self, target_index: usize)
         where T: core::default::Default
         requires
             old(self).wf(),
-            // TRACK gate: restore is uncallable on an untracked vec.
             TRACK,
-            // Structural reconstruction precondition (mechanism, not validity):
-            // the target frame is in range. Genealogy validity is the caller's
-            // (the `History`/`SyncGroup`) responsibility.
             (target_index as nat) < old(self).depth_spec(),
         ensures
             final(self).wf(),
             final(self).view() == old(self).snapshots_view()[target_index as int],
             final(self).depth_spec() == target_index as nat,
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target_index as int),
-            // Genealogy untouched (the wrapper does the cut): the whole stamp
-            // array is preserved, enough for the wrapper's bump_from headroom and wf.
+    {
+        let k = self.cold_stack.len();
+        if target_index > k {
+            self.restore_hot(target_index);
+        } else {
+            self.restore_cold(target_index);
+        }
+    }
+
+    /// COLD-target reconstruction (`target <= cold_count`): replays the whole
+    /// hot pool back to `snapshots[cold_count]`, then the surviving cold frames
+    /// newest-first via their index-run memcpys (`restore_run`), then
+    /// re-materializes the surviving cold top as a hot frame. Still
+    /// external_body: its reconstruction (`lemma_cold_replay_step` telescope)
+    /// and re-mat (`lemma_remat_frame_inv`) lemmas are proven, but the two-level
+    /// loop wiring + cold wf composition is not yet assembled. This is the sole
+    /// remaining external_body on the restore path.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(200)]
+    #[verifier::external_body]
+    pub(crate) fn restore_cold(&mut self, target_index: usize)
+        where T: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            (target_index as nat) <= old(self).cold_stack@.len(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[target_index as int],
+            final(self).depth_spec() == target_index as nat,
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target_index as int),
     {
         // EXEC-FIRST SCAFFOLD (ruled design): tier-aware reconstruction.
         // Mainline's restore proof re-attaches at lock time for the hot
