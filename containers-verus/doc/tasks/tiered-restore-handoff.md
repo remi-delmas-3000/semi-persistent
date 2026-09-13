@@ -291,3 +291,44 @@ lemmas exist (`lemma_cold_replay_step_l`, `lemma_remat_frame_inv`, cold survivor
 
 Ledgered external_body (not on the proven restore path, each with a differential
 belt): `compress_all_hot`, `normalize_frame`, the cold helpers.
+
+## 7. Design alternative considered: three explicit stacks (trail / hot / cold)
+
+A reviewer proposed making the three representations three explicit stacks —
+trail (raw temporal writes), hot (first-write-wins dedup), cold (sorted +
+run-compressed) — each with its own invariant and its own restore, with the
+pipeline `trail --dedup--> hot --sort+runs--> cold`. Honest assessment for
+whoever takes this over:
+
+**Helps (two real wins):**
+1. Kills discipline-branching. Today `unique_capture_spec()` is a runtime flag,
+   so `wf` and every lemma carry conditional clauses (`!unique ==> trail
+   sequence-bridge`, `unique ==> phys frame_inv`) and `index_set_ok`/`frame_iso`
+   had to be proven for both disciplines. Separate stacks with one invariant
+   each make those unconditional. This is where the serial invariant-discovery
+   pain (frame_iso, index_set_ok both ways) came from.
+2. Eliminates the ghost-dedupe update. The ugliest part of restore_cold: re-mat
+   yields a *deduped* diff_log while the trail store's ghost stratum is *raw*,
+   breaking the trail bridge and forcing a ghost-dedupe update. If the hot
+   stack's invariant is structurally `diff_log == dedupe_first(ghost)`, re-mat
+   (cold->hot) lands exactly a hot frame and that update disappears. The three
+   pipeline arrows are the already-proven equivalences (lemma_overlay_dedupe_first,
+   sort order-independence, cold_reconstructs).
+
+**Does NOT help (the two genuinely hard parts):**
+3. The cross-tier reconstruction telescope over varying-length snapshots stays.
+   Restoring an old target replays intervening frames across tiers, and
+   snapshots[target] differs in length from the live view (pop-into-marked makes
+   saved-lens non-monotone). lemma_cold_replay_step_l's fixed-L coverage is
+   semantic, not representational.
+4. Re-materialization (open-frame-must-be-writable) stays unless wf is relaxed to
+   allow a cold/hot open frame.
+
+**Cost:** three stacks is an exec rewrite that breaks the D4 algorithm lock and
+its benchmarks.
+
+**Recommendation.** For finishing THIS branch: stay on the 2-stack and complete
+restore_cold with the ghost-dedupe (all lemmas exist and verify - see section 6).
+The 3-stack model is the better architecture only for a from-scratch redesign,
+where per-stack invariants would be clean from the start; it is not worth a
+rewrite mid-flight given the lock.
