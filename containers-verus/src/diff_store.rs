@@ -277,10 +277,9 @@ where
     /// (chronological discipline). If the slot is in-frame and not yet
     /// captured, log `(old.data()[i], i)` and flip `captured[i]`; a
     /// chronological store also appends when the slot is already captured.
-    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>)
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>)
         requires
             old(self).wf(),
-            old(diff_log).wf(),
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
@@ -329,10 +328,9 @@ where
     /// Retained unconditional-capture operation. Within-frame: log + set
     /// captured. Out-of-frame: no-op. `Vec` has no call site; marked pops use
     /// conditional `capture` to preserve the one-entry-per-index bound.
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>)
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>)
         requires
             old(self).wf(),
-            old(diff_log).wf(),
             i.as_nat() < old(self).data().len(),
         ensures
             final(self).wf(),
@@ -408,15 +406,14 @@ where
     /// contiguous can use a sliced memcpy instead of scattered per-entry writes.
     /// Capture flags only decrease (a replay write never sets one), so an all-clear
     /// state stays all-clear through the call.
-    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
+    fn restore_overlay(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
+        diff_log: &Vec<(T, I)>,
         lo: usize,
         hi: usize,
     )
         requires
             old(self).wf(),
-            diff_log.wf(),
             lo <= hi <= diff_log@.len(),
         ensures
             final(self).wf(),

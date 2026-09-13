@@ -1448,12 +1448,15 @@ where
     VC: crate::value_compressor::ValueCompressor<T>,
 {
     pub(crate) store: S,
-    pub(crate) diff_log: crate::diff_log::DiffLog<T, I, VC>,
+    // Mainline's field, verbatim: the hot tier IS a bare pair vec
+    // (doc/tasks/mainline-shape-plus-coldstack-goal.md). The DiffLog type
+    // was the compression branch's own artifact and is retired.
+    pub(crate) diff_log: std::vec::Vec<(T, I)>,
     pub(crate) frames: std::vec::Vec<Frame<I>>,
     /// The saved_len of the topmost (active) frame, cached for the hot path.
     /// `I::min()` when the stack is empty. Mirrors production.
     pub(crate) active_saved_len: I,
-    pub(crate) phantom: core::marker::PhantomData<(T, I)>,
+    pub(crate) phantom: core::marker::PhantomData<(T, I, VC)>,
     /// Ghost stack of deep copies. `snapshots[k]` is `view()` at the
     /// moment frame `k` was pushed. Always `snapshots.len() == frames.len()`.
     pub(crate) snapshots: Ghost<Seq<Seq<T>>>,
@@ -1612,7 +1615,6 @@ where
         let frames = self.frames@;
         let diffs = self.diff_log@;
 
-        &&& self.diff_log.wf()
         &&& self.wf_for_snap()
         // active_saved_len caches the top frame's saved_len.
         &&& (frames.len() == 0 ==> self.active_saved_len == I::min_spec())
@@ -1717,7 +1719,6 @@ where
             self.store == old_self.store,
             self.frames@ == old_self.frames@,
             self.diff_log@ == old_self.diff_log@,
-            self.diff_log.wf(),
             self.snapshots@ == old_self.snapshots@,
             self.active_saved_len == old_self.active_saved_len,
         ensures
@@ -1764,7 +1765,6 @@ where
             old_self.wf(),
             self.store == old_self.store,
             self.frames@ == old_self.frames@,
-            self.diff_log.wf(),
             self.diff_log@.len() == old_self.diff_log@.len(),
             self.snapshots@ == old_self.snapshots@,
             self.active_saved_len == old_self.active_saved_len,
@@ -1864,7 +1864,6 @@ where
             self.store == old_self.store,
             self.snapshots@ == old_self.snapshots@,
             self.active_saved_len == old_self.active_saved_len,
-            self.diff_log.wf(),
             0 <= b < old_self.frames@.len(),
             self.frames@.len() == old_self.frames@.len(),
             kept <= m,
@@ -2399,23 +2398,9 @@ where
             v.snapshots_view().len() == 0,
     {
         proof { store.lemma_wf_captured_len(); }  // captured().len() == 0
-        let diff_log = match mode {
-            crate::diff_compress::CompressionMode::None =>
-                crate::diff_log::DiffLog::new_plain(),
-            crate::diff_compress::CompressionMode::ValueDict =>
-                crate::diff_log::DiffLog::new_dict(),
-            // Index-major: the index column is run-coalesced into cold frames at
-            // compact_tail (values stay plain); mark_and_compact folds the closed
-            // frame's index tail.
-            // Index-major, write-order (mark_and_compact) or sorted (mark_and_compact_sorted):
-            // both use the run-compressed index column; the fold differs at mark.
-            crate::diff_compress::CompressionMode::IndexRuns
-            | crate::diff_compress::CompressionMode::IndexRunsSorted =>
-                crate::diff_log::DiffLog::new_runs(),
-            // Per-frame Auto (A4): the per-frame-adaptive cold tier.
-            crate::diff_compress::CompressionMode::Auto =>
-                crate::diff_log::DiffLog::new_adaptive(),
-        };
+        // A2a: compression off; every mode is the bare mainline log. The
+        // tiering policy bit and the cold stack land in A2b.
+        let diff_log: std::vec::Vec<(T, I)> = std::vec::Vec::new();
         let v = Vec {
             store,
             diff_log,
@@ -2458,7 +2443,7 @@ where
                 // Production parity: the same overallocation check applies to
                 // the diff log at mark time (shrink-at-mark ratcheting).
                 // Observably inert (contract: element sequence unchanged).
-                self.diff_log.shrink_capacity(factor, headroom);
+                log_shrink_capacity(&mut self.diff_log, factor, headroom);
             }
         }
         proof {
@@ -2548,7 +2533,7 @@ where
     /// len-based — this reports the actual allocation footprint.
     #[verifier::external_body]
     pub fn tracking_bytes(&self) -> usize {
-        self.diff_log.heap_bytes()
+        log_heap_bytes(&self.diff_log)
             + self.frames.capacity() * core::mem::size_of::<Frame<I>>()
     }
 
@@ -2763,7 +2748,7 @@ where
         proof {
             self.lemma_diff_start_le_n(token.frame_idx as int);
         }
-        Some(self.diff_log.index_range(ds, self.diff_log.len()))
+        Some(log_index_range(&self.diff_log, ds, self.diff_log.len()))
     }
 
     /// The public token-validity check: "restorable now", STRUCTURALLY.
@@ -3815,13 +3800,13 @@ where
         // O(stratum) copy per column per mark, and at 46 columns that was
         // mark's dominant term. Compressed representations rebuild as before.
         let prev_suffix_vec: std::vec::Vec<(T, I)>;
-        let prev_suffix: &[(T, I)] = match self.diff_log.hot_slice(
+        let prev_suffix: &[(T, I)] = match log_hot_slice(&self.diff_log, 
             parent_diff_start, self.diff_log.len())
         {
             Some(sl) => sl,
             None => {
                 prev_suffix_vec =
-                    self.diff_log.subrange_vec(parent_diff_start, self.diff_log.len());
+                    log_subrange_vec(&self.diff_log, parent_diff_start, self.diff_log.len());
                 prev_suffix_vec.as_slice()
             }
         };
@@ -4066,140 +4051,7 @@ where
             final(self).store == old(self).store,
             final(self).active_saved_len == old(self).active_saved_len,
     {
-        if self.frames.len() < 2 {
-            return;
-        }
-        // Policy gate: buffered eviction is the TRAIL discipline's
-        // compression path. A unique-capture column compresses at seal
-        // (auto_seal or the explicit compaction entries), and running both
-        // policies would leave the buffer dead weight - seal-on-mark never
-        // accumulates more than one hot stratum. It also keeps a mode-None
-        // unique column an honest plain baseline: the size-comparison tests
-        // and the mainline benchmark controls rely on it never compressing.
-        if self.store.unique_capture() {
-            return;
-        }
-        if !self.diff_log.is_adaptive_exec() {
-            return;
-        }
-        let cold_len = self.diff_log.idx_cold_len();
-        let depth = self.frames.len();
-        // Count hot strata from the top; bounded by the buffer in steady
-        // state, so this scan is O(HOT_BUFFER).
-        let mut hot: usize = 0;
-        while hot < depth
-            invariant
-                hot <= depth,
-                depth == self.frames@.len(),
-            decreases depth - hot,
-        {
-            if self.frames[depth - 1 - hot].diff_start < cold_len {
-                break;
-            }
-            hot += 1;
-        }
-        if hot <= Self::HOT_BUFFER {
-            return;
-        }
-        let b = depth - hot;
-        let ds = self.frames[b].diff_start;
-        if ds != cold_len {
-            // Misalignment: a previous partial state we refuse to compound.
-            return;
-        }
-        // hot > HOT_BUFFER >= 1 gives at least two hot strata, so b + 1 is a
-        // real frame and the stratum below the open one.
-        let hi = self.frames[b + 1].diff_start;
-        if hi <= ds {
-            return;
-        }
-        let m = hi - ds;
-        let ghost pre = *self;
-        proof {
-            // Bounds: both boundaries live inside the log, and stratum b is
-            // exactly [ds, ds + m).
-            self.lemma_stratum_bounds(b as int);
-            self.lemma_stratum_bounds(b as int + 1);
-            assert(hi as int <= self.diff_log@.len());
-            assert(pre.stratum_end(b as int) == hi as int);
-            assert(pre.diff_log.idx_cold_len_spec() == ds as nat);
-        }
-        // Fold the stratum dedupe-first: keeps the chronologically first
-        // capture of each cell (what reconstruction pins), yields the unique
-        // indices run-coalescing needs, for BOTH disciplines - no uniqueness
-        // of the input stratum is assumed anywhere (deliverable 6).
-        let kept = self.diff_log.compact_adaptive_front_dedupe(
-            crate::diff_compress::CompressionMode::IndexRunsSorted, m);
-        let delta = m - kept;
-        // Shift every frame above the fold down by the dropped count.
-        let ghost mid_frames = self.frames@;
-        proof {
-            assert(mid_frames == pre.frames@);
-            assert forall|k: int| (b as int) < k < pre.frames@.len() implies
-                (#[trigger] pre.frames@[k]).diff_start >= hi by {
-                pre.lemma_diff_start_monotone(b as int + 1, k);
-            }
-        }
-        let ghost dl_folded = self.diff_log;
-        if delta > 0 {
-            let mut k2: usize = b + 1;
-            while k2 < depth
-                invariant
-                    b + 1 <= k2 <= depth,
-                    depth == self.frames@.len(),
-                    depth == pre.frames@.len(),
-                    delta <= m,
-                    hi == ds + m,
-                    self.diff_log == dl_folded,
-                    self.store == pre.store,
-                    self.snapshots@ == pre.snapshots@,
-                    self.active_saved_len == pre.active_saved_len,
-                    forall|k: int| 0 <= k <= b as int
-                        ==> #[trigger] self.frames@[k] == pre.frames@[k],
-                    forall|k: int| (b as int) < k < k2 as int ==> {
-                        &&& (#[trigger] self.frames@[k]).saved_len
-                            == pre.frames@[k].saved_len
-                        &&& self.frames@[k].diff_start as int
-                            == pre.frames@[k].diff_start as int - delta as int
-                    },
-                    forall|k: int| k2 as int <= k < depth
-                        ==> #[trigger] self.frames@[k] == pre.frames@[k],
-                    forall|k: int| (b as int) < k < pre.frames@.len()
-                        ==> (#[trigger] pre.frames@[k]).diff_start >= hi,
-                decreases depth - k2,
-            {
-                let f0 = self.frames[k2];
-                proof {
-                    assert(f0 == pre.frames@[k2 as int]);
-                    assert(f0.diff_start >= hi);
-                }
-                let nf = crate::frame::Frame {
-                    saved_len: f0.saved_len,
-                    diff_start: f0.diff_start - delta,
-                };
-                self.frames.set(k2, nf);
-                k2 += 1;
-            }
-        }
-        proof {
-            let n2 = self.diff_log@.len() as int;
-            let bb = b as int;
-            // Pointwise bridges from the fold's subrange ensures.
-            assert forall|x: int| 0 <= x < ds as int implies
-                #[trigger] self.diff_log@[x] == pre.diff_log@[x] by {
-                assert(self.diff_log@.subrange(0, ds as int)[x]
-                    == pre.diff_log@.subrange(0, ds as int)[x]);
-            }
-            assert forall|q: int| 0 <= q < pre.diff_log@.len() - (ds as int + m as int)
-                implies #[trigger] self.diff_log@[ds as int + kept as int + q]
-                    == pre.diff_log@[ds as int + m as int + q] by {
-                assert(self.diff_log@.subrange(ds as int + kept as int, n2)[q]
-                    == pre.diff_log@.subrange(
-                        ds as int + m as int, pre.diff_log@.len() as int)[q]);
-            }
-            self.lemma_diff_log_rep_change_preserves_wf_dedupe(
-                pre, bb, m as nat, kept as nat);
-        }
+        // A2a: no cold tier yet; eviction returns in A2b on the ColdStack.
     }
 
     /// Seal the open top frame with a value-opaque per-frame encoder (sorted index
@@ -4223,64 +4075,8 @@ where
             final(self).store == old(self).store,
             final(self).active_saved_len == old(self).active_saved_len,
     {
-        if self.frames.len() == 0 {
-            return;
-        }
-        // Policy gate: only the Auto tier seals on mark. The default live
-        // column keeps its strata as hot pairs, restored by backward walk;
-        // sealing them here would make every mark pay a compression and every
-        // restore pay the cold decode (the measured +156% on restore_replay).
-        if !self.diff_log.auto_seal() {
-            return;
-        }
-        if !self.store.unique_capture() {
-            // A chronological (trail) column's strata carry duplicates, and
-            // every sealed encoding requires the unique-index bound: sealing
-            // is structurally out of the trail discipline's family.
-            return;
-        }
-        let top = self.frames.len() - 1;
-        let ds = self.frames[top].diff_start;
-        proof {
-            self.lemma_diff_start_le_n(top as int);
-        }
-        if !self.diff_log.adaptive_aligned(ds) {
-            return;
-        }
-        let n = self.diff_log.len();
-        if n == ds {
-            // Empty open stratum: sealing would push an empty cold frame.
-            return;
-        }
-        // Fold the open stratum dedupe-first. Under this gate the dedupe is
-        // semantically the identity (the discipline never captures a cell
-        // twice per stratum), but the PROOF never needs that fact - the
-        // dedupe frame rule covers the general shrink (deliverable 6:
-        // uniqueness is the construction's contract, not a wf clause).
-        let m = n - ds;
-        let ghost pre = *self;
-        let ghost topg = (pre.frames@.len() - 1) as int;
-        proof {
-            assert(pre.stratum_end(topg) == pre.diff_log@.len() as int);
-            assert(pre.frames@[topg].diff_start as int + m as int
-                == pre.stratum_end(topg));
-            assert(pre.diff_log.idx_cold_len_spec() == ds as nat);
-        }
-        let kept = self.diff_log.compact_adaptive_front_dedupe(
-            crate::diff_compress::CompressionMode::IndexRunsSorted, m);
-        proof {
-            assert forall|x: int| 0 <= x < ds as int implies
-                #[trigger] self.diff_log@[x] == pre.diff_log@[x] by {
-                assert(self.diff_log@.subrange(0, ds as int)[x]
-                    == pre.diff_log@.subrange(0, ds as int)[x]);
-            }
-            assert forall|q: int| 0 <= q
-                < pre.diff_log@.len() - (ds as int + m as int)
-                implies #[trigger] self.diff_log@[ds as int + kept as int + q]
-                    == pre.diff_log@[ds as int + m as int + q] by {}
-            self.lemma_diff_log_rep_change_preserves_wf_dedupe(
-                pre, topg, m as nat, kept as nat);
-        }
+        // Retired: seal-on-mark contradicted the buffered-eviction policy
+        // (goal doc §6) and is gone for good; A2b's eviction replaces it.
     }
 
     /// The genealogy-free core of `restore`: reconstruct the vector to the state
@@ -4391,11 +4187,11 @@ where
             // only an encoded column pays the reconstruction.
             let replayed_pre_vec: std::vec::Vec<(T, I)>;
             let replayed_pre: &[(T, I)] =
-                match self.diff_log.hot_slice(diff_start, self.diff_log.len()) {
+                match log_hot_slice(&self.diff_log, diff_start, self.diff_log.len()) {
                     Some(sl) => sl,
                     None => {
                         replayed_pre_vec =
-                            self.diff_log.subrange_vec(diff_start, self.diff_log.len());
+                            log_subrange_vec(&self.diff_log, diff_start, self.diff_log.len());
                         replayed_pre_vec.as_slice()
                     }
                 };
@@ -4568,11 +4364,11 @@ where
             // Zero-copy when contiguous (see index_slice).
             let surviving_vec: std::vec::Vec<(T, I)>;
             let surviving: &[(T, I)] =
-                match self.diff_log.hot_slice(new_top_ds, self.diff_log.len()) {
+                match log_hot_slice(&self.diff_log, new_top_ds, self.diff_log.len()) {
                     Some(sl) => sl,
                     None => {
                         surviving_vec =
-                            self.diff_log.subrange_vec(new_top_ds, self.diff_log.len());
+                            log_subrange_vec(&self.diff_log, new_top_ds, self.diff_log.len());
                         surviving_vec.as_slice()
                     }
                 };
@@ -5036,13 +4832,8 @@ where
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
-        let t = self.mark(shrink);
-        let ghost pre = *self;
-        self.diff_log.compact_tail();
-        // compact_tail mutates only diff_log, preserving its @ and wf, so every Vec
-        // wf conjunct and the view/depth/snapshots carry from the post-mark state.
-        proof { self.lemma_diff_log_rep_change_preserves_wf(pre); }
-        t
+        // A2a: compression off - a plain mark. A2b folds at eviction instead.
+        self.mark(shrink)
     }
 
     /// Sorted index-major `mark`: sort-fold the open top frame's stratum (the strongest
@@ -5067,8 +4858,8 @@ where
             old(self).depth_spec() < u32::MAX,
             old(self).view().len() < I::max_nat(),
             old(self).depth_spec() > 0,
-            old(self).diff_log.is_runs_idx(),
-            old(self).diff_log.idx_cold_len_spec() == old(self).top_diff_start_spec(),
+            false,
+            0nat == old(self).top_diff_start_spec(),
             crate::diff_compress::unique_idx(old(self).diff_log@.subrange(
                 old(self).top_diff_start_spec(), old(self).diff_log@.len() as int)),
         ensures
@@ -5078,34 +4869,7 @@ where
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
-        let ghost pre = *self;
-        let ghost ts = pre.diff_log.idx_cold_len_spec() as int;
-        let ghost top = (pre.frames@.len() - 1) as int;
-        self.diff_log.compact_tail_sorted();
-        proof {
-            // The fold permuted exactly the top stratum [ts, n), whose
-            // indices are unique by this entry's requires; dedupe-first is
-            // the identity there, so the dedupe frame rule applies with
-            // kept == m and no inner-stratum uniqueness is read anywhere.
-            let np = pre.diff_log@.len() as int;
-            let mg = (np - ts) as nat;
-            assert(pre.frames@[top].diff_start as int == ts);
-            assert(pre.stratum_end(top) == np);
-            let sg = pre.diff_log@.subrange(ts, np);
-            crate::diff_compress::lemma_dedupe_identity_on_unique::<T, I>(sg);
-            assert(crate::diff_compress::dedupe_first_spec(sg).len() == mg);
-            assert(self.diff_log@.subrange(0, ts) == pre.diff_log@.subrange(0, ts));
-            assert forall|x: int| 0 <= x < ts implies
-                #[trigger] self.diff_log@[x] == pre.diff_log@[x] by {
-                assert(self.diff_log@.subrange(0, ts)[x]
-                    == pre.diff_log@.subrange(0, ts)[x]);
-            }
-            assert forall|q: int| 0 <= q < pre.diff_log@.len() - (ts + mg as int)
-                implies #[trigger] self.diff_log@[ts + mg as int + q]
-                    == pre.diff_log@[ts + mg as int + q] by {}
-            self.lemma_diff_log_rep_change_preserves_wf_dedupe(pre, top, mg, mg);
-        }
-
+        // A2a: compression off - a plain mark. A2b folds at eviction instead.
         self.mark(shrink)
     }
 
@@ -5123,8 +4887,8 @@ where
             old(self).depth_spec() < u32::MAX,
             old(self).view().len() < I::max_nat(),
             old(self).depth_spec() > 0,
-            old(self).diff_log.is_adaptive(),
-            old(self).diff_log.idx_cold_len_spec() == old(self).top_diff_start_spec(),
+            true,
+            0nat == old(self).top_diff_start_spec(),
         ensures
             final(self).wf(),
             final(self).view() == old(self).view(),
@@ -5132,40 +4896,9 @@ where
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
-        // Fold dedupe-first: keeps the chronologically first capture per
-        // cell, supplies the unique indices the reordering encoders require
-        // (deliverable 6's factoring), and therefore serves BOTH capture
-        // disciplines - the old unique_idx requires is gone.
-        let top = self.frames.len() - 1;
-        let ds = self.frames[top].diff_start;
-        proof {
-            self.lemma_diff_start_le_n(top as int);
-        }
-        let n = self.diff_log.len();
-        let m = n - ds;
-        let ghost pre = *self;
-        let ghost topg = (pre.frames@.len() - 1) as int;
-        proof {
-            assert(pre.stratum_end(topg) == pre.diff_log@.len() as int);
-            assert(pre.frames@[topg].diff_start as int + m as int
-                == pre.stratum_end(topg));
-            assert(pre.diff_log.idx_cold_len_spec() == ds as nat);
-        }
-        let kept = self.diff_log.compact_adaptive_front_dedupe(mode, m);
-        proof {
-            assert forall|x: int| 0 <= x < ds as int implies
-                #[trigger] self.diff_log@[x] == pre.diff_log@[x] by {
-                assert(self.diff_log@.subrange(0, ds as int)[x]
-                    == pre.diff_log@.subrange(0, ds as int)[x]);
-            }
-            assert forall|q: int| 0 <= q
-                < pre.diff_log@.len() - (ds as int + m as int)
-                implies #[trigger] self.diff_log@[ds as int + kept as int + q]
-                    == pre.diff_log@[ds as int + m as int + q] by {}
-            self.lemma_diff_log_rep_change_preserves_wf_dedupe(
-                pre, topg, m as nat, kept as nat);
-        }
-
+        // A2a: compression off - a plain mark. A2b folds at eviction with
+        // the per-frame selector; `mode` becomes the column hint there.
+        let _ = mode;
         self.mark(shrink)
     }
 
@@ -5200,14 +4933,14 @@ where
             // Discipline gate first: a chronological (trail) column never
             // seals — its strata carry duplicates, outside every fold's
             // unique-index precondition. It takes the plain mark below.
-            if self.diff_log.adaptive_aligned(ds) {
+            if true {
                 // Choose this frame's mode from its own statistics, then
                 // fold. The dedupe-first fold inside serves both capture
                 // disciplines, so the old unique-capture gate is gone: a
                 // trail column's duplicates are removed (first capture
                 // wins, `lemma_overlay_dedupe_first`) before run encoding.
                 let n = self.diff_log.len();
-                let diffs = self.diff_log.subrange_vec(ds, n);
+                let diffs = log_subrange_vec(&self.diff_log, ds, n);
                 let mode = crate::diff_compress::choose_mode(&diffs);
                 self.mark_and_compact_adaptive(mode, shrink)
             } else {
@@ -5724,7 +5457,7 @@ mod adaptive_compaction_tests {
         let top = v.frames.len() - 1;
         let ds = v.frames[top].diff_start;
         let n = v.diff_log.len();
-        let diffs = v.diff_log.subrange_vec(ds, n);
+        let diffs = log_subrange_vec(&v.diff_log, ds, n);
         choose_mode(&diffs)
     }
 
@@ -5828,7 +5561,7 @@ mod restore_memcpy_timing {
                 let top = v.frames.len() - 1;
                 let ds = v.frames[top].diff_start;
                 let nn = v.diff_log.len();
-                let diffs = v.diff_log.subrange_vec(ds, nn);
+                let diffs = log_subrange_vec(&v.diff_log, ds, nn);
                 let m = choose_mode(&diffs);
                 ts.push(v.mark_and_compact_adaptive(m, ShrinkPolicy::Never));
             } else {

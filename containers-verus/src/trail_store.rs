@@ -199,7 +199,7 @@ where
     }
 
     #[inline(always)]
-    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>) {
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_trail_discipline;
         if !TRACK {
             return;
@@ -212,7 +212,7 @@ where
         // The chronological discipline: append unconditionally. No flag
         // read, no branch on capture state — this is the hot-path saving.
         let old_val = self.data[iu];
-        diff_log.push(old_val, i);
+        diff_log.push((old_val, i));
         proof {
             if !self.captured@[iu as int] {
                 self.captured@ = self.captured@.update(iu as int, true);
@@ -224,7 +224,7 @@ where
         }
     }
 
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_trail_discipline;
         if !TRACK {
             return;
@@ -235,7 +235,7 @@ where
             return;
         }
         let old_val = self.data[iu];
-        diff_log.push(old_val, i);
+        diff_log.push((old_val, i));
         proof {
             self.captured@ = self.captured@.update(iu as int, true);
         }
@@ -270,9 +270,9 @@ where
         }
     }
 
-    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
+    fn restore_overlay(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
+        diff_log: &Vec<(T, I)>,
         lo: usize,
         hi: usize,
     ) {

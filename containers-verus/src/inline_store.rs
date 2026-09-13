@@ -284,7 +284,7 @@ where
     }
 
     #[inline(always)]
-    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>) {
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
@@ -297,7 +297,7 @@ where
         let r = self.data[iu];
         if !T::tag(&r) {
             let v = T::from_repr(&r);
-            diff_log.push(v, i);
+            diff_log.push((v, i));
             let mut new_r = r;
             T::set_tag(&mut new_r);
             self.data.set(iu, new_r);
@@ -313,7 +313,7 @@ where
         }
     }
 
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {
             return;
@@ -325,7 +325,7 @@ where
         }
         let r = self.data[iu];
         let v = T::from_repr(&r);
-        diff_log.push(v, i);
+        diff_log.push((v, i));
         let mut new_r = r;
         T::set_tag(&mut new_r);
         self.data.set(iu, new_r);
@@ -410,9 +410,9 @@ where
         }
     }
 
-    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
+    fn restore_overlay(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
+        diff_log: &Vec<(T, I)>,
         lo: usize,
         hi: usize,
     ) {
@@ -436,7 +436,6 @@ where
                 invariant
                     lo <= i <= hi,
                     hi <= diff_log@.len(),
-                    diff_log.wf(),
                     sl@ == diff_log@.subrange(lo as int, hi as int),
                     self.wf_spec(),
                     self.data@.len() == base.len(),
@@ -479,7 +478,6 @@ where
             invariant
                 lo <= i <= hi,
                 hi <= diff_log@.len(),
-                diff_log.wf(),
                 pairs@ == diff_log@.subrange(lo as int, hi as int),
                 self.wf_spec(),
                 self.data@.len() == base.len(),

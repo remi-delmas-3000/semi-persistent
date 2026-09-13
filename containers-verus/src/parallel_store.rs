@@ -252,7 +252,7 @@ where
     }
 
     #[inline(always)]
-    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I, VC>) {
+    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_parallel_discipline;
         if !TRACK {
             return;
@@ -264,7 +264,7 @@ where
         }
         if !self.captured.get(iu) {
             let old_val = self.data[iu];
-            diff_log.push(old_val, i);
+            diff_log.push((old_val, i));
             self.captured.set_true(iu, Ghost(self.data@.len() as int));
         }
         proof {
@@ -279,7 +279,7 @@ where
         }
     }
 
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_parallel_discipline;
         if !TRACK {
             return;
@@ -290,7 +290,7 @@ where
             return;
         }
         let old_val = self.data[iu];
-        diff_log.push(old_val, i);
+        diff_log.push((old_val, i));
         self.captured.set_true(iu, Ghost(self.data@.len() as int));
         proof {
             assert(self.captured_spec()[i.as_nat() as int] == true);
@@ -354,9 +354,9 @@ where
         }
     }
 
-    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
+    fn restore_overlay(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
+        diff_log: &Vec<(T, I)>,
         lo: usize,
         hi: usize,
     ) {

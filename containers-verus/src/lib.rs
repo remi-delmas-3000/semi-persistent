@@ -105,7 +105,6 @@ pub mod container_id;
 pub mod dense_id;
 pub mod dense_span_map;
 pub mod diff_compress;
-pub mod diff_log;
 pub mod diff_store;
 pub mod eclasses;
 pub mod error;

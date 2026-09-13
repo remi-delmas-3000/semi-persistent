@@ -263,11 +263,11 @@ where
     }
 
     #[inline(always)]
-    fn capture<VC: crate::value_compressor::ValueCompressor<T>>(
+    fn capture(
         &mut self,
         i: I,
         saved_len: I,
-        diff_log: &mut crate::diff_log::DiffLog<T, I, VC>,
+        diff_log: &mut Vec<(T, I)>,
     ) {
         broadcast use crate::diff_store::lemma_dyn_views;
         match self {
@@ -277,7 +277,7 @@ where
         }
     }
 
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut crate::diff_log::DiffLog<T, I>) {
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
         broadcast use crate::diff_store::lemma_dyn_views;
         match self {
             DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::force_capture(s, i, saved_len, diff_log),
@@ -332,9 +332,9 @@ where
         }
     }
 
-    fn restore_overlay<VC: crate::value_compressor::ValueCompressor<T>>(
+    fn restore_overlay(
         &mut self,
-        diff_log: &crate::diff_log::DiffLog<T, I, VC>,
+        diff_log: &Vec<(T, I)>,
         lo: usize,
         hi: usize,
     ) {
