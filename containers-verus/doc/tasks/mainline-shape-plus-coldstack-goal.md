@@ -606,3 +606,33 @@ physical analog of lemma_cell_eq_overlay, followed by the post-truncation wf
 re-establishment (now including phys_frame_inv_range for survivors) and the
 cold path. D7's clippy -D warnings gate is green (commit 28a6708); the full
 15-gate battery is blocked only on restore_frame's discharge.
+
+## Solver-ceiling constraint on push_frame (2026-09-13, cont.)
+
+New finding while attempting the trail frame-alignment invariant
+(hot_stack[i].start + g_start(cold_count) == g_start(cold_count+i), the offset
+that maps a hot frame's physical stratum to its ghost stratum): the invariant
+itself is maintained trivially by set_index/pop/push (they touch neither the
+hot starts nor trail_frames) and by push_frame at open time (the new frame
+opens at diff_log.len(), which the trail bridge makes full_trail.len() -
+g_start(cold_count)). But adding it as a wf clause makes push_frame's
+verification query return an SMT instability error ("expected rlimit-count in
+smt statistics") even at rlimit 3000 - push_frame's proof is already at the
+solver's practical ceiling after the trail bridge, and any further wf clause
+tips it over.
+
+Consequence for resuming: before more wf clauses (frame alignment, physical
+frame_inv_range) can be added, push_frame's proof (and likely pop's) must be
+REFACTORED - its per-frame reconstruction and bridge maintenance extracted into
+named proof lemmas so each SMT query stays small. That refactor is the first
+step of the restore_frame discharge, ahead of the invariants themselves. This
+is why the remaining work does not land as a single incremental commit: the
+existing large mutator proofs must be decomposed first.
+
+Ordered remaining work, updated:
+  0. Extract push_frame/pop reconstruction + bridge maintenance into lemmas
+     (relieve the solver ceiling).
+  1. Trail frame-alignment invariant (maintenance is then cheap).
+  2. Physical frame_inv_range (or the unique per-stratum dedupe bridge).
+  3. Physical telescoping reconstruction lemma; restore_frame body proof.
+  4. wf re-establishment on the truncated state; cold-run path.
