@@ -5444,6 +5444,101 @@ where
         // (goal doc §6) and is gone for good; A2b's eviction replaces it.
     }
 
+    /// wf re-establishment, part 3 (structural + trail bridges): for a HOT
+    /// target with survivors (target > cold_count, so no re-materialization),
+    /// after truncation the frame-count and length bridges hold, and under the
+    /// append-always discipline the trail sequence-bridge and frame alignment
+    /// carry from old_self. The alignment supplies the offset that turns the
+    /// truncated diff_log prefix `[0, hf_start)` into the ghost hot suffix
+    /// `full_trail[g_start(cc), b)`: hf_start == b - g_start(cc) by the old
+    /// alignment at index `target - cc`, so the two subranges coincide.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_restore_hot_structural(
+        &self, old_self: Self, target: int, hf_start: int, b: int,
+    )
+        requires
+            old_self.wf(),
+            old_self.cold_stack@.len() < target < old_self.trail_frames@.len(),
+            self.cold_stack@ == old_self.cold_stack@,
+            self.hot_stack@ == old_self.hot_stack@.subrange(
+                0, target - old_self.cold_stack@.len() as int),
+            hf_start == old_self.hot_stack@[target - old_self.cold_stack@.len() as int].start,
+            b == old_self.g_start(target),
+            self.diff_log@ == old_self.diff_log@.subrange(0, hf_start),
+            self.trail_frames@ == old_self.trail_frames@.subrange(0, target),
+            self.snapshots@ == old_self.snapshots@.subrange(0, target),
+            self.full_trail@ == old_self.full_trail@.subrange(0, b),
+        ensures
+            self.cold_stack@.len() + self.hot_stack@.len() == self.trail_frames@.len(),
+            self.snapshots@.len() == self.trail_frames@.len(),
+            self.hot_stack@.len() > 0,
+            !old_self.store.unique_capture_spec() ==>
+                self.diff_log@ == self.full_trail@.subrange(
+                    self.g_start((self.trail_frames@.len() - self.hot_stack@.len()) as int),
+                    self.full_trail@.len() as int),
+            !old_self.store.unique_capture_spec() ==>
+                forall|i: int| 0 <= i < self.hot_stack@.len() ==>
+                    (#[trigger] self.hot_stack@[i]).start as int
+                        + self.g_start((self.trail_frames@.len() - self.hot_stack@.len()) as int)
+                        == self.g_start((self.trail_frames@.len() - self.hot_stack@.len()) + i),
+    {
+        let cc = old_self.cold_stack@.len() as int;
+        // Frame-count and length bridges.
+        assert(self.trail_frames@.len() == target);
+        assert(self.hot_stack@.len() == target - cc);
+        assert(cc == self.trail_frames@.len() - self.hot_stack@.len());
+        assert(self.hot_stack@.len() > 0);
+        // g_start on the shared prefix is unchanged: trail_frames agree on [0, target).
+        assert forall|k: int| 0 <= k <= cc implies
+            self.g_start(k) == old_self.g_start(k) by {
+            if 0 <= k < target {
+                assert(self.trail_frames@[k] == old_self.trail_frames@.subrange(0, target)[k]);
+            }
+        }
+        if !old_self.store.unique_capture_spec() {
+            let gcc = old_self.g_start(cc);
+            // old alignment at index (target - cc): hf_start + gcc == g_start(target) == b.
+            assert(old_self.hot_stack@.len() == old_self.trail_frames@.len() - cc);
+            assert(hf_start + gcc == old_self.g_start(target)) by {
+                assert(old_self.hot_stack@[target - cc].start as int
+                    + old_self.g_start((old_self.trail_frames@.len() - old_self.hot_stack@.len()) as int)
+                    == old_self.g_start(
+                        (old_self.trail_frames@.len() - old_self.hot_stack@.len()) + (target - cc)));
+            }
+            assert(hf_start + gcc == b);
+            assert(self.g_start(cc) == gcc);
+            // Trail bridge: new diff_log == full_trail.subrange(gcc, b).
+            assert(self.diff_log@ =~= self.full_trail@.subrange(gcc, self.full_trail@.len() as int)) by {
+                assert(self.full_trail@.len() == b);
+                assert(old_self.diff_log@ == old_self.full_trail@.subrange(
+                    gcc, old_self.full_trail@.len() as int));
+                assert forall|t: int| 0 <= t < b - gcc implies
+                    #[trigger] self.diff_log@[t] == self.full_trail@.subrange(gcc, b)[t] by {
+                    assert(self.diff_log@[t] == old_self.diff_log@.subrange(0, hf_start)[t]);
+                    assert(old_self.diff_log@[t] == old_self.full_trail@.subrange(
+                        gcc, old_self.full_trail@.len() as int)[t]);
+                    assert(old_self.full_trail@.subrange(gcc, old_self.full_trail@.len() as int)[t]
+                        == old_self.full_trail@[gcc + t]);
+                    assert(self.full_trail@.subrange(gcc, b)[t] == self.full_trail@[gcc + t]);
+                    assert(self.full_trail@[gcc + t] == old_self.full_trail@.subrange(0, b)[gcc + t]);
+                }
+            }
+            // Alignment: for survivor i, new hot[i].start + gcc == g_start(cc+i).
+            assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                (#[trigger] self.hot_stack@[i]).start as int + self.g_start(cc)
+                    == self.g_start(cc + i) by {
+                assert(self.hot_stack@[i] == old_self.hot_stack@.subrange(0, target - cc)[i]);
+                assert(old_self.hot_stack@[i].start as int
+                    + old_self.g_start((old_self.trail_frames@.len() - old_self.hot_stack@.len()) as int)
+                    == old_self.g_start(
+                        (old_self.trail_frames@.len() - old_self.hot_stack@.len()) + i));
+                assert(cc + i < target);
+                assert(self.g_start(cc + i) == old_self.g_start(cc + i));
+            }
+        }
+    }
+
     /// wf re-establishment, part 2 (unique): for a HOT target the surviving hot
     /// frames keep their physical `frame_inv_range` after diff_log is truncated
     /// to `hf_start`. Each survivor's physical stratum lies within `[0, hf_start)`
