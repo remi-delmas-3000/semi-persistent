@@ -322,17 +322,50 @@ where
     }
 
 
-    /// Raw data column: one clamped copy_from_slice per run. EXEC-FIRST
-    /// SCAFFOLD.
-    #[verifier::external_body]
+    /// Raw data column: one clamped copy_from_slice per run, straight through
+    /// the vstd-specified as_mut_slice / split_at_mut / copy_from_slice chain
+    /// (the commit-20 memcpy pattern). No external_body: every primitive
+    /// carries a vstd contract, and their ensures compose to the written-window
+    /// facts the overwrite-only run contract reads.
     fn restore_run(&mut self, base: I, values: &[T]) {
+        broadcast use crate::diff_store::lemma_trail_discipline;
         let b = base.as_usize();
         let tlen = self.data.len();
+        let ghost old_data = self.data@;
         if b >= tlen {
             return;
         }
-        let cl = core::cmp::min(values.len(), tlen - b);
-        self.data[b..b + cl].copy_from_slice(&values[..cl]);
+        let cl = if values.len() <= tlen - b { values.len() } else { tlen - b };
+        let src = vstd::slice::slice_subrange(values, 0, cl);
+        let tslice = self.data.as_mut_slice();
+        let (_, rest) = tslice.split_at_mut(b);
+        let (dst, _tail) = rest.split_at_mut(cl);
+        dst.copy_from_slice(src);
+        proof {
+            assert(self.data@.len() == tlen as nat);
+            // Written window mirrors `values`; everything else is unchanged.
+            assert forall|i: int| 0 <= i < self.data@.len() implies
+                #[trigger] self.data@[i] ==
+                    if base.as_nat() <= i && (i as nat) < base.as_nat() + values@.len() {
+                        values@[i - base.as_nat()]
+                    } else {
+                        old_data[i]
+                    }
+            by {
+                if b as int <= i && i < b as int + cl as int {
+                    assert(self.data@[i] == src@[i - b as int]);
+                    assert(src@[i - b as int] == values@[i - b as int]);
+                } else if b as int + cl as int <= i && i < b as int + values@.len() {
+                    // Only nonempty when the clamp fired, and then b+cl == tlen,
+                    // past every valid index i < tlen.
+                    assert(cl < values@.len());
+                    assert(b + cl == tlen);
+                    assert(false);
+                } else {
+                    assert(self.data@[i] == old_data[i]);
+                }
+            }
+        }
     }
 
     fn shrink_if(&mut self, _factor: usize, _headroom: usize) {

@@ -3900,8 +3900,9 @@ pub(crate) proof fn reconstruct_child_split_links<K, L, S, const TRACK: bool>(
 /// half_binds, the link splice + half_links, two half_ids, footprint, disjoint)
 /// in one body; the bump over the default covers the combined query (raised
 /// 30→50 when the Vec wf gained the `!TRACK ⟹ no frames` conjunct, which
-/// enlarges the ambient context this instantiates against).
-#[verifier::rlimit(50)]
+/// enlarges the ambient context this instantiates against; 50→70 when wf gained
+/// the per-frame saved_len == snapshot-length conjunct).
+#[verifier::rlimit(70)]
 pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
     arena1: Ghost<Seq<L::Node>>,
     arena_rec: Ghost<Seq<L::Node>>,
@@ -6313,6 +6314,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         Ok(Self::from_sorted(keys))
     }
 
+    #[verifier::rlimit(100)]
     pub fn insert(&mut self, key: K) -> (added: bool)
         requires
             old(self).wf(),

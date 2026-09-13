@@ -109,12 +109,9 @@ proptest! {
                 }
             }
             // Differential check after EVERY op.
-            prop_assert_eq!(model.len(), {
-                let l: u32 = v.len().into();
-                l as usize
-            });
-            for i in 0..model.len() {
-                prop_assert_eq!(v.get_index(i as u32), model[i], "cell {} diverged", i);
+            prop_assert_eq!(model.len(), v.len() as usize);
+            for (i, &expected) in model.iter().enumerate() {
+                prop_assert_eq!(v.get_index(i as u32), expected, "cell {} diverged", i);
             }
         }
     }
@@ -146,8 +143,8 @@ proptest! {
         }
         while let Some((tok, snap)) = marks.pop() {
             v.try_restore(tok).expect("restore");
-            for i in 0..INIT_LEN {
-                prop_assert_eq!(v.get_index(i as u32), snap[i], "cell {} diverged at depth {}", i, marks.len());
+            for (i, &expected) in snap.iter().enumerate().take(INIT_LEN) {
+                prop_assert_eq!(v.get_index(i as u32), expected, "cell {} diverged at depth {}", i, marks.len());
             }
             model = snap;
         }

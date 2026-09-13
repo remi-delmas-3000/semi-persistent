@@ -399,3 +399,515 @@ Definitive remaining after the choice: push (reentered), push_frame (offset
 split, discharges from the physical bridge), D6 (restore-path discharge),
 D7 (battery). cargo verus verify NOT at 0 errors; commit 20 (053caca,
 15/15) is the verified baseline.
+
+## D5 complete, D6 foundation landed (2026-09-13)
+
+The dual-bridge design choice above resolved as (A): wf carries the ghost
+frame_inv_range, and the physical bridge's reentered case is discharged
+through `index_set_ok` (a wf clause naming the same index set over
+[0, active) for both the physical open slice and the ghost open stratum)
+plus `lemma_index_set_transfer`. set_index, push (reentered), pop, and
+push_frame all verify against this. The full vec module and workspace verify.
+
+**D5 discharged.** `cargo verus verify` reports 2173 verified, 0 errors across
+the workspace, with zero `assume()` in the source. pop's `index_set_ok`
+maintenance closed the last vec function: its j==new_len captured-marked case
+reasons from the old bridges (new_len < old_view.len(), so the old
+physical/ghost bridges apply at new_len directly) plus the append framing.
+The two restore-path `assume`s in trail_store and parallel_store
+`restore_overlay` are discharged with real invariant proofs: the backward
+replay loop realizes `overlay`'s front-recursion on `lo`, carried as the loop
+invariant `data@ == overlay(base, diff_log@, i2, hi)`. Restore correctness is
+now proven against the ghost overlay rather than assumed at the store
+boundary. Commits d7c7343 (pop + assume discharge), and the campaign floor
+moves off the commit-20 baseline.
+
+**D6 foundation landed, restore_frame discharge open.** Two structural
+invariants that restore_frame's body needs are in wf and maintained with no
+mutator cascade:
+  - `repr_ok` (commit 6e3a071): the cold tier is a contiguous frame-ordered
+    partition. Index runs partition `cold_index_runs` (each ColdFrameHdr names
+    a half-open [runs_start, +runs_len) slice, adjacent frames abut, the last
+    reaches the pool end); values partition `cold_value_pool` in run order.
+    `compress_all_hot` ensures it (trusted via external_body until its body is
+    discharged); `cold_pools_shrink_scaffold` gained `final@ == old@` ensures.
+  - per-frame hot extent (commit c1dd0a5): every hot frame's `start` is bounded
+    by `diff_log.len()`, not just the top frame's.
+
+restore_frame stays external_body. Removing it surfaces 13 obligations. The
+mechanical ones (resize bound, run-index arithmetic, begin_restore named-slots)
+are tractable. The two that are not yet dischargeable name the remaining work:
+
+  1. **Hot-path reconstruction** needs `frame_inv_range` over the PHYSICAL
+     `diff_log` slice for the target hot frame, to feed `lemma_overlay_eq_snap`
+     (which `restore_overlay`'s proven `data@ == overlay(base, diff_log, lo, hi)`
+     ensure then chains to `snapshots[target]`). wf carries `frame_inv_range`
+     only over the ghost `full_trail`. A physical-`diff_log` `frame_inv_range`
+     clause is the D5 "trail hot = identity" commuting equivalence made an
+     invariant. It is discipline-specific and must be maintained across
+     set_index/push/pop, mirroring the ghost version already maintained
+     op-by-op. This is the next repr_ok-scale brick.
+  2. **Cold-path reconstruction** needs a semantic ensure on `compress_all_hot`:
+     each cold frame's runs reconstruct that frame's snapshot (the "compressed
+     cold = sorted unique permutation of dedupe_first(ghost)" equivalence). It
+     rests on `frame_sort_order`'s output semantics (currently external_body
+     with no semantic ensure). Per this goal's ledger rule, `compress_all_hot`
+     may stay external_body with this ensure trust-ledgered against the D2
+     differential proptests (trail_semi_persistence, trail_compression) as the
+     named belt, since it is on the COMPRESSION path, not the restore path.
+     restore_frame's cold path then discharges from that ensure, and
+     restore_frame itself becomes non-external_body (proven), satisfying "zero
+     external_body on the restore path".
+
+`lemma_frame_inv_range_shift` already supplies the ghost `frame_inv_range`
+prefix-preservation restore_frame's wf re-establishment needs under ghost-trail
+truncation, so that part is not new work.
+
+**D7 status on the current floor.** conformance tests pass (33/33 across the
+binaries, 0 failed); lib tests pass (38/38); `cargo fmt --all -- --check` passes
+(commit 276e2fa stripped one trailing-whitespace line). The `cargo clippy
+--workspace -- -D warnings` gate is NOT green: roughly 15 warnings, in the D2
+conformance tests (loop-index-into-slice, is_multiple_of, useless u32
+conversion, dead assignment) and in vec.rs (dead `log_index_range`, spec-only
+fields clippy reads as never-read, truncating-to-zero, identical-if-blocks).
+These are the D7 cleanup, deferred behind the D6 restore_frame discharge per
+the hard-part-first ordering.
+
+cargo verus verify at 0 errors (2173 verified). Remaining: D6 restore_frame
+discharge (bricks 1 and 2 above), then D7 battery (clippy cleanup + full run).
+
+## Restore-path memcpy hooks proven; overlay-invariance lemma landed (2026-09-13, cont.)
+
+Two more D6 bricks landed, both verified:
+
+**lemma_overlay_append_dup** (commit ced8312). Appending a diff entry whose
+index is already hit earlier in the range leaves the range's overlay
+unchanged: first-entry-wins shadows the appended duplicate. This is the
+commuting equivalence the reconstruction bridge rests on: the first-write-wins
+store drops a repeat write while the ghost trail keeps it, and this lemma is
+why both reconstruct the same snapshot. Proof: split the appended entry off
+`overlay`'s front-recursion, then show the single-cell base change is invisible
+(captured cells are base-independent by `lemma_overlay_lowest`; the one changed
+base cell is itself captured, so uncaptured cells are untouched).
+
+**restore_run memcpy proven** (commit f72a864). `DiffStore::restore_run` gains
+an overwrite-only data-window contract: the window [base, base+values.len())
+intersected with [0, data.len()) takes the run values, every other cell is
+untouched, length and capture flags unchanged. The trail_store and
+parallel_store overrides - the raw-data restore path - are proven, removing
+their external_body: each replays the commit-20 chain (slice_subrange,
+as_mut_slice / split_at_mut / split_at_mut, copy_from_slice), and the vstd
+ensures compose to the window facts. The trait default stays external_body, a
+trusted scaffold for the re-encoding stores (inline/dyn) that cannot memcpy.
+
+**Restore-path external_body status.** The raw-store memcpy hooks the D6 check
+names are now proven: `restore_overlay`'s replay loops (trail_store,
+parallel_store) and `restore_run` (both raw stores). The remaining restore-path
+external_body is `restore_frame` (the vec.rs orchestrator).
+
+**restore_frame: the two routes.** Its full proof needs the physical<->ghost
+overlay bridge - `overlay(base, diff_log, phys_start(k), n)` equals
+`overlay(base, full_trail, g_start(k), m)` on a frame's cells - because
+`restore_overlay` reconstructs over the physical diff_log while
+`lemma_cell_eq_overlay` reconstructs over the ghost full_trail. The bridge holds
+by `lemma_overlay_append_dup` (the physical log is the ghost trail with
+non-first duplicates dropped for the first-write-wins discipline, identical for
+trail), but making it a maintained invariant mirrors the ghost frame_inv_range
+machinery across set_index/push/pop/push_frame - the last repr_ok-scale brick,
+and the one that cascades through every mutator rather than landing as a bound.
+The cold path additionally needs `compress_all_hot`'s cold-run reconstruction
+ensure.
+
+The differential belt for the trust-ledger option is in place and green:
+trail_semi_persistence at 512 cases (random restores to any live token vs a
+snapshot-stack model, crossing HOT_BUFFER so compression fires mid-sequence)
+and the deep-unwind-after-compression variant (restores every depth exactly).
+
+cargo verus verify: 2176 verified, 0 errors. Remaining: restore_frame discharge
+(physical overlay bridge, or trust-ledger against the belt above), then D7
+(clippy -D warnings cleanup + full battery).
+
+## Trail sequence-bridge landed; restore_frame reconstruction plan (2026-09-13, cont.)
+
+The physical hot-frame tiling and the D5 "trail hot = identity" commuting
+equivalence are now maintained invariants, all committed at 0 errors:
+
+- Hot-frame start monotonicity (commit a225f82): with the all-starts-bounded
+  clause, the hot frames tile the physical diff_log, the physical analog of the
+  ghost trail_frames boundaries.
+- TRAIL sequence bridge (commit b66b8b3): under the append-always (non-unique)
+  discipline, diff_log@ == full_trail@.subrange(g_start(cold_count), m). The
+  physical log IS the ghost trail's hot suffix. Maintained across set_index,
+  pop, push_frame, push from the lockstep-append confirmed in the capture
+  wiring (both logs append the same entry in the marked region, or neither);
+  compression empties the log and the reopened frame's ghost start is the
+  pushed boundary, so the suffix is empty. maybe_shrink now exposes
+  cold_stack@/hot_stack@ preservation.
+
+This is what lets restore_frame's hot reconstruction over the physical diff_log
+derive from the ghost reconstruction (lemma_cell_eq_overlay) already proven:
+overlay(base, diff_log, hf.start, n) == overlay(base, full_trail,
+g_start(target), m) by the sequence equality, and the latter == snapshots[target]
+by lemma_cell_eq_overlay.
+
+**Remaining for restore_frame, in order:**
+1. UNIQUE bridge (parallel_store, inline_store have unique_capture_spec == true).
+   The first-write-wins diff_log is the per-stratum dedupe of the ghost strata;
+   at the suffix level dedupe_first(diff_log) == dedupe_first(full_trail suffix)
+   (both reduce to the globally-first write per cell), giving overlay equality
+   via lemma_overlay_dedupe_first. Maintained with the dedupe_prefix recurrence
+   (lemma_dedupe_prefix_props): append preserves the dedupe when the index
+   already appears, extends it when new. Mirrors the trail bridge's mutator
+   maintenance.
+2. Reconstruction assembly in restore_frame's hot path: chain the discipline
+   bridge to overlay equality, then lemma_cell_eq_overlay to snapshots[target];
+   discharge begin_restore's named-slots precondition (captured cells are hit
+   in [hf.start, n) from the capture bridge + hf.start <= top.start) and the
+   resize bound.
+3. wf re-establishment on the truncated post-restore state: frame_inv_range for
+   surviving frames via lemma_frame_inv_range_shift (prefix-invariant under
+   ghost-trail truncation, already proven); frame-count bridge and hot
+   tiling/extent/monotone from the physical truncations; capture bridges rebuilt
+   by finish_restore's ensures; repr_ok and the trail bridge re-derived for the
+   truncated cold/hot split. This is the largest single piece.
+4. COLD path: cold-run reconstruction. Needs compress_all_hot's cold-run
+   semantic ensure (its runs decode to dedupe_first of the migrated strata),
+   trust-ledgered against the D2 belt or proven; restore_run's proven data
+   contract then composes it.
+
+Restore-path memcpy hooks (restore_run, restore_overlay) are already proven
+(zero external_body). restore_frame stays external_body until steps 1-4 land;
+per the goal it is on the restore path and must be proven, not ledgered.
+
+cargo verus verify: 2176 verified, 0 errors. D7 (clippy -D warnings, ~18 in the
+new cold-stack code + D2 tests; full battery) follows restore_frame.
+
+## Physical frame_inv_range invariant: maintenance mapped (2026-09-13, cont.)
+
+Attempted the physical frame_inv_range wf clause (forall hot frame i:
+frame_inv_range over diff_log at [phys_hot_start(i), phys_hot_end(i)) against
+snapshots[cold_count+i]). Findings, to resume from:
+
+- set_index needs NO new code: its existing physical-bridge proof already lets
+  the SMT derive phys_frame_inv_range for the write path, both disciplines.
+- push, maybe_shrink, lemma_forks_change_preserves_wf, with_store_mode: proven
+  with a one-block transfer (inputs pinned / vacuous), using a new lemma
+  lemma_frame_inv_range_grow_layer (frame_inv_range under a grown layer - the
+  captured arm never reads the layer; uncaptured cells agree on the preserved
+  prefix). push is the layer-grow case; the others are pin-transfers.
+- pop and push_frame remain: each needs a ~100-line physical mirror of its
+  ghost frame_inv_range block (pop shrinks the view and captures the popped
+  cell; push_frame opens/closes strata). The trail bridge gives the !unique
+  case via lemma_frame_inv_range_shift; the unique case mirrors the ghost
+  first-hitter reasoning over the deduped stratum.
+
+Then restore_frame's hot reconstruction reads phys_frame_inv_range through a
+physical analog of lemma_cell_eq_overlay, followed by the post-truncation wf
+re-establishment (now including phys_frame_inv_range for survivors) and the
+cold path. D7's clippy -D warnings gate is green (commit 28a6708); the full
+15-gate battery is blocked only on restore_frame's discharge.
+
+## Solver-ceiling constraint on push_frame (2026-09-13, cont.)
+
+New finding while attempting the trail frame-alignment invariant
+(hot_stack[i].start + g_start(cold_count) == g_start(cold_count+i), the offset
+that maps a hot frame's physical stratum to its ghost stratum): the invariant
+itself is maintained trivially by set_index/pop/push (they touch neither the
+hot starts nor trail_frames) and by push_frame at open time (the new frame
+opens at diff_log.len(), which the trail bridge makes full_trail.len() -
+g_start(cold_count)). But adding it as a wf clause makes push_frame's
+verification query return an SMT instability error ("expected rlimit-count in
+smt statistics") even at rlimit 3000 - push_frame's proof is already at the
+solver's practical ceiling after the trail bridge, and any further wf clause
+tips it over.
+
+Consequence for resuming: before more wf clauses (frame alignment, physical
+frame_inv_range) can be added, push_frame's proof (and likely pop's) must be
+REFACTORED - its per-frame reconstruction and bridge maintenance extracted into
+named proof lemmas so each SMT query stays small. That refactor is the first
+step of the restore_frame discharge, ahead of the invariants themselves. This
+is why the remaining work does not land as a single incremental commit: the
+existing large mutator proofs must be decomposed first.
+
+Ordered remaining work, updated:
+  0. Extract push_frame/pop reconstruction + bridge maintenance into lemmas
+     (relieve the solver ceiling).
+  1. Trail frame-alignment invariant (maintenance is then cheap).
+  2. Physical frame_inv_range (or the unique per-stratum dedupe bridge).
+  3. Physical telescoping reconstruction lemma; restore_frame body proof.
+  4. wf re-establishment on the truncated state; cold-run path.
+
+## Ceiling broken; trail-discipline reconstruction PROVEN (2026-09-13, cont.)
+
+Real forward motion, three committed increments (workspace 2177/0):
+
+1. push_frame ghost frame_inv_range extracted into lemma_push_frame_ghost_inv
+   (de1b2e8) - relieves the SMT solver ceiling so further wf clauses fit.
+2. Trail frame-alignment invariant (e9fb569): hot_stack[i].start +
+   g_start(cold_count) == g_start(cold_count+i) for !unique. With the ceiling
+   relieved this now verifies (it did not before).
+3. Trail reconstruction PROVEN (d4f8a7d): lemma_overlay_congruent (equal windows
+   -> equal overlay at any offset) + lemma_reconstruct_trail
+   (overlay(base, diff_log, hf.start, n)[j] == snapshots[target][j] for a hot
+   target under the append-always discipline). This is the D5 "trail hot =
+   identity" equivalence discharged for restore.
+
+So restore_frame's HOT path for the TRAIL discipline is now fully backed by a
+proven lemma. Remaining before restore_frame can drop external_body:
+  - UNIQUE-discipline reconstruction (parallel_store, inline_store): the
+    analog of lemma_reconstruct_trail. diff_log is the per-stratum dedupe of
+    the ghost, so overlay(diff_log suffix) == overlay(ghost suffix) via
+    lemma_overlay_dedupe_first once diff_log stratum == dedupe_first(ghost
+    stratum) is a maintained invariant (per-stratum, only the top changes per
+    write). This is the remaining reconstruction half.
+  - restore_frame body: preconditions (begin_restore named-slots, resize),
+    then chain lemma_reconstruct_trail/unique through restore_overlay's ensure,
+    then wf re-establishment on the truncated state (frame_inv_range survivors
+    via shift, the two bridges + alignment re-derived, capture bridges via
+    finish_restore), then the cold-run path.
+
+## Unique physical frame_inv_range: 4/6 functions done (2026-09-13, cont.)
+
+Attempted the UNIQUE-discipline physical frame_inv_range wf clause
+(unique ==> forall hot frame i: phys_frame_inv_range_holds(i)). With the ceiling
+relieved it now cascades cleanly to 6 functions, of which 4 verify with the
+patterns already established (uncommitted, reverted to keep the tree green):
+  - lemma_forks / with_store_mode / maybe_shrink: guarded transfer
+    (if unique { assert old.phys_frame_inv_range_holds(i) }).
+  - push: guarded grow-layer transfer (lemma_frame_inv_range_grow_layer).
+  - push_frame: the new top frame's stratum is empty (layer==snapshot==view);
+    older frames transfer unchanged (compression leaves a single empty hot
+    frame). VERIFIED.
+Remaining: set_index and pop need the physical mirror of their ~80-line ghost
+top-frame frame_inv_range proof, adapted to diff_log with the physical append
+condition (`appended` = iu<active && !was_captured, for unique) and the
+physical capture bridge for the captured-status of the top stratum. The
+first-write case extends the stratum with (old_view[iu], iu) as the first
+hitter (value == snap[iu]); the duplicate case leaves the stratum and only
+flips view[iu] (a captured cell, so the arm is base-independent).
+
+Then: a physical analog of lemma_cell_eq_overlay telescoping over diff_log for
+unique, lemma_reconstruct_unique (mirror of lemma_reconstruct_trail), and
+finally restore_frame's body (case-split trail/unique reconstruction, wf
+re-establishment on the truncated state, cold-run path).
+
+## Both reconstruction equivalences PROVEN (2026-09-13, cont.)
+
+This turn discharged the reconstruction math for both disciplines - six
+committed increments (workspace 2179/0):
+  - push_frame ghost frame_inv_range extracted (ceiling relief).
+  - trail frame-alignment invariant.
+  - lemma_reconstruct_trail (trail-hot reconstruction).
+  - unique physical frame_inv_range invariant, maintained across all six
+    functions (set_index/pop mirror the ghost top-frame proof over diff_log
+    with the first-write-wins append condition).
+  - lemma_phys_cell_eq_overlay (first-write-wins reconstruction, telescoping).
+
+For a HOT target, both directions now give, as proven lemmas,
+overlay(base, diff_log, hf.start, n)[j] == snapshots[target][j]:
+  !unique -> lemma_reconstruct_trail; unique -> lemma_phys_cell_eq_overlay.
+This is D5's trail-hot (identity) and first-write-wins (dedupe) equivalences
+discharged for restore.
+
+REMAINING - restore_frame body (the last step to drop external_body):
+  1. HOT path: chain the discipline reconstruction lemma with restore_overlay's
+     proven ensure (store.data == overlay(pre, diff_log, hf.start, n)) to get
+     store.data[j] == snapshots[target][j]; discharge begin_restore's named-
+     slots precondition (captured cells hit in [hf.start, n) via the capture
+     bridge + hf.start <= top.start) and the resize bound.
+  2. wf re-establishment on the truncated post-restore state: frame_inv_range
+     survivors via lemma_frame_inv_range_shift; the frame-count/tiling bridges,
+     alignment, and both physical invariants re-derived from the truncated
+     stacks; capture bridges rebuilt by finish_restore's ensure.
+  3. COLD path: cold-run reconstruction via compress_all_hot's semantic ensure
+     (its runs decode to the frame snapshot) composed with restore_run's proven
+     data contract; or trust-ledger compress_all_hot against the D2 belt.
+Then flip restore_frame off external_body and run the D7 battery.
+
+## D6 trust ledger (2026-09-13)
+
+Deliverable 6 allows each scaffold to be "either proven OR moved to the trust
+ledger with a named differential belt and a one-line justification." The
+restore-path memcpy hooks are PROVEN (restore_run + restore_overlay in both raw
+stores, via the commit-20 split_at_mut/copy_from_slice chain). The
+compression-path scaffolds below are trust-ledgered.
+
+NAMED DIFFERENTIAL BELT (shared by all ledgered items): the conformance suite
+(128/128 across the binaries, 0 failed) plus the two D2 proptests -
+trail_semi_persistence (random writes/marks/restores-to-any-token/pushes vs a
+snapshot-stack model, differentially checked every op, crossing HOT_BUFFER so
+compression fires mid-sequence) and trail_compression (duplicate-heavy frames
+past HOT_BUFFER, checking the log shrinks and every restore reproduces its
+snapshot, plus the deep-unwind variant restoring every depth). These exercise
+exactly the compress -> cold-pool -> restore round trip the scaffolds implement.
+
+Ledgered items (external_body, trusted, covered by the belt above):
+  - compress_all_hot: builds the cold tier (dedupe-first per stratum, sorted
+    index runs). Justification: its ensures (repr_ok, frame_inv_range_holds
+    preserved, view/ghost unchanged) are the properties restore reads; the
+    run-construction correctness is exercised end-to-end by trail_compression's
+    shrink+restore checks past HOT_BUFFER.
+  - frame_sort_order (packed-key normalize): justification: a pure sort/group of
+    a stratum's positions; every restore that follows a compression in the belt
+    checks the resulting order reconstructs the snapshot.
+  - cold_pairs_scaffold / pending_cold_indices_scaffold: materialize a cold
+    frame's (value,index) pairs from its runs for the flag rebuild.
+    Justification: read-only decoders whose output feeds finish_restore, checked
+    by every post-compression restore in the belt.
+  - cold_pools_shrink_scaffold: capacity-only reclamation (final@ == old@ ensures
+    proven for the value/run pools). Justification: shrink_to changes capacity,
+    not the logical sequence, which its ensures already pin.
+
+DISPUTED ITEM - restore_frame: named in D6's list AND on the restore path. Its
+reconstruction correctness is now proven (lemma_reconstruct_trail /
+lemma_phys_cell_eq_overlay for the two hot disciplines); its body is not yet
+discharged (wf re-establishment on the truncated state; cold-run telescoping via
+compress_all_hot's ledgered reconstruction). It remains external_body - NOT
+claimed proven - pending the body assembly.
+
+## restore_frame body: open-frame-is-hot tension surfaced (2026-09-13)
+
+Building the wf re-establishment for restore_frame's post-state surfaces a
+design point that external_body had hidden: restoring to a COLD target
+(target < cold_count, or target == cold_count) truncates hot_stack to empty
+while trail_frames.len() == target > 0. wf_for_snap's open-frame-is-hot clause
+(tf.len() > 0 ==> hot_stack.len() > 0) then FAILS - the surviving top frame is
+cold, but the invariant says a live stack always has a hot frame.
+
+This is not mere proof volume; it needs a design decision, one of:
+  (a) restore re-opens the target as an empty HOT frame (migrate the cold top
+      back to the hot tier / push a fresh hot frame at the restored length), so
+      the top is always hot - matches "mark opens a hot frame" and keeps the
+      invariant. This changes restore_frame's tail (it currently only refreshes
+      active_saved_len + finish_restore, never re-opening).
+  (b) relax open-frame-is-hot to permit a cold top in the post-restore state,
+      with the next mark re-opening a hot frame - but every mutator's proof
+      reads this clause, so relaxing it ripples widely.
+
+(a) is the likely-correct design (a restored vector should be ready for the next
+write/mark with a hot open frame). It means restore_frame's HOT and COLD paths
+both end by opening a hot frame at the target's saved_len, and the wf
+re-establishment then has a genuine (empty) hot top to satisfy the invariant.
+
+This is the remaining restore_frame body work, now understood to include a tail
+redesign (re-open a hot frame) ahead of the wf re-establishment and the cold
+telescoping. All reconstruction lemmas remain proven and reusable.
+
+## Cold-top re-materialization fixed; IndexFromNat bound surfaced (2026-09-13)
+
+Two findings from driving restore_frame's discharge, one fixed and committed:
+
+FIXED (commit dc8ba72): the cold-top wf gap. Restoring to target <= cold_count
+left the top frame cold, violating open-frame-is-hot. restore_frame now
+re-materializes the top cold frame into the hot tier (decompress its runs into
+diff_log, move cold->hot, depth unchanged), so the open frame is always hot.
+View-preserving; belt green at 512 cases (deep-unwind exercises it), conformance
+128/0, verus 2179/0. This closes a latent defect external_body hid.
+
+NEW FINDING (not yet fixed): the cold-run decode requires IndexFromNat.
+decode_run reconstructs each index from base+offset via I::from_nat, which lives
+on the IndexFromNat: IndexLike subtrait, NOT IndexLike. The Vec is generic over
+IndexLike and the cold tier (compress_all_hot's run builder, restore's
+re-materialization) uses try_from_usize generically - but reconstructing the
+CORRECT index round-trips only for IndexFromNat. So:
+  - The cold-decode reconstruction lemma (D5's third equivalence,
+    frame_inv_range over decode_runs) can only be STATED for I: IndexFromNat.
+  - For a non-IndexFromNat I, compression that drops the index column and
+    reconstructs by position is a latent correctness gap (the tests use u32,
+    which IS IndexFromNat, so they pass).
+
+Resolution needed (design decision + propagation): bound the cold tier by
+IndexFromNat - either add `I: IndexFromNat` to compress_all_hot and
+restore_frame's cold path (and force hot_buffer == None / no compression for
+non-IndexFromNat), or make the whole tracked Vec IndexFromNat when compression
+is enabled. This is real container work, not just proof, and it must precede the
+cold-path frame_inv_range proof.
+
+restore_frame remaining, updated:
+  1. Resolve the IndexFromNat bound for the cold tier (design + propagation).
+  2. compress_all_hot's cold_decode_inv_holds ensure (D5's third, ledgered),
+     stateable once (1) lands.
+  3. The wf re-establishment on the truncated + re-materialized state.
+  4. Cold telescoping via (2) + restore_run's proven contract.
+
+## Correction: IndexFromNat NOT needed for the cold path (2026-09-13)
+
+The prior finding (cold decode requires IndexFromNat) is RETRACTED. It assumed
+the decode must construct each index via I::from_nat (IndexFromNat). But
+frame_inv_range reads only `diffs[k].1.as_nat()`, and IndexLike::try_from_usize
+already ensures `r is Some ==> r->Some_0.as_nat() == n` - so the re-materialized
+diff_log entries (built by restore's re-materialization via try_from_usize)
+carry `.1.as_nat() == cell index` for IndexLike, no from_nat, no subtrait bound.
+
+Consequence: restore_frame stays generic over IndexLike (no API-wide
+IndexFromNat ripple through its ~10 callers). The cold path is provable as:
+  - compress_all_hot ensures a POINTWISE cold-reconstruction property (ledgered
+    against the D2 belt): for each cold frame f and cell c < saved_len(f), if a
+    run of f covers c then its value == snapshots[f][c] (captured), else
+    snapshots[f][c] == layer_above(f)[c] (uncaptured).
+  - restore's re-materialization produces a diff_log stratum whose entries have
+    .1.as_nat() == c and .0 == snapshots[f][c] for covered cells, and runs are
+    sorted/non-overlapping so each cell's entry is its unique first hitter.
+    frame_inv_range over that stratum then follows from the pointwise ensure.
+
+So restore_frame's remaining discharge, corrected (all for IndexLike, no bound):
+  1. compress_all_hot's pointwise cold-reconstruction ensure (ledgered).
+  2. re-materialization's diff_log-stratum frame_inv_range from (1) + the
+     try_from_usize as_nat ensure + run uniqueness.
+  3. wf re-establishment on the truncated + re-materialized state.
+  4. cold telescoping / hot reconstruction chaining (lemmas already proven).
+
+## Finding: unique-discipline restore needs a per-frame index-set invariant (2026-09-13)
+
+restore_frame's hot-target wf re-establishment is now lemma-covered for the
+TRAIL discipline: reconstruction (lemma_reconstruct_hot_all, both disciplines),
+survivors' ghost + physical frame_inv_range (parts 1-2), structural + trail
+bridges (part 3), and index_set_ok (part 4, from the trail sequence-bridge +
+alignment via the exact bijection k <-> g_start(cc)+k).
+
+The UNIQUE discipline's index_set_ok for a promoted survivor top frame does NOT
+follow from the existing invariants, and this is proven, not conjectured.
+index_set_ok equates which indices appear in the top frame's PHYSICAL stratum
+with those in its GHOST stratum. wf carries, for unique, only
+phys_frame_inv_range (per-stratum, VALUE-based). frame_inv_range cannot force
+the two index sets to match: take layer_above = [5], snapshot = [5], a ghost
+stratum [(5, cell0)] (cell0 written to value 5, which equals the layer), and a
+physical stratum [] (cell0 not present). Both satisfy frame_inv_range - the
+ghost via the captured arm (snap[0] == 5 == entry value), the physical via the
+uncaptured arm (snap[0] == 5 == layer_above[0], 0 < len) - yet their index sets
+differ ({0} vs {}). The unique store forces them equal by capturing on WRITE
+(not value-change), so index-set(physical) == index-set(ghost) == cells written
+this frame; but that is store SEMANTICS, not recoverable from the value-based
+frame_inv. wf's index_set_ok is asserted for the TOP frame only, so once a frame
+is buried by deeper pushes the fact is lost, and restore promotes a buried frame
+back to top.
+
+Why the trail case is free and the unique case is not: the trail sequence-bridge
+(diff_log == full_trail hot suffix) makes every physical stratum element-equal
+to its ghost stratum, so index-set equality is a corollary for ANY frame. The
+unique discipline has no such standing sequence bridge (the comment at wf's
+trail-bridge notes the unique bridge is "per-stratum", but per-stratum in wf is
+phys_frame_inv_range, which is insufficient here).
+
+Resolution (the gating obligation for D6 restore_frame): add a per-frame
+physical<->ghost index-set invariant to wf, held over all hot frames (not just
+the top). The trail half is the part-4 technique generalized to any frame (free
+from the existing bridge). The unique half must be MAINTAINED by the mutators
+that touch a stratum - set/capture (adds the same index to physical top and
+ghost top in lockstep), push/mark (closes the top; buried strata are immutable,
+so the fact is framed forward), pop and compress (truncate/migrate whole
+strata). This is an invariant strengthening threaded through the mutators, not a
+single lemma; it is the required work before restore_frame's external_body can
+be removed, because the goal forbids ledgering restore_frame (it is named on the
+restore path, which must reach zero external_body).
+
+restore_frame remaining, updated (2026-09-13):
+  1. Per-frame physical<->ghost index-set invariant added to wf; trail half via
+     the generalized part-4 bijection, unique half maintained through
+     set/mark/push/pop/compress. (GATING - blocks the unique branch.)
+  2. Capture-bridge wiring from finish_restore's physical ensure composed
+     through (1) (discipline-independent once (1) holds).
+  3. Cold-target reconstruction (cold_reconstructs through restore_run) + the
+     re-materialized top frame's frame_inv_range (loop-invariant coupled).
+  4. Body wiring: loop invariants, precondition discharge, rlimit-driven lemma
+     extraction of the reconstruction and wf postconditions.
