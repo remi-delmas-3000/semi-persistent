@@ -3368,6 +3368,25 @@ where
         }
     }
 
+    /// Per-frame physical<->ghost index-set equality for hot frame `i`: the
+    /// cells written in the frame are the same whether read off the physical
+    /// stratum `[phys_hot_start(i), phys_hot_end(i))` or the ghost stratum
+    /// `[g_start(cc+i), g_end(cc+i))`. This is the per-frame generalization of
+    /// wf's top-only `index_set_ok`; restore promotes a buried frame to top and
+    /// needs its index-set equality, which the value-based `phys_frame_inv_range`
+    /// cannot supply (a cell written to its layer-above value is index-present in
+    /// the ghost yet absent in a value-equivalent physical stratum). See
+    /// doc/tasks/mainline-shape-plus-coldstack-goal.md, 2026-09-13 finding.
+    pub open(crate) spec fn frame_iso(&self, i: int) -> bool {
+        forall|j: int| 0 <= j < self.snapshots@[self.cold_stack@.len() + i].len() ==>
+            #[trigger] captured_in_range::<T, I>(
+                self.diff_log@, self.phys_hot_start(i), self.phys_hot_end(i), j as nat)
+            == captured_in_range::<T, I>(
+                self.full_trail@,
+                self.g_start(self.cold_stack@.len() + i),
+                self.g_end(self.cold_stack@.len() + i), j as nat)
+    }
+
     /// Physical `frame_inv_range` for hot frame `i`: reconstruction against the
     /// physical `diff_log`, the analog of `frame_inv_range_holds` over the ghost
     /// trail. Holds for BOTH disciplines - the trail stratum is the ghost
@@ -5442,6 +5461,87 @@ where
     {
         // Retired: seal-on-mark contradicted the buffered-eviction policy
         // (goal doc §6) and is gone for good; A2b's eviction replaces it.
+    }
+
+    /// The trail half of the per-frame index-set invariant: under the
+    /// append-always discipline the sequence-bridge and alignment give
+    /// `frame_iso(i)` for EVERY hot frame, not just the top. For frame `i` the
+    /// alignment maps its physical stratum `[hot[i].start, phys_hot_end(i))`
+    /// onto its ghost stratum `[g_start(cc+i), g_end(cc+i))` by the same offset
+    /// `+gcc` (interior end via `hot[i+1].start + gcc == g_start(cc+i+1)`, top
+    /// end via the boundary `n + gcc == m`), so the bijection `k <-> gcc+k`
+    /// makes `captured_in_range` agree cell for cell. This generalizes part 4
+    /// (top-only) to the whole stack; the unique half must instead be maintained
+    /// through the mutators (see the 2026-09-13 finding).
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(500)]
+    pub(crate) proof fn lemma_frame_iso_trail_all(&self)
+        requires
+            !self.store.unique_capture_spec(),
+            self.cold_stack@.len() + self.hot_stack@.len() == self.trail_frames@.len(),
+            self.hot_stack@.len() > 0,
+            self.diff_log@ == self.full_trail@.subrange(
+                self.g_start(self.cold_stack@.len() as int),
+                self.full_trail@.len() as int),
+            forall|i: int| 0 <= i < self.hot_stack@.len() ==>
+                (#[trigger] self.hot_stack@[i]).start as int
+                    + self.g_start(self.cold_stack@.len() as int)
+                    == self.g_start(self.cold_stack@.len() + i),
+            self.g_start(self.cold_stack@.len() as int) + self.diff_log@.len()
+                == self.full_trail@.len(),
+        ensures
+            forall|i: int| 0 <= i < self.hot_stack@.len() ==> #[trigger] self.frame_iso(i),
+    {
+        let cc = self.cold_stack@.len() as int;
+        let gcc = self.g_start(cc);
+        let n = self.diff_log@.len() as int;
+        let m = self.full_trail@.len() as int;
+        assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+            #[trigger] self.frame_iso(i) by {
+            let ps = self.phys_hot_start(i);
+            let pe = self.phys_hot_end(i);
+            let gs = self.g_start(cc + i);
+            let ge = self.g_end(cc + i);
+            // stratum offset alignment: gs == ps + gcc, ge == pe + gcc.
+            assert(ps + gcc == gs) by {
+                assert(self.hot_stack@[i].start as int + gcc == self.g_start(cc + i));
+            }
+            if i + 1 < self.hot_stack@.len() {
+                assert(pe == self.hot_stack@[i + 1].start as int);
+                assert(cc + i + 1 < self.trail_frames@.len());
+                assert(ge == self.g_start(cc + i + 1));
+                assert(pe + gcc == ge) by {
+                    assert(self.hot_stack@[i + 1].start as int + gcc == self.g_start(cc + (i + 1)));
+                }
+            } else {
+                assert(pe == n);
+                assert(cc + i + 1 == self.trail_frames@.len());
+                assert(ge == m);
+                assert(pe + gcc == ge);
+            }
+            assert forall|j: int| 0 <= j < self.snapshots@[cc + i].len() implies
+                #[trigger] captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat)
+                == captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat) by {
+                if captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat) {
+                    let k = choose|k: int| ps <= k < pe && 0 <= k < self.diff_log@.len()
+                        && (#[trigger] self.diff_log@[k]).1.as_nat() == j as nat;
+                    assert(self.diff_log@[k] == self.full_trail@.subrange(gcc, m)[k]);
+                    assert(self.full_trail@.subrange(gcc, m)[k] == self.full_trail@[gcc + k]);
+                    assert(gs <= gcc + k < ge);
+                    assert(captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat));
+                }
+                if captured_in_range::<T, I>(self.full_trail@, gs, ge, j as nat) {
+                    let kp = choose|kp: int| gs <= kp < ge && 0 <= kp < self.full_trail@.len()
+                        && (#[trigger] self.full_trail@[kp]).1.as_nat() == j as nat;
+                    let k = kp - gcc;
+                    assert(ps <= k < pe);
+                    assert(self.diff_log@[k] == self.full_trail@.subrange(gcc, m)[k]);
+                    assert(self.full_trail@.subrange(gcc, m)[k] == self.full_trail@[gcc + k]);
+                    assert(gcc + k == kp);
+                    assert(captured_in_range::<T, I>(self.diff_log@, ps, pe, j as nat));
+                }
+            }
+        }
     }
 
     /// wf re-establishment, part 4 (trail index_set_ok): under the append-always
