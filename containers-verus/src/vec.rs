@@ -3875,6 +3875,56 @@ where
                         }
                     }
                 }
+
+                // INDEX-SET equality maintenance. For j < view.len() it is
+                // immediate from the two bridges just proven (both sides ==
+                // captured()[j]); for the popped region [view.len(), active)
+                // the write at iu (< view.len()) touches no such j in either
+                // slice, so the OLD equality carries.
+                assert forall|j: int| #![trigger captured_in_range::<T, I>(
+                        gt, ds_top, gt.len() as int, j as nat)]
+                    0 <= j < self.active_saved_len.as_nat() implies
+                    captured_in_range::<T, I>(diffs_p, phys_lo, diffs_p.len() as int, j as nat)
+                    == captured_in_range::<T, I>(gt, ds_top, gt.len() as int, j as nat)
+                by {
+                    if j < self.view().len() {
+                        // both == captured()[j] by the two bridges above.
+                        assert(self.store.captured()[j]
+                            == captured_in_range::<T, I>(gt, ds_top, gt.len() as int, j as nat));
+                        assert(self.store.captured()[j]
+                            == captured_in_range::<T, I>(diffs_p, phys_lo, diffs_p.len() as int, j as nat));
+                    } else {
+                        // popped-marked j: unchanged in both slices; old wf's
+                        // index-set clause gave the old equality.
+                        assert(old(self).hot_stack@.len() > 0);
+                        let old_phys = old(self).hot_stack@[
+                            (old(self).hot_stack@.len() - 1) as int].start as int;
+                        assert(old_phys == phys_lo);
+                        assert(captured_in_range::<T, I>(old_diffs, old_phys, old_diffs.len() as int, j as nat)
+                            == captured_in_range::<T, I>(old_gt, ds_top, old_gt.len() as int, j as nat));
+                        // iu < view.len() <= j, so appends (at index iu != j)
+                        // add no entry naming j; membership of j is unchanged
+                        // in both slices. captured_in_range is monotone under
+                        // an append whose index differs from j.
+                        assert(iu < j);
+                        // append shapes (index iu) for both slices.
+                        assert(ds_top <= old_gt.len());
+                        assert(gt == old_gt || (gt.len() == old_gt.len() + 1
+                            && gt.subrange(0, old_gt.len() as int) == old_gt
+                            && gt[old_gt.len() as int].1.as_nat() == iu as nat)) by {
+                            if appended_g { assert(gt == old_gt.push((old_view[iu], i))); }
+                        }
+                        assert(diffs_p == old_diffs || (diffs_p.len() == old_diffs.len() + 1
+                            && diffs_p.subrange(0, old_diffs.len() as int) == old_diffs
+                            && diffs_p[old_diffs.len() as int].1.as_nat() == iu as nat)) by {
+                            if appended { assert(diffs_p == old_diffs.push((old_view[iu], i))); }
+                        }
+                        lemma_captured_in_range_append_other::<T, I>(
+                            old_gt, gt, ds_top, j as nat, iu as nat);
+                        lemma_captured_in_range_append_other::<T, I>(
+                            old_diffs, diffs_p, phys_lo, j as nat, iu as nat);
+                    }
+                }
             }
         }
     }
