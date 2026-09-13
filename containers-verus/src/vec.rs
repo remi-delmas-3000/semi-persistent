@@ -1820,6 +1820,10 @@ where
         &&& (self.hot_stack@.len() > 0 ==>
                 self.hot_stack@[(self.hot_stack@.len() - 1) as int].start as int
                     <= self.diff_log@.len())
+        // The open (top) frame is always hot: mark opens a hot frame, and
+        // compression moves closed frames to cold but push_frame re-opens a
+        // hot one. So a live stack always has at least one hot frame.
+        &&& (tf.len() > 0 ==> self.hot_stack@.len() > 0)
         // Frame count fits usize (the depth guards keep it below u32::MAX).
         &&& tf.len() < usize::MAX
         // TRACK=false => no frames, ever (mark, the only frame-pusher,
@@ -3779,12 +3783,20 @@ where
                             diffs_p, phys_lo, diffs_p.len() as int, j as nat)
                 by {
                     // old bridge for j; hot_stack unchanged by set_index, so
-                    // the old physical open start equals phys_lo.
+                    // the old physical open start equals phys_lo, and the old
+                    // hot-extent gives phys_lo <= old_diffs.len().
                     assert(j < old(self).view().len());
                     assert(old(self).hot_stack@ == self.hot_stack@);
+                    let hlast = (self.hot_stack@.len() - 1) as int;
+                    assert(old(self).hot_stack@[hlast] == self.hot_stack@[hlast]);
+                    let old_phys_lo = old(self).hot_stack@[hlast].start as int;
+                    assert(old_phys_lo == phys_lo);
+                    assert(old(self).hot_stack@.len() > 0);
+                    assert(old_phys_lo <= old(self).diff_log@.len());  // old hot-extent (wf)
+                    assert(j < old(self).active_saved_len.as_nat());
                     assert(old(self).store.captured()[j]
                         == captured_in_range::<T, I>(
-                            old_diffs, phys_lo, old_diffs.len() as int, j as nat));
+                            old_diffs, old_phys_lo, old_diffs.len() as int, j as nat));
                     if j == iu {
                         if appended {
                             // first write: captured[iu] set, (.,iu) appended.
