@@ -1812,6 +1812,11 @@ where
         &&& snaps.len() == tf.len()
         // Frame-count bridge: the two physical stacks tile the ghost frames.
         &&& self.cold_stack@.len() + self.hot_stack@.len() == tf.len()
+        // No frames => no captures => the physical hot log is empty (and
+        // by the bridge both stacks are too).
+        &&& (tf.len() == 0 ==> self.diff_log@.len() == 0)
+        // Frame count fits usize (the depth guards keep it below u32::MAX).
+        &&& tf.len() < usize::MAX
         // TRACK=false => no frames, ever (mark, the only frame-pusher,
         // requires TRACK) - production-parity erasure.
         &&& (!TRACK ==> tf.len() == 0)
@@ -1839,7 +1844,6 @@ where
     /// T1-T4 theorems of the proof architecture). Opaque; maintained by the
     /// scaffolded mutators during the exec-locked phase and discharged
     /// per-theorem afterwards (goal doc, deliverables 5-6).
-    #[verifier::opaque]
     pub open(crate) spec fn repr_ok(&self) -> bool {
         // T1/T2: the hot pool tiles into hot_stack extents; a trail store's
         // stratum slice IS the ghost stratum, a unique store's equals
@@ -1945,7 +1949,7 @@ where
             0 <= k < self.trail_frames@.len(),
         ensures
             self.g_start(k) <= self.stratum_end(k),
-            self.stratum_end(k) <= self.diff_log@.len(),
+            self.stratum_end(k) <= self.full_trail@.len(),
     {
         if k + 1 < self.trail_frames@.len() {
             self.lemma_diff_start_monotone(k, k + 1);
@@ -1983,6 +1987,8 @@ where
     {
         if a < b {
             self.lemma_diff_start_monotone(a, b - 1);
+            // adjacent step (b-1, b) from wf_for_snap's monotone clause
+            assert(self.trail_frames@[b - 1] <= self.trail_frames@[b]);
         }
     }
 
@@ -2031,14 +2037,14 @@ where
                 ==> #[trigger] base[m] == self.view()[m],
         ensures
             overlay::<T, I>(
-                base, self.diff_log@,
+                base, self.full_trail@,
                 self.g_start(k),
-                self.diff_log@.len() as int)[j]
+                self.full_trail@.len() as int)[j]
                 == self.snapshots@[k][j],
         decreases self.trail_frames@.len() - k,
     {
         let tf = self.trail_frames@;
-        let diffs = self.diff_log@;
+        let diffs = self.full_trail@;
         let snaps = self.snapshots@;
         let n = diffs.len() as int;
         let lo = self.g_start(k);
@@ -2398,7 +2404,9 @@ where
 
     /// The frame's saved_len, tier-dispatched by the split point.
     #[inline]
-    pub(crate) fn frame_saved_len_exec(&self, k: usize) -> I {
+    pub(crate) fn frame_saved_len_exec(&self, k: usize) -> I
+        requires self.wf_for_snap(), k < self.depth_spec(),
+    {
         if k < self.cold_stack.len() {
             self.cold_stack[k].saved_len
         } else {

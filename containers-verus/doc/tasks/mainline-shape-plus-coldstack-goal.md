@@ -212,3 +212,32 @@ with a recorded reason). Lock bar met: 27/27 conformance binaries, trail
 semi-persistence proptests at 256 cases, 38/38 in-crate tests, D3
 benchmarks control-corrected in band. Everything below the lock is proof
 work against fixed code.
+
+
+## D5 crux identified (2026-09-13): repr_ok needs the open-frame clause
+
+State: 2162 obligations verify, 10 functions remain (down from 41 name
+errors). The reconstruction lemmas (cell_eq_overlay, bounds, monotone) are
+ported to the ghost trail; the frame-count bridge and no-frames-empty
+clauses are in wf. The remaining 10 are the mutator wf-preservation proofs
+(push/set_index/pop/push_frame) plus the store restore_overlay
+preconditions, and they share ONE root cause:
+
+  wf now demands frame_inv_range over full_trail@, but the mutators prove it
+  over diff_log@ (the physical log), and repr_ok - which must relate the two
+  - is still `true` (no relationship). So a physical write cannot be tied to
+  the ghost stratum.
+
+The fix is the T1/T2 abstraction landed as repr_ok's OPEN-FRAME clause: for
+the top (open, hot) frame, the physical diff_log slice
+[top.start, diff_log.len()) and the ghost open stratum
+[g_start(top), full_trail.len()) must relate so frame_inv_range transfers -
+identity for the trail discipline, dedupe_first for unique capture, unified
+by overlay-equality (lemma_overlay_dedupe_first). This is the load-bearing
+design step of D5 (per the goal: 'Vec::wf ... phrased against the ghost' via
+the equivalences), not a mechanical edit; it wants careful statement so the
+mutators' per-cell obligations discharge from it. NEXT: design the
+open-frame repr clause, prove the mutators transfer through it, then the
+cold clauses (T3/T4) for restore_frame's discharge (D6).
+
+Commit 20 (053caca) remains the fully-verified checkpoint beneath.
