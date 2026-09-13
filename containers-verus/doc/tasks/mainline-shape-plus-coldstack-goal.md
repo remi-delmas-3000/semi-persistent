@@ -475,3 +475,54 @@ the hard-part-first ordering.
 
 cargo verus verify at 0 errors (2173 verified). Remaining: D6 restore_frame
 discharge (bricks 1 and 2 above), then D7 battery (clippy cleanup + full run).
+
+## Restore-path memcpy hooks proven; overlay-invariance lemma landed (2026-09-13, cont.)
+
+Two more D6 bricks landed, both verified:
+
+**lemma_overlay_append_dup** (commit ced8312). Appending a diff entry whose
+index is already hit earlier in the range leaves the range's overlay
+unchanged: first-entry-wins shadows the appended duplicate. This is the
+commuting equivalence the reconstruction bridge rests on: the first-write-wins
+store drops a repeat write while the ghost trail keeps it, and this lemma is
+why both reconstruct the same snapshot. Proof: split the appended entry off
+`overlay`'s front-recursion, then show the single-cell base change is invisible
+(captured cells are base-independent by `lemma_overlay_lowest`; the one changed
+base cell is itself captured, so uncaptured cells are untouched).
+
+**restore_run memcpy proven** (commit f72a864). `DiffStore::restore_run` gains
+an overwrite-only data-window contract: the window [base, base+values.len())
+intersected with [0, data.len()) takes the run values, every other cell is
+untouched, length and capture flags unchanged. The trail_store and
+parallel_store overrides - the raw-data restore path - are proven, removing
+their external_body: each replays the commit-20 chain (slice_subrange,
+as_mut_slice / split_at_mut / split_at_mut, copy_from_slice), and the vstd
+ensures compose to the window facts. The trait default stays external_body, a
+trusted scaffold for the re-encoding stores (inline/dyn) that cannot memcpy.
+
+**Restore-path external_body status.** The raw-store memcpy hooks the D6 check
+names are now proven: `restore_overlay`'s replay loops (trail_store,
+parallel_store) and `restore_run` (both raw stores). The remaining restore-path
+external_body is `restore_frame` (the vec.rs orchestrator).
+
+**restore_frame: the two routes.** Its full proof needs the physical<->ghost
+overlay bridge - `overlay(base, diff_log, phys_start(k), n)` equals
+`overlay(base, full_trail, g_start(k), m)` on a frame's cells - because
+`restore_overlay` reconstructs over the physical diff_log while
+`lemma_cell_eq_overlay` reconstructs over the ghost full_trail. The bridge holds
+by `lemma_overlay_append_dup` (the physical log is the ghost trail with
+non-first duplicates dropped for the first-write-wins discipline, identical for
+trail), but making it a maintained invariant mirrors the ghost frame_inv_range
+machinery across set_index/push/pop/push_frame - the last repr_ok-scale brick,
+and the one that cascades through every mutator rather than landing as a bound.
+The cold path additionally needs `compress_all_hot`'s cold-run reconstruction
+ensure.
+
+The differential belt for the trust-ledger option is in place and green:
+trail_semi_persistence at 512 cases (random restores to any live token vs a
+snapshot-stack model, crossing HOT_BUFFER so compression fires mid-sequence)
+and the deep-unwind-after-compression variant (restores every depth exactly).
+
+cargo verus verify: 2176 verified, 0 errors. Remaining: restore_frame discharge
+(physical overlay bridge, or trust-ledger against the belt above), then D7
+(clippy -D warnings cleanup + full battery).
