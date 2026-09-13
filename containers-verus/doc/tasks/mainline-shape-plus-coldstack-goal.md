@@ -792,3 +792,40 @@ re-establishment then has a genuine (empty) hot top to satisfy the invariant.
 This is the remaining restore_frame body work, now understood to include a tail
 redesign (re-open a hot frame) ahead of the wf re-establishment and the cold
 telescoping. All reconstruction lemmas remain proven and reusable.
+
+## Cold-top re-materialization fixed; IndexFromNat bound surfaced (2026-09-13)
+
+Two findings from driving restore_frame's discharge, one fixed and committed:
+
+FIXED (commit dc8ba72): the cold-top wf gap. Restoring to target <= cold_count
+left the top frame cold, violating open-frame-is-hot. restore_frame now
+re-materializes the top cold frame into the hot tier (decompress its runs into
+diff_log, move cold->hot, depth unchanged), so the open frame is always hot.
+View-preserving; belt green at 512 cases (deep-unwind exercises it), conformance
+128/0, verus 2179/0. This closes a latent defect external_body hid.
+
+NEW FINDING (not yet fixed): the cold-run decode requires IndexFromNat.
+decode_run reconstructs each index from base+offset via I::from_nat, which lives
+on the IndexFromNat: IndexLike subtrait, NOT IndexLike. The Vec is generic over
+IndexLike and the cold tier (compress_all_hot's run builder, restore's
+re-materialization) uses try_from_usize generically - but reconstructing the
+CORRECT index round-trips only for IndexFromNat. So:
+  - The cold-decode reconstruction lemma (D5's third equivalence,
+    frame_inv_range over decode_runs) can only be STATED for I: IndexFromNat.
+  - For a non-IndexFromNat I, compression that drops the index column and
+    reconstructs by position is a latent correctness gap (the tests use u32,
+    which IS IndexFromNat, so they pass).
+
+Resolution needed (design decision + propagation): bound the cold tier by
+IndexFromNat - either add `I: IndexFromNat` to compress_all_hot and
+restore_frame's cold path (and force hot_buffer == None / no compression for
+non-IndexFromNat), or make the whole tracked Vec IndexFromNat when compression
+is enabled. This is real container work, not just proof, and it must precede the
+cold-path frame_inv_range proof.
+
+restore_frame remaining, updated:
+  1. Resolve the IndexFromNat bound for the cold tier (design + propagation).
+  2. compress_all_hot's cold_decode_inv_holds ensure (D5's third, ledgered),
+     stateable once (1) lands.
+  3. The wf re-establishment on the truncated + re-materialized state.
+  4. Cold telescoping via (2) + restore_run's proven contract.
