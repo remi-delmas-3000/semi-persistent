@@ -2521,6 +2521,8 @@ where
             assert(v.active_saved_len == I::min_spec());
             assert(v.trail_frames@.len() == 0);
             assert(v.snapshots@.len() == 0);
+            // Empty container: no hot frames, so phys_frame_inv_range is vacuous.
+            assert(v.hot_stack@.len() == 0);
         }
         v
     }
@@ -3158,6 +3160,37 @@ where
             self.g_end(k),
             self.snapshots@[k],
             self.g_saved_len(k))
+    }
+
+    /// Physical stratum start of hot frame `i` (stack index) in `diff_log`.
+    pub open(crate) spec fn phys_hot_start(&self, i: int) -> int {
+        self.hot_stack@[i].start as int
+    }
+
+    /// Physical stratum end: the next hot frame's start, or the log end for the
+    /// open top (whose stored `.end` is stale until the next mark closes it).
+    pub open(crate) spec fn phys_hot_end(&self, i: int) -> int {
+        if i + 1 < self.hot_stack@.len() {
+            self.hot_stack@[i + 1].start as int
+        } else {
+            self.diff_log@.len() as int
+        }
+    }
+
+    /// Physical `frame_inv_range` for hot frame `i`: reconstruction against the
+    /// physical `diff_log`, the analog of `frame_inv_range_holds` over the ghost
+    /// trail. Holds for BOTH disciplines - the trail stratum is the ghost
+    /// stratum, the first-write-wins stratum is its dedupe, and
+    /// `frame_cell_inv`'s captured arm pins the FIRST hitter, which both forms
+    /// share. This is what restore_frame's hot reconstruction reads.
+    pub open(crate) spec fn phys_frame_inv_range_holds(&self, i: int) -> bool {
+        frame_inv_range::<T, I>(
+            self.layer_above_at(self.cold_stack@.len() + i),
+            self.diff_log@,
+            self.phys_hot_start(i),
+            self.phys_hot_end(i),
+            self.snapshots@[self.cold_stack@.len() + i],
+            self.snapshots@[(self.cold_stack@.len() + i)].len())
     }
 
     /// Carry the top frame's `frame_inv_range` across a push (old_self had wf;
