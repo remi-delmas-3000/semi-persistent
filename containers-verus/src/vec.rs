@@ -308,7 +308,11 @@ pub(crate) fn cold_pools_shrink_scaffold<T: Copy, I: IndexLike>(
     values: &mut std::vec::Vec<T>,
     runs: &mut std::vec::Vec<crate::frame::IndexRun<I>>,
     factor: usize, headroom: usize,
-) {
+)
+    ensures
+        final(values)@ == old(values)@,
+        final(runs)@ == old(runs)@,
+{
     let vt = values.len().saturating_mul(factor).saturating_add(headroom);
     if values.capacity() > vt {
         values.shrink_to(vt);
@@ -1854,14 +1858,35 @@ where
     /// scaffolded mutators during the exec-locked phase and discharged
     /// per-theorem afterwards (goal doc, deliverables 5-6).
     pub open(crate) spec fn repr_ok(&self) -> bool {
-        // Deferred to D6 (cold-frame T3/T4 clauses for restore_frame's
-        // discharge). The OPEN-FRAME physical<->ghost relation push_frame's
-        // prepare_mark needs is carried DIRECTLY by wf's physical capture
-        // bridge (below) rather than here: prepare_mark reads the physical
-        // diff_log slice, and the physical bridge names its flags. The
-        // ghost/physical index-set equality is then a derived consequence of
-        // the two bridges, not a separately maintained invariant.
-        true
+        // Cold-pool structural well-formedness (D6). compress_all_hot lays the
+        // cold tier out as a contiguous partition: index runs are appended in
+        // frame order, values are appended in run order, and each frame header
+        // names a half-open slice [runs_start, runs_start+runs_len) of the run
+        // pool. These clauses are what restore_frame's cold path reads to
+        // discharge its pool-indexing preconditions; the physical<->ghost
+        // open-frame relation push_frame needs stays in wf's capture bridges.
+        &&& (forall|f: int| 0 <= f < self.cold_stack@.len() ==>
+                (#[trigger] self.cold_stack@[f]).runs_start + self.cold_stack@[f].runs_len
+                    <= self.cold_index_runs@.len())
+        &&& (self.cold_stack@.len() > 0 ==> self.cold_stack@[0].runs_start == 0)
+        &&& (forall|f: int| 0 <= f < self.cold_stack@.len() - 1 ==>
+                (#[trigger] self.cold_stack@[f]).runs_start + self.cold_stack@[f].runs_len
+                    == self.cold_stack@[f + 1].runs_start)
+        &&& (self.cold_stack@.len() > 0 ==>
+                self.cold_stack@[self.cold_stack@.len() - 1].runs_start
+                    + self.cold_stack@[self.cold_stack@.len() - 1].runs_len
+                    == self.cold_index_runs@.len())
+        &&& (forall|r: int| 0 <= r < self.cold_index_runs@.len() ==>
+                (#[trigger] self.cold_index_runs@[r]).start + self.cold_index_runs@[r].len
+                    <= self.cold_value_pool@.len())
+        &&& (self.cold_index_runs@.len() > 0 ==> self.cold_index_runs@[0].start == 0)
+        &&& (forall|r: int| 0 <= r < self.cold_index_runs@.len() - 1 ==>
+                (#[trigger] self.cold_index_runs@[r]).start + self.cold_index_runs@[r].len
+                    == self.cold_index_runs@[r + 1].start)
+        &&& (self.cold_index_runs@.len() > 0 ==>
+                self.cold_index_runs@[self.cold_index_runs@.len() - 1].start
+                    + self.cold_index_runs@[self.cold_index_runs@.len() - 1].len
+                    == self.cold_value_pool@.len())
     }
 
     /// The physical/ghost open-slice index-set equality (a wf conjunct),
@@ -1993,6 +2018,8 @@ where
             self.diff_log == old_self.diff_log,
             self.hot_stack@ == old_self.hot_stack@,
             self.cold_stack@ == old_self.cold_stack@,
+            self.cold_index_runs@ == old_self.cold_index_runs@,
+            self.cold_value_pool@ == old_self.cold_value_pool@,
             self.snapshots@ == old_self.snapshots@,
             self.active_saved_len == old_self.active_saved_len,
         ensures
@@ -4450,6 +4477,9 @@ where
             // ghost trail still holds for every frame.
             forall|k: int| 0 <= k < final(self).trail_frames@.len()
                 ==> #[trigger] final(self).frame_inv_range_holds(k),
+            // Cold-pool structural well-formedness: compress lays the runs and
+            // values out as a contiguous frame-ordered partition.
+            final(self).repr_ok(),
     {
         let mut keys: std::vec::Vec<u64> = std::vec::Vec::new();
         let mut wide: std::vec::Vec<usize> = std::vec::Vec::new();
