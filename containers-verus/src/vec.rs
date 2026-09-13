@@ -964,6 +964,64 @@ pub(crate) proof fn lemma_overlay_split<T, I: IndexLike>(
     }
 }
 
+/// Appending an entry at position `hi` whose index is ALREADY hit somewhere
+/// in `[lo, hi)` does not change the overlay of the range: first-entry-wins
+/// means the earlier hitter shadows the appended duplicate. This is the
+/// overlay-invariance under the physical log's dedup discipline (the
+/// first-write-wins store drops the later write; the ghost trail keeps it) that
+/// makes the physical and ghost reconstructions coincide on a stratum.
+pub(crate) proof fn lemma_overlay_append_dup<T, I: IndexLike>(
+    base: Seq<T>, diffs: Seq<(T, I)>, lo: int, hi: int,
+)
+    requires
+        0 <= lo <= hi,
+        hi < diffs.len(),
+        captured_in_range::<T, I>(diffs, lo, hi, diffs[hi].1.as_nat()),
+    ensures
+        overlay::<T, I>(base, diffs, lo, hi + 1) == overlay::<T, I>(base, diffs, lo, hi),
+{
+    lemma_overlay_len::<T, I>(base, diffs, lo, hi + 1);
+    lemma_overlay_len::<T, I>(base, diffs, lo, hi);
+    // Peel the appended entry at `hi` (the deepest position) off the front-
+    // recursion: overlay(base, lo, hi+1) == overlay(base2, lo, hi) where base2
+    // is base with only cell J = diffs[hi].1 possibly updated.
+    lemma_overlay_split::<T, I>(base, diffs, lo, hi, hi + 1);
+    let base2 = overlay::<T, I>(base, diffs, hi, hi + 1);
+    lemma_overlay_len::<T, I>(base, diffs, hi, hi + 1);
+    let jidx = diffs[hi].1.as_nat() as int;
+    // base2 is the single-step overlay at `hi`: unfold it to base, updated at
+    // cell J iff J is in range. Either way base2 agrees with base off J.
+    assert(overlay::<T, I>(base, diffs, hi + 1, hi + 1) == base);
+    assert(base2 == if diffs[hi].1.as_nat() < base.len() {
+        base.update(jidx, diffs[hi].0)
+    } else {
+        base
+    });
+    assert(forall|c: int| 0 <= c < base.len() && c != jidx ==>
+        #[trigger] base2[c] == base[c]);
+    assert forall|c: int| 0 <= c < base.len() implies
+        #[trigger] overlay::<T, I>(base2, diffs, lo, hi)[c]
+            == overlay::<T, I>(base, diffs, lo, hi)[c]
+    by {
+        if captured_in_range::<T, I>(diffs, lo, hi, c as nat) {
+            lemma_lowest_hitter::<T, I>(diffs, lo, hi, c as nat);
+            let p = choose|p: int| lo <= p < hi
+                && (#[trigger] diffs[p]).1.as_nat() == c as nat
+                && first_hitter::<T, I>(diffs, lo, p, c as nat);
+            lemma_overlay_lowest::<T, I>(base2, diffs, lo, hi, p, c);
+            lemma_overlay_lowest::<T, I>(base, diffs, lo, hi, p, c);
+        } else {
+            // c is uncaptured but J IS captured (hypothesis), so c != J, hence
+            // base2[c] == base[c]; both overlays reduce to that base cell.
+            lemma_overlay_uncaptured::<T, I>(base2, diffs, lo, hi, c);
+            lemma_overlay_uncaptured::<T, I>(base, diffs, lo, hi, c);
+            assert(c != jidx);
+        }
+    }
+    assert(overlay::<T, I>(base2, diffs, lo, hi)
+        =~= overlay::<T, I>(base, diffs, lo, hi));
+}
+
 /// Range-based "captured": some entry in `diffs[lo..hi)` hits `j`.
 pub open(crate) spec fn captured_in_range<T, I: IndexLike>(
     diffs: Seq<(T, I)>, lo: int, hi: int, j: nat,
