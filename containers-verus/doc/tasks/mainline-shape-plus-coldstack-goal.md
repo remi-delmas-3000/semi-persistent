@@ -308,3 +308,34 @@ FINISH LINE (crisp):
   4. D7: full 15-gate battery.
 
 Commit 20 (053caca) remains the fully-verified baseline beneath.
+
+
+## Confirmed: the dual-bridge is necessary (prepare_mark contract, 2026-09-13)
+
+Reading prepare_mark's requires settles it: it quantifies 'every set flag j
+is named by some prev_diffs entry' where prev_diffs is the PHYSICAL diff_log
+slice [hot_top.start, diff_log.len()). The store does not own diff_log (vec
+passes it by &mut), so the store's wf cannot state this - it is a JOINT
+vec+store invariant that vec's wf must carry. push_frame's four residual
+failures are exactly this: parent_diff_start (physical hot_top.start) !=
+g_start(top) (ghost trail_frames[top]), and diff_start (physical) !=
+full_trail.len() (ghost); the pre-tiering proof unified them because the
+physical and ghost offsets coincided.
+
+DEFINITIVE COMPLETION SPEC (one coherent refactor, not incremental):
+  wf carries BOTH capture bridges over the OPEN (top) frame -
+    physical:  captured()[j] == captured_in_range(diff_log@,  hot_top.start,        diff_log@.len(),  j)
+    ghost:     captured()[j] == captured_in_range(full_trail@, g_start(top),         full_trail@.len(), j)
+  The physical bridge (the pre-port clause) discharges push_frame's
+  prepare_mark directly; the ghost bridge drives reconstruction. Their
+  transitive consequence is the physical/ghost open-slice index-set
+  equality - so repr_ok needs no open-frame clause. Restore the physical-
+  bridge proof blocks in set_index/push/pop (they existed pre-port; git has
+  them), add them beside the ghost blocks already proven, fix push_frame's
+  physical/ghost split, then D6/D7. This is a single multi-function unit
+  best applied and verified together, not left half-landed - which is why
+  the committed checkpoint is held at 91/1 (a24f31e) rather than degraded.
+
+Status: D1-D4 done; D5 at 91/1 in vec with the completion spec above; D6-D7
+pending. cargo verus verify is NOT at 0 errors. Commit 20 (053caca, 15/15
+gates) is the verified baseline.
