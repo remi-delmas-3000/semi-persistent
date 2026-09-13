@@ -291,7 +291,6 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
-            final(diff_log).wf(),
             final(self).data() == old(self).data(),
             // First-write-wins (all TRACK-conditional; an untracked store's
             // flags are dead and its capture is a no-op — production parity):
@@ -342,7 +341,6 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
-            final(diff_log).wf(),
             final(self).data() == old(self).data(),
             (TRACK && i.as_nat() < saved_len.as_nat()) ==> {
                 &&& final(diff_log)@ == old(diff_log)@.push(

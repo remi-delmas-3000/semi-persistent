@@ -212,3 +212,190 @@ with a recorded reason). Lock bar met: 27/27 conformance binaries, trail
 semi-persistence proptests at 256 cases, 38/38 in-crate tests, D3
 benchmarks control-corrected in band. Everything below the lock is proof
 work against fixed code.
+
+
+## D5 crux identified (2026-09-13): repr_ok needs the open-frame clause
+
+State: 2162 obligations verify, 10 functions remain (down from 41 name
+errors). The reconstruction lemmas (cell_eq_overlay, bounds, monotone) are
+ported to the ghost trail; the frame-count bridge and no-frames-empty
+clauses are in wf. The remaining 10 are the mutator wf-preservation proofs
+(push/set_index/pop/push_frame) plus the store restore_overlay
+preconditions, and they share ONE root cause:
+
+  wf now demands frame_inv_range over full_trail@, but the mutators prove it
+  over diff_log@ (the physical log), and repr_ok - which must relate the two
+  - is still `true` (no relationship). So a physical write cannot be tied to
+  the ghost stratum.
+
+The fix is the T1/T2 abstraction landed as repr_ok's OPEN-FRAME clause: for
+the top (open, hot) frame, the physical diff_log slice
+[top.start, diff_log.len()) and the ghost open stratum
+[g_start(top), full_trail.len()) must relate so frame_inv_range transfers -
+identity for the trail discipline, dedupe_first for unique capture, unified
+by overlay-equality (lemma_overlay_dedupe_first). This is the load-bearing
+design step of D5 (per the goal: 'Vec::wf ... phrased against the ghost' via
+the equivalences), not a mechanical edit; it wants careful statement so the
+mutators' per-cell obligations discharge from it. NEXT: design the
+open-frame repr clause, prove the mutators transfer through it, then the
+cold clauses (T3/T4) for restore_frame's discharge (D6).
+
+Commit 20 (053caca) remains the fully-verified checkpoint beneath.
+
+
+## D5 progress + the repr_ok open-frame clause (2026-09-13)
+
+VERIFIED over the ghost trail (function-scoped, each 0 errors): set_index,
+push, pop. The mutator template is proven three times - reconstruction
+(frame_inv_range) and the capture bridge route through full_trail@ with the
+unconditional discipline-free ghost append, triggers aligned to wf_for_snap
+(g_end / snaps.len). The lemma family, wf/wf_for_snap, and the ghost model
+are ported; ~2159 obligations verify.
+
+REMAINING (the D5/D6 hard core, now pinned exactly): push_frame's
+prepare_mark precondition - 'every set capture flag is named by a physical
+diff_log suffix entry' - cannot be discharged from the ghost bridge alone,
+because prepare_mark consumes the PHYSICAL diff_log open slice
+[hot_top.start, diff_log.len()) while the bridge is over the GHOST open
+stratum [g_start(top), full_trail.len()). Closing it needs repr_ok's
+OPEN-FRAME clause:
+
+  tf.len() > 0 ==> for the top frame, the physical diff_log open slice and
+  the ghost open stratum carry the SAME SET OF INDICES (identity for the
+  trail discipline; dedupe_first preserves the index set for unique
+  capture).
+
+This is the T1/T2 abstraction the goal's D5 names. It must be added to
+repr_ok AND maintained by set_index/push/pop (each already verifies the
+rest; this adds one clause to re-establish, provable from the capture
+ensures: a first write adds the index to both, a duplicate leaves both
+index sets unchanged). Then push_frame's prepare_mark and restore_frame's
+discharge (D6) follow. NEXT SESSION: land the open-frame repr clause, thread
+it through the three proven mutators, finish push_frame, then D6/D7.
+
+Commit 20 (053caca) remains the fully-verified checkpoint beneath.
+
+
+## D5 near-complete: 91 verified, push_frame the sole vec obligation (2026-09-13)
+
+The ghost-model port of vec is essentially done: set_index, push, pop, the
+whole lemma family (bounds/monotone/le_n/cell_eq/forks/saved_len),
+maybe_shrink, with_store_mode, and the exec accessors ALL verify over
+full_trail@ (91 obligations, 1 function left). Key fixes: single-trigger on
+wf_for_snap's boundary-monotone clause; the mutator template (frame_inv_range
++ capture bridge over full_trail@, unconditional ghost append, aligned
+triggers); forks/maybe_shrink pin the new stacks. repr_ok reverted to `true`
+(its open-frame clause was the wrong mechanism - see below).
+
+SOLE REMAINING vec obligation - push_frame's prepare_mark: it consumes the
+PHYSICAL diff_log open slice, so it needs the PHYSICAL capture bridge
+  captured()[j] <==> captured_in_range(diff_log@, hot_top.start, diff_log.len(), j)
+which is a STORE-level fact (capture appends j to diff_log exactly when it
+sets the flag; the flag persists). This is not a vec-local proof: it is a
+DiffStore INTERFACE ADDITION - a spec fn + ensures on the trait, proved in
+inline/parallel/trail store impls (each already maintains it; it was the
+pre-ghost wf bridge). With it, push_frame's prepare_mark discharges
+directly, and the ghost<->physical index-set equality becomes a derived
+two-bridge consequence rather than a maintained invariant.
+
+FINISH LINE (crisp):
+  1. DiffStore: add fn captured_matches_log spec + ensures on capture/
+     prepare_mark/begin_restore/finish_restore; prove in the 3 stores.
+  2. push_frame: discharge prepare_mark from it; vec verifies 0 errors.
+  3. D6: restore_frame + compress_all_hot + normalize/restore_run + the
+     store restore_overlay loops - prove or trust-ledger (zero external_body
+     on the restore path via the split_at_mut/copy_from_slice chain).
+  4. D7: full 15-gate battery.
+
+Commit 20 (053caca) remains the fully-verified baseline beneath.
+
+
+## Confirmed: the dual-bridge is necessary (prepare_mark contract, 2026-09-13)
+
+Reading prepare_mark's requires settles it: it quantifies 'every set flag j
+is named by some prev_diffs entry' where prev_diffs is the PHYSICAL diff_log
+slice [hot_top.start, diff_log.len()). The store does not own diff_log (vec
+passes it by &mut), so the store's wf cannot state this - it is a JOINT
+vec+store invariant that vec's wf must carry. push_frame's four residual
+failures are exactly this: parent_diff_start (physical hot_top.start) !=
+g_start(top) (ghost trail_frames[top]), and diff_start (physical) !=
+full_trail.len() (ghost); the pre-tiering proof unified them because the
+physical and ghost offsets coincided.
+
+DEFINITIVE COMPLETION SPEC (one coherent refactor, not incremental):
+  wf carries BOTH capture bridges over the OPEN (top) frame -
+    physical:  captured()[j] == captured_in_range(diff_log@,  hot_top.start,        diff_log@.len(),  j)
+    ghost:     captured()[j] == captured_in_range(full_trail@, g_start(top),         full_trail@.len(), j)
+  The physical bridge (the pre-port clause) discharges push_frame's
+  prepare_mark directly; the ghost bridge drives reconstruction. Their
+  transitive consequence is the physical/ghost open-slice index-set
+  equality - so repr_ok needs no open-frame clause. Restore the physical-
+  bridge proof blocks in set_index/push/pop (they existed pre-port; git has
+  them), add them beside the ghost blocks already proven, fix push_frame's
+  physical/ghost split, then D6/D7. This is a single multi-function unit
+  best applied and verified together, not left half-landed - which is why
+  the committed checkpoint is held at 91/1 (a24f31e) rather than degraded.
+
+Status: D1-D4 done; D5 at 91/1 in vec with the completion spec above; D6-D7
+pending. cargo verus verify is NOT at 0 errors. Commit 20 (053caca, 15/15
+gates) is the verified baseline.
+
+
+## Dual-bridge state (2026-09-13): set_index+pop verified, 90/2 in vec
+
+The dual-bridge architecture is landed and PROVEN for set_index and pop:
+wf carries the physical capture bridge (over diff_log@/hot_top.start, for
+prepare_mark) and the ghost bridge (over full_trail@, for reconstruction),
+plus two structural invariants that surfaced and are true by construction:
+hot-frame extent (hot_top.start <= diff_log.len()) and open-frame-is-hot
+(tf.len()>0 ==> hot_stack.len()>0). 90 vec obligations verify.
+
+REMAINING (2 vec functions, then D6/D7):
+- push (1): its physical-bridge REENTERED case (j == old_len, a
+  mark_captured into a popped-but-marked slot) is NOT a mechanical copy of
+  the ghost case - it depends on whether the store appends the reentered
+  index to the PHYSICAL diff_log (first-write in the new stratum). Needs the
+  store capture/mark_captured postcondition, per discipline. The non-
+  reentered part duplicates set_index's physical bridge cleanly.
+- push_frame (17): the physical/ghost offset split - prepare_mark discharges
+  from the physical bridge (now in wf); the wf re-establishment for the new
+  empty frame follows the set_index template with g_start(new)=full_trail.len,
+  hot_top.start=diff_log.len separately.
+- D6: restore_frame/compress_all_hot/normalize/restore_run + store
+  restore_overlay loops - prove or trust-ledger, zero external_body on the
+  restore path.
+- D7: 15-gate battery.
+
+cargo verus verify NOT at 0 errors. Commit 20 (053caca, 15/15) is baseline.
+
+
+## push reentered case: a design decision on the physical bridge (2026-09-13)
+
+Diagnosed to root: mark_captured(i) only sets the flag
+(captured().update(i,true)); it does NOT append to diff_log. So when push
+reenters a popped-but-marked slot old_len, the log entry naming old_len
+came from the EARLIER pop's capture and must still be present. The ghost
+bridge proves captured_in_range(full_trail, old_len) via frame_inv_range's
+captured arm (the reconstruction invariant, over full_trail). The physical
+bridge needs captured_in_range(diff_log, old_len) - for which there is no
+physical analog of frame_inv_range.
+
+So the dual-bridge has an asymmetric maintenance cost: the physical bridge's
+reentered case is not derivable from the ghost bridge alone (that would be
+circular with the index-set equality it is meant to support). The two clean
+options, to decide before continuing:
+  (A) add a PHYSICAL frame_inv_range clause to wf (doubles the
+      reconstruction invariant, but every mutator proof already has the
+      ghost version as a template);
+  (B) prove an index-set-PRESERVATION lemma across pop/push (the physical
+      and ghost open slices gain/lose the same indices per op) and derive
+      the physical bridge from the ghost one + that lemma.
+(B) is less duplication but a genuinely new inductive lemma; (A) is more
+mechanical. This is the one remaining DESIGN choice; set_index (no reenter)
+and pop already verify with the dual bridge, so the non-reentered paths are
+settled either way.
+
+Definitive remaining after the choice: push (reentered), push_frame (offset
+split, discharges from the physical bridge), D6 (restore-path discharge),
+D7 (battery). cargo verus verify NOT at 0 errors; commit 20 (053caca,
+15/15) is the verified baseline.
