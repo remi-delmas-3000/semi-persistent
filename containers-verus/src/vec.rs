@@ -3365,6 +3365,40 @@ where
             self.snapshots@[(self.cold_stack@.len() + i)].len())
     }
 
+    /// Cell `c` is covered by some index run of cold frame `f`.
+    pub open(crate) spec fn cold_covered(&self, f: int, c: nat) -> bool {
+        exists|r: int|
+            self.cold_stack@[f].runs_start <= r
+                < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len
+            && (#[trigger] self.cold_index_runs@[r]).base.as_nat() <= c
+            && c < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len
+    }
+
+    /// The value cold frame `f`'s covering run holds for cell `c`.
+    pub open(crate) spec fn cold_value(&self, f: int, c: nat) -> T {
+        let r = choose|r: int|
+            self.cold_stack@[f].runs_start <= r
+                < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len
+            && (#[trigger] self.cold_index_runs@[r]).base.as_nat() <= c
+            && c < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len;
+        self.cold_value_pool@[self.cold_index_runs@[r].start as int
+            + (c - self.cold_index_runs@[r].base.as_nat()) as int]
+    }
+
+    /// COLD reconstruction (D5's third equivalence), pointwise and IndexLike-only
+    /// (no from_nat): each cold frame reconstructs its snapshot - a covered cell
+    /// takes its run's value, an uncovered cell keeps the layer above. This is
+    /// what restore's re-materialized diff_log stratum inherits (its entries have
+    /// .1.as_nat() == c via try_from_usize), so frame_inv_range follows.
+    pub open(crate) spec fn cold_reconstructs(&self, f: int) -> bool {
+        forall|c: int| 0 <= c < self.g_saved_len(f) as int ==>
+            if self.cold_covered(f, c as nat) {
+                #[trigger] self.cold_value(f, c as nat) == self.snapshots@[f][c]
+            } else {
+                self.snapshots@[f][c] == self.layer_above_at(f)[c]
+            }
+    }
+
     /// Carry the top frame's `frame_inv_range` across a push (old_self had wf;
     /// the new view is the old view plus appended elements). Coverage-based:
     /// no `saved_len <= view.len()` needed — the per-cell uncaptured arm itself
@@ -5214,6 +5248,13 @@ where
             // Cold-pool structural well-formedness: compress lays the runs and
             // values out as a contiguous frame-ordered partition.
             final(self).repr_ok(),
+            // COLD reconstruction (D5's third equivalence), trust-ledgered
+            // against the D2 belt: each migrated frame's runs reconstruct its
+            // snapshot pointwise (covered cell -> run value == snap; uncovered
+            // -> snap == layer). restore reads this to prove the re-materialized
+            // top frame and the cold telescoping.
+            forall|f: int| 0 <= f < final(self).cold_stack@.len()
+                ==> #[trigger] final(self).cold_reconstructs(f),
     {
         let mut keys: std::vec::Vec<u64> = std::vec::Vec::new();
         let mut wide: std::vec::Vec<usize> = std::vec::Vec::new();
