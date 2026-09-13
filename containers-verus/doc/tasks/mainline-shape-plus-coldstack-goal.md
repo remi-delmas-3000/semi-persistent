@@ -665,3 +665,28 @@ proven lemma. Remaining before restore_frame can drop external_body:
     then wf re-establishment on the truncated state (frame_inv_range survivors
     via shift, the two bridges + alignment re-derived, capture bridges via
     finish_restore), then the cold-run path.
+
+## Unique physical frame_inv_range: 4/6 functions done (2026-09-13, cont.)
+
+Attempted the UNIQUE-discipline physical frame_inv_range wf clause
+(unique ==> forall hot frame i: phys_frame_inv_range_holds(i)). With the ceiling
+relieved it now cascades cleanly to 6 functions, of which 4 verify with the
+patterns already established (uncommitted, reverted to keep the tree green):
+  - lemma_forks / with_store_mode / maybe_shrink: guarded transfer
+    (if unique { assert old.phys_frame_inv_range_holds(i) }).
+  - push: guarded grow-layer transfer (lemma_frame_inv_range_grow_layer).
+  - push_frame: the new top frame's stratum is empty (layer==snapshot==view);
+    older frames transfer unchanged (compression leaves a single empty hot
+    frame). VERIFIED.
+Remaining: set_index and pop need the physical mirror of their ~80-line ghost
+top-frame frame_inv_range proof, adapted to diff_log with the physical append
+condition (`appended` = iu<active && !was_captured, for unique) and the
+physical capture bridge for the captured-status of the top stratum. The
+first-write case extends the stratum with (old_view[iu], iu) as the first
+hitter (value == snap[iu]); the duplicate case leaves the stratum and only
+flips view[iu] (a captured cell, so the arm is base-independent).
+
+Then: a physical analog of lemma_cell_eq_overlay telescoping over diff_log for
+unique, lemma_reconstruct_unique (mirror of lemma_reconstruct_trail), and
+finally restore_frame's body (case-split trail/unique reconstruction, wf
+re-establishment on the truncated state, cold-run path).
