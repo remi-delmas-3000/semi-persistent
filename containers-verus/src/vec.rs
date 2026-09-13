@@ -2766,7 +2766,7 @@ where
         // folds) → frames non-empty → the index compare. Under TRACK=false
         // the whole computation erases.
         let reentered = TRACK
-            && self.depth_exec() > 0
+            && (self.hot_stack.len() + self.cold_stack.len() > 0)
             && old_len.as_usize() < self.active_saved_len.as_usize();
         let ghost has_frame = TRACK && self.trail_frames@.len() > 0;
         let ghost in_marked = old_len.as_nat() < self.active_saved_len.as_nat();
@@ -2829,15 +2829,15 @@ where
             assert(self.diff_log@ == old_self.diff_log@);
             assert(self.snapshots@ == old_self.snapshots@);
             let tf = self.trail_frames@;
-            let diffs = self.diff_log@;
+            let diffs = self.full_trail@;
             assert forall|k: int| 0 <= k < tf.len() implies
                 #[trigger] frame_inv_range::<T, I>(
                     self.layer_above_at(k),
-                    self.diff_log@,
+                    self.full_trail@,
                     self.g_start(k),
-                    self.stratum_end(k),
+                    self.g_end(k),
                     self.snapshots@[k],
-                    self.g_saved_len(k))
+                    self.snapshots@[k].len())
             by {
                 // old frame_inv_range held for old_self with same args except
                 // possibly layer_above_at (which equals view for top frame).
@@ -2873,7 +2873,7 @@ where
                         assert(j < old_self.view().len());
                         assert(old_self.store.captured()[j]
                             == captured_in_range::<T, I>(
-                                old_self.diff_log@, ds_top, old_self.diff_log@.len() as int, j as nat));
+                                old_self.full_trail@, ds_top, old_self.full_trail@.len() as int, j as nat));
                     } else {
                         // j == old_len: only present when old_len < view.len(),
                         // i.e. old_len < active (the mark_captured branch ran).
@@ -2893,15 +2893,15 @@ where
                         // and j >= old_view.len() (popped) ⇒ captured arm.
                         assert(old_self.frame_inv_range_holds(top));
                         lemma_frame_inv_arm_at::<T, I>(
-                            old_self.layer_above_at(top), old_self.diff_log@, ds_top,
-                            old_self.stratum_end(top), old_self.snapshots@[top],
-                            self.g_saved_len(top), j);
+                            old_self.layer_above_at(top), old_self.full_trail@, ds_top,
+                            old_self.g_end(top), old_self.snapshots@[top],
+                            old_self.snapshots@[top].len(), j);
                         assert(old_self.layer_above_at(top) == old_view);
                         assert(j >= old_view.len());  // old_len == old_view.len()
                         // uncaptured arm would need j < old_view.len(): false.
                         // So captured_in_range(old_diffs, ds_top, |old_diffs|, j).
                         assert(captured_in_range::<T, I>(
-                            old_self.diff_log@, ds_top, old_self.diff_log@.len() as int, j as nat));
+                            old_self.full_trail@, ds_top, old_self.full_trail@.len() as int, j as nat));
                         assert(self.store.captured()[j] == true);
                     }
                 }
