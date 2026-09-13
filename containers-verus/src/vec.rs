@@ -5585,80 +5585,52 @@ where
         }
     }
 
-    /// Unique-discipline reconstruction, lifted to every shared-prefix cell:
-    /// the first-write-wins analog of `lemma_reconstruct_hot_trail_all`. With
-    /// `base == self.view()` the per-cell `lemma_phys_cell_eq_overlay`
-    /// base-agreement hypothesis is trivial, so replaying the physical diff_log
-    /// suffix `[phys_hot_start(hidx), n)` reconstructs `snapshots[target][j]`
-    /// for every cell `j` present in both the current view and the target saved
-    /// region. This is the D5 first-write-wins equivalence discharged for the
-    /// restore path; the grow region (j >= view.len()) is handled from the
-    /// captured diff entries, as in the trail wrapper.
+    /// The definitive hot-target reconstruction, over EVERY cell of the target
+    /// saved region and both disciplines. With `base` the resized live data
+    /// (length `saved_len(target)`, agreeing with the pre-restore view on the
+    /// shared prefix), overlaying the physical diff_log suffix
+    /// `[hot_stack[hidx].start, n)` reconstructs `snapshots[target]` cell for
+    /// cell. The grow region (j >= view.len(), the pop-then-restore case) needs
+    /// no separate argument: `frame_inv_range`'s uncaptured arm demands
+    /// `j < layer_above.len()`, so a cell past the layer length is forced into
+    /// the captured arm and taken from a diff entry, not from `base`. The body
+    /// composes this with `restore_overlay`'s ensure to discharge
+    /// `view() == snapshots[target]`.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(400)]
-    pub(crate) proof fn lemma_reconstruct_hot_unique_all(&self, target: int)
+    pub(crate) proof fn lemma_reconstruct_hot_all(&self, target: int, base: Seq<T>)
         requires
             self.wf(),
-            self.store.unique_capture_spec(),
             self.cold_stack@.len() <= target < self.trail_frames@.len(),
             self.hot_stack@.len() > 0,
             (target - self.cold_stack@.len() as int) < self.hot_stack@.len(),
+            self.g_saved_len(target) <= base.len(),
+            forall|m: int| 0 <= m < base.len() && m < self.view().len()
+                ==> #[trigger] base[m] == self.view()[m],
         ensures
             forall|j: int| 0 <= j < self.snapshots@[target].len() as int
-                && j < self.view().len()
                 ==> #[trigger] overlay::<T, I>(
-                        self.view(), self.diff_log@,
-                        self.phys_hot_start(target - self.cold_stack@.len() as int),
+                        base, self.diff_log@,
+                        self.hot_stack@[target - self.cold_stack@.len() as int].start as int,
                         self.diff_log@.len() as int)[j]
                     == self.snapshots@[target][j],
     {
         let cc = self.cold_stack@.len() as int;
         let hidx = target - cc;
-        assert forall|j: int| 0 <= j < self.snapshots@[target].len() as int
-            && j < self.view().len() implies
+        assert forall|j: int| 0 <= j < self.snapshots@[target].len() as int implies
             #[trigger] overlay::<T, I>(
-                self.view(), self.diff_log@,
-                self.phys_hot_start(hidx),
+                base, self.diff_log@,
+                self.hot_stack@[hidx].start as int,
                 self.diff_log@.len() as int)[j]
             == self.snapshots@[target][j] by {
-            self.lemma_phys_cell_eq_overlay(self.view(), hidx, j);
-        }
-    }
-
-    /// Trail-discipline reconstruction, lifted to every shared-prefix cell:
-    /// with `base == self.view()` the per-cell `lemma_reconstruct_trail`
-    /// base-agreement hypothesis is trivial, so replaying the physical diff_log
-    /// suffix `[hf.start, n)` reconstructs `snapshots[target][j]` for every cell
-    /// `j` present in both the current view and the target saved region. The
-    /// body composes this with `restore_overlay`'s ensure (post.data ==
-    /// overlay(pre.view, diff_log, hf.start, n)); cells beyond the current view
-    /// length (the pop-then-restore grow region) are captured in the tail and
-    /// handled from the diff entries directly, not this shared-prefix wrapper.
-    #[verifier::spinoff_prover]
-    #[verifier::rlimit(400)]
-    pub(crate) proof fn lemma_reconstruct_hot_trail_all(&self, target: int)
-        requires
-            self.wf(),
-            !self.store.unique_capture_spec(),
-            self.cold_stack@.len() <= target < self.trail_frames@.len(),
-            self.hot_stack@.len() > 0,
-        ensures
-            forall|j: int| 0 <= j < self.g_saved_len(target) as int
-                && j < self.view().len()
-                ==> #[trigger] overlay::<T, I>(
-                        self.view(), self.diff_log@,
-                        self.hot_stack@[target - self.cold_stack@.len() as int].start as int,
-                        self.diff_log@.len() as int)[j]
-                    == self.snapshots@[target][j],
-    {
-        assert forall|j: int| 0 <= j < self.g_saved_len(target) as int
-            && j < self.view().len() implies
-            #[trigger] overlay::<T, I>(
-                self.view(), self.diff_log@,
-                self.hot_stack@[target - self.cold_stack@.len() as int].start as int,
-                self.diff_log@.len() as int)[j]
-            == self.snapshots@[target][j] by {
-            self.lemma_reconstruct_trail(target, self.view(), j);
+            // j < saved_len(target) == snapshots[target].len() <= base.len().
+            assert((j as nat) < base.len());
+            if self.store.unique_capture_spec() {
+                // phys_hot_start(hidx) == hot_stack[hidx].start.
+                self.lemma_phys_cell_eq_overlay(base, hidx, j);
+            } else {
+                self.lemma_reconstruct_trail(target, base, j);
+            }
         }
     }
 
