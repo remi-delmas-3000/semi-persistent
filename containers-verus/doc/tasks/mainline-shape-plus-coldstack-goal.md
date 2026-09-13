@@ -241,3 +241,36 @@ open-frame repr clause, prove the mutators transfer through it, then the
 cold clauses (T3/T4) for restore_frame's discharge (D6).
 
 Commit 20 (053caca) remains the fully-verified checkpoint beneath.
+
+
+## D5 progress + the repr_ok open-frame clause (2026-09-13)
+
+VERIFIED over the ghost trail (function-scoped, each 0 errors): set_index,
+push, pop. The mutator template is proven three times - reconstruction
+(frame_inv_range) and the capture bridge route through full_trail@ with the
+unconditional discipline-free ghost append, triggers aligned to wf_for_snap
+(g_end / snaps.len). The lemma family, wf/wf_for_snap, and the ghost model
+are ported; ~2159 obligations verify.
+
+REMAINING (the D5/D6 hard core, now pinned exactly): push_frame's
+prepare_mark precondition - 'every set capture flag is named by a physical
+diff_log suffix entry' - cannot be discharged from the ghost bridge alone,
+because prepare_mark consumes the PHYSICAL diff_log open slice
+[hot_top.start, diff_log.len()) while the bridge is over the GHOST open
+stratum [g_start(top), full_trail.len()). Closing it needs repr_ok's
+OPEN-FRAME clause:
+
+  tf.len() > 0 ==> for the top frame, the physical diff_log open slice and
+  the ghost open stratum carry the SAME SET OF INDICES (identity for the
+  trail discipline; dedupe_first preserves the index set for unique
+  capture).
+
+This is the T1/T2 abstraction the goal's D5 names. It must be added to
+repr_ok AND maintained by set_index/push/pop (each already verifies the
+rest; this adds one clause to re-establish, provable from the capture
+ensures: a first write adds the index to both, a duplicate leaves both
+index sets unchanged). Then push_frame's prepare_mark and restore_frame's
+discharge (D6) follow. NEXT SESSION: land the open-frame repr clause, thread
+it through the three proven mutators, finish push_frame, then D6/D7.
+
+Commit 20 (053caca) remains the fully-verified checkpoint beneath.

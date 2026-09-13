@@ -3899,7 +3899,7 @@ where
 
         proof {
             let tf = self.trail_frames@;
-            let diffs = self.diff_log@;
+            let diffs = self.full_trail@;
             let snaps = self.snapshots@;
             let new_top = (tf.len() - 1) as int;  // == old_tf.len()
 
@@ -3907,7 +3907,7 @@ where
             // snapshots & frames explicitly after); only the store's internal
             // capture flags changed, which the Vec invariant doesn't read.
             assert(self.view() == old_view);
-            assert(diffs == old(self).diff_log@);
+            assert(diffs == old(self).full_trail@);
             assert(diff_start == diffs.len());
             // diff_log is untouched by prepare_mark/frames.push/snapshots, so its
             // wf (established by maybe_shrink) persists; do not re-derive it (the
@@ -3960,10 +3960,10 @@ where
             assert forall|k: int| 0 <= k < tf.len() implies
                 #[trigger] frame_inv_range::<T, I>(
                     self.layer_above_at(k), diffs, self.g_start(k),
-                    self.stratum_end(k), snaps[k], self.g_saved_len(k))
+                    self.g_end(k), snaps[k], snaps[k].len())
             by {
                 let lo = self.g_start(k);
-                let hi = self.stratum_end(k);
+                let hi = self.g_end(k);
                 if k == new_top {
                     // New frame: stratum [diff_start, diff_start) is empty,
                     // layer == snapshot == view. All cells uncaptured ⇒
@@ -3974,7 +3974,7 @@ where
                     assert(snaps[k] == old_view);
                     // Empty stratum: prove frame_inv_range from scratch.
                     assert forall|j: int| #![trigger snaps[k][j]]
-                        0 <= j < self.g_saved_len(k) as int implies
+                        0 <= j < snaps[k].len() as int implies
                         snaps[k][j] == self.layer_above_at(k)[j]
                     by {
                         // no entry in [lo, hi) since the range is empty
@@ -3987,7 +3987,7 @@ where
                     assert(old(self).trail_frames@[k] == self.trail_frames@[k]);
                     assert(old_snaps[k] == snaps[k]);
                     assert(hi == diffs.len());
-                    assert(old(self).stratum_end(k) == diffs.len());
+                    assert(old(self).g_end(k) == diffs.len());
                     assert(self.layer_above_at(k) == snaps[k + 1]);
                     assert(snaps[k + 1] == old_view);
                     assert(old(self).layer_above_at(k) == old_view);
@@ -3995,7 +3995,7 @@ where
                     old(self).lemma_diff_start_le_n(k);
                     lemma_frame_inv_range_local::<T, I>(
                         self.layer_above_at(k), diffs, diffs,
-                        lo, hi, snaps[k], self.g_saved_len(k));
+                        lo, hi, snaps[k], snaps[k].len());
                 } else {
                     // Deeper frames: stratum and layer (a surviving snapshot)
                     // unchanged.
@@ -4005,17 +4005,17 @@ where
                     assert(self.layer_above_at(k) == snaps[k + 1]);
                     assert(old(self).layer_above_at(k) == old_snaps[k + 1]);
                     assert(self.layer_above_at(k) == old(self).layer_above_at(k));
-                    assert(hi == old(self).stratum_end(k));
+                    assert(hi == old(self).g_end(k));
                     assert(hi == old(self).g_start(k + 1));
                     old(self).lemma_diff_start_le_n(k + 1);
                     old(self).lemma_diff_start_monotone(k, k + 1);
                     lemma_frame_inv_range_local::<T, I>(
                         self.layer_above_at(k), diffs, diffs,
-                        lo, hi, snaps[k], self.g_saved_len(k));
+                        lo, hi, snaps[k], snaps[k].len());
                 }
                 assert(frame_inv_range::<T, I>(
                     self.layer_above_at(k), diffs, lo, hi, snaps[k],
-                    self.g_saved_len(k)));
+                    snaps[k].len()));
             }
             // Re-establish the store capture-length bridge at the end (it can be lost
             // across the heavy frame_inv_range forall above).
