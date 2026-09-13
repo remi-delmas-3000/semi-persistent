@@ -2379,6 +2379,88 @@ where
     }
 
 
+    /// Physical analog of `lemma_cell_eq_overlay` for the UNIQUE discipline:
+    /// overlaying the physical diff_log suffix from hot frame `hidx` up
+    /// reconstructs `snapshots[cold_count+hidx]`, telescoping through the hot
+    /// frames' physical strata (each satisfying `phys_frame_inv_range` from wf
+    /// under the unique guard). This is the first-write-wins reconstruction
+    /// discharged for restore; the trail discipline uses `lemma_reconstruct_trail`.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_phys_cell_eq_overlay(&self, base: Seq<T>, hidx: int, j: int)
+        requires
+            self.wf(),
+            self.store.unique_capture_spec(),
+            0 <= hidx < self.hot_stack@.len(),
+            0 <= j < self.snapshots@[self.cold_stack@.len() as int + hidx].len() as int,
+            (j as nat) < base.len(),
+            forall|m: int| 0 <= m < base.len() && m < self.view().len()
+                ==> #[trigger] base[m] == self.view()[m],
+        ensures
+            overlay::<T, I>(
+                base, self.diff_log@,
+                self.phys_hot_start(hidx),
+                self.diff_log@.len() as int)[j]
+                == self.snapshots@[self.cold_stack@.len() as int + hidx][j],
+        decreases self.hot_stack@.len() - hidx,
+    {
+        let cc = self.cold_stack@.len() as int;
+        let g = cc + hidx;
+        let diffs = self.diff_log@;
+        let n = diffs.len() as int;
+        let lo = self.phys_hot_start(hidx);
+        let mid = self.phys_hot_end(hidx);
+        let snap = self.snapshots@[g];
+        let saved = snap.len();
+        assert(self.phys_frame_inv_range_holds(hidx));
+        // Bounds lo <= mid <= n from hot-frame tiling (starts bounded + monotone).
+        assert(lo <= n);
+        if hidx + 1 < self.hot_stack@.len() {
+            assert(mid == self.hot_stack@[hidx + 1].start as int);
+            assert(lo <= mid) by { assert(self.hot_stack@[hidx].start
+                <= self.hot_stack@[hidx + 1].start); }
+            assert(mid <= n);
+        } else {
+            assert(mid == n);
+        }
+        lemma_frame_inv_arm_at::<T, I>(
+            self.layer_above_at(g), diffs, lo, mid, snap, saved, j);
+        assert(frame_inv_range::<T, I>(self.layer_above_at(g), diffs, lo, mid, snap, saved));
+        if captured_in_range::<T, I>(diffs, lo, mid, j as nat) {
+            let p = choose|q: int| lo <= q < mid
+                && (#[trigger] diffs[q]).1.as_nat() == j as nat
+                && diffs[q].0 == snap[j]
+                && first_hitter::<T, I>(diffs, lo, q, j as nat);
+            assert(lo <= p < mid && diffs[p].1.as_nat() == j as nat);
+            assert(forall|q: int| lo <= q < p ==> (#[trigger] diffs[q]).1.as_nat() != j as nat);
+            lemma_overlay_lowest::<T, I>(base, diffs, lo, n, p, j);
+        } else {
+            if hidx + 1 < self.hot_stack@.len() {
+                // layer == snaps[g+1]; recurse at hidx+1 over [mid, n).
+                assert(g + 1 < self.trail_frames@.len());
+                assert(self.layer_above_at(g) == self.snapshots@[g + 1]);
+                assert((j as nat) < self.snapshots@[g + 1].len());
+                assert(self.snapshots@[g + 1][j as int] == snap[j as int]);
+                assert(mid == self.phys_hot_start(hidx + 1));
+                self.lemma_phys_cell_eq_overlay(base, hidx + 1, j);
+                assert forall|q: int| lo <= q < mid implies
+                    (#[trigger] diffs[q]).1.as_nat() != j as nat by {
+                    if diffs[q].1.as_nat() == j as nat {
+                        assert(0 <= q < diffs.len());
+                        assert(captured_in_range::<T, I>(diffs, lo, mid, j as nat));
+                    }
+                }
+                lemma_overlay_uncaptured_prefix::<T, I>(base, diffs, lo, mid, n, j);
+            } else {
+                assert(self.layer_above_at(g) == self.view());
+                assert((j as nat) < self.view().len());
+                assert(self.view()[j as int] == snap[j as int]);
+                assert(mid == n);
+                lemma_overlay_uncaptured::<T, I>(base, diffs, lo, n, j);
+            }
+        }
+    }
+
     /// "Untracked" state: no marks are live. Production compiles out tracking
     /// when `TRACK == false`; the verus model instead proves that whenever the
     /// frame stack is empty there are no live diff entries and operations have
