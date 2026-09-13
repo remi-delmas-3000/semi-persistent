@@ -690,3 +690,36 @@ Then: a physical analog of lemma_cell_eq_overlay telescoping over diff_log for
 unique, lemma_reconstruct_unique (mirror of lemma_reconstruct_trail), and
 finally restore_frame's body (case-split trail/unique reconstruction, wf
 re-establishment on the truncated state, cold-run path).
+
+## Both reconstruction equivalences PROVEN (2026-09-13, cont.)
+
+This turn discharged the reconstruction math for both disciplines - six
+committed increments (workspace 2179/0):
+  - push_frame ghost frame_inv_range extracted (ceiling relief).
+  - trail frame-alignment invariant.
+  - lemma_reconstruct_trail (trail-hot reconstruction).
+  - unique physical frame_inv_range invariant, maintained across all six
+    functions (set_index/pop mirror the ghost top-frame proof over diff_log
+    with the first-write-wins append condition).
+  - lemma_phys_cell_eq_overlay (first-write-wins reconstruction, telescoping).
+
+For a HOT target, both directions now give, as proven lemmas,
+overlay(base, diff_log, hf.start, n)[j] == snapshots[target][j]:
+  !unique -> lemma_reconstruct_trail; unique -> lemma_phys_cell_eq_overlay.
+This is D5's trail-hot (identity) and first-write-wins (dedupe) equivalences
+discharged for restore.
+
+REMAINING - restore_frame body (the last step to drop external_body):
+  1. HOT path: chain the discipline reconstruction lemma with restore_overlay's
+     proven ensure (store.data == overlay(pre, diff_log, hf.start, n)) to get
+     store.data[j] == snapshots[target][j]; discharge begin_restore's named-
+     slots precondition (captured cells hit in [hf.start, n) via the capture
+     bridge + hf.start <= top.start) and the resize bound.
+  2. wf re-establishment on the truncated post-restore state: frame_inv_range
+     survivors via lemma_frame_inv_range_shift; the frame-count/tiling bridges,
+     alignment, and both physical invariants re-derived from the truncated
+     stacks; capture bridges rebuilt by finish_restore's ensure.
+  3. COLD path: cold-run reconstruction via compress_all_hot's semantic ensure
+     (its runs decode to the frame snapshot) composed with restore_run's proven
+     data contract; or trust-ledger compress_all_hot against the D2 belt.
+Then flip restore_frame off external_body and run the D7 battery.
