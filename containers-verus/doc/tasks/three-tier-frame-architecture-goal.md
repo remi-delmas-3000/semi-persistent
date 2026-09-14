@@ -1,6 +1,6 @@
 # Policy-driven three-tier frames: make it work, make it fast, then prove it
 
-**Status: E1–E6 EXECUTION LOCKED at `d116f76` — DiffStore-owned three tiers, explicit rollover/adaptive inputs, runtime validation, DynStore measurements, and post-migration reclamation are complete; presets remain unchanged because no universal automatic threshold was established; proof discharge is the next phase.**
+**Status: E1–E6 EXECUTION LOCKED at `d116f76` — DiffStore-owned three tiers, explicit rollover/adaptive inputs, runtime validation, DynStore measurements, and post-migration reclamation are complete; presets remain unchanged because no universal automatic threshold was established. The first proof milestone is VERIFIED on `d21-exec`: authoritative unique-capture Hot-only Defer projection, checked capture/set, `Defer + ShrinkPolicy::Never` mark, and Hot restore for zero and nonzero targets.**
 
 This is the controlling goal for replacing the dual-purpose hot stack on
 `d21-exec` after commit `a414090`. It supersedes the two-tier layout and proof
@@ -818,14 +818,14 @@ Update this table in the same change that adds or removes a marker.
 
 | body | reason during execution-first phase | executable validation | status |
 |---|---|---|---|
-| `Vec::with_store_policy`, `frame_saved_len_exec`, `diff_log_len` | retention-only construction, three-segment lookup, compatibility diagnostics, and cached no-op rollover gate precede proof rewrite | constructor compatibility suites and protocol tests | active scaffold; E1 runtime green |
-| `runtime_capture`, `runtime_push`, `runtime_pop`, `runtime_set`; wrappers `Vec::push`, `Vec::pop`, `Vec::set_index` | immutable `DiffStore` capability selects Trail or Hot ingress; static stores fold the answer and DynStore dispatches its variant | duplicate, pop/re-entry, three-protocol policy-matrix, and compatibility tests | active scaffold; E1 runtime green |
-| `runtime_apply_configured_rollover`, `runtime_rollover_on_mark`, `runtime_push_frame`, `push_frame_with_options`, `mark_with_options`; wrappers `Vec::push_frame`, `Vec::mark`, `Vec::try_mark_with` | preserve thresholded store/log shrink, close selected ingress, open one empty frame, then defer/apply/force only closed Trail -> Hot -> Cold prefixes | shrink-capacity, Defer/configured/forced-edge, empty-frame, all-tier restore, legacy cadence, and SyncGroup suites | active scaffold; E1-E3 runtime green |
+| `frame_saved_len_exec`, `diff_log_len` | three-segment lookup and compatibility diagnostics precede proof rewrite | constructor compatibility suites and protocol tests | active scaffold; `Vec::with_store_policy` is now verified and its marker removed |
+| `runtime_capture`, `runtime_push`, `runtime_pop`, `runtime_set`; wrappers `Vec::push`, `Vec::pop`, `Vec::set_index` | immutable `DiffStore` capability selects Trail or Hot ingress; static stores fold the answer and DynStore dispatches its variant | duplicate, pop/re-entry, three-protocol policy-matrix, and compatibility tests | partial discharge: real unique capture/set branches call verified `hot_defer_capture_checked`/`hot_defer_set_checked`; Trail and push/pop remain active scaffolds |
+| `runtime_apply_configured_rollover`, `runtime_rollover_on_mark`, `runtime_push_frame`, `push_frame_with_options`, `mark_with_options`; wrappers `Vec::push_frame`, `Vec::mark`, `Vec::try_mark_with` | preserve thresholded store/log shrink, close selected ingress, open one empty frame, then defer/apply/force only closed Trail -> Hot -> Cold prefixes | shrink-capacity, Defer/configured/forced-edge, empty-frame, all-tier restore, legacy cadence, and SyncGroup suites | partial discharge: real unique `Defer + ShrinkPolicy::Never` branch calls verified `hot_defer_mark_checked`; shrink-enabled/configured/forced paths remain scaffolds |
 | `runtime_trail_shape`, `runtime_migrate_trail_count`, `runtime_execute_trail_plan`, `runtime_migrate_trail`, `flush_trail` | oldest closed-prefix statistics, deterministic sort/dedupe first-capture execution, reusable accepted-frame plans, and pool rebasing precede refinement theorem | zero/frame/entry/byte/adaptive/unbounded boundary tests | active scaffold; E2 runtime green |
 | `runtime_hot_shape`, `runtime_migrate_hot_count`, `runtime_execute_hot_plan`, `runtime_migrate_hot`, `compress_hot` | exact U/R statistics, reusable sorted accepted-frame plans, unique-to-run conversion, and zero-budget path precede proof lock | clustered/singleton runs, zero hot budget, and legacy compression tests | active scaffold; E3 runtime green |
 | `runtime_closed_history_bytes`, `runtime_reclaim_adaptive_tier_capacities`, `runtime_apply_adaptive`, `apply_adaptive`, `try_mark_adaptive` | exact closed-only logical byte planning, two-stage execution, and post-migration capacity-only reclamation are locked by runtime evidence before refinement proof; ratios and budgets are explicit call inputs | exact boundary, duplicate/locality pass/fail, empty/blocker/cascade/unmet, retain-versus-shrink tracking, promotion, all-ingress, token, and policy-matrix tests | active scaffold; adaptive runtime and serial threshold/memory measurement green |
 | `runtime_apply_tier_policy`, `apply_tier_policy` | policy dispatch and reclamation are executable-first | immediate policy tightening and legacy environment-lever tests | active scaffold; E2/E3 runtime green |
-| `runtime_begin_restore`, `runtime_restore_frame`; wrapper `Vec::restore_frame` | newest-to-oldest trail/hot/cold orchestration precedes telescope proof | all-tier targets, deep unwind, nonmonotone lengths, conformance suite | active scaffold; E3 runtime green |
+| `runtime_begin_restore`, `runtime_restore_frame`; wrapper `Vec::restore_frame` | newest-to-oldest trail/hot/cold orchestration precedes telescope proof | all-tier targets, deep unwind, nonmonotone lengths, conformance suite | partial discharge: real non-fused unique Hot-only zero/nonzero targets (Parallel protocol) call verified restore cores; Inline retains its fused replay path; mixed-tier orchestration remains an active scaffold |
 | `runtime_promote_survivor` | survivor must become selected ingress without changing live values | hot/cold promotion and promote-write-remigrate-restore regression | active scaffold; E2/E3 runtime green |
 | `tracking_bytes`, `pending_restore_indices` | diagnostics now enumerate all physical pools/stacks | byte-counter, duplicate-index, compatibility, and conformance tests | existing trusted bodies updated; runtime green |
 | `compress_all_hot` | retired proof-era adapter remains external until proof cleanup; orphan-prefix repair was removed and the execution path does not call it | source call-site audit plus full runtime suites | superseded by `runtime_migrate_*`; no live call site |
@@ -837,6 +837,70 @@ open Hot, while Trail opens Trail.
 
 Existing unrelated trusted bodies remain governed by
 `doc/design/02-trust-boundary.md`; they are not silently absorbed here.
+
+### First formal milestone — unique Hot-only Defer (2026-09-14)
+
+The first post-lock executable prefix is verified in `src/vec.rs` against the
+closed, named `Vec::hot_defer_wf` projection. Its authoritative physical state is
+`hot_value_pool`/`hot_stack`; none of the new physical reconstruction proofs
+reads `diff_log`. The predicate includes:
+
+- unique-capture and Hot-only scope, with Trail and Cold stacks/pools empty;
+- exact Hot/ghost-frame/snapshot counts and zero-valued retained ghost
+  boundaries while the retired `full_trail` remains empty;
+- closed-header extents, `hot_stack[0].start == 0`, and
+  `hot_defer_end(top) == hot_value_pool.len()` for the writable top;
+- per-frame `saved_len == snapshots[i].len()`, top `active_saved_len`
+  alignment, per-stratum uniqueness, and `frame_inv_range` reconstruction;
+- the open capture-flag bridge over the top Hot pool slice, no stray set flags,
+  and explicit empty-history clauses.
+
+Verified named functions (each reported `1 verified, 0 errors` with
+`touch src/vec.rs` immediately before its function-scoped query):
+
+1. `lemma_frame_inv_range_capture_append`
+2. `lemma_frame_inv_range_set_captured`
+3. `lemma_frame_inv_range_set_outside`
+4. `lemma_hot_defer_start_monotone`
+5. `lemma_hot_defer_cell_eq_overlay`
+6. `hot_defer_capture_checked`
+7. `hot_defer_set_checked`
+8. `hot_defer_mark_checked`
+9. `hot_defer_restore_zero_checked`
+10. `hot_defer_restore_nonzero_checked`
+
+The real unique runtime branches call these cores: unique capture calls
+`hot_defer_capture_checked`; unique set calls `hot_defer_set_checked`;
+`Defer + ShrinkPolicy::Never` mark calls `hot_defer_mark_checked`; and a
+non-fused unique Hot-only restore (the Parallel protocol) dispatches target
+zero/nonzero to the corresponding checked restore core. InlineStore keeps its
+existing fused tag-clear replay path so proof wiring does not add a second scan.
+The outer protocol/mixed-tier dispatch functions remain `external_body` and are
+not counted as proof.
+
+Runtime evidence: `cargo test --test three_tier_runtime` passes 30/30, including
+`unique_defer_restores_surviving_prefix_and_zero`; `cargo test --test trail_vec`
+passes 5/5. The new test exercises Inline and Parallel, repeated unique
+capture, pop/regrow with nonmonotone saved lengths, four explicit Defer marks
+including an empty frame, three surviving-prefix restores, and target-zero
+retirement.
+
+Trust delta needed to make the execution-locked branch function-queryable:
+seven policy datatypes are transparent `external_type_specification`
+registrations; `Ratio` alone is opaque because its fields are private. Three new
+`external_body` markers are present relative to `44b8657`: `ExRatio`,
+`retained_closed_prefix`, and `hot_frame_run_count`. The two functions hide
+execution-only planner code that uses unsupported std APIs and carry no
+postconditions. `Vec::with_store_mode` and `Vec::with_store_policy` now verify,
+including empty unique-state establishment of `hot_defer_wf`; the pre-existing
+`with_store_policy` marker was removed. Net source counts are 96 default and
+101 with `literal-types`. No `admit` or `assume` exists in the new proof prefix.
+
+Remaining boundary: shrink-enabled Defer mark, `runtime_push`/`runtime_pop`,
+ApplyConfigured/ForceClosed conversion, and mixed Trail/Hot/Cold restore remain
+outside `hot_defer_wf`. General `wf` still describes the retired `diff_log`
+proof shadow and does not yet imply the new projection, so the external dispatch
+wrappers remain trusted until the next partition/refinement milestone.
 
 ## 9. Forbidden shortcuts
 

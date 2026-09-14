@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **49** (3 structs + 46 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
-| `literal-types` | **54** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **96** (4 structs + 92 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
+| `literal-types` | **101** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,13 +72,18 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. This crate has 50 default-build markers: 3 ContainerId + 16
-capacity/byte diagnostics and shrink helpers + the 5 `bplus_layout`
-bounds-elided array/slice primitives + `check_precondition` + `refuse` +
-`clone_key_exact` + `values_equal` + the debug ring-walk +
-`white_box_head` + the `ExIndexHasher` and `ExFoldHasher` registrations
-(5 more behind `literal-types`, for 55). The casts that were *eliminated* (the
-`IndexLike`/`DenseId` integer casts) are described in §3.
+boundary. The current execution-locked branch has 96 default-build markers:
+4 opaque structs and 92 functions. The permanent groups below remain the
+intended boundary; temporary three-tier Vec scaffolds are additionally owned by
+`doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
+milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
+Hot-only proof milestone. That milestone adds three parsing/runtime scaffolds
+(`ExRatio`, `retained_closed_prefix`, and `hot_frame_run_count`) and removes the
+pre-existing `Vec::with_store_policy` marker after proving policy construction;
+therefore the net source-derived counts are 96 default and 101 with
+`literal-types`. The 1 + 5 feature-gated axiom counts are unchanged. The casts
+that were *eliminated* (the `IndexLike`/`DenseId` integer casts) are described in
+§3.
 
 The groups differ in kind, and the distinction is the point of this chapter:
 
@@ -649,8 +654,12 @@ about, so a wrong checksum weakens a test rather than a proof.
 
 ## 4. Summary table
 
-All 50 default-build `external_body` markers plus the 1 default-build axiom
-(the `literal-types` additions are listed after):
+The table below catalogs the permanent and historically grouped trust items.
+The complete current source count is **96 default-build `external_body`
+markers plus 1 default-build axiom**; execution-first three-tier Vec markers not
+itemized here are enumerated in
+`doc/tasks/three-tier-frame-architecture-goal.md` §8. The `literal-types`
+additions are listed after the table.
 
 | # | Item | Group | Trusted because | Provable? |
 |---|---|---|---|---|
@@ -705,7 +714,7 @@ fuzz in `tests/compat_map.rs::canonical_key_model`.)
 
 Plus the Group E ordinary-Rust delegation shims tabulated in §3.5.
 
-**Bottom line.** Default build: 3 trusted-by-design `ContainerId` items
+**Bottom line (permanent grouped subset).** Default build: 3 trusted-by-design `ContainerId` items
 (permanent; equality reflection trusted, global freshness not proved, and
 finite distinctness behavior runtime-fuzzed), 12 capacity-introspection items
 (8 spec-free byte reporters
@@ -731,19 +740,17 @@ requirement (2) by construction, violation regressions pin the
 exclusions), and BitsF64 (raw-bit injective, the long-term float key;
 CanonicalF64's fold is a pinned production-parity decision, see
 key-model-tcb.md §float-semantics). Future key types must go through
-`declare_key_model_assumption!` (justified + auto-fuzzed axioms). The assumed-fact inventory of the default
-crate is therefore: `ContainerId::eq`'s equality reflection, the two shrink
-helpers' data preservation, `data_capacity_bits`'s `capacity >= len`,
-`clone_key_exact`'s clone identity, and the five `bplus_layout` primitives'
-agreement with their checked std forms: **ten** contract-carrying trusted
-statements. Each is either one line of exec code or (`arr_shift_up`) a length
-dispatch between the element loop and the `copy_within` its postcondition
-pins. No
-`assume`/`admit` anywhere in the verified modules. Within the
-`external_body` inventory, no larger algorithm is hidden:
-`arr_shift_up`'s length dispatch is the largest trusted body, and both of its
-arms restate the same postcondition. This statement does not cover the
-ordinary-Rust shims or the consumer proof algorithms listed above.
+`declare_key_model_assumption!` (justified + auto-fuzzed axioms). The permanent-boundary subset includes `ContainerId::eq`'s equality
+reflection, the two shrink helpers' data preservation,
+`data_capacity_bits`'s `capacity >= len`, `clone_key_exact`'s clone identity,
+and the five `bplus_layout` primitives' agreement with their checked std
+forms. The execution-first Vec contracts are additional temporary assumed
+facts and are tracked function-by-function in the three-tier task ledger; they
+must not be described as proved until their checked cores replace the outer
+markers. No `assume`/`admit` occurs in project sources. The first Hot-only
+milestone adds checked capture/set/mark/restore cores but removes no existing
+marker; its five-marker parsing delta and exact source counts are recorded
+above and in the task ledger.
 
 **Scope note.** "No `assume`/`admit`" is a claim about *this crate's project
 sources*. The sibling `abstract-domains` crate likewise has a project-local

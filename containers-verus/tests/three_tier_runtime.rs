@@ -1245,3 +1245,60 @@ fn adaptive_closed_accounting_and_mixed_cascade_report_are_exact() {
         (1, 0, 2, 14, 2)
     );
 }
+
+#[test]
+fn unique_defer_restores_surviving_prefix_and_zero() {
+    for kind in [StoreKind::Inline, StoreKind::Parallel] {
+        let mut v = V::new_kind_with_policy(kind, TierPolicy::restore_optimized());
+        for i in 0..4u32 {
+            v.try_push(i).unwrap();
+        }
+
+        let defer = MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer);
+        let root = v.try_mark_with(defer).unwrap();
+        v.set(1u32, 10);
+        v.set(1u32, 11); // repeated unique capture is a physical no-op
+        v.pop();
+        v.pop();
+        let middle = v.try_mark_with(defer).unwrap();
+        v.try_push(20).unwrap();
+        v.set(0u32, 9);
+        let empty = v.try_mark_with(defer).unwrap();
+        let newest = v.try_mark_with(defer).unwrap(); // closes an empty Hot frame
+        v.set(2u32, 30);
+
+        let hot = v.tier_stats();
+        assert_eq!(
+            (hot.trail_frames, hot.hot_frames, hot.cold_frames),
+            (0, 4, 0),
+            "{kind:?}"
+        );
+        assert_eq!(hot.hot_entries, 5, "{kind:?}");
+
+        v.try_restore(newest).unwrap();
+        assert_eq!(values(&v), vec![9, 11, 20], "{kind:?}");
+        assert_eq!(v.depth(), 3, "{kind:?}");
+
+        v.try_restore(empty).unwrap();
+        assert_eq!(values(&v), vec![9, 11, 20], "{kind:?}");
+        assert_eq!(v.depth(), 2, "{kind:?}");
+
+        v.try_restore(middle).unwrap();
+        assert_eq!(values(&v), vec![0, 11], "{kind:?}");
+        assert_eq!(v.depth(), 1, "{kind:?}");
+
+        v.try_restore(root).unwrap();
+        assert_eq!(values(&v), vec![0, 1, 2, 3], "{kind:?}");
+        assert_eq!(v.depth(), 0, "{kind:?}");
+        let physical = v.tier_stats();
+        assert_eq!(
+            (
+                physical.trail_frames,
+                physical.hot_frames,
+                physical.cold_frames
+            ),
+            (0, 0, 0),
+            "{kind:?}"
+        );
+    }
+}
