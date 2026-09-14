@@ -1,26 +1,26 @@
 # Nightshift goal: DiffStore-owned three-tier protocol and adaptive large-egraph study
 
-**Current status at `3126bad` plus the documented reclaim working tree:
-deterministic explicit-budget closed-history adaptive semantics BUILT; focused
-runtime and 1,024-case differential validation green; static VecP and aggregate
-baseline guards retained with no verified regression; `three_tier_v2`
-planner+execution and retain-versus-shrink rows MEASURED serially; the 2x
-ratios are not established as optimal automatic thresholds, so existing
-presets remain unchanged and explicit inputs remain required; live ingress
-switching UNIMPLEMENTED; proofs DEFERRED; E6 READY TO LOCK the explicit API and
-negative default decision.**
+**Completed at runtime lock `d116f76`: the DiffStore-owned three-tier protocol,
+88-row DynStore comparison, deterministic explicit-budget adaptive semantics,
+post-migration `ShrinkToFit` reclamation, focused runtime coverage, and the
+1,024-case differential matrix are BUILT, VALIDATED, and MEASURED. Static VecP
+and aggregate baseline guards have no verified regression. The measured data
+supports explicit pressure plus ratio/size gates, but does not establish 2x as
+an optimal universal threshold, so presets remain unchanged and callers supply
+budgets and ratios explicitly. Live ingress switching was evaluated and remains
+UNIMPLEMENTED; proofs remain DEFERRED.**
 
-The additive runtime follow-up introduces validated integer ratios,
-`AdaptiveInput`, `AdaptiveReport`, `Vec::apply_adaptive`, and
-`Vec::try_mark_adaptive`. It keeps DiffStore ingress immutable and performs only
-closed oldest-prefix Trail -> Hot -> Cold conversion after the replacement
-frame opens. The historical `three_tier_v1` measurements and negative
-benchmark-only conclusion remain valid for `c550112`; new built behavior and
-unmeasured v2 rows are appended to `three-tier-e5-measurement-a414090.md`.
-Allocator high-water data remains measurement-only and never drives policy.
+The additive runtime API provides validated integer ratios, `AdaptiveInput`,
+`AdaptiveReport`, `Vec::apply_adaptive`, and `Vec::try_mark_adaptive`. It keeps
+DiffStore ingress immutable and performs only closed oldest-prefix Trail → Hot
+→ Cold conversion after the replacement frame opens. The `three_tier_v1` and
+`three_tier_v2` timing, logical-memory, allocated-capacity, and high-water
+results are recorded in `three-tier-e5-measurement-a414090.md`. Allocator data
+remains measurement-only and never drives policy.
 
-Continue from the current uncommitted working tree on branch `d21-exec` at
-`a414090`; do not reset or discard the existing three-tier work. Use
+Execution began from `a414090` on `d21-exec`; milestone commits `c550112`,
+`c3bb5bd`, `3126bad`, and `d116f76` preserve the implementation, measurements,
+adaptive policy, and reclamation work. Use
 `containers-verus/doc/tasks/three-tier-frame-architecture-goal.md` and
 `containers-verus/doc/tasks/three-tier-e5-measurement-a414090.md` as the source
 of truth.

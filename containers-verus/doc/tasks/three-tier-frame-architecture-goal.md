@@ -1,6 +1,6 @@
 # Policy-driven three-tier frames: make it work, make it fast, then prove it
 
-**Status: E1–E5 BUILT, RUNTIME-VALIDATED, AND MEASURED — deterministic explicit-budget adaptive semantics are built at `3126bad`; explicit post-migration reclamation is measured; E6 can lock the explicit API and unchanged presets with a negative automatic-threshold decision.**
+**Status: E1–E6 EXECUTION LOCKED at `d116f76` — DiffStore-owned three tiers, explicit rollover/adaptive inputs, runtime validation, DynStore measurements, and post-migration reclamation are complete; presets remain unchanged because no universal automatic threshold was established; proof discharge is the next phase.**
 
 This is the controlling goal for replacing the dual-purpose hot stack on
 `d21-exec` after commit `a414090`. It supersedes the two-tier layout and proof
@@ -728,7 +728,7 @@ without an unexplained regression in another. Workload-specific tradeoffs MAY
 be accepted because policies are explicit; they MUST be recorded rather than
 hidden in one global default.
 
-### E6 — Algorithm and default-policy lock — LOCK CANDIDATE; REVISION PENDING
+### E6 — Algorithm and default-policy lock — LOCKED at `d116f76`
 
 Lock only when:
 
@@ -744,20 +744,20 @@ Lock only when:
 - DiffStore protocols, retention semantics, migration cadence, pool reclamation,
   and defaults are written as final decisions.
 
-The working tree satisfies the correctness, policy-matrix, measurement, and
-optimization criteria and is the execution **lock candidate**. The retained Vec
-formation residual and rejected bitmap shortcut are documented in the E5
-record. Formal lock is intentionally pending because no commit was requested;
-the lock revision must name the commit that records this working tree and the
-user's acceptance of the residual tradeoff.
+Runtime lock `d116f76` satisfies the correctness, policy-matrix, measurement,
+optimization, explicit-adaptive, and reclamation criteria. The static Vec hot
+path is at baseline; DynStore protocol tradeoffs, irreducible budget floors, and
+rejected automatic-threshold claims are documented in the E5 record. The lock
+keeps existing presets unchanged and exposes budgets, ratios, rollover, and
+reclamation explicitly rather than guessing one universal policy.
 
 After lock, execution changes require a reproduced correctness defect or a
 measured performance regression and MUST record why the lock reopened.
 
 ## 7. Deferred proof architecture
 
-Proof design MAY be documented before E6, but implementation of the proof
-campaign MUST wait for executable lock.
+Proof design was documented before E6; implementation of the proof campaign
+starts only after the executable lock recorded above.
 
 The canonical ghost model is one unique first-write abstraction per logical
 frame:

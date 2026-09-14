@@ -1161,3 +1161,26 @@ peak-memory optimization.
 post-migration reclamation is built and measured; the threshold study ends with
 a documented negative default decision. E6 may lock the current explicit API
 and unchanged presets, while live ingress switching and proofs remain deferred.
+
+## Final post-lock validation and static hot-path guard
+
+After runtime lock `d116f76`, the complete formatting, benchmark compilation,
+default and `compat-all,literal-types` containers-verus suites, 1,024-case
+release policy matrix, full 1,024-case release conformance suite, and egraph
+consumer suite all passed. `containers/` remained unchanged and no proof
+implementation was modified.
+
+The static VecP hot-path guard was rerun against `pre_three_tier_a414090` after
+adaptive reclamation:
+
+| row | final interval | baseline-relative change interval |
+|---|---:|---:|
+| production VecP, 1K | 4.5031–4.5318 us | -1.6013% to -0.8352% |
+| verified VecP, 1K | 3.8622–3.9038 us | -1.3253% to -0.0490% |
+| production VecP, 1M | 746.06–753.14 us | -3.5334% to -2.4412% |
+| verified VecP, 1M | 730.91–742.53 us | -10.606% to -8.8545% |
+
+The most-used static first-capture path therefore remains at baseline after the
+adaptive additions. The final decision is unchanged: explicit adaptive budgets,
+ratios, and reclamation are shipped as policy inputs; no universal automatic
+threshold or live DynStore ingress switch is claimed from the current data.
