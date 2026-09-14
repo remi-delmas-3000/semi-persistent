@@ -3304,11 +3304,6 @@ where
             frame.start -= cut;
             frame.end -= cut;
         }
-        if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
-            self.hot_value_pool.shrink_to_fit();
-            self.cold_value_pool.shrink_to_fit();
-            self.cold_index_runs.shrink_to_fit();
-        }
     }
 
     /// Migrate an oldest closed unique prefix to direct-restorable runs.
@@ -3346,6 +3341,25 @@ where
             }
         }
         self.runtime_migrate_hot_count(count);
+    }
+
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    fn runtime_reclaim_adaptive_tier_capacities(&mut self) {
+        if !matches!(
+            self.tier_policy.cold_reclaim,
+            crate::tier_policy::ReclaimPolicy::ShrinkToFit
+        ) {
+            return;
+        }
+        self.trail_value_pool.shrink_to_fit();
+        self.trail_stack.shrink_to_fit();
+        self.hot_value_pool.shrink_to_fit();
+        self.hot_stack.shrink_to_fit();
+        self.cold_value_pool.shrink_to_fit();
+        self.cold_index_runs.shrink_to_fit();
+        self.cold_stack.shrink_to_fit();
     }
 
     #[verifier::external_body]
@@ -3480,6 +3494,11 @@ where
 
         report.inspected_frames = report.inspected_trail_frames + report.inspected_hot_frames;
         report.migrated_frames = report.migrated_trail_frames + report.migrated_hot_frames;
+        if report.migrated_frames != 0 {
+            // Reclaim only after both plans finish so a Trail -> Hot -> Cold
+            // cascade does not shrink and immediately regrow intermediate pools.
+            self.runtime_reclaim_adaptive_tier_capacities();
+        }
         report.logical_bytes_after = self.runtime_closed_history_bytes();
         report.budget_unmet_bytes = report
             .logical_bytes_after

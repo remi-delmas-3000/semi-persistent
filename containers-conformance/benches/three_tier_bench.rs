@@ -1444,13 +1444,21 @@ fn adaptive_v2_input(budget: usize) -> verus::AdaptiveInput {
     }
 }
 
+fn adaptive_v2_policy(reclaim: ReclaimPolicy) -> TierPolicy {
+    TierPolicy {
+        cold_reclaim: reclaim,
+        ..unbounded_policy()
+    }
+}
+
 fn adaptive_v2_fixture<C: MeasuredMatrixColumn>(
     writes: usize,
     distinct: usize,
     frames: usize,
     singleton_runs: bool,
+    reclaim: ReclaimPolicy,
 ) -> C {
-    let mut v = build_matrix::<C>(unbounded_policy());
+    let mut v = build_matrix::<C>(adaptive_v2_policy(reclaim));
     mark_deferred(&mut v);
     for frame in 0..frames {
         if singleton_runs {
@@ -1473,10 +1481,11 @@ fn bench_matrix_adaptive_v2<C: MeasuredMatrixColumn>(
     frames: usize,
     singleton_runs: bool,
     budget: usize,
+    reclaim: ReclaimPolicy,
 ) {
     let input = adaptive_v2_input(budget);
     b.iter_batched_ref(
-        || adaptive_v2_fixture::<C>(writes, distinct, frames, singleton_runs),
+        || adaptive_v2_fixture::<C>(writes, distinct, frames, singleton_runs, reclaim),
         |v| black_box(v.apply_adaptive(input)),
         BatchSize::LargeInput,
     );
@@ -1492,6 +1501,7 @@ macro_rules! register_dyn_adaptive_v2 {
                 $frames,
                 $singletons,
                 $budget,
+                ReclaimPolicy::RetainCapacity,
             )
         });
         $group.bench_function("dyn_parallel", |b| {
@@ -1502,6 +1512,7 @@ macro_rules! register_dyn_adaptive_v2 {
                 $frames,
                 $singletons,
                 $budget,
+                ReclaimPolicy::RetainCapacity,
             )
         });
         $group.bench_function("dyn_trail", |b| {
@@ -1512,6 +1523,45 @@ macro_rules! register_dyn_adaptive_v2 {
                 $frames,
                 $singletons,
                 $budget,
+                ReclaimPolicy::RetainCapacity,
+            )
+        });
+    };
+}
+
+macro_rules! register_dyn_adaptive_v2_shrink {
+    ($group:ident, $writes:expr, $distinct:expr, $frames:expr, $singletons:expr, $budget:expr) => {
+        $group.bench_function("dyn_inline_shrink", |b| {
+            bench_matrix_adaptive_v2::<DynInline>(
+                b,
+                $writes,
+                $distinct,
+                $frames,
+                $singletons,
+                $budget,
+                ReclaimPolicy::ShrinkToFit,
+            )
+        });
+        $group.bench_function("dyn_parallel_shrink", |b| {
+            bench_matrix_adaptive_v2::<DynParallel>(
+                b,
+                $writes,
+                $distinct,
+                $frames,
+                $singletons,
+                $budget,
+                ReclaimPolicy::ShrinkToFit,
+            )
+        });
+        $group.bench_function("dyn_trail_shrink", |b| {
+            bench_matrix_adaptive_v2::<DynTrail>(
+                b,
+                $writes,
+                $distinct,
+                $frames,
+                $singletons,
+                $budget,
+                ReclaimPolicy::ShrinkToFit,
             )
         });
     };
@@ -1548,6 +1598,16 @@ fn bench_v2_adaptive(c: &mut Criterion) {
             "three_tier_v2/large/W64_U16_R1_frames256/budget_{budget_name}"
         ));
         register_dyn_adaptive_v2!(large, V1_TRACE_WRITES, 16, V1_LARGE_FRAMES, false, budget);
+        if budget != usize::MAX {
+            register_dyn_adaptive_v2_shrink!(
+                large,
+                V1_TRACE_WRITES,
+                16,
+                V1_LARGE_FRAMES,
+                false,
+                budget
+            );
+        }
         large.finish();
     }
 }
@@ -1559,14 +1619,15 @@ fn report_adaptive_v2_window<C: MeasuredMatrixColumn>(
     frames: usize,
     singleton_runs: bool,
     budget: usize,
+    reclaim: ReclaimPolicy,
 ) {
-    let mut v = adaptive_v2_fixture::<C>(writes, distinct, frames, singleton_runs);
+    let mut v = adaptive_v2_fixture::<C>(writes, distinct, frames, singleton_runs, reclaim);
     let before_tracking = v.tracking_bytes();
     let before_total = v.total_bytes();
     let mut report = verus::AdaptiveReport::default();
     let window = allocation_window(|| report = v.apply_adaptive(adaptive_v2_input(budget)));
     eprintln!(
-        "three_tier_v2_adaptive label={label} budget={budget} report={report:?} stats={:?} before_tracking_bytes={before_tracking} after_tracking_bytes={} before_total_bytes={before_total} after_total_bytes={} allocator_before_bytes={} allocator_after_bytes={} allocator_peak_bytes={} allocator_transient_peak_bytes={}",
+        "three_tier_v2_adaptive label={label} budget={budget} reclaim={reclaim:?} report={report:?} stats={:?} before_tracking_bytes={before_tracking} after_tracking_bytes={} before_total_bytes={before_total} after_total_bytes={} allocator_before_bytes={} allocator_after_bytes={} allocator_peak_bytes={} allocator_transient_peak_bytes={}",
         v.stats(),
         v.tracking_bytes(),
         v.total_bytes(),
@@ -1590,22 +1651,6 @@ fn report_v2_diagnostics() {
             4_096,
         ),
         ("singleton_budget_4096", WRITES, WRITES, 1, true, 4_096),
-        (
-            "large_budget_65536",
-            V1_TRACE_WRITES,
-            16,
-            V1_LARGE_FRAMES,
-            false,
-            65_536,
-        ),
-        (
-            "large_budget_32768",
-            V1_TRACE_WRITES,
-            16,
-            V1_LARGE_FRAMES,
-            false,
-            32_768,
-        ),
     ] {
         report_adaptive_v2_window::<DynInline>(
             &format!("{label}_dyn_inline"),
@@ -1614,6 +1659,7 @@ fn report_v2_diagnostics() {
             frames,
             singleton_runs,
             budget,
+            ReclaimPolicy::RetainCapacity,
         );
         report_adaptive_v2_window::<DynParallel>(
             &format!("{label}_dyn_parallel"),
@@ -1622,6 +1668,7 @@ fn report_v2_diagnostics() {
             frames,
             singleton_runs,
             budget,
+            ReclaimPolicy::RetainCapacity,
         );
         report_adaptive_v2_window::<DynTrail>(
             &format!("{label}_dyn_trail"),
@@ -1630,7 +1677,44 @@ fn report_v2_diagnostics() {
             frames,
             singleton_runs,
             budget,
+            ReclaimPolicy::RetainCapacity,
         );
+    }
+
+    for budget in [65_536, 32_768] {
+        for (reclaim_name, reclaim) in [
+            ("retain", ReclaimPolicy::RetainCapacity),
+            ("shrink", ReclaimPolicy::ShrinkToFit),
+        ] {
+            let label = format!("large_budget_{budget}_{reclaim_name}");
+            report_adaptive_v2_window::<DynInline>(
+                &format!("{label}_dyn_inline"),
+                V1_TRACE_WRITES,
+                16,
+                V1_LARGE_FRAMES,
+                false,
+                budget,
+                reclaim,
+            );
+            report_adaptive_v2_window::<DynParallel>(
+                &format!("{label}_dyn_parallel"),
+                V1_TRACE_WRITES,
+                16,
+                V1_LARGE_FRAMES,
+                false,
+                budget,
+                reclaim,
+            );
+            report_adaptive_v2_window::<DynTrail>(
+                &format!("{label}_dyn_trail"),
+                V1_TRACE_WRITES,
+                16,
+                V1_LARGE_FRAMES,
+                false,
+                budget,
+                reclaim,
+            );
+        }
     }
 }
 

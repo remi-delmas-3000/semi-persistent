@@ -701,6 +701,66 @@ fn close_deferred(v: &mut V) {
         .unwrap();
 }
 
+fn adaptive_reclaim_fixture(kind: StoreKind, reclaim: ReclaimPolicy) -> V {
+    let mut v = V::new_kind_with_policy(
+        kind,
+        TierPolicy {
+            trail: TierLimit::Unbounded,
+            hot: TierLimit::Unbounded,
+            cold_reclaim: reclaim,
+        },
+    );
+    for i in 0..64u32 {
+        v.try_push(i).unwrap();
+    }
+    close_deferred(&mut v);
+    for frame in 0..256u32 {
+        for write in 0..64u32 {
+            let index = write % 16;
+            v.set(index, (frame << 16) ^ write);
+        }
+        close_deferred(&mut v);
+    }
+    v
+}
+
+#[test]
+fn adaptive_shrink_reclaims_migrated_tier_capacities_without_changing_report() {
+    for kind in [StoreKind::Trail, StoreKind::Inline, StoreKind::Parallel] {
+        let mut retained = adaptive_reclaim_fixture(kind, ReclaimPolicy::RetainCapacity);
+        let retained_before = retained.tracking_bytes();
+        let retained_report = retained.apply_adaptive(adaptive_input(0));
+        let retained_after = retained.tracking_bytes();
+
+        let mut shrunk = adaptive_reclaim_fixture(kind, ReclaimPolicy::ShrinkToFit);
+        let no_op_before = shrunk.tracking_bytes();
+        let no_op = shrunk.apply_adaptive(adaptive_input(usize::MAX));
+        assert_eq!(no_op.inspected_frames, 0, "kind {kind:?}");
+        assert_eq!(shrunk.tracking_bytes(), no_op_before, "kind {kind:?}");
+
+        let shrink_before = shrunk.tracking_bytes();
+        let shrink_report = shrunk.apply_adaptive(adaptive_input(0));
+        let shrink_after = shrunk.tracking_bytes();
+
+        assert_eq!(shrink_report, retained_report, "kind {kind:?}");
+        assert!(shrink_report.migrated_frames > 0, "kind {kind:?}");
+        assert_eq!(shrunk.tier_stats(), retained.tier_stats(), "kind {kind:?}");
+        assert_eq!(values(&shrunk), values(&retained), "kind {kind:?}");
+        assert!(
+            retained_after > retained_before,
+            "RetainCapacity should preserve vacated pools while allocating the destination, kind {kind:?}: {retained_before} -> {retained_after}"
+        );
+        assert!(
+            shrink_after <= shrink_before,
+            "ShrinkToFit should not increase tracking capacity, kind {kind:?}: {shrink_before} -> {shrink_after}"
+        );
+        assert!(
+            retained_after.saturating_sub(shrink_after) >= 1024,
+            "ShrinkToFit should materially reclaim deterministic fixture capacity, kind {kind:?}: retain={retained_after}, shrink={shrink_after}"
+        );
+    }
+}
+
 #[test]
 fn adaptive_ratio_validation_and_budget_boundaries_are_exact() {
     use semi_persistent_containers_verus::Ratio;

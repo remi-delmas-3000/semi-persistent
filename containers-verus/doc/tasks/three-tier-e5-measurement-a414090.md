@@ -1025,3 +1025,139 @@ within the noise threshold or faster than the saved baseline; no adaptive
 hot-path regression was observed. This closes the static regression-evidence
 gap only. The new `three_tier_v2` adaptive rows remain untimed, so adaptive
 confidence intervals and final W/U/R threshold selection are still deferred.
+
+## Adaptive memory-pressure completion (`3126bad` plus reclaim working tree)
+
+This stage completed the previously deferred `three_tier_v2` campaign and added
+an explicit `ReclaimPolicy::ShrinkToFit` comparison for the 256-frame large
+fixture. The runtime change is intentionally narrower than the logical planner:
+a migrated explicit adaptive pass shrinks the seven Trail/Hot/Cold
+payload/header/run vectors once, after Trail and Hot execution both finish.
+`RetainCapacity`, budget-satisfied no-ops, `ShrinkPolicy`, rollover, and every
+write path are unchanged. Allocator observations remain diagnostics and are not
+adaptive inputs.
+
+The campaign ran alone, with the environment controls unset:
+
+```text
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- \
+  'three_tier_v2' --output-format bencher                 passed
+
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- \
+  'three_tier_v2'                                         passed
+```
+
+Criterion used 10 samples, 250 ms warm-up, and 500 ms measurement. The second
+serial pass supplied these 95% time intervals; the middle value is Criterion's
+point estimate. Existing unsuffixed large rows are `RetainCapacity` and retain
+their stable IDs. The six `_shrink` rows are new.
+
+| v2 row | 95% time interval (point) |
+|---|---:|
+| high-duplicates W512/U32/R1, budget 4096, Dyn Inline | 6.2392–7.9054 ns (6.7139 ns) |
+| high-duplicates W512/U32/R1, budget 4096, Dyn Parallel | 6.2454–7.3111 ns (6.6539 ns) |
+| high-duplicates W512/U32/R1, budget 4096, Dyn Trail | 3.6291–3.8074 us (3.6973 us) |
+| high-duplicates W512/U32/R1, budget 256, Dyn Inline | 307.42–314.86 ns (310.60 ns) |
+| high-duplicates W512/U32/R1, budget 256, Dyn Parallel | 300.52–304.18 ns (301.83 ns) |
+| high-duplicates W512/U32/R1, budget 256, Dyn Trail | 3.9240–3.9948 us (3.9584 us) |
+| unique contiguous W512/U512/R1, budget 4096, Dyn Inline | 3.4155–3.4323 us (3.4226 us) |
+| unique contiguous W512/U512/R1, budget 4096, Dyn Parallel | 3.4494–3.4628 us (3.4577 us) |
+| unique contiguous W512/U512/R1, budget 4096, Dyn Trail | 5.9106–5.9467 us (5.9233 us) |
+| singleton W512/U512/R512, budget 4096, Dyn Inline | 379.67–389.23 ns (385.64 ns) |
+| singleton W512/U512/R512, budget 4096, Dyn Parallel | 387.56–416.22 ns (405.34 ns) |
+| singleton W512/U512/R512, budget 4096, Dyn Trail | 868.06–873.88 ns (870.12 ns) |
+| large W64/U16/R1 x256, unbounded, Dyn Inline | 98.367–103.24 ns (101.10 ns) |
+| large W64/U16/R1 x256, unbounded, Dyn Parallel | 97.915–100.40 ns (99.278 ns) |
+| large W64/U16/R1 x256, unbounded, Dyn Trail | 94.858–99.680 ns (98.197 ns) |
+| large, budget 65536, Dyn Inline retain | 6.6937–6.9972 us (6.8930 us) |
+| large, budget 65536, Dyn Parallel retain | 6.7635–7.1490 us (6.9987 us) |
+| large, budget 65536, Dyn Trail retain | 108.53–109.02 us (108.79 us) |
+| large, budget 65536, Dyn Inline shrink | 6.8392–6.9789 us (6.9287 us) |
+| large, budget 65536, Dyn Parallel shrink | 6.9906–7.1714 us (7.0907 us) |
+| large, budget 65536, Dyn Trail shrink | 108.40–108.56 us (108.46 us) |
+| large, budget 32768, Dyn Inline retain | 21.200–21.805 us (21.556 us) |
+| large, budget 32768, Dyn Parallel retain | 21.339–23.494 us (22.588 us) |
+| large, budget 32768, Dyn Trail retain | 123.22–123.89 us (123.60 us) |
+| large, budget 32768, Dyn Inline shrink | 21.529–21.946 us (21.714 us) |
+| large, budget 32768, Dyn Parallel shrink | 21.390–22.083 us (21.796 us) |
+| large, budget 32768, Dyn Trail shrink | 123.53–124.23 us (123.77 us) |
+
+The large diagnostic reports are policy-independent logically. `W` is zero for
+Inline/Parallel because those stores enter directly into Hot; their fixture
+shape is still W64/U16/R1 per frame. Trail reports count chronology during its
+first stage.
+
+| budget | ingress | report W/U/R | migrated Trail/Hot | closed logical before→after | unmet |
+|---:|---|---:|---:|---:|---:|
+| 65536 | Inline | 0/960/60 | 0/60 | 71680→65440 | 0 |
+| 65536 | Parallel | 0/960/60 | 0/60 | 71680→65440 | 0 |
+| 65536 | Trail | 16384/4096/60 | 256/60 | 268288→65440 | 0 |
+| 32768 | Inline | 0/4096/256 | 0/256 | 71680→45056 | 12288 |
+| 32768 | Parallel | 0/4096/256 | 0/256 | 71680→45056 | 12288 |
+| 32768 | Trail | 16384/4096/256 | 256/256 | 268288→45056 | 12288 |
+
+Capacity-based tracking and the counting allocator produced the following exact
+untimed rows. Allocator columns are requested live bytes
+`before→after / high-water / transient-above-max-boundary`; they exclude
+allocator metadata and RSS.
+
+| budget | ingress/policy | tracking before→after | allocator before→after / peak / transient |
+|---:|---|---:|---:|
+| 65536 | Inline retain | 77824→89088 | 246714→257978 / 274874 / 16896 |
+| 65536 | Inline shrink | 77824→65464 | 246714→234354 / 274874 / 28160 |
+| 65536 | Parallel retain | 77824→89088 | 182202→193466 / 210362 / 16896 |
+| 65536 | Parallel shrink | 77824→65464 | 182202→169842 / 210362 / 28160 |
+| 65536 | Trail retain | 274432→357376 | 377786→460730 / 522170 / 61440 |
+| 65536 | Trail shrink | 274432→65464 | 377786→168818 / 522170 / 144384 |
+| 32768 | Inline retain | 77824→122880 | 246714→291770 / 363450 / 71680 |
+| 32768 | Inline shrink | 77824→45080 | 246714→213970 / 363450 / 116736 |
+| 32768 | Parallel retain | 77824→122880 | 182202→227258 / 298938 / 71680 |
+| 32768 | Parallel shrink | 77824→45080 | 182202→149458 / 298938 / 116736 |
+| 32768 | Trail retain | 274432→391168 | 377786→494522 / 567226 / 72704 |
+| 32768 | Trail shrink | 274432→45080 | 377786→148434 / 567226 / 189440 |
+
+`ShrinkToFit` therefore fixes the retained-allocation inversion: for example,
+Trail at 65536 keeps the same logical 268288→65440 report while post-operation
+tracking changes from 357376 under retain to 65464 under shrink. At 32768 all
+three ingress kinds finish at 45080 tracking bytes under shrink, versus 122880
+for retained unique ingress and 391168 for retained Trail. Shrinking does not
+lower the operation high-water because destination and scratch allocations
+occur before final reclamation; its lower final boundary makes the reported
+transient-above-boundary value larger. This is a retained-memory result, not a
+peak-memory optimization.
+
+### Threshold decision and limitations
+
+- The measurements support rejecting W/U=1 Trail conversion and accepting the
+  measured W/U=4 and W/U=16 duplicate-heavy cases. They do **not** isolate the
+  exact 2x W/U boundary, so 2x remains a conservative explicit input used by
+  this study, not a measured optimum or automatic default.
+- They support rejecting U/R=1 singleton conversion and accepting measured
+  U/R=16, U/R=32, and U/R=512 locality. They do **not** isolate the exact 2x
+  U/R boundary either.
+- A requested budget is irreducible when all eligible history is already Cold
+  or the oldest next transition fails its ratio/projected-byte gate. Concrete
+  cases are 304 bytes against budget 256 (48 unmet), 4144 against 4096 (48
+  unmet), and the fully Cold large shape at 45056 against 32768 (12288 unmet).
+  Unique Trail and singleton Hot blockers remain at 8216 against 4096 (4120
+  unmet) rather than forcing a harmful transition.
+- No default automatic threshold is justified. The study covers deterministic
+  container fixtures, not full large egraphs; it samples 1x versus 4x/16x or
+  higher rather than the 2x boundaries; planner/execution time ranges from
+  nanosecond no-ops to roughly 123 us; and final shrinking trades retained
+  capacity for no reduction in allocator high-water. Keep ratios and budgets
+  explicit and keep `RetainCapacity` as the existing preset behavior.
+- Requested-byte allocator counters are process-wide and exclude metadata/RSS;
+  only operation deltas and high-water windows are interpreted. `shrink_to_fit`
+  requests capacity release but allocator RSS return is allocator/platform
+  dependent. Tracking-byte tests use vector capacities, not allocator metadata.
+- This remains a 256-frame container microbenchmark. It does not measure future
+  writes that might reuse retained capacity, full-egraph end-to-end benefit,
+  live ingress switching, or proof refinement.
+
+**Completion status:** adaptive planner/execution behavior is measured; explicit
+post-migration reclamation is built and measured; the threshold study ends with
+a documented negative default decision. E6 may lock the current explicit API
+and unchanged presets, while live ingress switching and proofs remain deferred.

@@ -1,6 +1,6 @@
 # Policy-driven three-tier frames: make it work, make it fast, then prove it
 
-**Status: E1–E4 BUILT AND RUNTIME-VALIDATED — E5 historical measurements retained; deterministic explicit-budget adaptive semantics BUILT at `c3bb5bd` working tree — E6 REOPENED pending next-stage threshold measurement and a recorded revision.**
+**Status: E1–E5 BUILT, RUNTIME-VALIDATED, AND MEASURED — deterministic explicit-budget adaptive semantics are built at `3126bad`; explicit post-migration reclamation is measured; E6 can lock the explicit API and unchanged presets with a negative automatic-threshold decision.**
 
 This is the controlling goal for replacing the dual-purpose hot stack on
 `d21-exec` after commit `a414090`. It supersedes the two-tier layout and proof
@@ -200,8 +200,9 @@ enum TierLimit {
 struct TierPolicy {
     trail: TierLimit,
     hot: TierLimit,
-    // Cold is the terminal in-memory tier. Its capacity/reclaim policy is
-    // independent; disk spill is outside this goal.
+    // Capacity retention is independent of representation selection. An
+    // explicit adaptive migration may reclaim every Trail/Hot/Cold pool after
+    // both stages complete; disk spill is outside this goal.
     cold_reclaim: ReclaimPolicy,
 }
 ```
@@ -220,6 +221,13 @@ for automatic migration. Required semantics:
   changing representation meanings.
 - Budget changes MAY affect future migration at a mark or explicit policy
   application. They never change the store's ingress protocol.
+- `ReclaimPolicy::RetainCapacity` preserves vacated allocations. When an
+  explicit adaptive pass migrates at least one frame under `ShrinkToFit`, it
+  MUST reclaim unused capacity from all Trail, Hot, and Cold payload/header/run
+  pools once after both migration stages. Reclamation MUST NOT alter logical
+  planning, reports, tier ownership, values, or token semantics.
+- Reclamation is not a pressure signal: it MUST NOT read ambient allocator
+  state, add per-write work, or merge with `ShrinkPolicy` or rollover.
 
 ### 2.6 Static ingress and per-mark rollover API
 
@@ -815,7 +823,7 @@ Update this table in the same change that adds or removes a marker.
 | `runtime_apply_configured_rollover`, `runtime_rollover_on_mark`, `runtime_push_frame`, `push_frame_with_options`, `mark_with_options`; wrappers `Vec::push_frame`, `Vec::mark`, `Vec::try_mark_with` | preserve thresholded store/log shrink, close selected ingress, open one empty frame, then defer/apply/force only closed Trail -> Hot -> Cold prefixes | shrink-capacity, Defer/configured/forced-edge, empty-frame, all-tier restore, legacy cadence, and SyncGroup suites | active scaffold; E1-E3 runtime green |
 | `runtime_trail_shape`, `runtime_migrate_trail_count`, `runtime_execute_trail_plan`, `runtime_migrate_trail`, `flush_trail` | oldest closed-prefix statistics, deterministic sort/dedupe first-capture execution, reusable accepted-frame plans, and pool rebasing precede refinement theorem | zero/frame/entry/byte/adaptive/unbounded boundary tests | active scaffold; E2 runtime green |
 | `runtime_hot_shape`, `runtime_migrate_hot_count`, `runtime_execute_hot_plan`, `runtime_migrate_hot`, `compress_hot` | exact U/R statistics, reusable sorted accepted-frame plans, unique-to-run conversion, and zero-budget path precede proof lock | clustered/singleton runs, zero hot budget, and legacy compression tests | active scaffold; E3 runtime green |
-| `runtime_closed_history_bytes`, `runtime_apply_adaptive`, `apply_adaptive`, `try_mark_adaptive` | exact closed-only logical byte planning and execution are locked by runtime evidence before refinement proof; ratios and budgets are explicit call inputs | exact boundary, duplicate/locality pass/fail, empty/blocker/cascade/unmet, promotion, all-ingress, token, and policy-matrix tests | active scaffold; adaptive runtime green, threshold measurement pending |
+| `runtime_closed_history_bytes`, `runtime_reclaim_adaptive_tier_capacities`, `runtime_apply_adaptive`, `apply_adaptive`, `try_mark_adaptive` | exact closed-only logical byte planning, two-stage execution, and post-migration capacity-only reclamation are locked by runtime evidence before refinement proof; ratios and budgets are explicit call inputs | exact boundary, duplicate/locality pass/fail, empty/blocker/cascade/unmet, retain-versus-shrink tracking, promotion, all-ingress, token, and policy-matrix tests | active scaffold; adaptive runtime and serial threshold/memory measurement green |
 | `runtime_apply_tier_policy`, `apply_tier_policy` | policy dispatch and reclamation are executable-first | immediate policy tightening and legacy environment-lever tests | active scaffold; E2/E3 runtime green |
 | `runtime_begin_restore`, `runtime_restore_frame`; wrapper `Vec::restore_frame` | newest-to-oldest trail/hot/cold orchestration precedes telescope proof | all-tier targets, deep unwind, nonmonotone lengths, conformance suite | active scaffold; E3 runtime green |
 | `runtime_promote_survivor` | survivor must become selected ingress without changing live values | hot/cold promotion and promote-write-remigrate-restore regression | active scaffold; E2/E3 runtime green |
@@ -863,12 +871,12 @@ Existing unrelated trusted bodies remain governed by
 | three DiffStore ingress protocols | runtime tests for static and dynamic Inline/Parallel/Trail | BUILT — focused and compatibility suites green |
 | arbitrary per-tier buffering | zero/finite/unbounded policy tests | BUILT — zero/finite/adaptive/unbounded boundaries green |
 | trail-only SMT profile | differential traces and end-to-end benchmark | MEASURED — see E5 record |
-| adaptive equality-saturation profile | explicit closed-history budgets, memory/restore traces, and benchmark | BUILT — deterministic W/U/R planner and v2 rows; final thresholds deferred to next-stage measurement |
+| adaptive equality-saturation profile | explicit closed-history budgets, memory/restore traces, and benchmark | MEASURED — deterministic W/U/R planner, serial v2 rows, retained/high-water evidence, and negative automatic-threshold decision recorded in E5 |
 | direct-unique restore profile | direct-compression traces and benchmark | MEASURED — see E5 record |
 | correct conversions and promotions | boundary tests + arbitrary traces | BUILT — cross-tier and promote/write/remigrate regression green |
 | all-store policy-matrix campaign | retained proptest artifacts | BUILT — 1,024-case complete matrix and full conformance gate green |
 | end-to-end performance record | Criterion before/after/control tables | MEASURED AND OPTIMIZED — see E5 record |
-| optimized algorithm and defaults | profiles, tradeoffs, lock revision | REOPENED — explicit-budget behavior built; next-stage measurements must lock thresholds and revision |
+| optimized algorithm and defaults | profiles, tradeoffs, lock revision | READY TO LOCK — explicit budgets/ratios and reclaim policy retained; serial data does not justify a default automatic threshold or preset change |
 | complete proof plan against locked code | invariant and theorem dependency graph | DESIGNED IN OUTLINE |
 | discharged proof scaffolds | full Verus and trust-surface gates | DEFERRED |
 

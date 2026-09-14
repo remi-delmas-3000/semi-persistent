@@ -72,12 +72,12 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. This crate has 49 default-build markers: 3 ContainerId + 15
+boundary. This crate has 50 default-build markers: 3 ContainerId + 16
 capacity/byte diagnostics and shrink helpers + the 5 `bplus_layout`
 bounds-elided array/slice primitives + `check_precondition` + `refuse` +
 `clone_key_exact` + `values_equal` + the debug ring-walk +
 `white_box_head` + the `ExIndexHasher` and `ExFoldHasher` registrations
-(5 more behind `literal-types`, for 54). The casts that were *eliminated* (the
+(5 more behind `literal-types`, for 55). The casts that were *eliminated* (the
 `IndexLike`/`DenseId` integer casts) are described in §3.
 
 The groups differ in kind, and the distinction is the point of this chapter:
@@ -649,7 +649,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 
 ## 4. Summary table
 
-All 49 default-build `external_body` markers plus the 1 default-build axiom
+All 50 default-build `external_body` markers plus the 1 default-build axiom
 (the `literal-types` additions are listed after):
 
 | # | Item | Group | Trusted because | Provable? |
@@ -664,6 +664,7 @@ All 49 default-build `external_body` markers plus the 1 default-build axiom
 | 8 | `ParallelStore::heap_bytes` | B | same | partially |
 | 9 | `InlineStore::heap_bytes` | B | same | partially |
 | 10 | `shrink_vec_capacity` | B | `Vec::capacity`/`shrink_to` unmodeled; contract = element sequence unchanged (std-documented) | when vstd specs capacity ops |
+| 10a | `Vec::runtime_reclaim_adaptive_tier_capacities` | B | all-seven-pool `shrink_to_fit` is unmodeled; no `ensures`, and its only caller is the external adaptive runtime body | when vstd specs capacity ops |
 | 11 | `shrink_aov_capacity` | B | same (AppendOnlyVec variant formula) | same |
 | 11a | `ListArena::tracking_bytes` | B | capacity + `size_of` unmodeled; no `ensures`; forwards to the two inner vecs | partially |
 | 11b | `ListArena::total_bytes` | B | same | partially |
@@ -706,11 +707,12 @@ Plus the Group E ordinary-Rust delegation shims tabulated in §3.5.
 
 **Bottom line.** Default build: 3 trusted-by-design `ContainerId` items
 (permanent; equality reflection trusted, global freshness not proved, and
-finite distinctness behavior runtime-fuzzed), 11 capacity-introspection items
+finite distinctness behavior runtime-fuzzed), 12 capacity-introspection items
 (8 spec-free byte reporters
 (production-formula parity; `tracking_bytes` differential-tested exactly,
 store reporters formula-level only), 2 contract-carrying shrink
-helpers, and `data_capacity_bits`), 5 bounds-elided array/slice primitives
+helpers, 1 contract-free adaptive all-tier shrink helper, and
+`data_capacity_bits`), 5 bounds-elided array/slice primitives
 (§2d: each contract restates a documented std behavior, fuzzed and
 property-tested against the checked form), 2 runtime-trap primitives (`check_precondition`, load-bearing,
 body is a one-line panic; `refuse`, diverging and contract-free), 1 key-model projection (`clone_key_exact`, no

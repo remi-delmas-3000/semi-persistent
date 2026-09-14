@@ -45,12 +45,14 @@ pub enum TierLimit {
     Adaptive,
 }
 
-/// Capacity treatment for terminal cold pools after suffix truncation.
+/// Capacity treatment for history pools after eligible migration or restore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReclaimPolicy {
     /// Preserve allocations for reuse.
     RetainCapacity,
-    /// Release unused capacity after migration or restore.
+    /// Release unused capacity after migration or restore. An explicit
+    /// adaptive pass that migrates frames reclaims all Trail, Hot, and Cold
+    /// payload and header pools after both migration stages complete.
     ShrinkToFit,
 }
 
