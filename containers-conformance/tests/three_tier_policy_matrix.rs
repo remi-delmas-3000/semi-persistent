@@ -15,8 +15,8 @@ use semi_persistent_containers_verus as verus;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use verus::error::ContainerError;
 use verus::{
-    MarkOptions, ReclaimPolicy, RolloverPolicy, ShrinkPolicy, StoreKind, TierLimit, TierPolicy,
-    VecD, VecI, VecP, VecT,
+    AdaptiveInput, AdaptiveReport, MarkOptions, Ratio, ReclaimPolicy, RolloverPolicy, ShrinkPolicy,
+    StoreKind, TierLimit, TierPolicy, VecD, VecI, VecP, VecT,
 };
 
 const MAX_DEPTH: usize = 7;
@@ -394,6 +394,32 @@ impl VerifiedVec {
         }
     }
 
+    fn apply_adaptive(&mut self, input: AdaptiveInput) -> AdaptiveReport {
+        match self {
+            Self::Inline(vec) => vec.apply_adaptive(input),
+            Self::Parallel(vec) => vec.apply_adaptive(input),
+            Self::Trail(vec) => vec.apply_adaptive(input),
+            Self::Dynamic(vec) => vec.apply_adaptive(input),
+        }
+    }
+
+    fn mark_adaptive(&mut self, input: AdaptiveInput) -> (verus::vec::VecToken, AdaptiveReport) {
+        match self {
+            Self::Inline(vec) => vec
+                .try_mark_adaptive(ShrinkPolicy::Never, input)
+                .expect("depth is bounded"),
+            Self::Parallel(vec) => vec
+                .try_mark_adaptive(ShrinkPolicy::Never, input)
+                .expect("depth is bounded"),
+            Self::Trail(vec) => vec
+                .try_mark_adaptive(ShrinkPolicy::Never, input)
+                .expect("depth is bounded"),
+            Self::Dynamic(vec) => vec
+                .try_mark_adaptive(ShrinkPolicy::Never, input)
+                .expect("depth is bounded"),
+        }
+    }
+
     fn flush_trail(&mut self) {
         match self {
             Self::Inline(vec) => vec.flush_trail(),
@@ -438,6 +464,8 @@ enum Op {
     RetryLastRestore,
     SetPolicy(u8),
     ApplyPolicy,
+    ApplyAdaptive(u8),
+    MarkAdaptive(u8),
     FlushTrail,
     CompressHot,
     DeepUnwind,
@@ -456,6 +484,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         1 => Just(Op::RetryLastRestore),
         2 => any::<u8>().prop_map(Op::SetPolicy),
         1 => Just(Op::ApplyPolicy),
+        2 => any::<u8>().prop_map(Op::ApplyAdaptive),
+        2 => any::<u8>().prop_map(Op::MarkAdaptive),
         1 => Just(Op::FlushTrail),
         1 => Just(Op::CompressHot),
         1 => Just(Op::DeepUnwind),
@@ -486,13 +516,14 @@ fn tape_strategy() -> impl Strategy<Value = Vec<Op>> {
             },
             Op::SetPolicy(Profile::FiniteFrames as u8),
             Op::ApplyPolicy,
+            Op::ApplyAdaptive(0),
             Op::FlushTrail,
             Op::CompressHot,
             Op::RestoreLive { which: 0 },
             Op::RetryLastRestore,
             Op::Mark,
             Op::Set { at: 1, value: 700 },
-            Op::Mark,
+            Op::MarkAdaptive(2),
             Op::DuplicateBurst {
                 at: u16::MAX,
                 value: 800,
@@ -526,6 +557,45 @@ fn scale(ratio: u16, len: usize) -> Option<usize> {
     } else {
         Some((ratio as usize * len) / (u16::MAX as usize + 1))
     }
+}
+
+const ADAPTIVE_BUDGETS: [usize; 6] = [0, 32, 64, 128, 512, usize::MAX];
+
+fn adaptive_input(selection: u8) -> AdaptiveInput {
+    AdaptiveInput {
+        max_closed_history_bytes: ADAPTIVE_BUDGETS[selection as usize % ADAPTIVE_BUDGETS.len()],
+        min_writes_per_unique: Ratio::new(2, 1).expect("nonzero denominator"),
+        min_uniques_per_run: Ratio::new(2, 1).expect("nonzero denominator"),
+    }
+}
+
+fn check_adaptive_report(
+    report: AdaptiveReport,
+    input: AdaptiveInput,
+) -> Result<(), TestCaseError> {
+    prop_assert_eq!(
+        report.inspected_frames,
+        report.inspected_trail_frames + report.inspected_hot_frames
+    );
+    prop_assert_eq!(
+        report.migrated_frames,
+        report.migrated_trail_frames + report.migrated_hot_frames
+    );
+    prop_assert!(report.migrated_trail_frames <= report.inspected_trail_frames);
+    prop_assert!(report.migrated_hot_frames <= report.inspected_hot_frames);
+    prop_assert!(report.logical_bytes_after <= report.logical_bytes_before);
+    prop_assert_eq!(
+        report.budget_unmet_bytes,
+        report
+            .logical_bytes_after
+            .saturating_sub(input.max_closed_history_bytes)
+    );
+    if report.logical_bytes_before <= input.max_closed_history_bytes {
+        prop_assert_eq!(report.inspected_frames, 0);
+        prop_assert_eq!(report.migrated_frames, 0);
+        prop_assert_eq!(report.logical_bytes_after, report.logical_bytes_before);
+    }
+    Ok(())
 }
 
 type TokenTriple = (prod::VecToken, verus::vec::VecToken, OracleToken);
@@ -665,6 +735,21 @@ impl Harness {
                     .set_policy(PROFILES[selection as usize % PROFILES.len()].policy());
             }
             Op::ApplyPolicy => self.verified.apply_policy(),
+            Op::ApplyAdaptive(selection) => {
+                let input = adaptive_input(selection);
+                let report = self.verified.apply_adaptive(input);
+                check_adaptive_report(report, input)?;
+            }
+            Op::MarkAdaptive(selection) => {
+                if self.oracle.depth() < MAX_DEPTH {
+                    let input = adaptive_input(selection);
+                    let production = self.production.mark();
+                    let (verified, report) = self.verified.mark_adaptive(input);
+                    let oracle = self.oracle.mark();
+                    check_adaptive_report(report, input)?;
+                    self.tokens.push((production, verified, oracle));
+                }
+            }
             Op::FlushTrail => self.verified.flush_trail(),
             Op::CompressHot => self.verified.compress_hot(),
             Op::DeepUnwind => {

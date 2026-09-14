@@ -685,3 +685,503 @@ fn mark_options_preserve_thresholded_shrink_policy() {
     assert_eq!(values(&v), vec![0]);
     v.try_restore(token).unwrap();
 }
+
+fn adaptive_input(
+    max_closed_history_bytes: usize,
+) -> semi_persistent_containers_verus::AdaptiveInput {
+    semi_persistent_containers_verus::AdaptiveInput {
+        max_closed_history_bytes,
+        min_writes_per_unique: semi_persistent_containers_verus::Ratio::new(2, 1).unwrap(),
+        min_uniques_per_run: semi_persistent_containers_verus::Ratio::new(2, 1).unwrap(),
+    }
+}
+
+fn close_deferred(v: &mut V) {
+    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+        .unwrap();
+}
+
+#[test]
+fn adaptive_ratio_validation_and_budget_boundaries_are_exact() {
+    use semi_persistent_containers_verus::Ratio;
+
+    assert!(Ratio::new(2, 0).is_err());
+    assert_eq!(Ratio::new(6, 3).unwrap().numerator(), 6);
+    assert_eq!(Ratio::new(6, 3).unwrap().denominator(), 3);
+
+    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    for i in 0..4u32 {
+        v.try_push(i).unwrap();
+    }
+    v.try_mark(ShrinkPolicy::Never).unwrap();
+    for round in 0..4u32 {
+        v.set(1u32, 10 + round);
+    }
+    close_deferred(&mut v);
+
+    let observed = v.apply_adaptive(adaptive_input(usize::MAX));
+    assert_eq!(
+        observed.inspected_frames, 0,
+        "an already-met budget is a no-op"
+    );
+    assert_eq!(observed.logical_bytes_before, observed.logical_bytes_after);
+    assert_eq!(observed.budget_unmet_bytes, 0);
+
+    let boundary = v.apply_adaptive(adaptive_input(observed.logical_bytes_before));
+    assert_eq!(boundary.inspected_frames, 0, "equality is within budget");
+    assert_eq!(boundary.logical_bytes_before, boundary.logical_bytes_after);
+    assert_eq!(v.tier_stats().trail_frames, 2);
+}
+
+#[test]
+fn adaptive_duplicate_threshold_passes_and_fails_without_skipping() {
+    let mut pass = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    for i in 0..4u32 {
+        pass.try_push(i).unwrap();
+    }
+    pass.try_mark(ShrinkPolicy::Never).unwrap();
+    for round in 0..4u32 {
+        pass.set(1u32, 20 + round);
+    }
+    close_deferred(&mut pass);
+    let report = pass.apply_adaptive(adaptive_input(0));
+    assert_eq!((report.writes, report.uniques), (4, 1));
+    assert_eq!(
+        (report.inspected_trail_frames, report.migrated_trail_frames),
+        (1, 1)
+    );
+    assert_eq!(
+        (pass.tier_stats().trail_frames, pass.tier_stats().hot_frames),
+        (1, 1)
+    );
+
+    let mut blocked = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    for i in 0..4u32 {
+        blocked.try_push(i).unwrap();
+    }
+    blocked.try_mark(ShrinkPolicy::Never).unwrap();
+    blocked.set(0u32, 10);
+    blocked.set(1u32, 11); // W/U = 1: oldest blocker
+    close_deferred(&mut blocked);
+    for round in 0..4u32 {
+        blocked.set(2u32, 30 + round);
+    }
+    close_deferred(&mut blocked);
+    let report = blocked.apply_adaptive(adaptive_input(0));
+    assert_eq!(
+        (report.inspected_trail_frames, report.migrated_trail_frames),
+        (1, 0)
+    );
+    assert_eq!(blocked.tier_stats().trail_frames, 3);
+    assert_eq!(
+        blocked.tier_stats().hot_frames,
+        0,
+        "later eligible history cannot leapfrog"
+    );
+}
+
+#[test]
+fn adaptive_locality_accepts_contiguous_and_rejects_singletons() {
+    let mut contiguous =
+        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    for i in 0..16u32 {
+        contiguous.try_push(i).unwrap();
+    }
+    contiguous.try_mark(ShrinkPolicy::Never).unwrap();
+    for i in 2..10u32 {
+        contiguous.set(i, 100 + i);
+    }
+    close_deferred(&mut contiguous);
+    let report = contiguous.apply_adaptive(adaptive_input(0));
+    assert_eq!((report.uniques, report.runs), (8, 1));
+    assert_eq!(
+        (report.inspected_hot_frames, report.migrated_hot_frames),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            contiguous.tier_stats().cold_frames,
+            contiguous.tier_stats().hot_frames
+        ),
+        (1, 1)
+    );
+
+    let mut singleton =
+        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    for i in 0..32u32 {
+        singleton.try_push(i).unwrap();
+    }
+    singleton.try_mark(ShrinkPolicy::Never).unwrap();
+    for i in 0..8u32 {
+        singleton.set(i * 2, 200 + i);
+    }
+    close_deferred(&mut singleton);
+    let report = singleton.apply_adaptive(adaptive_input(0));
+    assert_eq!((report.uniques, report.runs), (8, 8));
+    assert_eq!(
+        (report.inspected_hot_frames, report.migrated_hot_frames),
+        (1, 0)
+    );
+    assert_eq!(report.budget_unmet_bytes, report.logical_bytes_after);
+    assert_eq!(singleton.tier_stats().cold_frames, 0);
+
+    let strict = semi_persistent_containers_verus::AdaptiveInput {
+        max_closed_history_bytes: 0,
+        min_writes_per_unique: semi_persistent_containers_verus::Ratio::new(2, 1).unwrap(),
+        min_uniques_per_run: semi_persistent_containers_verus::Ratio::new(3, 1).unwrap(),
+    };
+    let mut ratio_blocked =
+        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    for i in 0..4u32 {
+        ratio_blocked.try_push(i).unwrap();
+    }
+    ratio_blocked.try_mark(ShrinkPolicy::Never).unwrap();
+    ratio_blocked.set(0u32, 9);
+    ratio_blocked.set(1u32, 8);
+    close_deferred(&mut ratio_blocked);
+    let report = ratio_blocked.apply_adaptive(strict);
+    assert_eq!(
+        (report.uniques, report.runs, report.migrated_hot_frames),
+        (2, 1, 0)
+    );
+}
+
+#[test]
+fn adaptive_empty_frames_preserve_identity_and_cascade_in_order() {
+    let mut empty = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    empty.try_push(7).unwrap();
+    let root = empty.try_mark(ShrinkPolicy::Never).unwrap();
+    close_deferred(&mut empty);
+    let report = empty.apply_adaptive(adaptive_input(0));
+    assert_eq!((report.writes, report.uniques, report.runs), (0, 0, 0));
+    assert_eq!(
+        (report.migrated_trail_frames, report.migrated_hot_frames),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            empty.tier_stats().cold_frames,
+            empty.tier_stats().trail_frames
+        ),
+        (1, 1)
+    );
+    assert_eq!(empty.depth(), 2);
+    assert!(empty.is_valid_token(&root));
+    empty.try_restore(root).unwrap();
+    assert_eq!(values(&empty), vec![7]);
+
+    let mut cascade = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    for i in 0..16u32 {
+        cascade.try_push(i).unwrap();
+    }
+    let root = cascade.try_mark(ShrinkPolicy::Never).unwrap();
+    for round in 0..4u32 {
+        for i in 2..10u32 {
+            cascade.set(i, round * 100 + i);
+        }
+    }
+    close_deferred(&mut cascade);
+    let report = cascade.apply_adaptive(adaptive_input(0));
+    assert_eq!((report.writes, report.uniques, report.runs), (32, 8, 1));
+    assert_eq!(
+        (report.migrated_trail_frames, report.migrated_hot_frames),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            cascade.tier_stats().cold_frames,
+            cascade.tier_stats().hot_frames,
+            cascade.tier_stats().trail_frames
+        ),
+        (1, 0, 1)
+    );
+    assert_eq!(report.budget_unmet_bytes, report.logical_bytes_after);
+    cascade.try_restore(root).unwrap();
+    assert_eq!(values(&cascade), (0..16).collect::<Vec<_>>());
+}
+
+#[test]
+fn try_mark_adaptive_opens_replacement_first_and_preserves_token_semantics() {
+    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    for i in 0..8u32 {
+        v.try_push(i).unwrap();
+    }
+    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    for round in 0..4u32 {
+        for i in 2..6u32 {
+            v.set(i, round * 10 + i);
+        }
+    }
+    let after_writes = values(&v);
+    let depth_before = v.depth();
+    let (token, report) = v
+        .try_mark_adaptive(ShrinkPolicy::Never, adaptive_input(0))
+        .unwrap();
+    assert_eq!(v.depth(), depth_before + 1);
+    assert!(v.is_valid_token(&token));
+    assert!(v.is_valid_token(&root));
+    assert_eq!(report.migrated_trail_frames, 1);
+    assert_eq!(
+        v.tier_stats().trail_frames,
+        1,
+        "replacement Trail ingress stays open"
+    );
+
+    v.set(0u32, 999);
+    v.try_restore(token).unwrap();
+    assert_eq!(values(&v), after_writes);
+    assert!(!v.is_valid_token(&token));
+    assert!(v.is_valid_token(&root));
+    v.try_restore(root).unwrap();
+    assert_eq!(values(&v), (0..8).collect::<Vec<_>>());
+}
+
+#[test]
+fn adaptive_handles_nonmonotone_lengths_promotion_and_every_ingress_store() {
+    for kind in [StoreKind::Inline, StoreKind::Parallel, StoreKind::Trail] {
+        let policy = if kind == StoreKind::Trail {
+            TierPolicy::smt()
+        } else {
+            TierPolicy::fully_buffered_unique()
+        };
+        let mut v = V::new_kind_with_policy(kind, policy);
+        for i in 0..12u32 {
+            v.try_push(i).unwrap();
+        }
+        let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+        for round in 0..4u32 {
+            for i in 2..8u32 {
+                v.set(i, round * 100 + i);
+            }
+        }
+        close_deferred(&mut v);
+        v.pop();
+        v.pop();
+        v.set(2u32, 777);
+        let middle = v
+            .try_mark_adaptive(ShrinkPolicy::Never, adaptive_input(0))
+            .unwrap()
+            .0;
+        v.try_push(90).unwrap();
+        v.set(3u32, 888);
+        close_deferred(&mut v);
+        v.apply_adaptive(adaptive_input(0));
+
+        v.try_restore(middle).unwrap();
+        assert_eq!(v.len(), 10);
+        v.set(4u32, 444); // write through the original immutable ingress protocol
+        close_deferred(&mut v);
+        v.apply_adaptive(adaptive_input(0));
+        if kind == StoreKind::Trail {
+            assert!(
+                v.tier_stats().trail_frames >= 1,
+                "Trail ingress retains its writable frame"
+            );
+        } else {
+            assert_eq!(v.tier_stats().trail_frames, 0);
+            assert!(
+                v.tier_stats().hot_frames >= 1,
+                "unique ingress retains its writable Hot frame"
+            );
+        }
+        v.try_restore(root).unwrap();
+        assert_eq!(values(&v), (0..12).collect::<Vec<_>>(), "kind {kind:?}");
+    }
+}
+
+fn adaptive_input_with_ratios(
+    max_closed_history_bytes: usize,
+    min_writes_per_unique: (usize, usize),
+    min_uniques_per_run: (usize, usize),
+) -> semi_persistent_containers_verus::AdaptiveInput {
+    semi_persistent_containers_verus::AdaptiveInput {
+        max_closed_history_bytes,
+        min_writes_per_unique: semi_persistent_containers_verus::Ratio::new(
+            min_writes_per_unique.0,
+            min_writes_per_unique.1,
+        )
+        .unwrap(),
+        min_uniques_per_run: semi_persistent_containers_verus::Ratio::new(
+            min_uniques_per_run.0,
+            min_uniques_per_run.1,
+        )
+        .unwrap(),
+    }
+}
+
+fn trail_frame_bytes(entries: usize) -> usize {
+    core::mem::size_of::<semi_persistent_containers_verus::frame::TrailFrame<u32>>()
+        + entries * core::mem::size_of::<(u32, u32)>()
+}
+
+fn hot_frame_bytes(entries: usize) -> usize {
+    core::mem::size_of::<semi_persistent_containers_verus::frame::HotFrame<u32>>()
+        + entries * core::mem::size_of::<(u32, u32)>()
+}
+
+fn cold_frame_bytes(values: usize, runs: usize) -> usize {
+    core::mem::size_of::<semi_persistent_containers_verus::frame::ColdFrameHdr<u32>>()
+        + values * core::mem::size_of::<u32>()
+        + runs * core::mem::size_of::<semi_persistent_containers_verus::frame::IndexRun<u32>>()
+}
+
+#[test]
+fn adaptive_hot_blocker_prevents_newer_frame_leapfrog() {
+    let mut v = V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    for i in 0..16u32 {
+        v.try_push(i).unwrap();
+    }
+    v.try_mark(ShrinkPolicy::Never).unwrap();
+
+    for i in [0u32, 2, 4, 6] {
+        v.set(i, 100 + i);
+    }
+    close_deferred(&mut v);
+    for i in 8..16u32 {
+        v.set(i, 200 + i);
+    }
+    close_deferred(&mut v);
+
+    let report = v.apply_adaptive(adaptive_input(0));
+    assert_eq!((report.uniques, report.runs), (4, 4));
+    assert_eq!(
+        (report.inspected_hot_frames, report.migrated_hot_frames),
+        (1, 0)
+    );
+    assert_eq!(
+        (v.tier_stats().hot_frames, v.tier_stats().cold_frames),
+        (3, 0),
+        "the newer contiguous frame must not leapfrog the oldest blocker"
+    );
+}
+
+#[test]
+fn adaptive_projected_byte_gates_are_ratio_independent() {
+    assert_eq!(trail_frame_bytes(2), hot_frame_bytes(2));
+    let mut trail = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    for i in 0..8u32 {
+        trail.try_push(i).unwrap();
+    }
+    trail.try_mark(ShrinkPolicy::Never).unwrap();
+    trail.set(0u32, 10);
+    trail.set(1u32, 11);
+    close_deferred(&mut trail);
+    let report = trail.apply_adaptive(adaptive_input_with_ratios(0, (1, 1), (1, 1)));
+    assert_eq!((report.writes, report.uniques), (2, 2));
+    assert_eq!(report.migrated_trail_frames, 0);
+
+    assert!(cold_frame_bytes(2, 1) > hot_frame_bytes(2));
+    let mut growing_hot =
+        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    for i in 0..8u32 {
+        growing_hot.try_push(i).unwrap();
+    }
+    growing_hot.try_mark(ShrinkPolicy::Never).unwrap();
+    growing_hot.set(0u32, 10);
+    growing_hot.set(1u32, 11);
+    close_deferred(&mut growing_hot);
+    let report = growing_hot.apply_adaptive(adaptive_input_with_ratios(0, (1, 1), (2, 1)));
+    assert_eq!((report.uniques, report.runs), (2, 1));
+    assert_eq!(report.migrated_hot_frames, 0);
+
+    assert_eq!(cold_frame_bytes(6, 1), hot_frame_bytes(6));
+    let mut equal_hot =
+        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    for i in 0..12u32 {
+        equal_hot.try_push(i).unwrap();
+    }
+    equal_hot.try_mark(ShrinkPolicy::Never).unwrap();
+    for i in 2..8u32 {
+        equal_hot.set(i, 100 + i);
+    }
+    close_deferred(&mut equal_hot);
+    let report = equal_hot.apply_adaptive(adaptive_input_with_ratios(0, (1, 1), (2, 1)));
+    assert_eq!((report.uniques, report.runs), (6, 1));
+    assert_eq!(report.migrated_hot_frames, 1);
+}
+
+#[test]
+fn adaptive_closed_accounting_and_mixed_cascade_report_are_exact() {
+    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    for i in 0..32u32 {
+        v.try_push(i).unwrap();
+    }
+    v.try_mark(ShrinkPolicy::Never).unwrap();
+
+    for i in 0..6u32 {
+        v.set(i, 100 + i);
+        v.set(i, 200 + i);
+    }
+    close_deferred(&mut v);
+    let first = v.apply_adaptive(adaptive_input_with_ratios(0, (2, 1), (7, 1)));
+    assert_eq!(
+        (
+            first.migrated_trail_frames,
+            first.inspected_hot_frames,
+            first.migrated_hot_frames
+        ),
+        (1, 1, 0)
+    );
+
+    for i in 8..16u32 {
+        v.set(i, 300 + i);
+        v.set(i, 400 + i);
+    }
+    close_deferred(&mut v);
+
+    let expected_before = hot_frame_bytes(6) + trail_frame_bytes(16);
+    let no_op = v.apply_adaptive(adaptive_input(usize::MAX));
+    assert_eq!(no_op.logical_bytes_before, expected_before);
+    assert_eq!(no_op.logical_bytes_after, expected_before);
+
+    let values_before_live_growth = values(&v);
+    for i in 0..4096u32 {
+        v.try_push(10_000 + i).unwrap();
+    }
+    for _ in 0..4096 {
+        v.pop();
+    }
+    assert_eq!(values(&v), values_before_live_growth);
+    let after_live_growth = v.apply_adaptive(adaptive_input(usize::MAX));
+    assert_eq!(after_live_growth.logical_bytes_before, expected_before);
+
+    let tracking_bytes_before = v.tracking_bytes();
+    for i in 0..4096u32 {
+        v.set(20u32, 20_000 + i);
+    }
+    assert!(
+        v.tracking_bytes() > tracking_bytes_before,
+        "open ingress payload and its allocation must grow independently"
+    );
+    let after_open_writes = v.apply_adaptive(adaptive_input(usize::MAX));
+    assert_eq!(after_open_writes.logical_bytes_before, expected_before);
+    assert_eq!(after_open_writes.logical_bytes_after, expected_before);
+
+    let expected_after = 2 * cold_frame_bytes(7, 1);
+    let report = v.apply_adaptive(adaptive_input(0));
+    assert_eq!(
+        (
+            report.inspected_trail_frames,
+            report.migrated_trail_frames,
+            report.inspected_hot_frames,
+            report.migrated_hot_frames,
+            report.inspected_frames,
+            report.migrated_frames
+        ),
+        (1, 1, 2, 2, 3, 3)
+    );
+    assert_eq!((report.writes, report.uniques, report.runs), (16, 14, 2));
+    assert_eq!(report.logical_bytes_before, expected_before);
+    assert_eq!(report.logical_bytes_after, expected_after);
+    assert_eq!(report.budget_unmet_bytes, expected_after);
+    assert_eq!(
+        (
+            v.tier_stats().trail_frames,
+            v.tier_stats().hot_frames,
+            v.tier_stats().cold_frames,
+            v.tier_stats().cold_values,
+            v.tier_stats().cold_runs
+        ),
+        (1, 0, 2, 14, 2)
+    );
+}

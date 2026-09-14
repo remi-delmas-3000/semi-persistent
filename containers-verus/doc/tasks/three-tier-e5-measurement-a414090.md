@@ -906,3 +906,122 @@ MEASURED** at `c550112`; benchmark-only adaptive study **NEGATIVE / DEFERRED**;
 runtime semantics **UNCHANGED**; live ingress switching **UNIMPLEMENTED**;
 proofs **DEFERRED**; E6 remains **NOT LOCKED** pending any later runtime-policy
 decision.
+
+
+## Explicit-budget adaptive runtime follow-up (`c3bb5bd` working tree)
+
+This follow-up builds the runtime behavior that the `c550112` campaign
+intentionally left benchmark-only. It does **not** reinterpret the historical
+measurements above and does not claim final thresholds.
+
+### Built semantics
+
+The additive public surface is:
+
+- `Ratio::new(numerator, denominator)`, with zero-denominator rejection and
+  exact integer cross-multiplication comparisons;
+- `AdaptiveInput { max_closed_history_bytes, min_writes_per_unique,
+  min_uniques_per_run }`;
+- `AdaptiveReport`, including per-stage and total inspected/migrated frame
+  counts, W/U/R totals, logical bytes before/after, and exact unmet bytes;
+- `Vec::apply_adaptive(input)` and
+  `Vec::try_mark_adaptive(shrink, input)`.
+
+The planner counts only closed Trail/Hot/Cold headers and payload lengths via
+`size_of`. It excludes the open ingress frame, live store, capacity, allocator
+state, RSS, and time. It scans oldest prefixes without skipping, preserves
+empty frame identity, requires the configured W/U ratio plus a strict logical
+byte reduction for Trail -> Hot, then recomputes pressure and requires the U/R
+ratio plus non-worsening logical bytes for Hot -> Cold. Trail -> Hot always
+executes first. A blocker or irreducible Cold returns an exact nonzero
+`budget_unmet_bytes`; the planner does not force a harmful transition.
+
+`try_mark_adaptive` seals and opens through the existing immutable `DiffStore`
+protocol with `RolloverPolicy::Defer` before applying the pass. Existing
+`try_mark`, `try_mark_with`, `TierPolicy`, legacy rollover, and static mutation
+paths are unchanged. Live `DynStore` switching remains unimplemented.
+
+Trail W/U derivation and first-capture execution use deterministic sort/dedupe
+scratch rather than quadratic `Vec::contains` scans. Scratch is local to the
+cold operation and is not retained in `Vec`.
+
+### Built validation and measurement rows
+
+Focused runtime coverage now includes budget already met, exact equality,
+duplicate pass/fail, locality pass/fail, singleton rejection, empty frames,
+oldest blockers, both-edge cascade, unmet budget, nonmonotone lengths,
+promotion/write/restore, all ingress stores, and adaptive-mark token semantics.
+The `PROPTEST_CASES`-aware six-backend/seven-profile matrix includes explicit
+adaptive apply/mark operations, report invariants, and the unchanged full-state
+semantic oracle after every operation.
+
+`three_tier_v2/adaptive/*` and `three_tier_v2/large/*` Criterion rows time the
+combined planner+execution path for all DynStore kinds at fixed shapes and
+budgets:
+
+- W512/U32/R1 at 4,096 and 256 bytes;
+- W512/U512/R1 at 4,096 bytes;
+- W512/U512/R512 at 4,096 bytes;
+- 256 frames of W64/U16/R1 at unbounded, 65,536, and 32,768 bytes.
+
+Untimed diagnostics emit the exact returned report, final tier occupancy,
+capacity/total bytes, and allocator high-water windows. Allocator diagnostics
+remain measurement-only and are never policy inputs.
+
+### Threshold status
+
+The explicit 2x ratios used by tests and benchmark fixtures preserve the
+historical conservative study shape (2x W/U and 2x U/R), but no public runtime
+preset promotes those ratios to defaults. Criterion confidence
+intervals and retained/peak results for the new v2 rows are explicitly deferred
+to the next measurement stage. E6 is therefore reopened and remains unlocked.
+Proof implementation also remains deferred.
+
+
+### Follow-up validation result
+
+```text
+cargo fmt --all -- --check                                      passed
+cargo check -p containers-conformance --benches                 passed
+cargo test -p semi-persistent-containers-verus \
+  --test three_tier_runtime                                     28 passed
+cargo test -p semi-persistent-containers-verus                  passed
+cargo test -p semi-persistent-containers-verus \
+  --features "compat-all,literal-types"                          passed
+PROPTEST_CASES=1024 cargo test -p containers-conformance \
+  --release --test three_tier_policy_matrix                     4 passed
+PROPTEST_CASES=1024 cargo test -p containers-conformance \
+  --release                                                     passed
+cargo test -p semi-persistent-egraph                            passed
+```
+
+The final working-tree diff contains no `containers/` source or proof changes,
+and no commit was created. The Criterion v2 rows were compile-checked but not
+measured in this implementation stage; confidence intervals and final threshold
+selection remain the explicit next-stage limitation.
+
+
+## Adaptive review follow-up: static hot-path guards
+
+The unchanged-ID static VecP and aggregate guards were rerun from the final
+adaptive working tree against `pre_three_tier_a414090`, with
+`SEMPER_COMPRESS` and `SEMPER_DIFF` unset. Criterion reported these
+baseline-relative 95% confidence intervals:
+
+| row | point estimate | baseline-relative interval |
+|---|---:|---:|
+| tracked VecP production control, 1K | 4.5370 us | -0.3620% [-0.8078%, +0.0918%] |
+| tracked VecP verified, 1K | 3.8529 us | -1.3677% [-1.8743%, -0.8998%] |
+| tracked VecP production control, 1M | 729.17 us | -5.4597% [-6.0978%, -4.7039%] |
+| tracked VecP verified, 1M | 740.68 us | -9.2267% [-10.056%, -8.3250%] |
+| retained vec mark/set/restore verified | 122.72 us | -11.306% [-12.609%, -10.011%] |
+| retained vec restore replay verified | 139.06 us | -3.9505% [-5.2116%, -2.7259%] |
+| class-ring merge/restore verified | 28.617 us | -21.402% [-21.873%, -20.978%] |
+| sparse-set churn verified | 177.41 us | -9.2867% [-9.7684%, -8.8155%] |
+| eclasses mark/merge/restore verified | 8.0983 us | -6.4970% [-7.0887%, -5.8956%] |
+
+The static VecP rows and every verified aggregate guard are therefore unchanged
+within the noise threshold or faster than the saved baseline; no adaptive
+hot-path regression was observed. This closes the static regression-evidence
+gap only. The new `three_tier_v2` adaptive rows remain untimed, so adaptive
+confidence intervals and final W/U/R threshold selection are still deferred.

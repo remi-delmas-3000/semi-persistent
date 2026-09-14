@@ -709,6 +709,7 @@ trait MatrixColumn: Sized {
 
 trait MeasuredMatrixColumn: MatrixColumn {
     fn mark_with(&mut self, rollover: RolloverPolicy) -> Self::Token;
+    fn apply_adaptive(&mut self, input: verus::AdaptiveInput) -> verus::AdaptiveReport;
     fn stats(&self) -> verus::TierStats;
     fn tracking_bytes(&self) -> usize;
     fn total_bytes(&self) -> usize;
@@ -762,6 +763,11 @@ macro_rules! verified_matrix_column {
                 self.0
                     .try_mark_with(MarkOptions::new(ShrinkPolicy::Never, rollover))
                     .expect("matrix fixture depth is bounded")
+            }
+
+            #[inline]
+            fn apply_adaptive(&mut self, input: verus::AdaptiveInput) -> verus::AdaptiveReport {
+                self.0.apply_adaptive(input)
             }
 
             #[inline]
@@ -1430,10 +1436,209 @@ fn report_v1_diagnostics() {
     );
 }
 
+fn adaptive_v2_input(budget: usize) -> verus::AdaptiveInput {
+    verus::AdaptiveInput {
+        max_closed_history_bytes: budget,
+        min_writes_per_unique: verus::Ratio::new(2, 1).expect("nonzero ratio denominator"),
+        min_uniques_per_run: verus::Ratio::new(2, 1).expect("nonzero ratio denominator"),
+    }
+}
+
+fn adaptive_v2_fixture<C: MeasuredMatrixColumn>(
+    writes: usize,
+    distinct: usize,
+    frames: usize,
+    singleton_runs: bool,
+) -> C {
+    let mut v = build_matrix::<C>(unbounded_policy());
+    mark_deferred(&mut v);
+    for frame in 0..frames {
+        if singleton_runs {
+            for write in 0..writes {
+                let index = (write * 2 + frame % 2) as u32;
+                v.set(index, ((frame as u64) << 40) ^ write as u64 ^ 0x51A6_1E70);
+            }
+        } else {
+            write_matrix(&mut v, writes, distinct, frame);
+        }
+        mark_deferred(&mut v);
+    }
+    v
+}
+
+fn bench_matrix_adaptive_v2<C: MeasuredMatrixColumn>(
+    b: &mut criterion::Bencher<'_>,
+    writes: usize,
+    distinct: usize,
+    frames: usize,
+    singleton_runs: bool,
+    budget: usize,
+) {
+    let input = adaptive_v2_input(budget);
+    b.iter_batched_ref(
+        || adaptive_v2_fixture::<C>(writes, distinct, frames, singleton_runs),
+        |v| black_box(v.apply_adaptive(input)),
+        BatchSize::LargeInput,
+    );
+}
+
+macro_rules! register_dyn_adaptive_v2 {
+    ($group:ident, $writes:expr, $distinct:expr, $frames:expr, $singletons:expr, $budget:expr) => {
+        $group.bench_function("dyn_inline", |b| {
+            bench_matrix_adaptive_v2::<DynInline>(
+                b,
+                $writes,
+                $distinct,
+                $frames,
+                $singletons,
+                $budget,
+            )
+        });
+        $group.bench_function("dyn_parallel", |b| {
+            bench_matrix_adaptive_v2::<DynParallel>(
+                b,
+                $writes,
+                $distinct,
+                $frames,
+                $singletons,
+                $budget,
+            )
+        });
+        $group.bench_function("dyn_trail", |b| {
+            bench_matrix_adaptive_v2::<DynTrail>(
+                b,
+                $writes,
+                $distinct,
+                $frames,
+                $singletons,
+                $budget,
+            )
+        });
+    };
+}
+
+fn bench_v2_adaptive(c: &mut Criterion) {
+    let mut stop_hot =
+        c.benchmark_group("three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096");
+    register_dyn_adaptive_v2!(stop_hot, WRITES, 32, 1, false, 4_096);
+    stop_hot.finish();
+
+    let mut cascade =
+        c.benchmark_group("three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_256");
+    register_dyn_adaptive_v2!(cascade, WRITES, 32, 1, false, 256);
+    cascade.finish();
+
+    let mut contiguous =
+        c.benchmark_group("three_tier_v2/adaptive/unique_W512_U512_R1/budget_4096");
+    register_dyn_adaptive_v2!(contiguous, WRITES, WRITES, 1, false, 4_096);
+    contiguous.finish();
+
+    let mut singleton =
+        c.benchmark_group("three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096");
+    register_dyn_adaptive_v2!(singleton, WRITES, WRITES, 1, true, 4_096);
+    singleton.finish();
+
+    for budget in [usize::MAX, 65_536, 32_768] {
+        let budget_name = if budget == usize::MAX {
+            "unbounded".to_owned()
+        } else {
+            budget.to_string()
+        };
+        let mut large = c.benchmark_group(format!(
+            "three_tier_v2/large/W64_U16_R1_frames256/budget_{budget_name}"
+        ));
+        register_dyn_adaptive_v2!(large, V1_TRACE_WRITES, 16, V1_LARGE_FRAMES, false, budget);
+        large.finish();
+    }
+}
+
+fn report_adaptive_v2_window<C: MeasuredMatrixColumn>(
+    label: &str,
+    writes: usize,
+    distinct: usize,
+    frames: usize,
+    singleton_runs: bool,
+    budget: usize,
+) {
+    let mut v = adaptive_v2_fixture::<C>(writes, distinct, frames, singleton_runs);
+    let before_tracking = v.tracking_bytes();
+    let before_total = v.total_bytes();
+    let mut report = verus::AdaptiveReport::default();
+    let window = allocation_window(|| report = v.apply_adaptive(adaptive_v2_input(budget)));
+    eprintln!(
+        "three_tier_v2_adaptive label={label} budget={budget} report={report:?} stats={:?} before_tracking_bytes={before_tracking} after_tracking_bytes={} before_total_bytes={before_total} after_total_bytes={} allocator_before_bytes={} allocator_after_bytes={} allocator_peak_bytes={} allocator_transient_peak_bytes={}",
+        v.stats(),
+        v.tracking_bytes(),
+        v.total_bytes(),
+        window.before_bytes,
+        window.after_bytes,
+        window.peak_bytes,
+        window.transient_peak_bytes(),
+    );
+}
+
+fn report_v2_diagnostics() {
+    for &(label, writes, distinct, frames, singleton_runs, budget) in &[
+        ("high_duplicates_budget_4096", WRITES, 32, 1, false, 4_096),
+        ("high_duplicates_budget_256", WRITES, 32, 1, false, 256),
+        (
+            "unique_contiguous_budget_4096",
+            WRITES,
+            WRITES,
+            1,
+            false,
+            4_096,
+        ),
+        ("singleton_budget_4096", WRITES, WRITES, 1, true, 4_096),
+        (
+            "large_budget_65536",
+            V1_TRACE_WRITES,
+            16,
+            V1_LARGE_FRAMES,
+            false,
+            65_536,
+        ),
+        (
+            "large_budget_32768",
+            V1_TRACE_WRITES,
+            16,
+            V1_LARGE_FRAMES,
+            false,
+            32_768,
+        ),
+    ] {
+        report_adaptive_v2_window::<DynInline>(
+            &format!("{label}_dyn_inline"),
+            writes,
+            distinct,
+            frames,
+            singleton_runs,
+            budget,
+        );
+        report_adaptive_v2_window::<DynParallel>(
+            &format!("{label}_dyn_parallel"),
+            writes,
+            distinct,
+            frames,
+            singleton_runs,
+            budget,
+        );
+        report_adaptive_v2_window::<DynTrail>(
+            &format!("{label}_dyn_trail"),
+            writes,
+            distinct,
+            frames,
+            singleton_runs,
+            budget,
+        );
+    }
+}
+
 fn bench_diagnostics(c: &mut Criterion) {
     report_tier_diagnostics();
     report_allocation_diagnostics();
     report_v1_diagnostics();
+    report_v2_diagnostics();
     let mut group = c.benchmark_group("three_tier/diagnostics");
     group.bench_function("reporting_excluded_from_timing", |b| {
         b.iter(|| black_box(0usize))
@@ -1460,6 +1665,7 @@ criterion_group! {
         bench_v1_restore,
         bench_v1_rollover,
         bench_v1_promotion,
-        bench_v1_traces
+        bench_v1_traces,
+        bench_v2_adaptive
 }
 criterion_main!(benches);

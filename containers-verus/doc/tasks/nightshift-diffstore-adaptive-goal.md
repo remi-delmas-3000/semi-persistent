@@ -1,16 +1,20 @@
 # Nightshift goal: DiffStore-owned three-tier protocol and adaptive large-egraph study
 
-**Current status at `c550112`: container-level `three_tier_v1` matrix BUILT AND
-MEASURED; adaptive runtime semantics DEFERRED after a benchmark-only negative
-result; live ingress switching UNIMPLEMENTED; proofs DEFERRED; E6 NOT LOCKED.**
+**Current status at clean base `c3bb5bd`: deterministic explicit-budget
+closed-history adaptive semantics BUILT in the working tree; focused runtime
+and differential operations added; static VecP and aggregate baseline guards
+RERUN with no verified regression; `three_tier_v2` planner+execution rows BUILT
+but final measured thresholds DEFERRED to the next stage; live ingress switching
+UNIMPLEMENTED; proofs DEFERRED; E6 REOPENED / NOT LOCKED.**
 
-The benchmark/docs-only follow-up adds stable same-policy DynStore
-Inline/Parallel/Trail comparisons, static and production controls, explicit
-rollover rows, 256-frame retained traces, and untimed W/U/R, tier-byte,
-capacity, and allocator high-water diagnostics. Exact commands, confidence
-intervals, results, and limitations are appended to
-`three-tier-e5-measurement-a414090.md`. No `containers/`, runtime, or proof code
-changed.
+The additive runtime follow-up introduces validated integer ratios,
+`AdaptiveInput`, `AdaptiveReport`, `Vec::apply_adaptive`, and
+`Vec::try_mark_adaptive`. It keeps DiffStore ingress immutable and performs only
+closed oldest-prefix Trail -> Hot -> Cold conversion after the replacement
+frame opens. The historical `three_tier_v1` measurements and negative
+benchmark-only conclusion remain valid for `c550112`; new built behavior and
+unmeasured v2 rows are appended to `three-tier-e5-measurement-a414090.md`.
+Allocator high-water data remains measurement-only and never drives policy.
 
 Continue from the current uncommitted working tree on branch `d21-exec` at
 `a414090`; do not reset or discard the existing three-tier work. Use
@@ -134,3 +138,21 @@ Stop only when:
 If blocked, preserve the smallest failing trace, exact command/output, and a
 precise architectural explanation rather than weakening the representation
 boundaries or silently changing compatibility behavior.
+
+
+## `c3bb5bd` explicit-budget implementation checkpoint
+
+The required first target is now built as an additive cold-path API. Explicit
+budgets apply only to closed logical history; the planner scans oldest prefixes,
+executes exact Trail -> Hot first-capture migration before any Hot -> Cold run
+formation, preserves empty frame boundaries, and reports exact residual
+pressure. Ratio and projected-byte blockers stop a prefix rather than allowing
+a newer frame to leapfrog. No adaptive input is stored in `Vec`, no allocator
+measurement is consulted, and no write path or existing rollover API gained an
+adaptive branch.
+
+The optional live-protocol research target remains deliberately unimplemented:
+`DynStore` continues to select one immutable ingress protocol at construction.
+The new v2 benchmark matrix is present for next-stage measurement, but final
+W/U and U/R thresholds are not claimed until those confidence intervals and
+memory diagnostics are recorded.

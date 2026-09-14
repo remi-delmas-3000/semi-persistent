@@ -2935,6 +2935,193 @@ where
         }
     }
 
+    #[verifier::external_body]
+    fn runtime_trail_shape(
+        &self,
+        frame: crate::frame::TrailFrame<I>,
+        scratch: &mut std::vec::Vec<(usize, usize)>,
+        first_captures: &mut std::vec::Vec<(T, I)>,
+    ) -> (usize, usize) {
+        let entries = &self.trail_value_pool[frame.start..frame.end];
+        scratch.clear();
+        scratch.extend(
+            entries
+                .iter()
+                .enumerate()
+                .map(|(position, (_, index))| (index.as_usize(), position)),
+        );
+        scratch.sort_unstable();
+        scratch.dedup_by_key(|(index, _)| *index);
+        scratch.sort_unstable_by_key(|(_, position)| *position);
+        first_captures.clear();
+        first_captures.extend(scratch.iter().map(|(_, position)| entries[*position]));
+        (entries.len(), first_captures.len())
+    }
+
+    #[verifier::external_body]
+    fn runtime_hot_shape(
+        &self,
+        frame: crate::frame::HotFrame<I>,
+        sorted_entries: &mut std::vec::Vec<(T, I)>,
+    ) -> (usize, usize) {
+        sorted_entries.clear();
+        sorted_entries.extend_from_slice(&self.hot_value_pool[frame.start..frame.end]);
+        sorted_entries.sort_unstable_by_key(|(_, index)| index.as_usize());
+        let mut runs = 0usize;
+        let mut previous: Option<usize> = None;
+        for &(_, index) in sorted_entries.iter() {
+            let index = index.as_usize();
+            if previous.map(|p| p + 1 != index).unwrap_or(true) {
+                runs += 1;
+            }
+            previous = Some(index);
+        }
+        (frame.end - frame.start, runs)
+    }
+
+    #[verifier::external_body]
+    fn runtime_closed_history_bytes(&self) -> usize {
+        fn bytes(count: usize, width: usize) -> usize {
+            count
+                .checked_mul(width)
+                .expect("logical closed-history byte count overflow")
+        }
+        fn add(left: usize, right: usize) -> usize {
+            left.checked_add(right)
+                .expect("logical closed-history byte count overflow")
+        }
+
+        let trail_closed = self.trail_stack.len().saturating_sub(1);
+        let trail_entries = self.trail_stack[..trail_closed]
+            .iter()
+            .fold(0usize, |total, frame| {
+                total
+                    .checked_add(frame.end - frame.start)
+                    .expect("logical closed-history entry count overflow")
+            });
+        let hot_closed = if self.store.unique_capture() {
+            self.hot_stack.len().saturating_sub(1)
+        } else {
+            self.hot_stack.len()
+        };
+        let hot_entries = self.hot_stack[..hot_closed]
+            .iter()
+            .fold(0usize, |total, frame| {
+                total
+                    .checked_add(frame.end - frame.start)
+                    .expect("logical closed-history entry count overflow")
+            });
+
+        let trail = add(
+            bytes(trail_closed, core::mem::size_of::<crate::frame::TrailFrame<I>>()),
+            bytes(trail_entries, core::mem::size_of::<(T, I)>()),
+        );
+        let hot = add(
+            bytes(hot_closed, core::mem::size_of::<crate::frame::HotFrame<I>>()),
+            bytes(hot_entries, core::mem::size_of::<(T, I)>()),
+        );
+        let cold = add(
+            bytes(
+                self.cold_stack.len(),
+                core::mem::size_of::<crate::frame::ColdFrameHdr<I>>(),
+            ),
+            add(
+                bytes(self.cold_value_pool.len(), core::mem::size_of::<T>()),
+                bytes(
+                    self.cold_index_runs.len(),
+                    core::mem::size_of::<crate::frame::IndexRun<I>>(),
+                ),
+            ),
+        );
+        add(add(trail, hot), cold)
+    }
+
+    /// Execute an exact oldest closed Trail prefix through deterministic
+    /// first-capture dedupe. Sorting `(index, chronological_position)` avoids
+    /// the old quadratic `Vec::contains` scan while retaining the first write.
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    fn runtime_migrate_trail_count(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let closed = self.trail_stack.len().saturating_sub(1);
+        assert!(count <= closed, "adaptive Trail plan must name a closed prefix");
+
+        let mut keyed: std::vec::Vec<(usize, usize)> = std::vec::Vec::new();
+        let mut selected: std::vec::Vec<usize> = std::vec::Vec::new();
+        for f in 0..count {
+            let frame = self.trail_stack[f];
+            let entries = &self.trail_value_pool[frame.start..frame.end];
+            keyed.clear();
+            keyed.extend(
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(position, (_, index))| (index.as_usize(), position)),
+            );
+            keyed.sort_unstable();
+            selected.clear();
+            let mut previous: Option<usize> = None;
+            for &(index, position) in keyed.iter() {
+                if previous != Some(index) {
+                    selected.push(position);
+                    previous = Some(index);
+                }
+            }
+            selected.sort_unstable();
+
+            let start = self.hot_value_pool.len();
+            for &position in selected.iter() {
+                self.hot_value_pool.push(entries[position]);
+            }
+            self.hot_stack.push(crate::frame::HotFrame {
+                saved_len: frame.saved_len,
+                start,
+                end: self.hot_value_pool.len(),
+            });
+        }
+        let cut = self.trail_stack[count].start;
+        self.trail_value_pool.drain(0..cut);
+        self.trail_stack.drain(0..count);
+        for frame in self.trail_stack.iter_mut() {
+            frame.start -= cut;
+            frame.end -= cut;
+        }
+    }
+
+    /// Execute first-capture payloads retained by the adaptive planner without
+    /// rescanning or resorting accepted Trail frames.
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    fn runtime_execute_trail_plan(&mut self, planned: &[std::vec::Vec<(T, I)>]) {
+        let count = planned.len();
+        if count == 0 {
+            return;
+        }
+        let closed = self.trail_stack.len().saturating_sub(1);
+        assert!(count <= closed, "adaptive Trail plan must name a closed prefix");
+        for (f, entries) in planned.iter().enumerate() {
+            let frame = self.trail_stack[f];
+            let start = self.hot_value_pool.len();
+            self.hot_value_pool.extend_from_slice(entries);
+            self.hot_stack.push(crate::frame::HotFrame {
+                saved_len: frame.saved_len,
+                start,
+                end: self.hot_value_pool.len(),
+            });
+        }
+        let cut = self.trail_stack[count].start;
+        self.trail_value_pool.drain(0..cut);
+        self.trail_stack.drain(0..count);
+        for frame in self.trail_stack.iter_mut() {
+            frame.start -= cut;
+            frame.end -= cut;
+        }
+    }
+
     /// Migrate an oldest closed trail prefix through first-capture dedupe.
     #[verifier::external_body]
     #[cold]
@@ -2956,50 +3143,21 @@ where
         };
         if !flush_all && matches!(self.tier_policy.trail, crate::tier_policy::TierLimit::Adaptive) {
             count = 0;
+            let mut scratch = std::vec::Vec::new();
+            let mut first_captures = std::vec::Vec::new();
             while count < closed {
-                let frame = self.trail_stack[count];
-                let entries = &self.trail_value_pool[frame.start..frame.end];
-                let mut unique: std::vec::Vec<usize> = std::vec::Vec::new();
-                for (_, index) in entries {
-                    let i = index.as_usize();
-                    if !unique.contains(&i) {
-                        unique.push(i);
-                    }
-                }
-                if entries.len() < unique.len().saturating_mul(2) {
+                let (writes, uniques) = self.runtime_trail_shape(
+                    self.trail_stack[count],
+                    &mut scratch,
+                    &mut first_captures,
+                );
+                if writes < uniques.saturating_mul(2) {
                     break;
                 }
                 count += 1;
             }
         }
-        if count == 0 {
-            return;
-        }
-
-        for f in 0..count {
-            let frame = self.trail_stack[f];
-            let start = self.hot_value_pool.len();
-            let mut seen: std::vec::Vec<usize> = std::vec::Vec::new();
-            for &(value, index) in &self.trail_value_pool[frame.start..frame.end] {
-                let i = index.as_usize();
-                if !seen.contains(&i) {
-                    seen.push(i);
-                    self.hot_value_pool.push((value, index));
-                }
-            }
-            self.hot_stack.push(crate::frame::HotFrame {
-                saved_len: frame.saved_len,
-                start,
-                end: self.hot_value_pool.len(),
-            });
-        }
-        let cut = self.trail_stack[count].start;
-        self.trail_value_pool.drain(0..cut);
-        self.trail_stack.drain(0..count);
-        for frame in self.trail_stack.iter_mut() {
-            frame.start -= cut;
-            frame.end -= cut;
-        }
+        self.runtime_migrate_trail_count(count);
     }
 
     fn hot_frame_run_count(&self, frame: crate::frame::HotFrame<I>) -> usize {
@@ -3019,43 +3177,20 @@ where
         runs
     }
 
-    /// Migrate an oldest closed unique prefix to direct-restorable runs.
+    /// Execute an exact oldest closed Hot prefix as direct-restorable runs.
     #[verifier::external_body]
     #[cold]
     #[inline(never)]
-    fn runtime_migrate_hot(&mut self, compress_all: bool) {
+    fn runtime_migrate_hot_count(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
         let closed = if self.store.unique_capture() {
             self.hot_stack.len().saturating_sub(1)
         } else {
             self.hot_stack.len()
         };
-        if closed == 0 {
-            return;
-        }
-        let mut count = if compress_all {
-            closed
-        } else {
-            Self::retained_closed_prefix(
-                closed,
-                self.tier_policy.hot,
-                |f| self.hot_stack[f].end - self.hot_stack[f].start,
-                core::mem::size_of::<(T, I)>(),
-            )
-        };
-        if !compress_all && matches!(self.tier_policy.hot, crate::tier_policy::TierLimit::Adaptive) {
-            count = 0;
-            while count < closed {
-                let frame = self.hot_stack[count];
-                let entries = frame.end - frame.start;
-                if entries == 0 || self.hot_frame_run_count(frame).saturating_mul(2) > entries {
-                    break;
-                }
-                count += 1;
-            }
-        }
-        if count == 0 {
-            return;
-        }
+        assert!(count <= closed, "adaptive Hot plan must name a closed prefix");
 
         for f in 0..count {
             let frame = self.hot_stack[f];
@@ -3107,6 +3242,269 @@ where
             self.cold_value_pool.shrink_to_fit();
             self.cold_index_runs.shrink_to_fit();
         }
+    }
+
+    /// Execute sorted unique payloads retained by the adaptive planner without
+    /// rescanning or resorting accepted Hot frames.
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    fn runtime_execute_hot_plan(&mut self, planned: &[std::vec::Vec<(T, I)>]) {
+        let count = planned.len();
+        if count == 0 {
+            return;
+        }
+        let closed = if self.store.unique_capture() {
+            self.hot_stack.len().saturating_sub(1)
+        } else {
+            self.hot_stack.len()
+        };
+        assert!(count <= closed, "adaptive Hot plan must name a closed prefix");
+
+        for (f, entries) in planned.iter().enumerate() {
+            let frame = self.hot_stack[f];
+            let runs_start = self.cold_index_runs.len();
+            let mut runs_len = 0usize;
+            let mut current: Option<(I, usize, usize)> = None;
+            for &(value, index) in entries.iter() {
+                match current {
+                    Some((base, value_start, len)) if base.as_usize() + len == index.as_usize() => {
+                        self.cold_value_pool.push(value);
+                        current = Some((base, value_start, len + 1));
+                    }
+                    _ => {
+                        if let Some((base, start, len)) = current.take() {
+                            self.cold_index_runs.push(crate::frame::IndexRun { base, start, len });
+                            runs_len += 1;
+                        }
+                        let start = self.cold_value_pool.len();
+                        self.cold_value_pool.push(value);
+                        current = Some((index, start, 1));
+                    }
+                }
+            }
+            if let Some((base, start, len)) = current.take() {
+                self.cold_index_runs.push(crate::frame::IndexRun { base, start, len });
+                runs_len += 1;
+            }
+            self.cold_stack.push(crate::frame::ColdFrameHdr {
+                saved_len: frame.saved_len,
+                runs_start,
+                runs_len,
+            });
+        }
+        let cut = if count < self.hot_stack.len() {
+            self.hot_stack[count].start
+        } else {
+            self.hot_value_pool.len()
+        };
+        self.hot_value_pool.drain(0..cut);
+        self.hot_stack.drain(0..count);
+        for frame in self.hot_stack.iter_mut() {
+            frame.start -= cut;
+            frame.end -= cut;
+        }
+        if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
+            self.hot_value_pool.shrink_to_fit();
+            self.cold_value_pool.shrink_to_fit();
+            self.cold_index_runs.shrink_to_fit();
+        }
+    }
+
+    /// Migrate an oldest closed unique prefix to direct-restorable runs.
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    fn runtime_migrate_hot(&mut self, compress_all: bool) {
+        let closed = if self.store.unique_capture() {
+            self.hot_stack.len().saturating_sub(1)
+        } else {
+            self.hot_stack.len()
+        };
+        if closed == 0 {
+            return;
+        }
+        let mut count = if compress_all {
+            closed
+        } else {
+            Self::retained_closed_prefix(
+                closed,
+                self.tier_policy.hot,
+                |f| self.hot_stack[f].end - self.hot_stack[f].start,
+                core::mem::size_of::<(T, I)>(),
+            )
+        };
+        if !compress_all && matches!(self.tier_policy.hot, crate::tier_policy::TierLimit::Adaptive) {
+            count = 0;
+            while count < closed {
+                let frame = self.hot_stack[count];
+                let entries = frame.end - frame.start;
+                if entries == 0 || self.hot_frame_run_count(frame).saturating_mul(2) > entries {
+                    break;
+                }
+                count += 1;
+            }
+        }
+        self.runtime_migrate_hot_count(count);
+    }
+
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    fn runtime_apply_adaptive(
+        &mut self,
+        input: crate::tier_policy::AdaptiveInput,
+    ) -> crate::tier_policy::AdaptiveReport {
+        fn frame_bytes(header: usize, entries: usize, entry: usize) -> usize {
+            header
+                .checked_add(
+                    entries
+                        .checked_mul(entry)
+                        .expect("logical adaptive frame byte count overflow"),
+                )
+                .expect("logical adaptive frame byte count overflow")
+        }
+        fn add_total(total: &mut usize, value: usize) {
+            *total = total
+                .checked_add(value)
+                .expect("adaptive W/U/R total overflow");
+        }
+
+        let mut report = crate::tier_policy::AdaptiveReport::default();
+        let mut logical = self.runtime_closed_history_bytes();
+        report.logical_bytes_before = logical;
+        if logical <= input.max_closed_history_bytes {
+            report.logical_bytes_after = logical;
+            return report;
+        }
+
+        let pair_bytes = core::mem::size_of::<(T, I)>();
+        let preexisting_hot_frames = self.hot_stack.len();
+        let trail_closed = self.trail_stack.len().saturating_sub(1);
+        let mut trail_scratch: std::vec::Vec<(usize, usize)> = std::vec::Vec::new();
+        let mut first_captures: std::vec::Vec<(T, I)> = std::vec::Vec::new();
+        let mut trail_plan: std::vec::Vec<std::vec::Vec<(T, I)>> = std::vec::Vec::new();
+        let mut trail_count = 0usize;
+        while trail_count < trail_closed && logical > input.max_closed_history_bytes {
+            let frame = self.trail_stack[trail_count];
+            let (writes, uniques) = self.runtime_trail_shape(
+                frame,
+                &mut trail_scratch,
+                &mut first_captures,
+            );
+            report.inspected_trail_frames += 1;
+            add_total(&mut report.writes, writes);
+            add_total(&mut report.uniques, uniques);
+
+            let trail_bytes = frame_bytes(
+                core::mem::size_of::<crate::frame::TrailFrame<I>>(),
+                writes,
+                pair_bytes,
+            );
+            let hot_bytes = frame_bytes(
+                core::mem::size_of::<crate::frame::HotFrame<I>>(),
+                uniques,
+                pair_bytes,
+            );
+            let eligible = if writes == 0 {
+                true
+            } else {
+                input.min_writes_per_unique.accepts(writes, uniques)
+                    && hot_bytes < trail_bytes
+            };
+            if !eligible {
+                break;
+            }
+            logical = logical - trail_bytes + hot_bytes;
+            trail_plan.push(core::mem::take(&mut first_captures));
+            trail_count += 1;
+        }
+        report.migrated_trail_frames = trail_plan.len();
+        self.runtime_execute_trail_plan(&trail_plan);
+        drop(trail_plan);
+
+        // Trail -> Hot is executed first. Recompute exact pressure before the
+        // Hot scan so the second stage sees the actual closed representation.
+        logical = self.runtime_closed_history_bytes();
+        let hot_closed = if self.store.unique_capture() {
+            self.hot_stack.len().saturating_sub(1)
+        } else {
+            self.hot_stack.len()
+        };
+        let mut sorted_entries: std::vec::Vec<(T, I)> = std::vec::Vec::new();
+        let mut hot_plan: std::vec::Vec<std::vec::Vec<(T, I)>> = std::vec::Vec::new();
+        let mut hot_count = 0usize;
+        while hot_count < hot_closed && logical > input.max_closed_history_bytes {
+            let frame = self.hot_stack[hot_count];
+            let (uniques, runs) = self.runtime_hot_shape(frame, &mut sorted_entries);
+            report.inspected_hot_frames += 1;
+            if hot_count < preexisting_hot_frames {
+                add_total(&mut report.uniques, uniques);
+            }
+            add_total(&mut report.runs, runs);
+
+            let hot_bytes = frame_bytes(
+                core::mem::size_of::<crate::frame::HotFrame<I>>(),
+                uniques,
+                pair_bytes,
+            );
+            let cold_bytes = core::mem::size_of::<crate::frame::ColdFrameHdr<I>>()
+                .checked_add(
+                    uniques
+                        .checked_mul(core::mem::size_of::<T>())
+                        .expect("logical adaptive Cold byte count overflow"),
+                )
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        runs
+                            .checked_mul(core::mem::size_of::<crate::frame::IndexRun<I>>())
+                            .expect("logical adaptive Cold byte count overflow"),
+                    )
+                })
+                .expect("logical adaptive Cold byte count overflow");
+            let eligible = if uniques == 0 {
+                cold_bytes <= hot_bytes
+            } else {
+                input.min_uniques_per_run.accepts(uniques, runs)
+                    && cold_bytes <= hot_bytes
+            };
+            if !eligible {
+                break;
+            }
+            logical = logical - hot_bytes + cold_bytes;
+            hot_plan.push(core::mem::take(&mut sorted_entries));
+            hot_count += 1;
+        }
+        report.migrated_hot_frames = hot_plan.len();
+        self.runtime_execute_hot_plan(&hot_plan);
+
+        report.inspected_frames = report.inspected_trail_frames + report.inspected_hot_frames;
+        report.migrated_frames = report.migrated_trail_frames + report.migrated_hot_frames;
+        report.logical_bytes_after = self.runtime_closed_history_bytes();
+        report.budget_unmet_bytes = report
+            .logical_bytes_after
+            .saturating_sub(input.max_closed_history_bytes);
+        report
+    }
+
+    /// Apply one deterministic explicit-budget Trail -> Hot -> Cold pass to
+    /// closed history. The writable ingress frame and its immutable
+    /// [`DiffStore`] protocol are never changed.
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    pub fn apply_adaptive(
+        &mut self,
+        input: crate::tier_policy::AdaptiveInput,
+    ) -> (report: crate::tier_policy::AdaptiveReport)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            final(self).depth_spec() == old(self).depth_spec(),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        self.runtime_apply_adaptive(input)
     }
 
     #[verifier::external_body]
@@ -3860,6 +4258,50 @@ where
             return Err(crate::error::ContainerError::CapacityExhausted);
         }
         Ok(self.mark_with_options(options))
+    }
+
+    /// Total mark followed by one explicit adaptive closed-history pass.
+    ///
+    /// The old frame is sealed and its replacement opens with the existing
+    /// immutable `DiffStore` ingress protocol before planning starts. No
+    /// configured rollover is applied by this operation.
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    pub fn try_mark_adaptive(
+        &mut self,
+        shrink: ShrinkPolicy,
+        input: crate::tier_policy::AdaptiveInput,
+    ) -> (r: Result<(VecToken, crate::tier_policy::AdaptiveReport), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r matches Ok((token, _)) ==> {
+                &&& final(self).view() == old(self).view()
+                &&& token.frame_idx_spec() == old(self).depth_spec()
+                &&& final(self).depth_spec() == old(self).depth_spec() + 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().push(old(self).view())
+            },
+            r is Err ==> final(self).view() == old(self).view()
+                && final(self).depth_spec() == old(self).depth_spec()
+                && final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        if !TRACK {
+            return Err(crate::error::ContainerError::Untracked);
+        }
+        if !(self.depth_exec() < (u32::MAX as usize)) {
+            return Err(crate::error::ContainerError::DepthLimit);
+        }
+        if !(self.store.raw_len() <= <I as crate::index_like::IndexLike>::max().as_usize()) {
+            return Err(crate::error::ContainerError::CapacityExhausted);
+        }
+        let token = self.mark_with_options(MarkOptions::new(
+            shrink,
+            crate::tier_policy::RolloverPolicy::Defer,
+        ));
+        let report = self.runtime_apply_adaptive(input);
+        Ok((token, report))
     }
 
     /// Total mark using the vector's configured rollover behavior. This is

@@ -177,7 +177,10 @@ pub use sorted_cursor::SortedCursor;
 pub use sorted_vec_cursor::SortedVecCursor;
 pub use sparse_set::{SparseSet, SparseSetToken};
 pub use tagged::{BoolTagged, Pair, Tagged};
-pub use tier_policy::{ReclaimPolicy, RolloverPolicy, TierLimit, TierPolicy, TierStats};
+pub use tier_policy::{
+    AdaptiveInput, AdaptiveReport, InvalidRatio, Ratio, ReclaimPolicy, RolloverPolicy, TierLimit,
+    TierPolicy, TierStats,
+};
 pub use two_stack_log::TwoStackLog;
 pub use vec::{MarkOptions, ShrinkPolicy, Vec, VecToken, VecView, VecViewIter};
 

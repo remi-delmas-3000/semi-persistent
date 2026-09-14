@@ -121,3 +121,108 @@ pub struct TierStats {
     pub cold_runs: usize,
     pub cold_values: usize,
 }
+
+/// A non-negative integer ratio used by explicit adaptive history planning.
+///
+/// Construction validates that the denominator is nonzero. Comparisons use
+/// cross multiplication, so planning never depends on floating-point rounding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ratio {
+    numerator: usize,
+    denominator: core::num::NonZeroUsize,
+}
+
+/// Returned when a [`Ratio`] is constructed with a zero denominator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidRatio;
+
+impl core::fmt::Display for InvalidRatio {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ratio denominator must be nonzero")
+    }
+}
+
+impl std::error::Error for InvalidRatio {}
+
+impl Ratio {
+    /// Construct an exact integer ratio.
+    pub const fn new(numerator: usize, denominator: usize) -> Result<Self, InvalidRatio> {
+        match core::num::NonZeroUsize::new(denominator) {
+            Some(denominator) => Ok(Self {
+                numerator,
+                denominator,
+            }),
+            None => Err(InvalidRatio),
+        }
+    }
+
+    pub const fn numerator(self) -> usize {
+        self.numerator
+    }
+
+    pub const fn denominator(self) -> usize {
+        self.denominator.get()
+    }
+
+    /// Return whether `left / right` is at least this ratio.
+    pub(crate) fn accepts(self, left: usize, right: usize) -> bool {
+        (left as u128) * (self.denominator() as u128) >= (right as u128) * (self.numerator as u128)
+    }
+}
+
+/// Explicit inputs for one deterministic adaptive closed-history pass.
+///
+/// The byte budget is logical occupancy only: closed Trail/Hot/Cold headers
+/// and payload lengths multiplied by `size_of`. It excludes the writable
+/// ingress frame, live store, allocation capacity, allocator state, RSS, and
+/// time. Inputs are passed per operation and are never persisted in a vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveInput {
+    pub max_closed_history_bytes: usize,
+    pub min_writes_per_unique: Ratio,
+    pub min_uniques_per_run: Ratio,
+}
+
+/// Exact observations and effects of one adaptive closed-history pass.
+///
+/// W/U/R totals count each inspected logical frame once across the two-stage
+/// pass: U from a Trail frame is not counted again if that same frame then
+/// cascades through Hot to Cold. `budget_unmet_bytes` is exactly
+/// `logical_bytes_after.saturating_sub(input.max_closed_history_bytes)`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveReport {
+    pub inspected_frames: usize,
+    pub migrated_frames: usize,
+    pub inspected_trail_frames: usize,
+    pub migrated_trail_frames: usize,
+    pub inspected_hot_frames: usize,
+    pub migrated_hot_frames: usize,
+    pub writes: usize,
+    pub uniques: usize,
+    pub runs: usize,
+    pub logical_bytes_before: usize,
+    pub logical_bytes_after: usize,
+    pub budget_unmet_bytes: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Ratio;
+
+    #[test]
+    fn ratio_accepts_exact_boundaries_and_extreme_products() {
+        let two_thirds = Ratio::new(2, 3).unwrap();
+        assert!(two_thirds.accepts(2, 3));
+        assert!(two_thirds.accepts(3, 4));
+        assert!(!two_thirds.accepts(1, 2));
+
+        assert!(Ratio::new(0, 1).unwrap().accepts(0, usize::MAX));
+        assert!(!Ratio::new(1, usize::MAX).unwrap().accepts(0, usize::MAX));
+
+        let max = usize::MAX;
+        let near_one = Ratio::new(max, max - 1).unwrap();
+        assert!(near_one.accepts(max, max - 1));
+        assert!(!near_one.accepts(max - 1, max - 1));
+        assert!(!near_one.accepts(max, max));
+    }
+}

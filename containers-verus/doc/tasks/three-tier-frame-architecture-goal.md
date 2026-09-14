@@ -1,6 +1,6 @@
 # Policy-driven three-tier frames: make it work, make it fast, then prove it
 
-**Status: E1–E4 BUILT AND RUNTIME-VALIDATED — E5 MEASURED AND OPTIMIZED — E6 lock candidate pending a recorded revision.**
+**Status: E1–E4 BUILT AND RUNTIME-VALIDATED — E5 historical measurements retained; deterministic explicit-budget adaptive semantics BUILT at `c3bb5bd` working tree — E6 REOPENED pending next-stage threshold measurement and a recorded revision.**
 
 This is the controlling goal for replacing the dual-purpose hot stack on
 `d21-exec` after commit `a414090`. It supersedes the two-tier layout and proof
@@ -258,6 +258,38 @@ are true, Trail -> Hot runs before Hot -> Cold. None of these choices changes
 live values, depth, snapshot order, or token coordinates. Group/internal mark
 callers continue through `try_mark`/`seal_frame` and therefore preserve
 `ApplyConfigured` behavior.
+
+### 2.7 Explicit-budget adaptive pass
+
+The additive `AdaptiveInput` is supplied to one `apply_adaptive` or
+`try_mark_adaptive` call and is never retained in `Vec`. Its thresholds are
+exact integer `Ratio` values whose constructor rejects a zero denominator. The
+byte budget counts deterministic logical occupancy for **closed history only**:
+Trail/Hot/Cold frame headers and payload lengths multiplied by `size_of`.
+Capacity, allocator counters, RSS, time, the live store, and the open ingress
+frame are excluded.
+
+Planning and execution obey these rules:
+
+1. If logical closed history is already at or below budget, return an unchanged
+   report without inspecting a frame.
+2. Scan the oldest closed Trail prefix without skipping. Empty frames remain
+   eligible token boundaries. A nonempty frame advances only when W/U meets the
+   supplied threshold and projected Hot bytes are strictly smaller.
+3. Execute exactly that prefix with first-capture semantics, then recompute
+   logical pressure from resulting physical lengths.
+4. While still over budget, scan the oldest closed Hot prefix without skipping.
+   Empty frames remain eligible. A nonempty frame advances only when U/R meets
+   the supplied threshold and projected Cold bytes are no worse than Hot.
+5. Execute exactly that prefix. Report inspected and migrated counts, W/U/R,
+   before/after logical bytes, and the exact remaining byte shortfall.
+
+Trail -> Hot always precedes Hot -> Cold. Ordering blockers, ratio blockers,
+singleton locality, or irreducible Cold may leave a nonzero shortfall; this is
+reported rather than hidden by harmful migration. `try_mark_adaptive` first
+seals the old frame and opens the replacement with the immutable existing
+`DiffStore`, then applies the pass. Live `DynStore` protocol switching remains
+outside this goal and is not implemented.
 
 ## 3. Representation contracts
 
@@ -781,8 +813,9 @@ Update this table in the same change that adds or removes a marker.
 | `Vec::with_store_policy`, `frame_saved_len_exec`, `diff_log_len` | retention-only construction, three-segment lookup, compatibility diagnostics, and cached no-op rollover gate precede proof rewrite | constructor compatibility suites and protocol tests | active scaffold; E1 runtime green |
 | `runtime_capture`, `runtime_push`, `runtime_pop`, `runtime_set`; wrappers `Vec::push`, `Vec::pop`, `Vec::set_index` | immutable `DiffStore` capability selects Trail or Hot ingress; static stores fold the answer and DynStore dispatches its variant | duplicate, pop/re-entry, three-protocol policy-matrix, and compatibility tests | active scaffold; E1 runtime green |
 | `runtime_apply_configured_rollover`, `runtime_rollover_on_mark`, `runtime_push_frame`, `push_frame_with_options`, `mark_with_options`; wrappers `Vec::push_frame`, `Vec::mark`, `Vec::try_mark_with` | preserve thresholded store/log shrink, close selected ingress, open one empty frame, then defer/apply/force only closed Trail -> Hot -> Cold prefixes | shrink-capacity, Defer/configured/forced-edge, empty-frame, all-tier restore, legacy cadence, and SyncGroup suites | active scaffold; E1-E3 runtime green |
-| `runtime_migrate_trail`, `flush_trail` | oldest closed-prefix dedupe and pool rebasing implemented before refinement theorem | zero/frame/entry/byte/adaptive/unbounded boundary tests | active scaffold; E2 runtime green |
-| `runtime_migrate_hot`, `compress_hot` | sorted unique-to-run conversion and zero-budget path precede proof lock | clustered runs, zero hot budget, and legacy compression tests | active scaffold; E3 runtime green |
+| `runtime_trail_shape`, `runtime_migrate_trail_count`, `runtime_execute_trail_plan`, `runtime_migrate_trail`, `flush_trail` | oldest closed-prefix statistics, deterministic sort/dedupe first-capture execution, reusable accepted-frame plans, and pool rebasing precede refinement theorem | zero/frame/entry/byte/adaptive/unbounded boundary tests | active scaffold; E2 runtime green |
+| `runtime_hot_shape`, `runtime_migrate_hot_count`, `runtime_execute_hot_plan`, `runtime_migrate_hot`, `compress_hot` | exact U/R statistics, reusable sorted accepted-frame plans, unique-to-run conversion, and zero-budget path precede proof lock | clustered/singleton runs, zero hot budget, and legacy compression tests | active scaffold; E3 runtime green |
+| `runtime_closed_history_bytes`, `runtime_apply_adaptive`, `apply_adaptive`, `try_mark_adaptive` | exact closed-only logical byte planning and execution are locked by runtime evidence before refinement proof; ratios and budgets are explicit call inputs | exact boundary, duplicate/locality pass/fail, empty/blocker/cascade/unmet, promotion, all-ingress, token, and policy-matrix tests | active scaffold; adaptive runtime green, threshold measurement pending |
 | `runtime_apply_tier_policy`, `apply_tier_policy` | policy dispatch and reclamation are executable-first | immediate policy tightening and legacy environment-lever tests | active scaffold; E2/E3 runtime green |
 | `runtime_begin_restore`, `runtime_restore_frame`; wrapper `Vec::restore_frame` | newest-to-oldest trail/hot/cold orchestration precedes telescope proof | all-tier targets, deep unwind, nonmonotone lengths, conformance suite | active scaffold; E3 runtime green |
 | `runtime_promote_survivor` | survivor must become selected ingress without changing live values | hot/cold promotion and promote-write-remigrate-restore regression | active scaffold; E2/E3 runtime green |
@@ -830,12 +863,12 @@ Existing unrelated trusted bodies remain governed by
 | three DiffStore ingress protocols | runtime tests for static and dynamic Inline/Parallel/Trail | BUILT — focused and compatibility suites green |
 | arbitrary per-tier buffering | zero/finite/unbounded policy tests | BUILT — zero/finite/adaptive/unbounded boundaries green |
 | trail-only SMT profile | differential traces and end-to-end benchmark | MEASURED — see E5 record |
-| adaptive equality-saturation profile | memory/restore traces and benchmark | MEASURED — see E5 record |
+| adaptive equality-saturation profile | explicit closed-history budgets, memory/restore traces, and benchmark | BUILT — deterministic W/U/R planner and v2 rows; final thresholds deferred to next-stage measurement |
 | direct-unique restore profile | direct-compression traces and benchmark | MEASURED — see E5 record |
 | correct conversions and promotions | boundary tests + arbitrary traces | BUILT — cross-tier and promote/write/remigrate regression green |
 | all-store policy-matrix campaign | retained proptest artifacts | BUILT — 1,024-case complete matrix and full conformance gate green |
 | end-to-end performance record | Criterion before/after/control tables | MEASURED AND OPTIMIZED — see E5 record |
-| optimized algorithm and defaults | profiles, tradeoffs, lock revision | LOCK CANDIDATE — recorded revision pending |
+| optimized algorithm and defaults | profiles, tradeoffs, lock revision | REOPENED — explicit-budget behavior built; next-stage measurements must lock thresholds and revision |
 | complete proof plan against locked code | invariant and theorem dependency graph | DESIGNED IN OUTLINE |
 | discharged proof scaffolds | full Verus and trust-surface gates | DEFERRED |
 
