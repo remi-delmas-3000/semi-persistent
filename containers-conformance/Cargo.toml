@@ -72,3 +72,7 @@ harness = false
 [[bench]]
 name = "normalize_bench"
 harness = false
+
+[[bench]]
+name = "three_tier_bench"
+harness = false

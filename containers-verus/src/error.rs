@@ -1,11 +1,10 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Error type for total public container operations.
+//! Error types for total public container operations.
 //!
-//! Every `try_` wrapper returns `Result<_, ContainerError>`; the variant
-//! names which precondition failed, so a caller can distinguish operational
-//! exhaustion (capacity, depth, forks — conditions a correct program can
-//! meet at scale) from contract violations (a foreign or stale token).
+//! `ContainerError` names failures shared by total container operations.
+//! Additive APIs with narrower failure domains use dedicated error types so
+//! this enum's public variant surface remains stable.
 
 use vstd::prelude::*;
 

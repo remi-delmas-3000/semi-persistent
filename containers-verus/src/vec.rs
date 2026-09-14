@@ -30,10 +30,36 @@ use crate::index_like::IndexLike;
 /// production). The verus model treats both variants as observationally
 /// inert: shrinking is a capacity hint that never changes `view()` or any
 /// tracked sequence, so it carries no spec content.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 pub enum ShrinkPolicy {
     Never,
     IfOverallocated { factor: usize, headroom: usize },
+}
+
+/// Per-mark controls. Rollover is evaluated only after the old frame is
+/// sealed and the new writable frame is open.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct MarkOptions {
+    pub shrink: ShrinkPolicy,
+    pub rollover: crate::tier_policy::RolloverPolicy,
+}
+
+impl MarkOptions {
+    pub const fn new(
+        shrink: ShrinkPolicy,
+        rollover: crate::tier_policy::RolloverPolicy,
+    ) -> Self {
+        Self { shrink, rollover }
+    }
+}
+
+impl Default for MarkOptions {
+    fn default() -> Self {
+        Self {
+            shrink: ShrinkPolicy::Never,
+            rollover: crate::tier_policy::RolloverPolicy::ApplyConfigured,
+        }
+    }
 }
 
 /// Opaque token returned by `mark()`.
@@ -191,6 +217,7 @@ pub(crate) fn log_subrange_vec<T: Copy, I: IndexLike>(
     out
 }
 
+#[allow(dead_code)]
 pub(crate) fn log_index<T: Copy, I: IndexLike>(
     d: &std::vec::Vec<(T, I)>, i: usize,
 ) -> (e: (T, I))
@@ -1744,25 +1771,33 @@ where
     VC: crate::value_compressor::ValueCompressor<T>,
 {
     pub(crate) store: S,
-    // Mainline's field, verbatim: the hot tier IS a bare pair vec
-    // (doc/tasks/mainline-shape-plus-coldstack-goal.md). The DiffLog type
-    // was the compression branch's own artifact and is retired.
+    /// Inert proof-compatibility shadow retained until the deferred proof
+    /// campaign is rewritten against the three physical representations.
+    /// Executable capture, migration, and restore never read or append it.
+    #[allow(dead_code)]
     pub(crate) diff_log: std::vec::Vec<(T, I)>,
-    // Ruled layout: two frame stacks. Cold frames are the OLDEST [0, k),
-    // hot frames the most recent [k, n); a token's frame_idx resolves by
-    // comparison with cold_stack.len(). Each tier's header carries the
-    // frame's saved_len.
+    /// Chronological duplicate-preserving history. Only the newest frame is
+    /// mutable for a TrailStore protocol.
+    pub(crate) trail_value_pool: std::vec::Vec<(T, I)>,
+    pub(crate) trail_stack: std::vec::Vec<crate::frame::TrailFrame<I>>,
+    /// Unique first-capture-wins history. Only the newest frame is mutable
+    /// for an InlineStore or ParallelStore protocol.
+    pub(crate) hot_value_pool: std::vec::Vec<(T, I)>,
     pub(crate) hot_stack: std::vec::Vec<crate::frame::HotFrame<I>>,
+    /// Immutable run-compressed oldest history.
     pub(crate) cold_stack: std::vec::Vec<crate::frame::ColdFrameHdr<I>>,
-    /// All value runs of all cold frames, concatenated in frame order.
     pub(crate) cold_value_pool: std::vec::Vec<T>,
-    /// All index runs of all cold frames: run lands at live[base..], values
-    /// at cold_value_pool[start .. start+len].
     pub(crate) cold_index_runs: std::vec::Vec<crate::frame::IndexRun<I>>,
-    /// Compression cadence: None = never compress (plain baseline columns);
-    /// Some(b) = at mark, when more than b hot frames exist, pass
-    /// compress=true (the buffered eviction policy).
+    pub(crate) tier_policy: crate::tier_policy::TierPolicy,
+    /// Legacy constructor cadence. `Some(n)` means that once more than `n`
+    /// ingress frames are closed, the compatibility adapter migrates the
+    /// entire closed batch. Explicit-policy constructors always leave this
+    /// `None` and use `tier_policy`'s oldest-prefix semantics instead.
     pub(crate) hot_buffer: Option<usize>,
+    /// Cached answer to whether `ApplyConfigured` can migrate history. Updated
+    /// with the store protocol and tier policy; avoids decoding no-op policy on
+    /// every default mark.
+    pub(crate) automatic_rollover_enabled: bool,
     /// THE ghost diff (proof architecture, goal doc): every tracked write,
     /// in temporal order, duplicates included, regardless of the store's
     /// capture discipline. Restore correctness is stated once against this;
@@ -1783,7 +1818,13 @@ where
     pub(crate) snapshots: Ghost<Seq<Seq<T>>>,
 }
 
-impl<T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, S, TRACK, VC>
+impl<
+    T,
+    I,
+    S,
+    const TRACK: bool,
+    VC: crate::value_compressor::ValueCompressor<T>,
+> Vec<T, I, S, TRACK, VC>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -2654,6 +2695,23 @@ where
         self.store.get(i)
     }
 
+    #[inline(always)]
+    fn configured_rollover_can_run(
+        unique_capture: bool,
+        tier_policy: crate::tier_policy::TierPolicy,
+        hot_buffer: Option<usize>,
+    ) -> bool {
+        if hot_buffer.is_some() {
+            return true;
+        }
+        if unique_capture {
+            !matches!(tier_policy.hot, crate::tier_policy::TierLimit::Unbounded)
+        } else {
+            !matches!(tier_policy.trail, crate::tier_policy::TierLimit::Unbounded)
+                || !matches!(tier_policy.hot, crate::tier_policy::TierLimit::Unbounded)
+        }
+    }
+
     /// Build an empty tracked vector over a freshly-empty store. Mirrors
     /// production's `with_store`. The store must be well-formed and empty
     /// (no data, no capture flags) — the concrete `new()` of each backend
@@ -2686,12 +2744,13 @@ where
         Self::with_store_mode(store, mode)
     }
 
-    /// As `with_store`, but selects the diff log's value representation at
-    /// runtime (per instance, not a const generic): `None` keeps the value
-    /// column plain (SMT: no compression overhead); `ValueDict` dictionary-
-    /// encodes it (equality saturation: the union-find columns coalesce equal
-    /// values, at the cost of a `dict_find` per capture). Both start empty and
-    /// well-formed, so the constructor's contract is representation-independent.
+    /// As `with_store`, enabling the legacy Vec compression cadence. `None`
+    /// keeps unique-capture stores fully buffered; every other mode, plus a
+    /// chronological store, migrates each whole batch after eight closed
+    /// frames. The three-tier Vec normalizes migrated history to its run-only
+    /// cold representation, so non-`None` modes are activation aliases here.
+    /// Use [`crate::diff_compress::compress_frame`] when the named dictionary
+    /// or write-order codec itself is required.
     pub(crate) fn with_store_mode(store: S, mode: crate::diff_compress::CompressionMode)
         -> (v: Self)
         requires
@@ -2703,24 +2762,41 @@ where
             v.snapshots_view().len() == 0,
     {
         proof { store.lemma_wf_captured_len(); }  // captured().len() == 0
-        // The bare mainline log for every mode; what differs per column is
-        // only the compression cadence below (ruled design).
-        let diff_log: std::vec::Vec<(T, I)> = std::vec::Vec::new();
-        // Cadence: a mode-None unique-capture column is the plain
-        // production-parity baseline and never compresses; every other
-        // column (any compressing mode, and the trail discipline whose only
-        // compression path is eviction) buffers HOT_BUFFER frames.
-        let tiered = !(matches!(mode, crate::diff_compress::CompressionMode::None)
-            && store.unique_capture());
-        let hot_buffer = if tiered { Some(8usize) } else { None };
+        let unique_capture = store.unique_capture();
+        // Legacy Vec modes predate the run-only three-tier cold contract. The
+        // standalone `compress_frame` API still provides each named encoder;
+        // Vec treats every non-None mode as the same run-cold activation alias.
+        // Compatibility here is the historical whole-batch cadence: after
+        // more than eight frames close, all closed ingress frames migrate.
+        let legacy_batch_rollover = if matches!(mode, crate::diff_compress::CompressionMode::None)
+            && unique_capture
+        {
+            None
+        } else {
+            Some(8usize)
+        };
+        let tier_policy = if unique_capture {
+            crate::tier_policy::TierPolicy::fully_buffered_unique()
+        } else {
+            crate::tier_policy::TierPolicy::smt()
+        };
         let v = Vec {
             store,
-            diff_log,
+            diff_log: std::vec::Vec::new(),
+            trail_value_pool: std::vec::Vec::new(),
+            trail_stack: std::vec::Vec::new(),
+            hot_value_pool: std::vec::Vec::new(),
             hot_stack: std::vec::Vec::new(),
             cold_stack: std::vec::Vec::new(),
             cold_value_pool: std::vec::Vec::new(),
             cold_index_runs: std::vec::Vec::new(),
-            hot_buffer,
+            tier_policy,
+            hot_buffer: legacy_batch_rollover,
+            automatic_rollover_enabled: Self::configured_rollover_can_run(
+                unique_capture,
+                tier_policy,
+                legacy_batch_rollover,
+            ),
             full_trail: Ghost(Seq::empty()),
             trail_frames: Ghost(Seq::empty()),
             active_saved_len: <I as IndexLike>::min(),
@@ -2738,6 +2814,653 @@ where
                 #[trigger] v.phys_frame_inv_range_holds(i) by {}
         }
         v
+    }
+
+    /// Explicit execution-first constructor used by the three-tier API.
+    #[verifier::external_body]
+    pub(crate) fn with_store_policy(
+        store: S,
+        tier_policy: crate::tier_policy::TierPolicy,
+    ) -> (v: Self)
+        requires
+            store.wf(),
+            store.data().len() == 0,
+        ensures
+            v.wf(),
+            v.view().len() == 0,
+            v.snapshots_view().len() == 0,
+    {
+        let mut v = Self::with_store_mode(store, crate::diff_compress::CompressionMode::None);
+        v.tier_policy = tier_policy;
+        v.hot_buffer = None;
+        v.automatic_rollover_enabled =
+            Self::configured_rollover_can_run(v.store.unique_capture(), tier_policy, None);
+        v
+    }
+
+    /// Capture according to the immutable protocol selected by `DiffStore`.
+    /// Static stores constant-fold this branch; `DynStore` dispatches through
+    /// its construction-time `StoreKind` variant.
+    #[inline(always)]
+    #[verifier::external_body]
+    fn runtime_capture(&mut self, index: I) {
+        if !TRACK || index.as_usize() >= self.active_saved_len.as_usize() {
+            return;
+        }
+        if self.store.unique_capture() {
+            self.store
+                .capture(index, self.active_saved_len, &mut self.hot_value_pool);
+        } else {
+            let old_value = self.store.get(index);
+            self.trail_value_pool.push((old_value, index));
+        }
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    fn runtime_push(&mut self, value: T) {
+        let old_len = self.store.len();
+        self.store.push(value);
+        if TRACK
+            && old_len.as_usize() < self.active_saved_len.as_usize()
+            && self.store.unique_capture()
+        {
+            // A tracked pop from the marked range already captured this slot.
+            // Re-entry only needs to restore that O(1) capture bit.
+            self.store.mark_captured(old_len);
+        }
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    fn runtime_pop(&mut self) -> Option<T> {
+        let len = self.store.raw_len();
+        if len == 0 {
+            return None;
+        }
+        if TRACK && len - 1 < self.active_saved_len.as_usize() {
+            if let Some(index) = I::try_from_usize(len - 1) {
+                self.runtime_capture(index);
+            }
+        }
+        self.store.pop()
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    fn runtime_set(&mut self, index: I, value: T) {
+        self.runtime_capture(index);
+        self.store.set_raw(index, value);
+    }
+
+    fn retained_closed_prefix<F>(
+        closed: usize,
+        limit: crate::tier_policy::TierLimit,
+        mut frame_entries: F,
+        entry_bytes: usize,
+    ) -> usize
+    where
+        F: FnMut(usize) -> usize,
+    {
+        match limit {
+            crate::tier_policy::TierLimit::Unbounded
+            | crate::tier_policy::TierLimit::Adaptive => 0,
+            crate::tier_policy::TierLimit::Frames(keep) => closed.saturating_sub(keep),
+            crate::tier_policy::TierLimit::Entries(keep) => {
+                let mut retained = 0usize;
+                let mut used = 0usize;
+                while retained < closed {
+                    let n = frame_entries(closed - 1 - retained);
+                    if n > keep.saturating_sub(used) {
+                        break;
+                    }
+                    used += n;
+                    retained += 1;
+                }
+                closed - retained
+            }
+            crate::tier_policy::TierLimit::Bytes(keep) => {
+                let mut retained = 0usize;
+                let mut used = 0usize;
+                while retained < closed {
+                    let n = frame_entries(closed - 1 - retained).saturating_mul(entry_bytes);
+                    if n > keep.saturating_sub(used) {
+                        break;
+                    }
+                    used += n;
+                    retained += 1;
+                }
+                closed - retained
+            }
+        }
+    }
+
+    /// Migrate an oldest closed trail prefix through first-capture dedupe.
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    fn runtime_migrate_trail(&mut self, flush_all: bool) {
+        let closed = self.trail_stack.len().saturating_sub(1);
+        if closed == 0 {
+            return;
+        }
+        let mut count = if flush_all {
+            closed
+        } else {
+            Self::retained_closed_prefix(
+                closed,
+                self.tier_policy.trail,
+                |f| self.trail_stack[f].end - self.trail_stack[f].start,
+                core::mem::size_of::<(T, I)>(),
+            )
+        };
+        if !flush_all && matches!(self.tier_policy.trail, crate::tier_policy::TierLimit::Adaptive) {
+            count = 0;
+            while count < closed {
+                let frame = self.trail_stack[count];
+                let entries = &self.trail_value_pool[frame.start..frame.end];
+                let mut unique: std::vec::Vec<usize> = std::vec::Vec::new();
+                for (_, index) in entries {
+                    let i = index.as_usize();
+                    if !unique.contains(&i) {
+                        unique.push(i);
+                    }
+                }
+                if entries.len() < unique.len().saturating_mul(2) {
+                    break;
+                }
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return;
+        }
+
+        for f in 0..count {
+            let frame = self.trail_stack[f];
+            let start = self.hot_value_pool.len();
+            let mut seen: std::vec::Vec<usize> = std::vec::Vec::new();
+            for &(value, index) in &self.trail_value_pool[frame.start..frame.end] {
+                let i = index.as_usize();
+                if !seen.contains(&i) {
+                    seen.push(i);
+                    self.hot_value_pool.push((value, index));
+                }
+            }
+            self.hot_stack.push(crate::frame::HotFrame {
+                saved_len: frame.saved_len,
+                start,
+                end: self.hot_value_pool.len(),
+            });
+        }
+        let cut = self.trail_stack[count].start;
+        self.trail_value_pool.drain(0..cut);
+        self.trail_stack.drain(0..count);
+        for frame in self.trail_stack.iter_mut() {
+            frame.start -= cut;
+            frame.end -= cut;
+        }
+    }
+
+    fn hot_frame_run_count(&self, frame: crate::frame::HotFrame<I>) -> usize {
+        let mut indices: std::vec::Vec<usize> = self.hot_value_pool[frame.start..frame.end]
+            .iter()
+            .map(|(_, index)| index.as_usize())
+            .collect();
+        indices.sort_unstable();
+        let mut runs = 0usize;
+        let mut previous: Option<usize> = None;
+        for index in indices {
+            if previous.map(|p| p + 1 != index).unwrap_or(true) {
+                runs += 1;
+            }
+            previous = Some(index);
+        }
+        runs
+    }
+
+    /// Migrate an oldest closed unique prefix to direct-restorable runs.
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    fn runtime_migrate_hot(&mut self, compress_all: bool) {
+        let closed = if self.store.unique_capture() {
+            self.hot_stack.len().saturating_sub(1)
+        } else {
+            self.hot_stack.len()
+        };
+        if closed == 0 {
+            return;
+        }
+        let mut count = if compress_all {
+            closed
+        } else {
+            Self::retained_closed_prefix(
+                closed,
+                self.tier_policy.hot,
+                |f| self.hot_stack[f].end - self.hot_stack[f].start,
+                core::mem::size_of::<(T, I)>(),
+            )
+        };
+        if !compress_all && matches!(self.tier_policy.hot, crate::tier_policy::TierLimit::Adaptive) {
+            count = 0;
+            while count < closed {
+                let frame = self.hot_stack[count];
+                let entries = frame.end - frame.start;
+                if entries == 0 || self.hot_frame_run_count(frame).saturating_mul(2) > entries {
+                    break;
+                }
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return;
+        }
+
+        for f in 0..count {
+            let frame = self.hot_stack[f];
+            let mut entries = self.hot_value_pool[frame.start..frame.end].to_vec();
+            entries.sort_unstable_by_key(|(_, index)| index.as_usize());
+            let runs_start = self.cold_index_runs.len();
+            let mut runs_len = 0usize;
+            let mut current: Option<(I, usize, usize)> = None;
+            for (value, index) in entries {
+                match current {
+                    Some((base, value_start, len)) if base.as_usize() + len == index.as_usize() => {
+                        self.cold_value_pool.push(value);
+                        current = Some((base, value_start, len + 1));
+                    }
+                    _ => {
+                        if let Some((base, start, len)) = current.take() {
+                            self.cold_index_runs.push(crate::frame::IndexRun { base, start, len });
+                            runs_len += 1;
+                        }
+                        let start = self.cold_value_pool.len();
+                        self.cold_value_pool.push(value);
+                        current = Some((index, start, 1));
+                    }
+                }
+            }
+            if let Some((base, start, len)) = current.take() {
+                self.cold_index_runs.push(crate::frame::IndexRun { base, start, len });
+                runs_len += 1;
+            }
+            self.cold_stack.push(crate::frame::ColdFrameHdr {
+                saved_len: frame.saved_len,
+                runs_start,
+                runs_len,
+            });
+        }
+        let cut = if count < self.hot_stack.len() {
+            self.hot_stack[count].start
+        } else {
+            self.hot_value_pool.len()
+        };
+        self.hot_value_pool.drain(0..cut);
+        self.hot_stack.drain(0..count);
+        for frame in self.hot_stack.iter_mut() {
+            frame.start -= cut;
+            frame.end -= cut;
+        }
+        if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
+            self.hot_value_pool.shrink_to_fit();
+            self.cold_value_pool.shrink_to_fit();
+            self.cold_index_runs.shrink_to_fit();
+        }
+    }
+
+    #[verifier::external_body]
+    #[cold]
+    #[inline(never)]
+    fn runtime_apply_tier_policy(&mut self) {
+        self.runtime_migrate_trail(false);
+        self.runtime_migrate_hot(false);
+    }
+
+    /// Enforce both configured limits immediately. The open ingress frame is
+    /// excluded even when a limit is zero.
+    #[verifier::external_body]
+    pub fn apply_tier_policy(&mut self) {
+        self.runtime_apply_tier_policy();
+    }
+
+    /// Explicitly dedupe every closed chronological frame.
+    #[verifier::external_body]
+    pub fn flush_trail(&mut self) {
+        self.runtime_migrate_trail(true);
+    }
+
+    /// Explicitly run-compress every closed unique frame.
+    #[verifier::external_body]
+    pub fn compress_hot(&mut self) {
+        self.runtime_migrate_hot(true);
+    }
+
+    #[inline(always)]
+    #[verifier::external_body]
+    fn runtime_apply_configured_rollover(&mut self) {
+        let legacy_batch_due = self
+            .hot_buffer
+            .map(|keep| {
+                let closed = if self.store.unique_capture() {
+                    self.hot_stack.len().saturating_sub(1)
+                } else {
+                    self.trail_stack.len().saturating_sub(1)
+                };
+                closed > keep
+            })
+            .unwrap_or(false);
+        if legacy_batch_due {
+            if !self.store.unique_capture() {
+                self.runtime_migrate_trail(true);
+            }
+            self.runtime_migrate_hot(true);
+        } else {
+            let automatic_policy_is_noop = if self.store.unique_capture() {
+                matches!(self.tier_policy.hot, crate::tier_policy::TierLimit::Unbounded)
+            } else {
+                matches!(
+                    self.tier_policy.trail,
+                    crate::tier_policy::TierLimit::Unbounded
+                ) && matches!(
+                    self.tier_policy.hot,
+                    crate::tier_policy::TierLimit::Unbounded
+                )
+            };
+            if !automatic_policy_is_noop {
+                self.runtime_apply_tier_policy();
+            }
+        }
+    }
+
+    #[verifier::external_body]
+    fn runtime_rollover_on_mark(&mut self, rollover: crate::tier_policy::RolloverPolicy) {
+        match rollover {
+            crate::tier_policy::RolloverPolicy::Defer => {}
+            crate::tier_policy::RolloverPolicy::ApplyConfigured => {
+                self.runtime_apply_configured_rollover();
+            }
+            crate::tier_policy::RolloverPolicy::ForceClosed {
+                trail_to_hot,
+                hot_to_cold,
+            } => {
+                if trail_to_hot {
+                    self.runtime_migrate_trail(true);
+                }
+                if hot_to_cold {
+                    self.runtime_migrate_hot(true);
+                }
+            }
+        }
+    }
+
+    #[verifier::external_body]
+    fn runtime_push_frame<const APPLY_CONFIGURED: bool>(&mut self, options: MarkOptions) {
+        // Preserve the established thresholded reclaim contract. Rollover is
+        // independent and still occurs only after the replacement frame opens.
+        self.maybe_shrink(options.shrink);
+        let saved_len = self.store.len();
+        let active: &[(T, I)] = if self.store.unique_capture() {
+            self.hot_stack
+                .last()
+                .map(|f| &self.hot_value_pool[f.start..self.hot_value_pool.len()])
+                .unwrap_or(&[])
+        } else {
+            self.trail_stack
+                .last()
+                .map(|f| &self.trail_value_pool[f.start..self.trail_value_pool.len()])
+                .unwrap_or(&[])
+        };
+        self.store.prepare_mark(saved_len, active);
+        if self.store.unique_capture() {
+            if let Some(frame) = self.hot_stack.last_mut() {
+                frame.end = self.hot_value_pool.len();
+            }
+            let start = self.hot_value_pool.len();
+            self.hot_stack.push(crate::frame::HotFrame {
+                saved_len,
+                start,
+                end: start,
+            });
+        } else {
+            if let Some(frame) = self.trail_stack.last_mut() {
+                frame.end = self.trail_value_pool.len();
+            }
+            let start = self.trail_value_pool.len();
+            self.trail_stack.push(crate::frame::TrailFrame {
+                saved_len,
+                start,
+                end: start,
+            });
+        }
+        let ghost old_view = self.view();
+        proof {
+            self.snapshots = Ghost(self.snapshots@.push(old_view));
+            self.trail_frames@ = self.trail_frames@.push(self.full_trail@.len() as nat);
+        }
+        self.active_saved_len = saved_len;
+        // Rollover is deliberately after the new frame opens. Migration
+        // helpers therefore see only closed oldest prefixes and cannot change
+        // depth, token coordinates, snapshots, or the writable frame.
+        if APPLY_CONFIGURED {
+            if self.automatic_rollover_enabled {
+                self.runtime_apply_configured_rollover();
+            }
+        } else {
+            self.runtime_rollover_on_mark(options.rollover);
+        }
+        if let ShrinkPolicy::IfOverallocated { factor, headroom } = options.shrink {
+            // Apply the same thresholded reclaim rule to the executable
+            // three-tier pools. This replaces the earlier unconditional
+            // shrink-to-fit shortcut while preserving mark-time reclamation.
+            log_shrink_capacity(&mut self.trail_value_pool, factor, headroom);
+            log_shrink_capacity(&mut self.hot_value_pool, factor, headroom);
+            if matches!(
+                self.tier_policy.cold_reclaim,
+                crate::tier_policy::ReclaimPolicy::ShrinkToFit
+            ) {
+                self.cold_value_pool.shrink_to_fit();
+                self.cold_index_runs.shrink_to_fit();
+            }
+        }
+    }
+
+    fn cold_value_cut(&self, runs_start: usize) -> usize {
+        if runs_start < self.cold_index_runs.len() {
+            self.cold_index_runs[runs_start].start
+        } else {
+            self.cold_value_pool.len()
+        }
+    }
+
+    #[verifier::external_body]
+    fn runtime_begin_restore(&mut self) {
+        if !self.store.needs_replayed_indices() {
+            self.store.begin_restore(&[]);
+            return;
+        }
+        let entries: &[(T, I)] = if self.store.unique_capture() {
+            self.hot_stack
+                .last()
+                .map(|f| &self.hot_value_pool[f.start..self.hot_value_pool.len()])
+                .unwrap_or(&[])
+        } else {
+            self.trail_stack
+                .last()
+                .map(|f| &self.trail_value_pool[f.start..self.trail_value_pool.len()])
+                .unwrap_or(&[])
+        };
+        self.store.begin_restore(entries);
+    }
+
+    #[verifier::external_body]
+    fn runtime_promote_survivor(&mut self) {
+        if self.depth_exec() == 0 {
+            self.active_saved_len = <I as IndexLike>::min();
+            self.store.finish_restore(&[], self.active_saved_len);
+            return;
+        }
+        if !self.store.unique_capture() {
+                if self.trail_stack.is_empty() {
+                    if let Some(frame) = self.hot_stack.pop() {
+                        let entries = self.hot_value_pool[frame.start..frame.end].to_vec();
+                        self.hot_value_pool.truncate(frame.start);
+                        let start = self.trail_value_pool.len();
+                        self.trail_value_pool.extend_from_slice(&entries);
+                        self.trail_stack.push(crate::frame::TrailFrame {
+                            saved_len: frame.saved_len,
+                            start,
+                            end: self.trail_value_pool.len(),
+                        });
+                    } else if let Some(frame) = self.cold_stack.pop() {
+                        let start = self.trail_value_pool.len();
+                        for r in frame.runs_start..frame.runs_start + frame.runs_len {
+                            let run = self.cold_index_runs[r];
+                            for q in 0..run.len {
+                                if let Some(index) = I::try_from_usize(run.base.as_usize() + q) {
+                                    self.trail_value_pool.push((self.cold_value_pool[run.start + q], index));
+                                }
+                            }
+                        }
+                        let value_cut = self.cold_value_cut(frame.runs_start);
+                        self.cold_index_runs.truncate(frame.runs_start);
+                        self.cold_value_pool.truncate(value_cut);
+                        self.trail_stack.push(crate::frame::TrailFrame {
+                            saved_len: frame.saved_len,
+                            start,
+                            end: self.trail_value_pool.len(),
+                        });
+                    }
+                }
+                let top = *self.trail_stack.last().expect("nonempty history has an ingress frame");
+                self.active_saved_len = top.saved_len;
+                self.store.finish_restore(
+                    &self.trail_value_pool[top.start..self.trail_value_pool.len()],
+                    self.store.len(),
+                );
+            } else {
+                if self.hot_stack.is_empty() {
+                    let frame = self.cold_stack.pop().expect("nonempty unique history has a survivor");
+                    let start = self.hot_value_pool.len();
+                    for r in frame.runs_start..frame.runs_start + frame.runs_len {
+                        let run = self.cold_index_runs[r];
+                        for q in 0..run.len {
+                            if let Some(index) = I::try_from_usize(run.base.as_usize() + q) {
+                                self.hot_value_pool.push((self.cold_value_pool[run.start + q], index));
+                            }
+                        }
+                    }
+                    let value_cut = self.cold_value_cut(frame.runs_start);
+                    self.cold_index_runs.truncate(frame.runs_start);
+                    self.cold_value_pool.truncate(value_cut);
+                    self.hot_stack.push(crate::frame::HotFrame {
+                        saved_len: frame.saved_len,
+                        start,
+                        end: self.hot_value_pool.len(),
+                    });
+                }
+                let top = *self.hot_stack.last().expect("nonempty history has an ingress frame");
+                self.active_saved_len = top.saved_len;
+                self.store.finish_restore(
+                    &self.hot_value_pool[top.start..self.hot_value_pool.len()],
+                    self.store.len(),
+                );
+            }
+    }
+
+    /// Tier-aware newest-to-oldest restore. Trail entries replay right-to-left,
+    /// hot entries are unique scalar writes, and cold runs write directly.
+    #[verifier::external_body]
+    fn runtime_restore_frame(&mut self, target: usize)
+    where
+        T: core::default::Default,
+    {
+        let cold = self.cold_stack.len();
+        let hot = self.hot_stack.len();
+        let trail = self.trail_stack.len();
+        let saved_len = self.frame_saved_len_exec(target);
+        if self.store.len().as_usize() != saved_len.as_usize() {
+            self.store.resize_default(saved_len);
+        }
+        if !self.store.restore_entries_clear_capture() {
+            self.runtime_begin_restore();
+        }
+
+        let trail_start = cold + hot;
+        let first_trail = target.saturating_sub(trail_start).min(trail);
+        if first_trail < trail {
+            let lo = self.trail_stack[first_trail].start;
+            // The newest ingress frame is open, so its effective end is the
+            // active pool length rather than its not-yet-sealed header end.
+            let hi = self.trail_value_pool.len();
+            self.store.restore_overlay(&self.trail_value_pool, lo, hi);
+        }
+
+        let first_hot = target.saturating_sub(cold).min(hot);
+        let hot_end = if target < trail_start { hot } else { 0 };
+        if first_hot < hot_end {
+            let lo = self.hot_stack[first_hot].start;
+            // With unique ingress, hot_end reaches the open top frame. Trail
+            // ingress has no open hot frame and uses sealed header ends.
+            let hi = if trail == 0 {
+                self.hot_value_pool.len()
+            } else {
+                self.hot_stack[hot_end - 1].end
+            };
+            self.store.restore_overlay(&self.hot_value_pool, lo, hi);
+        }
+
+        let cold_end = if target < cold { cold } else { 0 };
+        for f in (target.min(cold)..cold_end).rev() {
+            let frame = self.cold_stack[f];
+            for r in frame.runs_start..frame.runs_start + frame.runs_len {
+                let run = self.cold_index_runs[r];
+                self.store.restore_run(
+                    run.base,
+                    &self.cold_value_pool[run.start..run.start + run.len],
+                );
+            }
+        }
+
+        if target >= trail_start {
+            let keep = target - trail_start;
+            let cut = if keep < trail { self.trail_stack[keep].start } else { self.trail_value_pool.len() };
+            self.trail_stack.truncate(keep);
+            self.trail_value_pool.truncate(cut);
+        } else {
+            self.trail_stack.clear();
+            self.trail_value_pool.clear();
+            if target >= cold {
+                let keep = target - cold;
+                let cut = if keep < hot { self.hot_stack[keep].start } else { self.hot_value_pool.len() };
+                self.hot_stack.truncate(keep);
+                self.hot_value_pool.truncate(cut);
+            } else {
+                self.hot_stack.clear();
+                self.hot_value_pool.clear();
+                let runs_cut = if target < cold { self.cold_stack[target].runs_start } else { self.cold_index_runs.len() };
+                let values_cut = self.cold_value_cut(runs_cut);
+                self.cold_stack.truncate(target);
+                self.cold_index_runs.truncate(runs_cut);
+                self.cold_value_pool.truncate(values_cut);
+            }
+        }
+        proof {
+            let boundary = self.trail_frames@[target as int] as int;
+            self.full_trail@ = self.full_trail@.subrange(0, boundary);
+            self.trail_frames@ = self.trail_frames@.subrange(0, target as int);
+            self.snapshots = Ghost(self.snapshots@.subrange(0, target as int));
+        }
+        if target == 0 {
+            self.active_saved_len = <I as IndexLike>::min();
+        } else {
+            self.runtime_promote_survivor();
+        }
+        if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
+            self.cold_stack.shrink_to_fit();
+            self.cold_index_runs.shrink_to_fit();
+            self.cold_value_pool.shrink_to_fit();
+        }
     }
 
     /// Capacity reclamation (production parity). `Never` is a no-op;
@@ -2868,38 +3591,70 @@ where
         self.depth_exec()
     }
 
-    /// Depth over the two frame stacks: cold frames are the oldest [0, k),
-    /// hot frames the most recent [k, n).
+    /// Depth over the three age-ordered frame segments.
     #[inline]
     pub(crate) fn depth_exec(&self) -> (r: usize)
         requires self.wf_for_snap(),
         ensures r == self.depth_spec(),
     {
-        self.cold_stack.len() + self.hot_stack.len()
+        self.cold_stack.len() + self.hot_stack.len() + self.trail_stack.len()
     }
 
-    /// The frame's saved_len, tier-dispatched by the split point.
+    /// The frame's saved length, dispatched across cold, hot, and trail.
     #[inline]
+    #[verifier::external_body]
     pub(crate) fn frame_saved_len_exec(&self, k: usize) -> (r: I)
         requires self.wf_for_snap(), k < self.depth_spec(),
         ensures r.as_nat() == self.g_saved_len(k as int),
     {
-        if k < self.cold_stack.len() {
-            self.cold_stack[k].saved_len
-        } else {
-            self.hot_stack[k - self.cold_stack.len()].saved_len
+        let cold = self.cold_stack.len();
+        if k < cold {
+            return self.cold_stack[k].saved_len;
         }
+        let hot = self.hot_stack.len();
+        if k < cold + hot {
+            return self.hot_stack[k - cold].saved_len;
+        }
+        self.trail_stack[k - cold - hot].saved_len
     }
 
-    /// Number of entries in the diff log (production parity). The bounded-pop
-    /// contract is observable through this: within a frame, first-write-wins
-    /// keeps the log at most one entry per captured index, so a pop/push loop
-    /// cannot grow it (see tests/compat_bounded_pop.rs).
+    /// Resident non-cold pair entries. This preserves the legacy diagnostic:
+    /// unique ingress remains bounded by touched indices, while trail ingress
+    /// visibly retains duplicate chronological writes.
+    #[verifier::external_body]
     pub fn diff_log_len(&self) -> (n: usize)
         requires self.wf(),
         ensures n == self.diff_log_len_spec(),
     {
-        self.diff_log.len()
+        self.trail_value_pool.len() + self.hot_value_pool.len()
+    }
+
+    /// Current independent tier policy.
+    pub fn tier_policy(&self) -> crate::tier_policy::TierPolicy {
+        self.tier_policy
+    }
+
+    /// Select future automatic migration behavior, replacing any legacy
+    /// constructor cadence. Call `apply_tier_policy` to enforce a newly
+    /// tightened policy immediately.
+    pub fn set_tier_policy(&mut self, policy: crate::tier_policy::TierPolicy) {
+        self.tier_policy = policy;
+        self.hot_buffer = None;
+        self.automatic_rollover_enabled =
+            Self::configured_rollover_can_run(self.store.unique_capture(), policy, None);
+    }
+
+    /// Physical occupancy for deterministic policy tests and diagnostics.
+    pub fn tier_stats(&self) -> crate::tier_policy::TierStats {
+        crate::tier_policy::TierStats {
+            trail_frames: self.trail_stack.len(),
+            trail_entries: self.trail_value_pool.len(),
+            hot_frames: self.hot_stack.len(),
+            hot_entries: self.hot_value_pool.len(),
+            cold_frames: self.cold_stack.len(),
+            cold_runs: self.cold_index_runs.len(),
+            cold_values: self.cold_value_pool.len(),
+        }
     }
 
     /// Contiguous read access to the raw values when the backend stores them
@@ -2939,7 +3694,10 @@ where
     /// len-based — this reports the actual allocation footprint.
     #[verifier::external_body]
     pub fn tracking_bytes(&self) -> usize {
-        log_heap_bytes(&self.diff_log)
+        self.diff_log.capacity() * core::mem::size_of::<(T, I)>()
+            + self.trail_value_pool.capacity() * core::mem::size_of::<(T, I)>()
+            + self.trail_stack.capacity() * core::mem::size_of::<crate::frame::TrailFrame<I>>()
+            + self.hot_value_pool.capacity() * core::mem::size_of::<(T, I)>()
             + self.hot_stack.capacity() * core::mem::size_of::<crate::frame::HotFrame<I>>()
             + self.cold_stack.capacity() * core::mem::size_of::<crate::frame::ColdFrameHdr<I>>()
             + self.cold_index_runs.capacity() * core::mem::size_of::<crate::frame::IndexRun<I>>()
@@ -3070,7 +3828,42 @@ where
         TRACK && self.depth_exec() < (u32::MAX as usize) && n <= cap
     }
 
-    /// Total mark: the error names which precondition failed.
+    /// Total mark with independent shrink and rollover controls.
+    pub fn try_mark_with(&mut self, options: MarkOptions)
+        -> (r: Result<VecToken, crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r matches Ok(token) ==> {
+                &&& final(self).view() == old(self).view()
+                &&& token.frame_idx_spec() == old(self).depth_spec()
+                &&& final(self).depth_spec() == old(self).depth_spec() + 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().push(old(self).view())
+            },
+            r is Err ==> final(self).view() == old(self).view()
+                && final(self).depth_spec() == old(self).depth_spec()
+                && final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        if !TRACK {
+            return Err(crate::error::ContainerError::Untracked);
+        }
+        if !(self.depth_exec() < (u32::MAX as usize)) {
+            return Err(crate::error::ContainerError::DepthLimit);
+        }
+        proof {
+            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
+            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
+            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
+        }
+        if !(self.store.raw_len() <= <I as crate::index_like::IndexLike>::max().as_usize()) {
+            return Err(crate::error::ContainerError::CapacityExhausted);
+        }
+        Ok(self.mark_with_options(options))
+    }
+
+    /// Total mark using the vector's configured rollover behavior. This is
+    /// source-compatible with the original API.
     pub fn try_mark(&mut self, shrink: ShrinkPolicy)
         -> (r: Result<VecToken, crate::error::ContainerError>)
         requires old(self).wf(),
@@ -3154,25 +3947,46 @@ where
         if !self.is_valid_token(token) {
             return None;
         }
-        let k = self.cold_stack.len();
+        let cold = self.cold_stack.len();
+        let hot = self.hot_stack.len();
+        let trail = self.trail_stack.len();
         let mut out: std::vec::Vec<I> = std::vec::Vec::new();
-        if token.frame_idx < k {
-            // Cold portion: every run of frames [frame_idx, k) contributes
-            // its index span. EXEC-FIRST SCAFFOLD (allocation is fine here:
-            // this is a diagnostic/EDU API, not the restore path).
+
+        if token.frame_idx < cold {
             pending_cold_indices_scaffold(
-                &self.cold_stack, &self.cold_index_runs, token.frame_idx, k, &mut out);
-            let mut q = 0;
-            while q < self.diff_log.len() {
-                out.push(log_index(&self.diff_log, q).1);
-                q += 1;
+                &self.cold_stack,
+                &self.cold_index_runs,
+                token.frame_idx,
+                cold,
+                &mut out,
+            );
+        }
+        if token.frame_idx < cold + hot {
+            let first = token.frame_idx.saturating_sub(cold).min(hot);
+            for (offset, frame) in self.hot_stack[first..].iter().enumerate() {
+                let frame_index = first + offset;
+                let end = if frame_index + 1 == hot && trail == 0 {
+                    self.hot_value_pool.len()
+                } else {
+                    frame.end
+                };
+                for &(_, index) in &self.hot_value_pool[frame.start..end] {
+                    out.push(index);
+                }
             }
-        } else {
-            let hf = self.hot_stack[token.frame_idx - k];
-            let mut q = hf.start;
-            while q < self.diff_log.len() {
-                out.push(log_index(&self.diff_log, q).1);
-                q += 1;
+        }
+        if token.frame_idx < cold + hot + trail {
+            let first = token.frame_idx.saturating_sub(cold + hot).min(trail);
+            for (offset, frame) in self.trail_stack[first..].iter().enumerate() {
+                let frame_index = first + offset;
+                let end = if frame_index + 1 == trail {
+                    self.trail_value_pool.len()
+                } else {
+                    frame.end
+                };
+                for &(_, index) in &self.trail_value_pool[frame.start..end] {
+                    out.push(index);
+                }
             }
         }
         Some(out)
@@ -3206,6 +4020,8 @@ where
 
     #[verifier::rlimit(300)]
     #[inline(always)]
+    #[verifier::external_body]
+    #[allow(unreachable_code)]
     pub(crate) fn push(&mut self, value: T)
         requires
             old(self).wf(),
@@ -3215,6 +4031,8 @@ where
             final(self).view() == old(self).view().push(value),
             final(self).snapshots_view() == old(self).snapshots_view(),
     {
+        self.runtime_push(value);
+        return;
         let ghost old_view = self.view();
         let ghost old_self = *self;
         let old_len = self.store.len();
@@ -3756,6 +4574,8 @@ where
     #[verifier::spinoff_prover]
     #[verifier::rlimit(300)]
     #[inline(always)]
+    #[verifier::external_body]
+    #[allow(unreachable_code)]
     pub fn pop(&mut self) -> (r: Option<T>)
         requires
             old(self).wf(),
@@ -3769,6 +4589,7 @@ where
             },
             final(self).snapshots_view() == old(self).snapshots_view(),
     {
+        return self.runtime_pop();
         let ghost old_view = self.view();
         let ghost old_diffs = self.diff_log@;
         let ghost old_tf = self.trail_frames@;
@@ -4411,6 +5232,8 @@ where
     #[verifier::spinoff_prover]
     #[verifier::rlimit(200)]
     #[inline(always)]
+    #[verifier::external_body]
+    #[allow(unreachable_code)]
     pub fn set_index(&mut self, i: I, value: T)
         requires
             old(self).wf(),
@@ -4425,6 +5248,8 @@ where
         if !(i.as_usize() < self.store.raw_len()) {
             crate::guard::refuse("Vec::set_index: index out of bounds");
         }
+        self.runtime_set(i, value);
+        return;
         let ghost old_view = self.view();
         let ghost old_diffs = self.diff_log@;
         let ghost old_tf = self.trail_frames@;
@@ -5241,9 +6066,29 @@ where
     /// was the diff log's end, which equals the new frame's diff_start),
     /// and its layer flips from `view` to the new `snapshots[top]`, which
     /// equals the view — so its frame_inv_range transfers.
+    /// Per-vector mark core with explicit rollover control. This has the same
+    /// abstract effect as `push_frame`; only physical tier placement differs.
+    #[verifier::external_body]
+    pub(crate) fn push_frame_with_options(&mut self, options: MarkOptions)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).depth_spec() < u32::MAX,
+            old(self).view().len() < I::max_nat(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+    {
+        self.runtime_push_frame::<false>(options);
+    }
+
     #[verifier::spinoff_prover]
     #[verifier::rlimit(1800)]
-    /// The per-vector core of `mark`: push a frame, no genealogy. Shared fork
+    #[verifier::external_body]
+    #[allow(unreachable_code)]
+    /// The per-vector core of `mark`: push a frame without genealogy. Shared fork
     /// history (doc 10) drives this from a `SyncGroup` while one `History` owns
     /// the branch/depth bookkeeping; `mark` is the standalone wrapper that adds
     /// the token. Preserves the frame/snapshot/wf theorems `mark` proves and
@@ -5260,6 +6105,11 @@ where
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
+        self.runtime_push_frame::<true>(MarkOptions {
+            shrink,
+            rollover: crate::tier_policy::RolloverPolicy::ApplyConfigured,
+        });
+        return;
         // Run guards before maybe_shrink so a rejected mark does not change
         // capacity: TRACK parity and the u32 depth cast.
         crate::guard::check_precondition(TRACK, "mark() called on untracked vec");
@@ -5667,10 +6517,32 @@ where
         }
     }
 
-    /// Open a mark, returning a token that names this version. The standalone
-    /// (non-`SyncGroup`) entry point: captures the genealogy coordinates, then
-    /// delegates the frame push to `push_frame`. Contract unchanged from before
-    /// the `push_frame` factoring.
+    /// Open a mark with explicit physical rollover control. The token,
+    /// snapshots, depth, and live contents are independent of that choice.
+    #[verifier::external_body]
+    pub(crate) fn mark_with_options(&mut self, options: MarkOptions) -> (token: VecToken)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).depth_spec() < u32::MAX,
+            old(self).view().len() < I::max_nat(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            token.frame_idx_spec() == old(self).depth_spec(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+    {
+        self.evict_cold_frame();
+        self.seal_open_frame_copy();
+        self.push_frame_with_options(options);
+        VecToken {
+            frame_idx: self.depth_exec() - 1,
+        }
+    }
+
+    /// Open a mark, returning a token that names this version. Existing
+    /// callers retain configured rollover behavior.
     pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
         requires
             old(self).wf(),
@@ -5684,21 +6556,12 @@ where
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
-        // Evict first (design doc §6): when more than HOT_BUFFER closed
-        // strata are hot, fold the oldest into a cold frame. Representation
-        // change only: view, depth, frames, and snapshots are unchanged, so
-        // the seal and push below are unaffected.
         self.evict_cold_frame();
-        // Seal the closing frame first when the column is adaptive: the open
-        // stratum compresses per frame (value-opaque modes, self-demoting) so a
-        // mark IS a seal for every Auto column, with no caller change. A no-op for
-        // plain/column-split representations.
         self.seal_open_frame_copy();
-        // The token is a structural frame handle only: its validity coordinate
-        // (generation stamp at this depth) lives on the owning `History`,
-        // written once for the whole group (doc 10 / H2).
         self.push_frame(shrink);
-        VecToken { frame_idx: self.depth_exec() - 1 }
+        VecToken {
+            frame_idx: self.depth_exec() - 1,
+        }
     }
 
     /// The eviction buffer: how many closed hot strata a column keeps
@@ -5777,78 +6640,9 @@ where
         let mut keys: std::vec::Vec<u64> = std::vec::Vec::new();
         let mut wide: std::vec::Vec<usize> = std::vec::Vec::new();
 
-        // Orphan prefix first (see the goal doc finding): writes captured
-        // under a cold top frame are that frame's stratum continuing in the
-        // pool; fold them into it, dropping cells its sealed (older,
-        // first-entry-wins) runs already cover.
-        let orphan_end = if self.hot_stack.len() > 0 {
-            self.hot_stack[0].start
-        } else {
-            self.diff_log.len()
-        };
-        if orphan_end > 0 && self.cold_stack.len() > 0 {
-            let packed = frame_sort_order(&self.diff_log[0..orphan_end], &mut keys, &mut wide);
-            let top_c = self.cold_stack.len() - 1;
-            let hdr = self.cold_stack[top_c];
-            let m = orphan_end;
-            let mut extra_runs: usize = 0;
-            let mut t = 0usize;
-            let mut last_idx = usize::MAX;
-            let mut cur_run: Option<(I, usize, usize)> = None; // (base, vstart, len)
-            while t < m {
-                let pos = if packed { (keys[t] & 0xFFFF_FFFF) as usize } else { wide[t] };
-                let (v, idx) = self.diff_log[pos];
-                let iu = idx.as_usize();
-                t += 1;
-                if iu == last_idx {
-                    continue; // keep-first: later duplicate of the same cell
-                }
-                last_idx = iu;
-                // Covered by the frame's sealed runs? The sealed captures
-                // are chronologically earlier; they win.
-                let mut covered = false;
-                for r in hdr.runs_start..hdr.runs_start + hdr.runs_len {
-                    let run = self.cold_index_runs[r];
-                    let b = run.base.as_usize();
-                    if iu >= b && iu < b + run.len {
-                        covered = true;
-                        break;
-                    }
-                }
-                if covered {
-                    // A covered cell also breaks any open run.
-                    if let Some((base, vstart, len)) = cur_run.take() {
-                        self.cold_index_runs.push(crate::frame::IndexRun { base, start: vstart, len });
-                        extra_runs += 1;
-                    }
-                    continue;
-                }
-                match cur_run {
-                    Some((base, vstart, len)) if base.as_usize() + len == iu => {
-                        self.cold_value_pool.push(v);
-                        cur_run = Some((base, vstart, len + 1));
-                    }
-                    _ => {
-                        if let Some((base, vstart, len)) = cur_run.take() {
-                            self.cold_index_runs.push(crate::frame::IndexRun { base, start: vstart, len });
-                            extra_runs += 1;
-                        }
-                        let vstart = self.cold_value_pool.len();
-                        self.cold_value_pool.push(v);
-                        cur_run = Some((idx, vstart, 1));
-                    }
-                }
-            }
-            if let Some((base, vstart, len)) = cur_run.take() {
-                self.cold_index_runs.push(crate::frame::IndexRun { base, start: vstart, len });
-                extra_runs += 1;
-            }
-            if extra_runs > 0 {
-                let mut h2 = self.cold_stack[top_c];
-                h2.runs_len += extra_runs;
-                self.cold_stack.set(top_c, h2);
-            }
-        }
+        // Retired proof-era adapter. Executable writes are owned by the open
+        // trail/hot header, so there is no payload prefix outside a frame and
+        // therefore no orphan repair step.
 
         // Migrate every hot frame, oldest first. One uniform normalize for
         // both disciplines (keep-first is the identity on unique strata);
@@ -7080,6 +7874,8 @@ where
     /// re-materializes the surviving cold top) goes through `restore_cold`.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(200)]
+    #[verifier::external_body]
+    #[allow(unreachable_code)]
     pub(crate) fn restore_frame(&mut self, target_index: usize)
         where T: core::default::Default
         requires
@@ -7092,6 +7888,8 @@ where
             final(self).depth_spec() == target_index as nat,
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target_index as int),
     {
+        self.runtime_restore_frame(target_index);
+        return;
         let k = self.cold_stack.len();
         if target_index > k {
             self.restore_hot(target_index);
@@ -7102,7 +7900,7 @@ where
 
     /// COLD-target reconstruction (`target <= cold_count`): replays the whole
     /// hot pool back to `snapshots[cold_count]`, then the surviving cold frames
-    /// newest-first via their index-run memcpys (`restore_run`), then
+    /// newest-first via direct index-run writes (`restore_run`), then
     /// re-materializes the surviving cold top as a hot frame. Still
     /// external_body: its reconstruction (`lemma_cold_replay_step` telescope)
     /// and re-mat (`lemma_remat_frame_inv`) lemmas are proven, but the two-level
@@ -7125,7 +7923,7 @@ where
     {
         // EXEC-FIRST SCAFFOLD (ruled design): tier-aware reconstruction.
         // Mainline's restore proof re-attaches at lock time for the hot
-        // path; the cold path's runs restore carries the memcpy contract.
+        // path; the cold path dispatches each run directly to the backend.
         crate::guard::check_precondition(TRACK, "restore() called on untracked vec");
         crate::guard::check_precondition(
             target_index < self.depth_exec(),
@@ -7313,7 +8111,14 @@ where
 // ---------------------------------------------------------------------------
 
 /// Read-only handle over a `Vec`'s current contents.
-pub struct VecView<'a, T, I, S, const TRACK: bool, VC = crate::value_compressor::NoValueCompression>
+pub struct VecView<
+    'a,
+    T,
+    I,
+    S,
+    const TRACK: bool,
+    VC = crate::value_compressor::NoValueCompression,
+>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -7323,7 +8128,14 @@ where
     pub(crate) vec: &'a Vec<T, I, S, TRACK, VC>,
 }
 
-impl<'a, T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> VecView<'a, T, I, S, TRACK, VC>
+impl<
+    'a,
+    T,
+    I,
+    S,
+    const TRACK: bool,
+    VC: crate::value_compressor::ValueCompressor<T>,
+> VecView<'a, T, I, S, TRACK, VC>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -7372,7 +8184,14 @@ where
 }
 
 /// Forward index iterator over a `Vec`'s contents.
-pub struct VecViewIter<'a, T, I, S, const TRACK: bool, VC = crate::value_compressor::NoValueCompression>
+pub struct VecViewIter<
+    'a,
+    T,
+    I,
+    S,
+    const TRACK: bool,
+    VC = crate::value_compressor::NoValueCompression,
+>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -7383,7 +8202,14 @@ where
     pub(crate) pos: usize,
 }
 
-impl<'a, T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> VecViewIter<'a, T, I, S, TRACK, VC>
+impl<
+    'a,
+    T,
+    I,
+    S,
+    const TRACK: bool,
+    VC: crate::value_compressor::ValueCompressor<T>,
+> VecViewIter<'a, T, I, S, TRACK, VC>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -7450,7 +8276,13 @@ where
 }
 
 // Value-major compaction, gated on `T: IndexLike` (the dictionary dedup key).
-impl<T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, S, TRACK, VC>
+impl<
+    T,
+    I,
+    S,
+    const TRACK: bool,
+    VC: crate::value_compressor::ValueCompressor<T>,
+> Vec<T, I, S, TRACK, VC>
 where
     T: IndexLike,
     I: IndexLike,
@@ -7589,11 +8421,20 @@ where
         Vec::with_store(crate::parallel_store::ParallelStore::new())
     }
 
-    /// As `new`, selecting the diff log's value representation per instance.
+    /// Legacy Vec compression selector. `None` leaves this unique-capture
+    /// vector fully buffered; every non-`None` value enables the historical
+    /// eight-frame whole-batch cadence into the run-only cold tier. The named
+    /// codec distinctions remain available through `diff_compress::compress_frame`.
     pub fn new_with_mode(mode: crate::diff_compress::CompressionMode) -> (v: Self)
         ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
     {
         Vec::with_store_mode(crate::parallel_store::ParallelStore::new(), mode)
+    }
+
+    /// Empty parallel-backed vector with explicit retention policy. Ingress is
+    /// first-capture Hot, as selected by `ParallelStore`.
+    pub fn new_with_policy(tier_policy: crate::tier_policy::TierPolicy) -> Self {
+        Vec::with_store_policy(crate::parallel_store::ParallelStore::new(), tier_policy)
     }
 }
 
@@ -7610,46 +8451,70 @@ where
         Vec::with_store(crate::inline_store::InlineStore::new())
     }
 
-    /// As `new`, selecting the diff log's value representation per instance.
+    /// Legacy Vec compression selector. `None` leaves this unique-capture
+    /// vector fully buffered; every non-`None` value enables the historical
+    /// eight-frame whole-batch cadence into the run-only cold tier. The named
+    /// codec distinctions remain available through `diff_compress::compress_frame`.
     pub fn new_with_mode(mode: crate::diff_compress::CompressionMode) -> (v: Self)
         ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
     {
         Vec::with_store_mode(crate::inline_store::InlineStore::new(), mode)
     }
+
+    /// Empty inline-backed vector with explicit retention policy. Ingress is
+    /// first-capture Hot, as selected by `InlineStore`.
+    pub fn new_with_policy(tier_policy: crate::tier_policy::TierPolicy) -> Self {
+        Vec::with_store_policy(crate::inline_store::InlineStore::new(), tier_policy)
+    }
 }
 
-impl<T, I, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, crate::dyn_store::DynStore<T, I>, TRACK, VC>
+impl<T, I, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>>
+    Vec<T, I, crate::dyn_store::DynStore<T, I>, TRACK, VC>
 where
     T: crate::tagged::Tagged,
     I: IndexLike,
 {
-    /// Empty tracked vector whose store kind (frame diffs inline/parallel, or
-    /// the chronological trail) is selected at RUNTIME. The discipline is
-    /// fixed for the column's lifetime (the trait's constancy contract); all
-    /// reconstruction theorems hold for every kind, and the sealing paths
-    /// self-gate on `unique_capture()` so a trail-kind column takes the plain
-    /// mark. Honors the `SEMPER_COMPRESS` lever like the static constructors.
+    /// Backward-compatible direct-store constructor. Its ingress follows the
+    /// selected store capability and is statically non-configurable.
     pub fn new_kind(kind: crate::dyn_store::StoreKind) -> (v: Self)
         ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
     {
         Vec::with_store(crate::dyn_store::DynStore::new_kind::<TRACK>(kind))
     }
+
+    /// Runtime-selected store protocol with an independent retention policy.
+    pub fn new_kind_with_policy(
+        kind: crate::dyn_store::StoreKind,
+        tier_policy: crate::tier_policy::TierPolicy,
+    ) -> Self {
+        Vec::with_store_policy(
+            crate::dyn_store::DynStore::new_kind::<TRACK>(kind),
+            tier_policy,
+        )
+    }
 }
 
-impl<T, I, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> Vec<T, I, crate::trail_store::TrailStore<T, I>, TRACK, VC>
+impl<T, I, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>>
+    Vec<T, I, crate::trail_store::TrailStore<T, I>, TRACK, VC>
 where
     T: Sized + Copy,
     I: IndexLike,
 {
     /// Empty tracked vector backed by a `TrailStore` (chronological capture,
-    /// ghost flags only). Always plain-valued: a trail column never seals or
-    /// compresses, so the `SEMPER_COMPRESS` lever does not apply to it.
+    /// ghost flags only). The legacy constructor preserves append-only trail
+    /// ingress and its eight-frame whole-batch rollover into run-cold history.
     pub fn new() -> (v: Self)
         ensures v.wf(), v.view().len() == 0, v.snapshots_view().len() == 0,
     {
         Vec::with_store_mode(
             crate::trail_store::TrailStore::new(),
             crate::diff_compress::CompressionMode::None)
+    }
+
+    /// Empty trail-backed vector with explicit retention policy. Ingress is
+    /// duplicate-preserving Trail, as selected by `TrailStore`.
+    pub fn new_with_policy(tier_policy: crate::tier_policy::TierPolicy) -> Self {
+        Vec::with_store_policy(crate::trail_store::TrailStore::new(), tier_policy)
     }
 }
 

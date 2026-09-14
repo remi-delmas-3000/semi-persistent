@@ -97,7 +97,8 @@ pub trait SyncMember: Send {
 /// with the full mode set. `T: IndexLike` is what `poke`/`checksum` and the
 /// dictionary/delta value layers need; opaque-struct columns join through the
 /// `ValueCompressor` design (goal F2) once it lands.
-impl<T, I, S, const TRACK: bool, VC> SyncMember for crate::vec::Vec<T, I, S, TRACK, VC>
+impl<T, I, S, const TRACK: bool, VC> SyncMember
+    for crate::vec::Vec<T, I, S, TRACK, VC>
 where
     T: crate::index_like::IndexLike + core::default::Default + Send,
     I: crate::index_like::IndexLike + Send,

@@ -122,6 +122,21 @@ where
     }
 
     #[inline(always)]
+    fn restore_entries_clear_capture(&self) -> bool {
+        match self {
+            DynStore::Inline(s) => {
+                <InlineStore<T, I> as DiffStore<T, I, TRACK>>::restore_entries_clear_capture(s)
+            }
+            DynStore::Parallel(s) => {
+                <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::restore_entries_clear_capture(s)
+            }
+            DynStore::Trail(s) => {
+                <TrailStore<T, I> as DiffStore<T, I, TRACK>>::restore_entries_clear_capture(s)
+            }
+        }
+    }
+
+    #[inline(always)]
     fn is_empty(&self) -> bool {
         match self {
             DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::is_empty(s),

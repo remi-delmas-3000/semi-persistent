@@ -200,6 +200,12 @@ proptest! {
 #[test]
 fn vecd_kinds_match_oracle() {
     use semi_persistent_containers_verus::{StoreKind, VecD};
+    let _: semi_persistent_containers_verus::Vec<
+        u32,
+        u32,
+        semi_persistent_containers_verus::dyn_store::DynStore<u32, u32>,
+        true,
+    > = VecD::new_kind(StoreKind::Inline);
     let kinds = [StoreKind::Inline, StoreKind::Parallel, StoreKind::Trail];
     let mut cols: Vec<VecD<u32, u32, true>> = kinds.iter().map(|&k| VecD::new_kind(k)).collect();
     let mut oracle: Vec<u32> = Vec::new();
