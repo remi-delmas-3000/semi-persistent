@@ -622,3 +622,287 @@ literal zero-dispatch per-call defer operation is required, the next design is
 a dedicated const-selected `try_mark_deferred(shrink)` wrapper; this is separate
 from the resolved VecP write regression and was not added without a caller that
 requires it.
+
+
+## Container-level `three_tier_v1` measurement matrix — c550112
+
+Recorded after the DiffStore-owned three-tier runtime was committed at
+`c5501127e62afc78e99873b1a18660a8c4c88d90`. This follow-up changes only the
+Criterion benchmark and task documentation. It adds no runtime behavior, proof
+work, or adaptive policy. Every new ID starts with `three_tier_v1`; all
+pre-existing `three_tier/*` IDs remain unchanged.
+
+### Matrix and fixture contract
+
+The dynamic Inline, Parallel, and Trail rows in each comparison use the same
+deterministic fixture and the same `TierPolicy` (`Trail=Unbounded`,
+`Hot=Unbounded`, `ReclaimPolicy::RetainCapacity`) unless the row explicitly
+measures rollover. Matching static `VecI`, `VecP`, and `VecT` rows use that same
+policy. Production `VecI`/`VecP` rows are same-process workload controls only:
+production has no Trail or three-tier retention policy.
+
+The versioned matrix contains 88 rows:
+
+- low- and high-duplicate writes (`W=512,U=512,R=1` and
+  `W=512,U=32,R=1`);
+- shallow duplicate-heavy restore, deep 64-frame restore, and isolated direct
+  Cold restore after one contiguous run is constructed;
+- `Defer`, `ApplyConfigured`, and `ForceClosed` rollover for Trail -> Hot,
+  contiguous Hot -> Cold, singleton-run Hot -> Cold, and both edges;
+- Cold-survivor promotion followed by mark/write/restore;
+- 128-cycle SMT backtracking, 64-frame equality-saturation retention,
+  32-cycle EClasses-style mark/merge/restore, and 256-frame retained history.
+
+`W`, `U`, `R`, `TierStats`, per-tier logical bytes, aggregate capacity-based
+`tracking_bytes`, `total_bytes`, and allocator requested-byte high-water values
+are computed and printed outside timed loops. The 256-frame workload is over ten
+times deeper than the old 24-frame fixture while remaining practical for the
+full local run.
+
+### Exact commands and outcomes
+
+```bash
+cargo fmt --all
+cargo check -p containers-conformance --benches
+cargo fmt --all -- --check
+git diff --check
+
+# Representative smoke groups. These two were initially launched concurrently;
+# they passed, but their timings are deliberately not used below.
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- \
+  'three_tier_v1/write/high_duplicates'
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- \
+  'three_tier_v1/rollover'
+
+# Practical full matrix: all 88 new rows passed.
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- \
+  'three_tier_v1' --output-format bencher
+
+# Sequential Criterion confidence-interval runs used for the tables below.
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- 'three_tier_v1/write'
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- \
+  'three_tier_v1/(restore|promotion)'
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- 'three_tier_v1/rollover'
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- \
+  'three_tier_v1/trace/(smt_backtracking_128|eqsat_retained_64_frames)'
+env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench \
+  -p containers-conformance --bench three_tier_bench -- \
+  'three_tier_v1/trace/(eclasses_mark_merge_restore_32|large_retained_256_frames)'
+```
+
+All commands passed. The benchmark configuration remains 10 samples, 250 ms
+warm-up, and 500 ms measurement. The tables report Criterion's middle estimate
+and bracketed confidence interval from the final sequential run. Criterion's
+change lines compare repeated runs of these newly created IDs, not a historical
+revision, and are therefore omitted.
+
+### Exact write measurements
+
+| fixture | implementation | estimate | confidence interval |
+|---|---|---:|---:|
+| low duplicates | Dyn Inline | 1.8745 us | [1.8639, 1.8813] us |
+| low duplicates | Dyn Parallel | 1.8202 us | [1.8074, 1.8404] us |
+| low duplicates | Dyn Trail | 1.4895 us | [1.4817, 1.4953] us |
+| low duplicates | static VecI | 910.36 ns | [908.44, 913.30] ns |
+| low duplicates | static VecP | 1.2062 us | [1.1952, 1.2170] us |
+| low duplicates | static VecT | 864.14 ns | [840.96, 881.64] ns |
+| low duplicates | production VecI | 948.16 ns | [946.67, 949.88] ns |
+| low duplicates | production VecP | 1.4921 us | [1.4865, 1.4973] us |
+| high duplicates | Dyn Inline | 1.3009 us | [1.2935, 1.3065] us |
+| high duplicates | Dyn Parallel | 1.1037 us | [1.1014, 1.1076] us |
+| high duplicates | Dyn Trail | 1.4623 us | [1.4555, 1.4662] us |
+| high duplicates | static VecI | 480.20 ns | [479.42, 480.80] ns |
+| high duplicates | static VecP | 528.64 ns | [525.60, 530.89] ns |
+| high duplicates | static VecT | 799.26 ns | [789.68, 812.94] ns |
+| high duplicates | production VecI | 539.83 ns | [523.37, 553.03] ns |
+| high duplicates | production VecP | 792.58 ns | [791.36, 794.99] ns |
+
+Trail is the fastest dynamic ingress for low duplicates, while dynamic Parallel
+is fastest for high duplicates. The static controls are materially faster than
+their dynamic counterparts, making the cost of runtime `DynStore` dispatch
+visible without changing the static path.
+
+### Exact restore and promotion measurements
+
+| fixture | implementation | estimate | confidence interval |
+|---|---|---:|---:|
+| shallow high-duplicate restore | Dyn Inline | 24.521 ns | [23.843, 24.935] ns |
+| shallow high-duplicate restore | Dyn Parallel | 24.752 ns | [24.537, 24.902] ns |
+| shallow high-duplicate restore | Dyn Trail | 219.53 ns | [217.44, 220.53] ns |
+| shallow high-duplicate restore | static VecI | 25.079 ns | [24.606, 25.476] ns |
+| shallow high-duplicate restore | static VecP | 25.574 ns | [24.724, 26.455] ns |
+| shallow high-duplicate restore | static VecT | 218.78 ns | [207.88, 229.08] ns |
+| shallow high-duplicate restore | production VecI | 33.814 ns | [33.513, 33.955] ns |
+| shallow high-duplicate restore | production VecP | 35.921 ns | [35.451, 36.306] ns |
+| deep 64-frame restore | Dyn Inline | 425.67 ns | [419.22, 431.05] ns |
+| deep 64-frame restore | Dyn Parallel | 397.82 ns | [393.25, 407.77] ns |
+| deep 64-frame restore | Dyn Trail | 1.5731 us | [1.5650, 1.5778] us |
+| deep 64-frame restore | static VecI | 425.34 ns | [419.59, 435.36] ns |
+| deep 64-frame restore | static VecP | 421.11 ns | [417.84, 423.21] ns |
+| deep 64-frame restore | static VecT | 1.4409 us | [1.4017, 1.5076] us |
+| deep 64-frame restore | production VecI | 590.64 ns | [589.31, 592.37] ns |
+| deep 64-frame restore | production VecP | 590.74 ns | [586.27, 593.29] ns |
+| direct Cold contiguous restore | Dyn Inline | 174.14 ns | [172.54, 176.13] ns |
+| direct Cold contiguous restore | Dyn Parallel | 174.91 ns | [174.16, 176.39] ns |
+| direct Cold contiguous restore | Dyn Trail | 172.58 ns | [169.98, 175.71] ns |
+| direct Cold contiguous restore | static VecI | 170.83 ns | [169.37, 173.81] ns |
+| direct Cold contiguous restore | static VecP | 95.091 ns | [91.943, 96.432] ns |
+| direct Cold contiguous restore | static VecT | 97.170 ns | [91.246, 100.00] ns |
+| promotion/write/restore | Dyn Inline | 1.4955 us | [1.4906, 1.4985] us |
+| promotion/write/restore | Dyn Parallel | 1.6535 us | [1.6084, 1.6774] us |
+| promotion/write/restore | Dyn Trail | 1.4661 us | [1.4450, 1.4748] us |
+| promotion/write/restore | static VecI | 584.57 ns | [562.24, 604.84] ns |
+| promotion/write/restore | static VecP | 640.99 ns | [608.95, 673.19] ns |
+| promotion/write/restore | static VecT | 708.58 ns | [703.15, 711.24] ns |
+
+The duplicate-heavy Trail restore replays `W=512`; the unique stores replay
+`U=32`, producing the expected order-of-magnitude difference. Promotion rows
+start with at least eight Cold frames for every verified implementation; no
+production promotion row is claimed because production has no Cold tier.
+
+### Exact rollover measurements
+
+| fixture/directive | estimate | confidence interval |
+|---|---:|---:|
+| Trail -> Hot, Defer | 6.6185 ns | [6.4004, 7.1620] ns |
+| Trail -> Hot, ApplyConfigured | 1.0282 us | [1.0162, 1.0436] us |
+| Trail -> Hot, ForceClosed | 1.0004 us | [995.71 ns, 1.0044 us] |
+| Hot -> Cold contiguous, Defer | 17.459 ns | [17.192, 17.706] ns |
+| Hot -> Cold contiguous, ApplyConfigured | 3.1874 us | [3.1763, 3.1958] us |
+| Hot -> Cold contiguous, ForceClosed | 3.1797 us | [3.1748, 3.1833] us |
+| Hot -> Cold singleton runs, Defer | 18.007 ns | [17.570, 18.213] ns |
+| Hot -> Cold singleton runs, ApplyConfigured | 1.5956 us | [1.5886, 1.6066] us |
+| Hot -> Cold singleton runs, ForceClosed | 1.5833 us | [1.5777, 1.5870] us |
+| both edges, source-compatible `try_mark` | 1.2760 us | [1.2649, 1.3029] us |
+| both edges, explicit ApplyConfigured | 1.2443 us | [1.2402, 1.2464] us |
+| both edges, ForceClosed | 1.2509 us | [1.2484, 1.2530] us |
+
+`ApplyConfigured` and `ForceClosed` agree within narrow intervals on equivalent
+single-edge fixtures. The source-compatible `try_mark(ShrinkPolicy)` path is
+retained and measured beside the explicit directive path. Both-edge force
+executes Trail -> Hot before Hot -> Cold, verified by final Cold ownership.
+
+### Exact trace measurements
+
+| trace | implementation | estimate | confidence interval |
+|---|---|---:|---:|
+| SMT backtracking 128 | Dyn Inline | 46.488 us | [42.839, 49.489] us |
+| SMT backtracking 128 | Dyn Parallel | 34.471 us | [33.672, 35.521] us |
+| SMT backtracking 128 | Dyn Trail | 43.881 us | [39.141, 47.868] us |
+| SMT backtracking 128 | static VecI | 11.727 us | [11.432, 11.852] us |
+| SMT backtracking 128 | static VecP | 14.422 us | [14.302, 14.546] us |
+| SMT backtracking 128 | static VecT | 13.842 us | [13.799, 13.873] us |
+| SMT backtracking 128 | production VecI | 12.721 us | [12.320, 13.423] us |
+| SMT backtracking 128 | production VecP | 20.933 us | [20.803, 21.015] us |
+| eqsat retained 64 | Dyn Inline | 31.161 us | [29.459, 34.579] us |
+| eqsat retained 64 | Dyn Parallel | 26.118 us | [25.256, 27.233] us |
+| eqsat retained 64 | Dyn Trail | 37.033 us | [34.663, 39.252] us |
+| eqsat retained 64 | static VecI | 10.689 us | [10.546, 10.768] us |
+| eqsat retained 64 | static VecP | 13.148 us | [12.742, 13.428] us |
+| eqsat retained 64 | static VecT | 13.621 us | [13.573, 13.671] us |
+| eqsat retained 64 | production VecI | 10.851 us | [10.694, 11.027] us |
+| eqsat retained 64 | production VecP | 14.247 us | [14.226, 14.276] us |
+| EClasses-style 32 | Dyn Inline | 60.263 us | [56.072, 63.443] us |
+| EClasses-style 32 | Dyn Parallel | 58.150 us | [54.945, 60.168] us |
+| EClasses-style 32 | Dyn Trail | 58.091 us | [53.272, 62.614] us |
+| EClasses-style 32 | static VecI | 21.645 us | [21.414, 22.003] us |
+| EClasses-style 32 | static VecP | 26.963 us | [26.184, 27.606] us |
+| EClasses-style 32 | static VecT | 25.301 us | [24.727, 25.905] us |
+| EClasses-style 32 | production VecI | 22.638 us | [22.173, 23.660] us |
+| EClasses-style 32 | production VecP | 36.866 us | [36.769, 36.968] us |
+| large retained 256 | Dyn Inline | 67.492 us | [65.257, 71.578] us |
+| large retained 256 | Dyn Parallel | 59.489 us | [58.171, 60.400] us |
+| large retained 256 | Dyn Trail | 69.930 us | [67.552, 71.633] us |
+| large retained 256 | static VecI | 22.380 us | [21.754, 22.858] us |
+| large retained 256 | static VecP | 28.234 us | [27.894, 28.738] us |
+| large retained 256 | static VecT | 28.951 us | [28.792, 29.100] us |
+| large retained 256 | production VecI | 25.813 us | [25.042, 26.749] us |
+| large retained 256 | production VecP | 38.218 us | [38.053, 38.326] us |
+
+Dynamic Parallel has the lowest middle estimate in the retained 64- and
+256-frame traces. The broad dynamic intervals mean the EClasses-style dynamic
+rows are not distinguishable from one another in this run; no policy threshold
+is inferred from those point estimates alone.
+
+### Exact retained and peak diagnostics
+
+The final full-matrix diagnostic snapshot reported:
+
+| fixture | W/U/R | final logical bytes (Trail, Hot, Cold) | tracking bytes | total bytes |
+|---|---:|---:|---:|---:|
+| low duplicate Dyn Inline | 512/512/1 | (0, 8,240, 0) | 8,288 | 139,664 |
+| low duplicate Dyn Parallel | 512/512/1 | (0, 8,240, 0) | 8,288 | 75,152 |
+| low duplicate Dyn Trail | 512/512/1 | (8,240, 0, 0) | 8,288 | 8,592 |
+| high duplicate Dyn Inline | 512/32/1 | (0, 560, 0) | 608 | 131,984 |
+| high duplicate Dyn Parallel | 512/32/1 | (0, 560, 0) | 608 | 67,472 |
+| high duplicate Dyn Trail | 512/32/1 | (8,240, 0, 0) | 8,288 | 8,592 |
+| 256-frame Dyn Inline | 64/16/1 per frame | (0, 71,704, 0) | 77,824 | 209,200 |
+| 256-frame Dyn Parallel | 64/16/1 per frame | (0, 71,704, 0) | 77,824 | 144,688 |
+| 256-frame Dyn Trail | 64/16/1 per frame | (268,312, 0, 0) | 274,432 | 274,736 |
+
+All occupancy matched the intended representation: the two unique ingress
+kinds retained 4,096 Hot entries across 257 headers in the large fixture, while
+Trail retained all 16,384 writes across 257 Trail headers.
+
+| transition | logical before -> after (Trail, Hot, Cold) | tracking before -> after | peak growth | transient peak |
+|---|---:|---:|---:|---:|
+| Trail -> Hot, W512/U32/R1 | (8,216,0,0) -> (24,536,0) | 8,288 -> 8,896 B | 864 B | 256 B |
+| Hot -> Cold contiguous, W512/U512/R1 | (0,8,216,0) -> (0,24,4,144) | 8,288 -> 12,576 B | 12,288 B | 8,000 B |
+| Hot -> Cold singleton, W512/U512/R512 | (0,8,216,0) -> (0,24,16,408) | 8,288 -> 24,768 B | 24,576 B | 8,096 B |
+| both edges, W512/U32/R1 | (8,216,0,0) -> (24,0,304) | 8,288 -> 9,344 B | 1,376 B | 320 B |
+
+Retained capacity grows under `RetainCapacity` even when logical occupancy
+shrinks, because source capacity remains reusable and destination capacity is
+allocated. The contiguous Cold representation halves logical retained history,
+but singleton Cold doubles logical retained history and increases final total bytes
+by 21.9% (75,152 -> 91,632 B). This is direct negative evidence against automatic
+Hot -> Cold conversion for `U/R` near 1.
+
+The benchmark-only explicit-budget records were:
+
+```text
+high_duplicates_contiguous W=512 U=32 R=1 budget=4096 candidate=trail_to_hot_to_cold
+unique_contiguous W=512 U=512 R=1 budget=8192 candidate=defer
+unique_singleton_runs W=512 U=512 R=512 budget=16384 candidate=defer
+```
+
+These are deterministic study outputs, not runtime decisions. They provide a
+candidate threshold shape—require both real budget pressure and at least 2x
+`W/U` or `U/R` reduction—but this campaign does not establish a stable
+end-to-end automatic threshold. The honest result is therefore negative: retain
+explicit directives and do not add adaptive runtime semantics from these data.
+
+### Limitations and status
+
+- This is a container-level matrix. `eclasses_mark_merge_restore_32` reproduces
+  a deterministic parent-update/merge-shaped access pattern over a Vec; it is
+  not the full `EClasses` aggregate or full egraph application. The unchanged
+  `eclasses_bench` and prior egraph consumer results remain the aggregate
+  controls.
+- 256 retained frames are materially deeper than 24 and expose the memory
+  slope, but they are still a practical microbenchmark rather than a
+  production-sized egraph.
+- Allocator counters report process-wide requested payload bytes. They exclude
+  allocator metadata and RSS; absolute before/after boundaries vary with the
+  benchmark process, so only operation deltas are interpreted.
+- Production has no Trail, rollover, Cold, or promotion equivalent. Production
+  rows are value/workload controls, not representation controls.
+- The explicit budget classifier exists only in the benchmark diagnostics.
+  There is still no runtime memory-budget input, no live DynStore protocol
+  switching, and no proof implementation.
+- The full Bencher-format pass is the completeness check; the sequential
+  default-format reruns are the authoritative confidence intervals. The two
+  initial concurrent smoke runs are pass/fail evidence only.
+
+**Status:** container-level `three_tier_v1` measurement matrix **BUILT AND
+MEASURED** at `c550112`; benchmark-only adaptive study **NEGATIVE / DEFERRED**;
+runtime semantics **UNCHANGED**; live ingress switching **UNIMPLEMENTED**;
+proofs **DEFERRED**; E6 remains **NOT LOCKED** pending any later runtime-policy
+decision.

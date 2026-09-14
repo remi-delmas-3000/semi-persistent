@@ -1,5 +1,17 @@
 # Nightshift goal: DiffStore-owned three-tier protocol and adaptive large-egraph study
 
+**Current status at `c550112`: container-level `three_tier_v1` matrix BUILT AND
+MEASURED; adaptive runtime semantics DEFERRED after a benchmark-only negative
+result; live ingress switching UNIMPLEMENTED; proofs DEFERRED; E6 NOT LOCKED.**
+
+The benchmark/docs-only follow-up adds stable same-policy DynStore
+Inline/Parallel/Trail comparisons, static and production controls, explicit
+rollover rows, 256-frame retained traces, and untimed W/U/R, tier-byte,
+capacity, and allocator high-water diagnostics. Exact commands, confidence
+intervals, results, and limitations are appended to
+`three-tier-e5-measurement-a414090.md`. No `containers/`, runtime, or proof code
+changed.
+
 Continue from the current uncommitted working tree on branch `d21-exec` at
 `a414090`; do not reset or discard the existing three-tier work. Use
 `containers-verus/doc/tasks/three-tier-frame-architecture-goal.md` and
