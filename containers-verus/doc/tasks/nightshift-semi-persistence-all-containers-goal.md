@@ -29,9 +29,12 @@ restore(k):
 ```
 
 Higher-level proofs MUST consume this contract rather than Hot/Trail/Cold
-representation details. Existing SparseSet, UnionFind, CircularList, ListArena,
-BPlusTreeSet, and EClasses archive/refinement proofs SHOULD reverify unchanged;
-a downstream edit is allowed only when verification demonstrates a real
+representation details. The geometric model in
+`containers-verus/doc/design/17-three-tier-frame-grid.md` is the required lemma-
+discovery aid: horizontal moves correspond to live-length changes, vertical
+moves to frame locality/depth, and column encoding changes to tier refinement.
+Existing SparseSet, UnionFind, CircularList, ListArena, BPlusTreeSet, and
+EClasses archive/refinement proofs SHOULD reverify unchanged; a downstream edit is allowed only when verification demonstrates a real
 abstraction leak or an independently incorrect collection invariant.
 
 ## Fixed constraints
@@ -124,9 +127,13 @@ survive conversion. No conversion may change the ghost snapshot stack.
 
 ### N5 — Prove Hot-to-Cold conversion and Cold replay
 
-MUST prove sorted disjoint runs decode to the same Hot frame abstraction,
-including singleton runs and cells beyond a shorter layer above. Direct Cold
-slice replay MUST restore the frame snapshot at its own saved length.
+MUST prove that a transient in-place sort of the selected unique Hot frame is a
+permutation preserving `stratum_unique` and the complete frame abstraction;
+sortedness MUST remain local to this translation and MUST NOT become a
+persistent Hot invariant. Run formation over that order must produce sorted
+disjoint runs that decode to the same Hot frame abstraction, including singleton
+runs and cells beyond a shorter layer above. Direct Cold slice replay MUST
+restore the frame snapshot at its own saved length.
 
 ### N6 — Prove mixed-tier restore and every policy
 

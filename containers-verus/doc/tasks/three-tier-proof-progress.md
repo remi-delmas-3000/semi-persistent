@@ -230,3 +230,49 @@ full vec module                 117 verified, 0 errors
 The full gate command was `touch src/vec.rs && cargo verus verify --
 --verify-only-module vec`. No `external_body`, `admit`, or `assume` was added to
 close H1.
+
+## 2026-09-15 — H2 push/regrowth checked core
+
+**Result: internal Hot-only push/regrowth core verified; runtime/public wiring is
+not yet claimed.**
+
+The geometric frame model is now recorded in
+`doc/design/17-three-tier-frame-grid.md`. It treats indices as horizontal
+columns, frame age as the vertical axis, and each frame's `saved_len` as an
+independent boundary. It also records that Hot and Cold payload counts are
+bounded by `saved_len`, while a Trail frame may contain arbitrarily many
+chronological duplicates until `dedupe_first` establishes the unique Hot bound.
+Persistent Hot is unordered; sorting is a transient, local Hot-to-Cold
+translation step that preserves uniqueness and the frame abstraction.
+
+`lemma_frame_inv_range_grow_layer` formalizes horizontal extension of the live
+row. A captured column is independent of that row; an uncovered column was
+already in bounds of the old row and transfers through prefix equality. It
+requires no relation between adjacent frame saved lengths.
+
+`hot_defer_push_checked` copies the locked `runtime_push` algorithm: append one
+live value and a false capture bit, then restore the bit iff the appended index
+is strictly below the active frame's own `saved_len`. Re-entry appends no Hot or
+canonical history because the earlier pop already covered that column. The core
+preserves `hot_value_pool`, `full_trail`, snapshots, frame coordinates, and
+`active_saved_len`, and re-establishes `hot_defer_wf`.
+
+Exact verification from `containers-verus`, touching `src/vec.rs` before each
+query:
+
+```text
+lemma_frame_inv_range_grow_layer  1 verified, 0 errors
+hot_defer_push_checked            1 verified, 0 errors
+lemma_captured_in_range_dedupe    1 verified, 0 errors
+full vec module                 119 verified, 0 errors
+```
+
+`lemma_captured_in_range_dedupe` received only `spinoff_prover` isolation after
+the larger module context exhausted its previous shared query; its theorem and
+body are unchanged. No `external_body`, `admit`, or `assume` was added.
+
+Scope boundary: `runtime_push` and public `push` remain pre-existing trusted
+wrappers, and this checked core currently proves `hot_defer_wf`, not general
+`wf`. The next H2 slice must preserve canonical `wf_for_snap`, wire this core
+into an in-scope checked dispatcher, and then close pop/set before removing the
+public mutator markers.

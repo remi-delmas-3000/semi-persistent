@@ -50,9 +50,9 @@ This holds per cell, at arbitrary mark-nesting depth, under any interleaving of
 will accept: each `mark` opens a branch in a fork history, each `restore` cuts the
 branches it discards, and a token naming a discarded state is rejected. The
 development uses no `admit`s or `assume`s; run `cargo verus verify` for the
-per-module tally. (That does not mean nothing is trusted; the trust boundary is
-27 `external_body` items in the default build, 32 with `literal-types`,
-enumerated in [Chapter 2](02-trust-boundary.md).)
+per-module tally. (That does not mean nothing is trusted; the current
+execution-first branch has 90 default-build `external_body` markers, 95 with
+`literal-types`, enumerated in [Chapter 2](02-trust-boundary.md).)
 
 ## Reference: what is in the crate
 
@@ -81,6 +81,10 @@ listing's order.
     over chapter 15: a base generation, one delta generation, per-key
     invalidation, and the cross-generation sortedness lemma with the caller
     obligation it rests on. Verified; the engine does not enable it.
+17. **[The Three-Tier Frame Grid](17-three-tier-frame-grid.md)**: the geometric
+    proof model for non-monotone saved lengths, Trail duplicate columns, Hot
+    unique captures, Cold runs, cross-tier replay, and the inductive lemmas
+    suggested by horizontal, vertical, and representation changes.
 
 ## The class layer
 

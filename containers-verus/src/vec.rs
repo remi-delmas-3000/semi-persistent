@@ -1069,6 +1069,34 @@ pub(crate) proof fn lemma_frame_inv_arm_at<T, I: IndexLike>(
 {
 }
 
+/// Extend the layer above a frame without changing the frame's saved domain.
+/// In the 2D proof grid this adds live columns on the right: captured columns
+/// ignore the live row, while every uncaptured column was already in bounds of
+/// `above_old` and therefore keeps the same value in `above_new`.
+pub(crate) proof fn lemma_frame_inv_range_grow_layer<T, I: IndexLike>(
+    above_old: Seq<T>, above_new: Seq<T>, diffs: Seq<(T, I)>,
+    lo: int, hi: int, snap: Seq<T>, saved_len: nat,
+)
+    requires
+        frame_inv_range::<T, I>(above_old, diffs, lo, hi, snap, saved_len),
+        above_old.len() <= above_new.len(),
+        forall|j: int| 0 <= j < above_old.len() ==>
+            #[trigger] above_new[j] == above_old[j],
+    ensures
+        frame_inv_range::<T, I>(above_new, diffs, lo, hi, snap, saved_len),
+{
+    assert forall|j: int| 0 <= j < saved_len as int implies
+        #[trigger] frame_cell_inv::<T, I>(above_new, diffs, lo, hi, snap, j)
+    by {
+        lemma_frame_inv_arm_at::<T, I>(
+            above_old, diffs, lo, hi, snap, saved_len, j);
+        if !captured_in_range::<T, I>(diffs, lo, hi, j as nat) {
+            assert(j < above_old.len());
+            assert(above_new[j] == above_old[j]);
+        }
+    }
+}
+
 /// `stratum_unique` transfers between diff logs that agree pointwise on the
 /// stratum `[lo, hi)` (covers both an extension and a truncation whose
 /// surviving prefix contains the stratum).
@@ -1483,6 +1511,7 @@ pub(crate) proof fn lemma_frame_inv_range_dedupe<T: Copy, I: IndexLike>(
 
 /// `captured_in_range` is preserved by dedupe-and-permute of a stratum:
 /// the kept set writes exactly the same cells.
+#[verifier::spinoff_prover]
 pub(crate) proof fn lemma_captured_in_range_dedupe<T: Copy, I: IndexLike>(
     dold: Seq<(T, I)>, dnew: Seq<(T, I)>, lo: int, m: nat, kept: nat, j: nat,
 )
@@ -3088,6 +3117,160 @@ where
         } else {
             let old_value = self.store.get(index);
             self.trail_value_pool.push((old_value, index));
+        }
+    }
+
+    /// Checked push/regrowth core for the unique-capture, all-Hot projection.
+    /// A push below the top frame's saved length re-enters a column captured by
+    /// an earlier pop, so it restores only the capture bit and appends no
+    /// history entry.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(1800)]
+    #[inline(always)]
+    fn hot_defer_push_checked(&mut self, value: T)
+        requires
+            old(self).hot_defer_wf(),
+            old(self).view().len() + 1 < I::max_nat(),
+        ensures
+            final(self).hot_defer_wf(),
+            final(self).view() == old(self).view().push(value),
+            final(self).snapshots@ == old(self).snapshots@,
+            final(self).trail_frames@ == old(self).trail_frames@,
+            final(self).full_trail@ == old(self).full_trail@,
+            final(self).hot_stack@ == old(self).hot_stack@,
+            final(self).hot_value_pool@ == old(self).hot_value_pool@,
+            final(self).active_saved_len == old(self).active_saved_len,
+    {
+        let ghost pre = *self;
+        let old_len = self.store.len();
+        self.store.push(value);
+        let ghost pushed = *self;
+        let reentered = TRACK
+            && old_len.as_usize() < self.active_saved_len.as_usize()
+            && self.store.unique_capture();
+        proof {
+            reveal(Vec::hot_defer_wf);
+            reveal(Vec::hot_defer_end);
+            assert(TRACK);
+            assert(old_len.as_nat() == pre.view().len());
+            assert(self.view() == pre.view().push(value));
+            assert(self.store.captured() == pre.store.captured().push(false));
+            assert(self.store.unique_capture_spec());
+            assert(reentered
+                == (old_len.as_nat() < self.active_saved_len.as_nat()));
+        }
+        if reentered {
+            self.store.mark_captured(old_len);
+        }
+        proof {
+            reveal(Vec::hot_defer_wf);
+            reveal(Vec::hot_defer_end);
+            I::lemma_min_as_nat();
+            let depth = self.hot_stack@.len();
+            let n = old_len.as_nat() as int;
+            assert(n == pre.view().len());
+            assert(self.view() == pre.view().push(value));
+            assert(self.hot_stack@ == pre.hot_stack@);
+            assert(self.hot_value_pool@ == pre.hot_value_pool@);
+            assert(self.snapshots@ == pre.snapshots@);
+            assert(self.trail_frames@ == pre.trail_frames@);
+            assert(self.full_trail@ == pre.full_trail@);
+            assert(self.active_saved_len == pre.active_saved_len);
+            assert(self.store.unique_capture_spec());
+            assert(self.store.captured().len() == self.view().len());
+
+            assert forall|q: int| 0 <= q < n implies
+                #[trigger] self.store.captured()[q] == pre.store.captured()[q] by {
+                if reentered {
+                    assert(self.store.captured()[q] == pushed.store.captured()[q]);
+                    assert(pushed.store.captured()[q] == pre.store.captured()[q]);
+                } else {
+                    assert(self.store.captured()[q] == pushed.store.captured()[q]);
+                    assert(pushed.store.captured()[q] == pre.store.captured()[q]);
+                }
+            }
+            assert(self.store.captured()[n] == reentered) by {
+                if reentered {
+                    assert(self.store.captured()[n] == true);
+                } else {
+                    assert(self.store.captured()[n] == false);
+                }
+            }
+
+            // Every closed frame keeps the same snapshot layer. Only the top
+            // frame sees the horizontally extended live row.
+            assert forall|i: int| 0 <= i < depth implies
+                #[trigger] frame_inv_range::<T, I>(
+                    self.layer_above_at(i), self.hot_value_pool@,
+                    self.hot_stack@[i].start as int, self.hot_defer_end(i),
+                    self.snapshots@[i], self.snapshots@[i].len()) by {
+                assert(frame_inv_range::<T, I>(
+                    pre.layer_above_at(i), pre.hot_value_pool@,
+                    pre.hot_stack@[i].start as int, pre.hot_defer_end(i),
+                    pre.snapshots@[i], pre.snapshots@[i].len()));
+                assert(self.hot_defer_end(i) == pre.hot_defer_end(i));
+                if i + 1 < depth {
+                    assert(self.layer_above_at(i) == pre.layer_above_at(i));
+                } else {
+                    assert(i + 1 == depth);
+                    assert(pre.layer_above_at(i) == pre.view());
+                    assert(self.layer_above_at(i) == self.view());
+                    lemma_frame_inv_range_grow_layer::<T, I>(
+                        pre.view(), self.view(), self.hot_value_pool@,
+                        self.hot_stack@[i].start as int, self.hot_defer_end(i),
+                        self.snapshots@[i], self.snapshots@[i].len());
+                }
+            }
+
+            // The old prefix keeps its capture bridge. The only new live
+            // column is captured exactly when it re-enters the saved domain.
+            if depth > 0 {
+                let top = (depth - 1) as int;
+                let lo = self.hot_stack@[top].start as int;
+                assert forall|j: int|
+                    0 <= j < self.active_saved_len.as_nat()
+                        && j < self.view().len() implies
+                    #[trigger] self.store.captured()[j]
+                        == captured_in_range::<T, I>(
+                            self.hot_value_pool@, lo,
+                            self.hot_value_pool@.len() as int, j as nat) by {
+                    if j < n {
+                        assert(j < pre.view().len());
+                        assert(self.store.captured()[j] == pre.store.captured()[j]);
+                        assert(pre.store.captured()[j]
+                            == captured_in_range::<T, I>(
+                                pre.hot_value_pool@, lo,
+                                pre.hot_value_pool@.len() as int, j as nat));
+                    } else {
+                        assert(j == n);
+                        assert(n < self.active_saved_len.as_nat());
+                        assert(reentered);
+                        assert(pre.layer_above_at(top) == pre.view());
+                        lemma_frame_inv_arm_at::<T, I>(
+                            pre.view(), pre.hot_value_pool@, lo,
+                            pre.hot_value_pool@.len() as int,
+                            pre.snapshots@[top], pre.snapshots@[top].len(), j);
+                        assert(captured_in_range::<T, I>(
+                            pre.hot_value_pool@, lo,
+                            pre.hot_value_pool@.len() as int, j as nat));
+                        assert(self.store.captured()[j]);
+                    }
+                }
+            }
+            assert forall|j: int| 0 <= j < self.view().len()
+                && #[trigger] self.store.captured()[j]
+                implies depth > 0 && j < self.active_saved_len.as_nat() by {
+                if j < n {
+                    assert(pre.store.captured()[j]);
+                } else {
+                    assert(j == n);
+                    assert(reentered);
+                    if depth == 0 {
+                        assert(self.active_saved_len.as_nat() == 0);
+                    }
+                }
+            }
+            assert(self.hot_defer_wf());
         }
     }
 

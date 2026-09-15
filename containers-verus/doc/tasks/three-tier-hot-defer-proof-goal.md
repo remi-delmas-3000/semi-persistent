@@ -1,7 +1,8 @@
 # Three-tier proof milestone: general Hot-only `Defer` semi-persistence
 
-**Status: H0 CHECKPOINTED AT `df10134`; H1 FULL-MODULE VERIFIED
-(`117 verified, 0 errors`); H2 HOT MUTATORS NEXT.**
+**Status: H0 CHECKPOINTED AT `df10134`; H1 CHECKPOINTED AT `706a305`;
+H2 IN PROGRESS — CHECKED HOT PUSH/REGROWTH CORE VERIFIED, RUNTIME/PUBLIC
+WIRING AND POP/SET REMAIN.**
 
 This task is the first bounded formal milestone after the three-tier runtime
 lock. It consults `origin/main` at
@@ -29,6 +30,8 @@ out of scope. They begin only after this milestone is complete.
 - Main proof template: `origin/main` at `56a06a5`.
 - Runtime architecture:
   `containers-verus/doc/tasks/three-tier-frame-architecture-goal.md`.
+- Geometric proof model:
+  `containers-verus/doc/design/17-three-tier-frame-grid.md`.
 - Existing proof record:
   `containers-verus/doc/tasks/three-tier-proof-progress.md`.
 - Trust ledger: `containers-verus/doc/design/02-trust-boundary.md` and the
