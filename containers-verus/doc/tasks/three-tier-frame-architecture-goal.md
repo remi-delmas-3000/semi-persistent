@@ -895,9 +895,11 @@ postconditions. `Vec::with_store_mode` and `Vec::with_store_policy` verify,
 including empty unique-state establishment of `hot_defer_wf`; the pre-existing
 `with_store_policy` marker was removed. H1 additionally verifies
 `frame_saved_len_exec` over the Cold|Hot|Trail partition and removes that marker.
-Net source counts are now 90 default and 95 with `literal-types`. H1 removes
-one proved accessor marker plus five unreachable legacy scaffold markers. No
-`admit` or `assume` exists in the new proof prefix.
+Net source counts at H1 were 90 default and 95 with `literal-types`. H1 removes
+one proved accessor marker plus five unreachable legacy scaffold markers. H2
+then verifies public `push`, `pop`, and `set_index` through checked Hot-scope
+dispatch and removes three more markers; current counts are 87 default and 92
+with `literal-types`. No `admit` or `assume` exists in the new proof prefix.
 
 H1 now gives general `wf` named pool-native boundaries (`frame_partition_ok`,
 `hot_repr_ok`, `trail_repr_ok`, `cold_repr_ok`, and `open_ingress_ok`) and the

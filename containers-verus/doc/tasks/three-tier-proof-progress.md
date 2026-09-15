@@ -276,3 +276,57 @@ wrappers, and this checked core currently proves `hot_defer_wf`, not general
 `wf`. The next H2 slice must preserve canonical `wf_for_snap`, wire this core
 into an in-scope checked dispatcher, and then close pop/set before removing the
 public mutator markers.
+
+## 2026-09-15 — H2 Hot mutators through public wrappers
+
+**Result: unique-capture all-Hot push, pop, and set are checked from general
+`wf` through their public wrappers.** Non-Hot Trail/Cold states remain behind
+narrow fallbacks whose precondition is the exact negation of the checked
+`hot_defer_scope`; those fallbacks belong to later tier milestones.
+
+The proof now maintains two intentionally different histories:
+
+- `hot_value_pool` is authoritative first-capture storage and grows at most once
+  per `(frame,index)` column;
+- canonical ghost `full_trail` appends one chronological old-value event for
+  every in-frame set/pop capture, including duplicates.
+
+`lemma_frame_inv_range_append_duplicate` proves that a later vertical Trail
+event preserves the frame's first hitter. `lemma_frame_inv_range_shrink_layer`
+and `lemma_frame_inv_range_pop_last` prove horizontal contraction: capture the
+departing saved column, while every higher absent saved column was already
+forced into the covered arm. `lemma_frame_inv_range_grow_layer` handles push
+and re-entry. None assumes adjacent saved lengths are monotone.
+
+`hot_defer_capture_canonical_checked`, `hot_defer_push_checked`,
+`hot_defer_pop_checked`, and `hot_defer_set_checked` preserve both
+`hot_defer_wf` and general `wf`. `hot_defer_scope_exec` proves the executable
+dispatch criterion. Checked `runtime_push`, `runtime_pop`, and `runtime_set`
+route the Hot scope to those cores; only `!hot_defer_scope` reaches the trusted
+fallbacks. Public `push`, `pop`, and `set_index` now verify without
+`external_body`, preserving their prior contracts byte-for-byte.
+
+Exact results:
+
+```text
+all new grid/transfer/assembly lemmas       1 verified, 0 errors each
+hot_defer_capture_canonical_checked         1 verified, 0 errors
+hot_defer_push_checked                      1 verified, 0 errors
+hot_defer_pop_checked                       1 verified, 0 errors
+hot_defer_set_checked                       1 verified, 0 errors
+runtime_push/runtime_pop/runtime_set        1 verified, 0 errors each
+public push/public pop/public set_index     1 verified, 0 errors each
+full vec module                           134 verified, 0 errors
+three_tier_runtime                          30 passed, 0 failed
+```
+
+`maybe_shrink` and `lemma_captured_in_range_dedupe` received only
+`spinoff_prover` isolation after the larger module context triggered the known
+Verus rlimit-statistics panic; their contracts and proof bodies remain checked.
+No new trusted body or assumption was added. Removing the three public mutator
+markers changes the source-derived count from 90 to **87 default**, plus 5
+`literal-types` registrations = **92**.
+
+Next: H3 must connect checked `maybe_shrink` and `hot_defer_mark_checked` through
+explicit `RolloverPolicy::Defer` dispatch for both `ShrinkPolicy::Never` and
+thresholded shrink, then remove the in-scope mark-wrapper trust.

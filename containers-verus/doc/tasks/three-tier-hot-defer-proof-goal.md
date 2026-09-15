@@ -1,8 +1,8 @@
 # Three-tier proof milestone: general Hot-only `Defer` semi-persistence
 
 **Status: H0 CHECKPOINTED AT `df10134`; H1 CHECKPOINTED AT `706a305`;
-H2 IN PROGRESS — CHECKED HOT PUSH/REGROWTH CORE VERIFIED, RUNTIME/PUBLIC
-WIRING AND POP/SET REMAIN.**
+H2 HOT MUTATORS FULLY VERIFIED THROUGH PUBLIC WRAPPERS (`134 verified, 0
+errors`); H3 DEFER MARKS NEXT.**
 
 This task is the first bounded formal milestone after the three-tier runtime
 lock. It consults `origin/main` at

@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **90** (4 structs + 86 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
-| `literal-types` | **95** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **87** (4 structs + 83 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
+| `literal-types` | **92** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,8 +72,8 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current H1 working tree has 90 default-build markers:
-4 opaque structs and 86 functions. The permanent groups below remain the
+boundary. The current H2 working tree has 87 default-build markers:
+4 opaque structs and 83 functions. The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -84,7 +84,10 @@ for 96 default markers. H1 additionally proves the three-segment
 `frame_saved_len_exec` dispatch and removes its marker. Retiring five unreachable
 legacy scaffolds (`cold_pairs_scaffold`, `frame_sort_order`,
 `cold_pools_shrink_scaffold`, `compress_all_hot`, and `restore_cold`) removes
-five more markers, yielding source-derived counts of 90 default and 95 with
+five more markers, yielding H1 counts of 90 default and 95 with
+`literal-types`. H2 verifies the public `Vec::push`, `Vec::pop`, and
+`Vec::set_index` wrappers through checked Hot-scope dispatch and removes those
+three markers, yielding current counts of 87 default and 92 with
 `literal-types`. The
 three-segment accessor, H1 extractor, Cold/ingress transfer lemmas, and
 `maybe_shrink` pass targeted verification; a clean full Vec-module query reports
@@ -661,7 +664,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **90 default-build `external_body`
+The complete current source count is **87 default-build `external_body`
 markers plus 1 default-build axiom**; execution-first three-tier Vec markers not
 itemized here are enumerated in
 `doc/tasks/three-tier-frame-architecture-goal.md` §8. The `literal-types`
@@ -757,7 +760,9 @@ markers. No `assume`/`admit` occurs in project sources. The first Hot-only
 milestone added checked capture/set/mark/restore cores. H1 removes the
 `frame_saved_len_exec` marker after a checked three-segment body, establishes
 the general-wf-to-Hot bridge, and restores a green full Vec-module gate without
-adding a trust marker.
+adding a trust marker. H2 checks canonical and physical Hot push/pop/set,
+proves Hot-scope dispatch cannot reach non-Hot fallbacks, and removes the public
+`push`, `pop`, and `set_index` markers.
 
 **Scope note.** "No `assume`/`admit`" is a claim about *this crate's project
 sources*. The sibling `abstract-domains` crate likewise has a project-local

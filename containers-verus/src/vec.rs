@@ -1097,6 +1097,64 @@ pub(crate) proof fn lemma_frame_inv_range_grow_layer<T, I: IndexLike>(
     }
 }
 
+/// Contract the layer above a frame after every removed saved column has been
+/// covered. In the 2D grid, uncovered columns must remain inside the retained
+/// horizontal prefix; covered columns are independent of live-row length.
+pub(crate) proof fn lemma_frame_inv_range_shrink_layer<T, I: IndexLike>(
+    above_old: Seq<T>, above_new: Seq<T>, diffs: Seq<(T, I)>,
+    lo: int, hi: int, snap: Seq<T>, saved_len: nat,
+)
+    requires
+        frame_inv_range::<T, I>(above_old, diffs, lo, hi, snap, saved_len),
+        above_new.len() <= above_old.len(),
+        forall|j: int| 0 <= j < above_new.len() ==>
+            #[trigger] above_new[j] == above_old[j],
+        forall|j: int| above_new.len() <= j < saved_len as int ==>
+            #[trigger] captured_in_range::<T, I>(diffs, lo, hi, j as nat),
+    ensures
+        frame_inv_range::<T, I>(above_new, diffs, lo, hi, snap, saved_len),
+{
+    assert forall|j: int| 0 <= j < saved_len as int implies
+        #[trigger] frame_cell_inv::<T, I>(above_new, diffs, lo, hi, snap, j)
+    by {
+        lemma_frame_inv_arm_at::<T, I>(
+            above_old, diffs, lo, hi, snap, saved_len, j);
+        if !captured_in_range::<T, I>(diffs, lo, hi, j as nat) {
+            assert(j < above_new.len());
+            assert(above_new[j] == above_old[j]);
+        }
+    }
+}
+
+/// Remove the last live column after capturing it when it lies inside the
+/// frame's saved domain. Any still-higher saved column was already absent from
+/// `above_old`, so the old invariant forces it into the covered arm.
+pub(crate) proof fn lemma_frame_inv_range_pop_last<T, I: IndexLike>(
+    above_old: Seq<T>, above_new: Seq<T>, diffs: Seq<(T, I)>,
+    lo: int, hi: int, snap: Seq<T>, saved_len: nat,
+)
+    requires
+        frame_inv_range::<T, I>(above_old, diffs, lo, hi, snap, saved_len),
+        above_old.len() > 0,
+        above_new == above_old.drop_last(),
+        above_new.len() < saved_len ==>
+            captured_in_range::<T, I>(
+                diffs, lo, hi, above_new.len()),
+    ensures
+        frame_inv_range::<T, I>(above_new, diffs, lo, hi, snap, saved_len),
+{
+    assert forall|j: int| above_new.len() <= j < saved_len as int implies
+        #[trigger] captured_in_range::<T, I>(diffs, lo, hi, j as nat) by {
+        if j > above_new.len() {
+            assert(j >= above_old.len());
+            lemma_frame_inv_arm_at::<T, I>(
+                above_old, diffs, lo, hi, snap, saved_len, j);
+        }
+    }
+    lemma_frame_inv_range_shrink_layer::<T, I>(
+        above_old, above_new, diffs, lo, hi, snap, saved_len);
+}
+
 /// `stratum_unique` transfers between diff logs that agree pointwise on the
 /// stratum `[lo, hi)` (covers both an extension and a truncation whose
 /// surviving prefix contains the stratum).
@@ -1199,6 +1257,72 @@ pub(crate) proof fn lemma_frame_inv_range_capture_append<T, I: IndexLike>(
             assert(first_hitter::<T, I>(db, lo, n, j as nat));
         } else {
             lemma_frame_inv_arm_at::<T, I>(above, da, lo, n, snap, saved_len, j);
+            lemma_captured_in_range_append_other::<T, I>(
+                da, db, lo, j as nat, jnew as nat);
+            if captured_in_range::<T, I>(da, lo, n, j as nat) {
+                let p = choose|p: int| lo <= p < n
+                    && (#[trigger] da[p]).1.as_nat() == j as nat
+                    && da[p].0 == snap[j]
+                    && first_hitter::<T, I>(da, lo, p, j as nat);
+                assert(db[p] == db.subrange(0, n)[p]);
+                assert(db[p] == da[p]);
+                assert forall|q: int| lo <= q < p implies
+                    (#[trigger] db[q]).1.as_nat() != j as nat by {
+                    assert(db[q] == db.subrange(0, n)[q]);
+                    assert(db[q] == da[q]);
+                }
+                assert(first_hitter::<T, I>(db, lo, p, j as nat));
+            }
+        }
+    }
+}
+
+/// Appending a later chronological write for an index already covered by the
+/// frame preserves reconstruction: the existing first hitter remains the
+/// authoritative snapshot value and the appended duplicate is vertically
+/// above it in the proof grid.
+pub(crate) proof fn lemma_frame_inv_range_append_duplicate<T, I: IndexLike>(
+    above: Seq<T>, da: Seq<(T, I)>, db: Seq<(T, I)>, lo: int,
+    snap: Seq<T>, saved_len: nat, jnew: int,
+)
+    requires
+        frame_inv_range::<T, I>(above, da, lo, da.len() as int, snap, saved_len),
+        0 <= lo <= da.len(),
+        0 <= jnew < saved_len as int,
+        captured_in_range::<T, I>(da, lo, da.len() as int, jnew as nat),
+        db.len() == da.len() + 1,
+        db.subrange(0, da.len() as int) == da,
+        db[da.len() as int].1.as_nat() == jnew as nat,
+    ensures
+        frame_inv_range::<T, I>(above, db, lo, db.len() as int, snap, saved_len),
+{
+    let n = da.len() as int;
+    assert forall|k: int| lo <= k < db.len() implies
+        (#[trigger] db[k]).1.as_nat() < saved_len by {
+        if k < n {
+            assert(db[k] == db.subrange(0, n)[k]);
+            assert(db[k] == da[k]);
+        } else {
+            assert(k == n);
+        }
+    }
+    assert forall|j: int| 0 <= j < saved_len as int implies
+        #[trigger] frame_cell_inv::<T, I>(above, db, lo, db.len() as int, snap, j) by {
+        lemma_frame_inv_arm_at::<T, I>(above, da, lo, n, snap, saved_len, j);
+        if j == jnew {
+            let p = choose|p: int| lo <= p < n
+                && (#[trigger] da[p]).1.as_nat() == j as nat
+                && da[p].0 == snap[j]
+                && first_hitter::<T, I>(da, lo, p, j as nat);
+            assert(db[p] == db.subrange(0, n)[p]);
+            assert(db[p] == da[p]);
+            assert forall|q: int| lo <= q < p implies
+                (#[trigger] db[q]).1.as_nat() != j as nat by {
+                assert(db[q] == db.subrange(0, n)[q]);
+                assert(db[q] == da[q]);
+            }
+            assert(first_hitter::<T, I>(db, lo, p, j as nat));
+        } else {
             lemma_captured_in_range_append_other::<T, I>(
                 da, db, lo, j as nat, jnew as nat);
             if captured_in_range::<T, I>(da, lo, n, j as nat) {
@@ -2516,6 +2640,54 @@ where
         self.store.lemma_wf_captured_len();
     }
 
+    /// Executable/refinement boundary for the unique-capture all-Hot path.
+    /// Pool emptiness is included so callers can invoke the closed Hot
+    /// projection without reconstructing representation facts ad hoc.
+    pub open(crate) spec fn hot_defer_scope(&self) -> bool {
+        &&& TRACK
+        &&& self.store.unique_capture_spec()
+        &&& self.trail_stack@.len() == 0
+        &&& self.trail_value_pool@.len() == 0
+        &&& self.cold_stack@.len() == 0
+        &&& self.cold_index_runs@.len() == 0
+        &&& self.cold_value_pool@.len() == 0
+    }
+
+    #[inline(always)]
+    pub(crate) fn hot_defer_scope_exec(&self) -> (r: bool)
+        requires self.wf(),
+        ensures r == self.hot_defer_scope(),
+    {
+        let unique = self.store.unique_capture();
+        let cold_empty = self.cold_stack.len() == 0;
+        let trail_empty = self.trail_stack.len() == 0;
+        let r = TRACK && unique && cold_empty && trail_empty;
+        proof {
+            reveal(Vec::hot_defer_scope);
+            if r {
+                self.lemma_wf_named_parts();
+                reveal(Vec::trail_repr_ok);
+                reveal(Vec::cold_repr_ok);
+                reveal(Vec::repr_ok);
+                assert(self.trail_value_pool@.len() == 0);
+                assert(self.cold_index_runs@.len() == 0);
+                assert(self.cold_value_pool@.len() == 0);
+            }
+        }
+        r
+    }
+
+    pub(crate) proof fn lemma_hot_defer_scope_implies_projection(&self)
+        requires
+            self.wf(),
+            self.hot_defer_scope(),
+        ensures
+            self.hot_defer_wf(),
+    {
+        reveal(Vec::hot_defer_scope);
+        self.lemma_wf_implies_hot_defer_wf();
+    }
+
     /// H1 bridge: under the unique-capture, Hot-only physical boundary, the
     /// general invariant entails the closed executable `hot_defer_wf`
     /// projection. No Trail/Cold conversion or refinement theorem is used.
@@ -2599,6 +2771,67 @@ where
             self.lemma_open_ingress_hot_at(j);
         }
         assert(self.hot_defer_wf());
+    }
+
+    /// Changing only canonical ghost history cannot affect the physical Hot
+    /// projection. This framing lemma keeps ghost-trail updates from forcing
+    /// every caller to re-expand `hot_defer_wf`.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(1200)]
+    pub(crate) proof fn lemma_hot_defer_transfer_canonical(&self, other: Self)
+        requires
+            other.hot_defer_wf(),
+            self.store.wf(),
+            self.store.unique_capture_spec() == other.store.unique_capture_spec(),
+            self.store.captured() == other.store.captured(),
+            self.view() == other.view(),
+            self.hot_stack@ == other.hot_stack@,
+            self.hot_value_pool@ == other.hot_value_pool@,
+            self.trail_stack@ == other.trail_stack@,
+            self.trail_value_pool@ == other.trail_value_pool@,
+            self.cold_stack@ == other.cold_stack@,
+            self.cold_index_runs@ == other.cold_index_runs@,
+            self.cold_value_pool@ == other.cold_value_pool@,
+            self.snapshots@ == other.snapshots@,
+            self.trail_frames@ == other.trail_frames@,
+            self.active_saved_len == other.active_saved_len,
+            forall|i: int| 0 <= i < self.hot_stack@.len() ==>
+                #[trigger] self.layer_above_at(i) == other.layer_above_at(i),
+        ensures
+            self.hot_defer_wf(),
+    {
+        reveal(Vec::hot_defer_wf);
+        reveal(Vec::hot_defer_end);
+    }
+
+    /// Reassemble the general invariant after an all-Hot operation has proved
+    /// both the authoritative Hot grid and the canonical ghost grid. Empty
+    /// Trail/Cold tiers make their representation predicates vacuous; the
+    /// compatibility predicate remains an explicit premise because
+    /// `hot_defer_wf` intentionally grants no authority to inert `diff_log`.
+    pub(crate) proof fn lemma_hot_defer_snap_implies_wf(&self)
+        requires
+            self.hot_defer_wf(),
+            self.wf_for_snap(),
+            self.proof_compat_ok(),
+        ensures
+            self.wf(),
+    {
+        reveal(Vec::hot_defer_wf);
+        reveal(Vec::hot_defer_end);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::hot_repr_ok);
+        reveal(Vec::trail_repr_ok);
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::proof_compat_ok);
+        assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+            self.hot_defer_end(i) == self.phys_hot_end(i) by {}
+        assert(self.hot_repr_ok());
+        assert(self.trail_repr_ok());
+        assert(self.cold_repr_ok());
+        assert(self.open_ingress_ok());
+        assert(self.wf());
     }
 
 
@@ -2964,6 +3197,7 @@ where
             final(self).snapshots@ == old(self).snapshots@,
             final(self).trail_frames@ == old(self).trail_frames@,
             final(self).full_trail@ == old(self).full_trail@,
+            final(self).diff_log@ == old(self).diff_log@,
             final(self).active_saved_len == old(self).active_saved_len,
             index.as_nat() < old(self).active_saved_len.as_nat()
                 ==> final(self).store.captured()[index.as_nat() as int],
@@ -3103,6 +3337,146 @@ where
         }
     }
 
+    /// Checked unique-Hot capture that maintains both physical first-capture
+    /// storage and the canonical chronological ghost trail. Every in-frame
+    /// write appends one ghost event; repeated physical captures remain no-ops.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(2200)]
+    #[inline(always)]
+    fn hot_defer_capture_canonical_checked(&mut self, index: I)
+        requires
+            old(self).wf(),
+            old(self).hot_defer_wf(),
+            index.as_nat() < old(self).view().len(),
+        ensures
+            final(self).wf(),
+            final(self).hot_defer_wf(),
+            final(self).view() == old(self).view(),
+            final(self).snapshots@ == old(self).snapshots@,
+            final(self).trail_frames@ == old(self).trail_frames@,
+            final(self).active_saved_len == old(self).active_saved_len,
+            index.as_nat() < old(self).active_saved_len.as_nat() ==>
+                final(self).store.captured()[index.as_nat() as int],
+            index.as_nat() < old(self).active_saved_len.as_nat() ==>
+                final(self).full_trail@
+                    == old(self).full_trail@.push((old(self).view()[index.as_nat() as int], index)),
+            index.as_nat() >= old(self).active_saved_len.as_nat() ==>
+                final(self).full_trail@ == old(self).full_trail@,
+    {
+        let ghost pre = *self;
+        self.hot_defer_capture_checked(index);
+        let ghost physical = *self;
+        proof {
+            reveal(Vec::hot_defer_wf);
+            reveal(Vec::hot_defer_end);
+            let j = index.as_nat() as int;
+            let depth = self.trail_frames@.len();
+            let append = j < self.active_saved_len.as_nat() as int;
+            assert(self.view() == pre.view());
+            assert(self.full_trail@ == pre.full_trail@);
+            assert(self.trail_frames@ == pre.trail_frames@);
+            assert(self.snapshots@ == pre.snapshots@);
+            if append {
+                assert(depth > 0);
+                self.full_trail@ = physical.full_trail@.push((pre.view()[j], index));
+                assert(physical.full_trail@ == pre.full_trail@);
+                assert(self.full_trail@
+                    == pre.full_trail@.push((pre.view()[j], index)));
+                assert(self.full_trail@.subrange(0, pre.full_trail@.len() as int)
+                    =~= pre.full_trail@) by {
+                    assert forall|q: int| 0 <= q < pre.full_trail@.len() implies
+                        #[trigger] self.full_trail@[q] == pre.full_trail@[q] by {}
+                }
+            }
+            assert(physical.hot_defer_wf());
+            assert(self.store == physical.store);
+            assert(self.hot_stack@ == physical.hot_stack@);
+            assert(self.hot_value_pool@ == physical.hot_value_pool@);
+            assert(self.trail_stack@ == physical.trail_stack@);
+            assert(self.trail_value_pool@ == physical.trail_value_pool@);
+            assert(self.cold_stack@ == physical.cold_stack@);
+            assert(self.cold_index_runs@ == physical.cold_index_runs@);
+            assert(self.cold_value_pool@ == physical.cold_value_pool@);
+            assert(self.snapshots@ == physical.snapshots@);
+            assert(self.trail_frames@ == physical.trail_frames@);
+            assert(self.active_saved_len == physical.active_saved_len);
+            assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+                #[trigger] self.layer_above_at(i) == physical.layer_above_at(i) by {}
+            self.lemma_hot_defer_transfer_canonical(physical);
+
+            assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
+                #[trigger] frame_inv_range::<T, I>(
+                    self.layer_above_at(k), self.full_trail@,
+                    self.g_start(k), self.g_end(k), self.snapshots@[k],
+                    self.snapshots@[k].len()) by {
+                assert(pre.frame_inv_range_holds(k));
+                assert(self.layer_above_at(k) == pre.layer_above_at(k));
+                assert(self.g_start(k) == pre.g_start(k));
+                if !append {
+                    assert(self.full_trail@ == pre.full_trail@);
+                    assert(self.g_end(k) == pre.g_end(k));
+                } else {
+                    let top = (depth - 1) as int;
+                    if k == top {
+                        assert(pre.g_end(k) == pre.full_trail@.len() as int);
+                        assert(self.g_end(k) == self.full_trail@.len() as int);
+                        if captured_in_range::<T, I>(
+                            pre.full_trail@, self.g_start(k),
+                            pre.full_trail@.len() as int, j as nat) {
+                            lemma_frame_inv_range_append_duplicate::<T, I>(
+                                pre.view(), pre.full_trail@, self.full_trail@,
+                                self.g_start(k), self.snapshots@[k],
+                                self.snapshots@[k].len(), j);
+                        } else {
+                            lemma_frame_inv_range_capture_append::<T, I>(
+                                pre.view(), pre.full_trail@, self.full_trail@,
+                                self.g_start(k), self.snapshots@[k],
+                                self.snapshots@[k].len(), j);
+                        }
+                    } else {
+                        assert(k + 1 < depth);
+                        assert(self.g_end(k) == pre.g_end(k));
+                        let hi = self.g_end(k);
+                        pre.lemma_diff_start_le_n(k + 1);
+                        assert(hi <= pre.full_trail@.len());
+                        assert forall|q: int| self.g_start(k) <= q < hi implies
+                            #[trigger] pre.full_trail@[q] == self.full_trail@[q] by {}
+                        lemma_frame_inv_range_local::<T, I>(
+                            self.layer_above_at(k), pre.full_trail@,
+                            self.full_trail@, self.g_start(k), hi,
+                            self.snapshots@[k], self.snapshots@[k].len());
+                    }
+                }
+            }
+
+            pre.lemma_wf_named_parts();
+            reveal(Vec::wf_for_snap);
+            assert(self.store.wf());
+            assert(self.frame_partition_ok());
+            assert(self.snapshots@.len() == self.trail_frames@.len());
+            assert(self.trail_frames@.len() < usize::MAX);
+            assert(self.trail_frames@.len() == 0 ==> self.full_trail@.len() == 0);
+            assert(self.trail_frames@.len() > 0 ==> self.trail_frames@[0] == 0);
+            assert(self.trail_frames@.len() > 0 ==>
+                self.trail_frames@[(self.trail_frames@.len() - 1) as int]
+                    <= self.full_trail@.len());
+            assert forall|k: int|
+                0 <= k && k + 1 < self.trail_frames@.len() implies
+                    #[trigger] self.trail_frames@[k] <= self.trail_frames@[k + 1] by {
+                assert(self.trail_frames@ == pre.trail_frames@);
+                assert(0 <= k && k + 1 < pre.trail_frames@.len());
+                pre.lemma_diff_start_monotone(k, k + 1);
+            }
+            assert(self.wf_for_snap());
+            reveal(Vec::proof_compat_ok);
+            assert(pre.proof_compat_ok());
+            assert(self.diff_log@ == pre.diff_log@);
+            assert(self.trail_frames@ == pre.trail_frames@);
+            assert(self.proof_compat_ok());
+            self.lemma_hot_defer_snap_implies_wf();
+        }
+    }
+
     /// Capture according to the immutable protocol selected by `DiffStore`.
     /// Static stores constant-fold this branch; `DynStore` dispatches through
     /// its construction-time `StoreKind` variant.
@@ -3129,9 +3503,11 @@ where
     #[inline(always)]
     fn hot_defer_push_checked(&mut self, value: T)
         requires
+            old(self).wf(),
             old(self).hot_defer_wf(),
             old(self).view().len() + 1 < I::max_nat(),
         ensures
+            final(self).wf(),
             final(self).hot_defer_wf(),
             final(self).view() == old(self).view().push(value),
             final(self).snapshots@ == old(self).snapshots@,
@@ -3271,27 +3647,299 @@ where
                 }
             }
             assert(self.hot_defer_wf());
+
+            // Canonical ghost reconstruction uses the same grid argument over
+            // `full_trail`: all inner layers are fixed snapshots and only the
+            // top live row grows.
+            pre.lemma_wf_named_parts();
+            assert(self.diff_log@ == pre.diff_log@);
+            assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
+                #[trigger] frame_inv_range::<T, I>(
+                    self.layer_above_at(k), self.full_trail@,
+                    self.g_start(k), self.g_end(k), self.snapshots@[k],
+                    self.snapshots@[k].len()) by {
+                assert(pre.frame_inv_range_holds(k));
+                assert(self.g_start(k) == pre.g_start(k));
+                assert(self.g_end(k) == pre.g_end(k));
+                if k + 1 < self.trail_frames@.len() {
+                    assert(self.layer_above_at(k) == pre.layer_above_at(k));
+                } else {
+                    assert(k + 1 == self.trail_frames@.len());
+                    assert(pre.layer_above_at(k) == pre.view());
+                    assert(self.layer_above_at(k) == self.view());
+                    lemma_frame_inv_range_grow_layer::<T, I>(
+                        pre.view(), self.view(), self.full_trail@,
+                        self.g_start(k), self.g_end(k), self.snapshots@[k],
+                        self.snapshots@[k].len());
+                }
+            }
+            reveal(Vec::wf_for_snap);
+            assert(self.store.wf());
+            assert(self.frame_partition_ok());
+            assert(self.snapshots@.len() == self.trail_frames@.len());
+            assert(self.trail_frames@.len() < usize::MAX);
+            assert(self.trail_frames@.len() == 0 ==> self.full_trail@.len() == 0);
+            assert(self.trail_frames@.len() > 0 ==> self.trail_frames@[0] == 0);
+            assert(self.trail_frames@.len() > 0 ==>
+                self.trail_frames@[(self.trail_frames@.len() - 1) as int]
+                    <= self.full_trail@.len());
+            assert forall|k: int|
+                0 <= k && k + 1 < self.trail_frames@.len() implies
+                    #[trigger] self.trail_frames@[k] <= self.trail_frames@[k + 1] by {
+                assert(self.trail_frames@ == pre.trail_frames@);
+                assert(0 <= k && k + 1 < pre.trail_frames@.len());
+                pre.lemma_diff_start_monotone(k, k + 1);
+            }
+            assert(self.wf_for_snap());
+            reveal(Vec::hot_repr_ok);
+            reveal(Vec::trail_repr_ok);
+            reveal(Vec::cold_repr_ok);
+            reveal(Vec::open_ingress_ok);
+            reveal(Vec::proof_compat_ok);
+            assert(self.hot_repr_ok());
+            assert(self.trail_repr_ok());
+            assert(self.cold_repr_ok());
+            assert(self.open_ingress_ok());
+            assert(self.proof_compat_ok());
+            assert(self.wf());
         }
     }
 
     #[inline(always)]
     #[verifier::external_body]
-    fn runtime_push(&mut self, value: T) {
+    fn runtime_push_fallback(&mut self, value: T)
+        requires
+            old(self).wf(),
+            !old(self).hot_defer_scope(),
+            old(self).view().len() + 1 < I::max_nat(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view().push(value),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+    {
         let old_len = self.store.len();
         self.store.push(value);
         if TRACK
             && old_len.as_usize() < self.active_saved_len.as_usize()
             && self.store.unique_capture()
         {
-            // A tracked pop from the marked range already captured this slot.
-            // Re-entry only needs to restore that O(1) capture bit.
             self.store.mark_captured(old_len);
         }
     }
 
     #[inline(always)]
+    fn runtime_push(&mut self, value: T)
+        requires
+            old(self).wf(),
+            old(self).view().len() + 1 < I::max_nat(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view().push(value),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        let hot = self.hot_defer_scope_exec();
+        if hot {
+            proof { self.lemma_hot_defer_scope_implies_projection(); }
+            self.hot_defer_push_checked(value);
+        } else {
+            self.runtime_push_fallback(value);
+        }
+    }
+
+    /// Checked pop core for the unique-capture, all-Hot projection. The last
+    /// live column is captured before contraction exactly when it belongs to
+    /// the top frame's saved domain; arbitrary higher saved columns were
+    /// already covered by the frame invariant.
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(2600)]
+    #[inline(always)]
+    fn hot_defer_pop_checked(&mut self) -> (r: Option<T>)
+        requires
+            old(self).wf(),
+            old(self).hot_defer_wf(),
+        ensures
+            final(self).wf(),
+            final(self).hot_defer_wf(),
+            final(self).snapshots@ == old(self).snapshots@,
+            final(self).trail_frames@ == old(self).trail_frames@,
+            old(self).view().len() == 0 ==> {
+                &&& r is None
+                &&& final(self).view() == old(self).view()
+            },
+            old(self).view().len() > 0 ==> {
+                &&& r == Some(old(self).view().last())
+                &&& final(self).view() == old(self).view().drop_last()
+            },
+    {
+        let ghost pre = *self;
+        let len = self.store.raw_len();
+        if len == 0 {
+            return None;
+        }
+        let new_len = len - 1;
+        let needs_capture = TRACK && new_len < self.active_saved_len.as_usize();
+        if needs_capture {
+            let index_opt = I::try_from_usize(new_len);
+            if let Some(index) = index_opt {
+                self.hot_defer_capture_canonical_checked(index);
+            } else {
+                proof {
+                    assert((new_len as nat) < self.active_saved_len.as_nat());
+                    self.active_saved_len.lemma_as_nat_bounded();
+                    assert((new_len as nat) < I::max_nat());
+                    assert(false);
+                }
+            }
+        }
+        let ghost mid = *self;
+        let r = self.store.pop();
+        proof {
+            reveal(Vec::hot_defer_wf);
+            reveal(Vec::hot_defer_end);
+            let depth = self.hot_stack@.len();
+            let n = new_len as int;
+            assert(len == pre.view().len());
+            assert(mid.view() == pre.view());
+            assert(self.view() == mid.view().drop_last());
+            assert(self.hot_stack@ == mid.hot_stack@);
+            assert(self.hot_value_pool@ == mid.hot_value_pool@);
+            assert(self.snapshots@ == mid.snapshots@);
+            assert(self.trail_frames@ == mid.trail_frames@);
+            assert(self.full_trail@ == mid.full_trail@);
+            assert(self.active_saved_len == mid.active_saved_len);
+            assert(self.store.captured() == mid.store.captured().drop_last());
+            assert(self.store.unique_capture_spec());
+            self.store.lemma_wf_captured_len();
+
+            assert forall|i: int| 0 <= i < depth implies
+                #[trigger] frame_inv_range::<T, I>(
+                    self.layer_above_at(i), self.hot_value_pool@,
+                    self.hot_stack@[i].start as int, self.hot_defer_end(i),
+                    self.snapshots@[i], self.snapshots@[i].len()) by {
+                assert(frame_inv_range::<T, I>(
+                    mid.layer_above_at(i), mid.hot_value_pool@,
+                    mid.hot_stack@[i].start as int, mid.hot_defer_end(i),
+                    mid.snapshots@[i], mid.snapshots@[i].len()));
+                assert(self.hot_defer_end(i) == mid.hot_defer_end(i));
+                if i + 1 < depth {
+                    assert(self.layer_above_at(i) == mid.layer_above_at(i));
+                } else {
+                    assert(i + 1 == depth);
+                    assert(mid.layer_above_at(i) == mid.view());
+                    assert(self.layer_above_at(i) == self.view());
+                    let lo = self.hot_stack@[i].start as int;
+                    let hi = self.hot_defer_end(i);
+                    let saved = self.snapshots@[i].len();
+                    if n < saved as int {
+                        assert(needs_capture);
+                        assert(mid.store.captured()[n]);
+                        assert(mid.store.captured()[n]
+                            == captured_in_range::<T, I>(
+                                mid.hot_value_pool@, lo, hi, n as nat));
+                    }
+                    lemma_frame_inv_range_pop_last::<T, I>(
+                        mid.view(), self.view(), self.hot_value_pool@, lo, hi,
+                        self.snapshots@[i], saved);
+                }
+            }
+
+            if depth > 0 {
+                let top = (depth - 1) as int;
+                let lo = self.hot_stack@[top].start as int;
+                assert forall|q: int|
+                    0 <= q < self.active_saved_len.as_nat()
+                        && q < self.view().len() implies
+                    #[trigger] self.store.captured()[q]
+                        == captured_in_range::<T, I>(
+                            self.hot_value_pool@, lo,
+                            self.hot_value_pool@.len() as int, q as nat) by {
+                    assert(q < mid.view().len());
+                    assert(self.store.captured()[q] == mid.store.captured()[q]);
+                }
+            }
+            assert forall|q: int| 0 <= q < self.view().len()
+                && #[trigger] self.store.captured()[q]
+                implies depth > 0 && q < self.active_saved_len.as_nat() by {
+                assert(q < mid.view().len());
+                assert(self.store.captured()[q] == mid.store.captured()[q]);
+                assert(mid.store.captured()[q]);
+            }
+            assert(self.hot_defer_wf());
+
+            assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
+                #[trigger] frame_inv_range::<T, I>(
+                    self.layer_above_at(k), self.full_trail@,
+                    self.g_start(k), self.g_end(k), self.snapshots@[k],
+                    self.snapshots@[k].len()) by {
+                assert(mid.frame_inv_range_holds(k));
+                assert(self.g_start(k) == mid.g_start(k));
+                assert(self.g_end(k) == mid.g_end(k));
+                if k + 1 < self.trail_frames@.len() {
+                    assert(self.layer_above_at(k) == mid.layer_above_at(k));
+                } else {
+                    assert(k + 1 == self.trail_frames@.len());
+                    assert(mid.layer_above_at(k) == mid.view());
+                    assert(self.layer_above_at(k) == self.view());
+                    let lo = self.g_start(k);
+                    let hi = self.g_end(k);
+                    let saved = self.snapshots@[k].len();
+                    if n < saved as int {
+                        assert(needs_capture);
+                        assert(mid.full_trail@.len() > pre.full_trail@.len());
+                        assert(mid.full_trail@[(mid.full_trail@.len() - 1) as int].1.as_nat()
+                            == n as nat);
+                        assert(captured_in_range::<T, I>(
+                            mid.full_trail@, lo, hi, n as nat));
+                    }
+                    lemma_frame_inv_range_pop_last::<T, I>(
+                        mid.view(), self.view(), self.full_trail@, lo, hi,
+                        self.snapshots@[k], saved);
+                }
+            }
+
+            mid.lemma_wf_named_parts();
+            reveal(Vec::wf_for_snap);
+            assert(self.store.wf());
+            assert(self.frame_partition_ok());
+            assert(self.snapshots@.len() == self.trail_frames@.len());
+            assert(self.trail_frames@.len() < usize::MAX);
+            assert(self.trail_frames@.len() == 0 ==> self.full_trail@.len() == 0);
+            assert(self.trail_frames@.len() > 0 ==> self.trail_frames@[0] == 0);
+            assert(self.trail_frames@.len() > 0 ==>
+                self.trail_frames@[(self.trail_frames@.len() - 1) as int]
+                    <= self.full_trail@.len());
+            assert forall|k: int|
+                0 <= k && k + 1 < self.trail_frames@.len() implies
+                    #[trigger] self.trail_frames@[k] <= self.trail_frames@[k + 1] by {
+                assert(self.trail_frames@ == mid.trail_frames@);
+                assert(0 <= k && k + 1 < mid.trail_frames@.len());
+                mid.lemma_diff_start_monotone(k, k + 1);
+            }
+            assert(self.wf_for_snap());
+            assert(self.proof_compat_ok());
+            self.lemma_hot_defer_snap_implies_wf();
+        }
+        r
+    }
+
+    #[inline(always)]
     #[verifier::external_body]
-    fn runtime_pop(&mut self) -> Option<T> {
+    fn runtime_pop_fallback(&mut self) -> (r: Option<T>)
+        requires
+            old(self).wf(),
+            !old(self).hot_defer_scope(),
+        ensures
+            final(self).wf(),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+            old(self).view().len() == 0 ==> {
+                &&& r is None
+                &&& final(self).view() == old(self).view()
+            },
+            old(self).view().len() > 0 ==> {
+                &&& r == Some(old(self).view().last())
+                &&& final(self).view() == old(self).view().drop_last()
+            },
+    {
         let len = self.store.raw_len();
         if len == 0 {
             return None;
@@ -3304,22 +3952,49 @@ where
         self.store.pop()
     }
 
+    #[inline(always)]
+    fn runtime_pop(&mut self) -> (r: Option<T>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+            old(self).view().len() == 0 ==> {
+                &&& r is None
+                &&& final(self).view() == old(self).view()
+            },
+            old(self).view().len() > 0 ==> {
+                &&& r == Some(old(self).view().last())
+                &&& final(self).view() == old(self).view().drop_last()
+            },
+    {
+        let hot = self.hot_defer_scope_exec();
+        if hot {
+            proof { self.lemma_hot_defer_scope_implies_projection(); }
+            self.hot_defer_pop_checked()
+        } else {
+            self.runtime_pop_fallback()
+        }
+    }
+
     /// Verified set core for the Hot-only Defer projection. Capture is proved
     /// first, then the raw write changes only the live top layer.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(900)]
+    #[verifier::rlimit(1800)]
     #[inline(always)]
     fn hot_defer_set_checked(&mut self, index: I, value: T)
         requires
+            old(self).wf(),
             old(self).hot_defer_wf(),
             index.as_nat() < old(self).view().len(),
         ensures
+            final(self).wf(),
             final(self).hot_defer_wf(),
             final(self).view() == old(self).view().update(index.as_nat() as int, value),
             final(self).snapshots@ == old(self).snapshots@,
             final(self).trail_frames@ == old(self).trail_frames@,
     {
-        self.hot_defer_capture_checked(index);
+        let ghost pre = *self;
+        self.hot_defer_capture_canonical_checked(index);
         let ghost mid = *self;
         self.store.set_raw(index, value);
         proof {
@@ -3351,6 +4026,9 @@ where
                     let hi = self.hot_defer_end(i);
                     let saved = self.snapshots@[i].len();
                     if j < saved as int {
+                        assert(mid.active_saved_len.as_nat() == saved);
+                        assert(mid.active_saved_len == pre.active_saved_len);
+                        assert(j < pre.active_saved_len.as_nat() as int);
                         assert(mid.store.captured()[j]);
                         assert(mid.store.captured()[j]
                             == captured_in_range::<T, I>(
@@ -3369,14 +4047,16 @@ where
             // flags, all unchanged by set_raw. The open bridge also survives:
             // its range and flags are identical and the view length is stable.
             assert(self.view().len() == mid.view().len());
-            assert forall|q: int|
-                0 <= q < self.active_saved_len.as_nat() && q < self.view().len() implies
-                (#[trigger] self.store.captured()[q])
-                    == captured_in_range::<T, I>(
-                        self.hot_value_pool@,
-                        self.hot_stack@[(depth - 1) as int].start as int,
-                        self.hot_value_pool@.len() as int, q as nat) by {
-                assert(q < mid.view().len());
+            if depth > 0 {
+                assert forall|q: int|
+                    0 <= q < self.active_saved_len.as_nat() && q < self.view().len() implies
+                    (#[trigger] self.store.captured()[q])
+                        == captured_in_range::<T, I>(
+                            self.hot_value_pool@,
+                            self.hot_stack@[(depth - 1) as int].start as int,
+                            self.hot_value_pool@.len() as int, q as nat) by {
+                    assert(q < mid.view().len());
+                }
             }
             assert forall|q: int| 0 <= q < self.view().len()
                 && #[trigger] self.store.captured()[q]
@@ -3385,17 +4065,108 @@ where
                 assert(mid.store.captured()[q]);
             }
             assert(self.hot_defer_wf());
+
+            // The canonical top stratum received the chronological event in
+            // the capture adapter. A write inside saved_len is therefore a
+            // captured-column update; a write at/above saved_len is outside
+            // the frame's horizontal domain.
+            assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
+                #[trigger] frame_inv_range::<T, I>(
+                    self.layer_above_at(k), self.full_trail@,
+                    self.g_start(k), self.g_end(k), self.snapshots@[k],
+                    self.snapshots@[k].len()) by {
+                assert(mid.frame_inv_range_holds(k));
+                assert(self.g_start(k) == mid.g_start(k));
+                assert(self.g_end(k) == mid.g_end(k));
+                if k + 1 < self.trail_frames@.len() {
+                    assert(self.layer_above_at(k) == mid.layer_above_at(k));
+                } else {
+                    assert(k + 1 == self.trail_frames@.len());
+                    assert(mid.layer_above_at(k) == mid.view());
+                    assert(self.layer_above_at(k) == self.view());
+                    let lo = self.g_start(k);
+                    let hi = self.g_end(k);
+                    let saved = self.snapshots@[k].len();
+                    if j < saved as int {
+                        assert(j < pre.active_saved_len.as_nat() as int);
+                        assert(mid.full_trail@
+                            == pre.full_trail@.push((pre.view()[j], index)));
+                        assert(lo <= pre.full_trail@.len());
+                        assert(mid.full_trail@[pre.full_trail@.len() as int].1.as_nat()
+                            == j as nat);
+                        assert(captured_in_range::<T, I>(
+                            mid.full_trail@, lo, hi, j as nat));
+                        lemma_frame_inv_range_set_captured::<T, I>(
+                            mid.view(), self.view(), self.full_trail@, lo, hi,
+                            self.snapshots@[k], saved, j, value);
+                    } else {
+                        lemma_frame_inv_range_set_outside::<T, I>(
+                            mid.view(), self.view(), self.full_trail@, lo, hi,
+                            self.snapshots@[k], saved, j, value);
+                    }
+                }
+            }
+
+            mid.lemma_wf_named_parts();
+            reveal(Vec::wf_for_snap);
+            assert(self.store.wf());
+            assert(self.frame_partition_ok());
+            assert(self.snapshots@.len() == self.trail_frames@.len());
+            assert(self.trail_frames@.len() < usize::MAX);
+            assert(self.trail_frames@.len() == 0 ==> self.full_trail@.len() == 0);
+            assert(self.trail_frames@.len() > 0 ==> self.trail_frames@[0] == 0);
+            assert(self.trail_frames@.len() > 0 ==>
+                self.trail_frames@[(self.trail_frames@.len() - 1) as int]
+                    <= self.full_trail@.len());
+            assert forall|k: int|
+                0 <= k && k + 1 < self.trail_frames@.len() implies
+                    #[trigger] self.trail_frames@[k] <= self.trail_frames@[k + 1] by {
+                assert(self.trail_frames@ == mid.trail_frames@);
+                assert(0 <= k && k + 1 < mid.trail_frames@.len());
+                mid.lemma_diff_start_monotone(k, k + 1);
+            }
+            assert(self.wf_for_snap());
+            assert(self.proof_compat_ok());
+            self.lemma_hot_defer_snap_implies_wf();
         }
     }
 
     #[inline(always)]
     #[verifier::external_body]
-    fn runtime_set(&mut self, index: I, value: T) {
+    fn runtime_set_fallback(&mut self, index: I, value: T)
+        requires
+            old(self).wf(),
+            !old(self).hot_defer_scope(),
+            index.as_nat() < old(self).view().len(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view().update(index.as_nat() as int, value),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+    {
         if self.store.unique_capture() {
             self.hot_defer_set_checked(index, value);
         } else {
             self.runtime_capture(index);
             self.store.set_raw(index, value);
+        }
+    }
+
+    #[inline(always)]
+    fn runtime_set(&mut self, index: I, value: T)
+        requires
+            old(self).wf(),
+            index.as_nat() < old(self).view().len(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view().update(index.as_nat() as int, value),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        let hot = self.hot_defer_scope_exec();
+        if hot {
+            proof { self.lemma_hot_defer_scope_implies_projection(); }
+            self.hot_defer_set_checked(index, value);
+        } else {
+            self.runtime_set_fallback(index, value);
         }
     }
 
@@ -5144,6 +5915,7 @@ where
     /// so `view()`, `wf`, and all tracked sequences are unchanged. (The
     /// production diff_log capacity hint is omitted — it's a pure allocator
     /// hint with no effect on `diff_log@`.)
+    #[verifier::spinoff_prover]
     #[verifier::rlimit(2000)]
     fn maybe_shrink(&mut self, policy: ShrinkPolicy)
         requires old(self).wf(),
@@ -5774,7 +6546,6 @@ where
 
     #[verifier::rlimit(300)]
     #[inline(always)]
-    #[verifier::external_body]
     pub(crate) fn push(&mut self, value: T)
         requires
             old(self).wf(),
@@ -6007,7 +6778,6 @@ where
     #[verifier::spinoff_prover]
     #[verifier::rlimit(300)]
     #[inline(always)]
-    #[verifier::external_body]
     pub fn pop(&mut self) -> (r: Option<T>)
         requires
             old(self).wf(),
@@ -6030,7 +6800,6 @@ where
     #[verifier::spinoff_prover]
     #[verifier::rlimit(200)]
     #[inline(always)]
-    #[verifier::external_body]
     pub fn set_index(&mut self, i: I, value: T)
         requires
             old(self).wf(),
