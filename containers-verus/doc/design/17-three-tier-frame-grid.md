@@ -211,6 +211,27 @@ For an older Cold target, continue with direct Cold run copies. Trail order is
 load-bearing because one column may contain multiple entries. Order within one
 Hot or Cold frame is irrelevant because each index appears at most once.
 
+### Connecting the induction to execution
+
+Freeze the original container locally with `let ghost pre = *self`. Replay may
+change the live buffer, but all frame lemmas continue to read `pre`, whose
+invariant is still available. No second persistent frame history is needed:
+`frame_saved_value` reads the existing pools and headers.
+
+The diagram shows logical frame steps. Trail and Hot execution still use one
+batched range per tier. `lemma_overlay_split` connects that range to the frame
+induction, and `lemma_pair_tier_suffix_cell` follows inherited cells until it
+finds a winning capture or reaches the original live row. Cold's checked run
+composition feeds `lemma_physical_frame_step`; its reverse frame loop carries
+the intersection with the fixed target window.
+
+`reconstruct_target_checked` composes resize, capture preparation, and these
+physical tier paths. Its contract establishes the target contents and preserves
+all history fields. Final well-formedness is a separate obligation: truncate
+history, retain the canonical prefix, promote a survivor when needed, and
+rebuild capture state. Verification of reconstruction alone does not discharge
+those later operations or the representation-conversion proofs.
+
 ## 6. Push and regrowth
 
 Suppose the live vector is shorter than the newest frame's saved length:

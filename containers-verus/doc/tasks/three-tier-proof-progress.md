@@ -604,3 +604,60 @@ do not close it.
 
 The fresh `literal-types` Verus run also passed: **2240 verified, 0 errors**
 (4m 57s). Both feature configurations were checked from freshly touched source.
+
+
+### Mixed-tier reconstruction — local pre-state and batched induction
+
+The preceding Cold-run checkpoint is `70cd3ed`. The next reconstruction phase
+uses `let ghost pre = *self` and adds no persistent fields or ghost history.
+`frame_saved_value` remains a projection of physical pools. Reconstruction is
+separate from final well-formedness: intermediate buffers need only agree with
+the relevant pre-state layer on their shared index domain.
+
+Cold replay now proves adjacent-run disjointness implies pairwise separation,
+composes the checked run copies, bridges the resulting mapping to
+`frame_saved_value`, and calls `lemma_physical_frame_step`. A checked reverse
+Cold frame traversal preserves the fixed target window even when saved lengths
+zigzag. Empty frames need no special logical case.
+
+Trail/Hot replay remains one batched pool overlay per tier. A per-cell induction
+uses the captured-or-inherited contract and `lemma_overlay_split` to show that
+the batch implements newest-to-oldest frame replay. Narrow layout accessors
+supply only required bounds and mapping facts. Profiling identified automatic
+unfolding of `wf` as a source of unrelated history instantiations; keeping it
+opaque makes the induction verify at the default limit.
+
+`replay_all_tiers_checked` consumes the checked tier results in runtime order.
+`reconstruct_target_checked` adds the actual one-time resize and capture
+preparation. It returns exactly `pre.snapshots[target]`, preserves every history
+field, and preserves store protocols while only decreasing capture flags.
+`runtime_begin_restore` is now checked against resized flags and the original
+physical ingress pool; its trusted marker is removed. Default trust is 81
+markers, plus five literal-type registrations.
+
+The actual mixed-tier fallback calls this reconstruction phase. Its remaining
+truncation, canonical-prefix retention, promotion, and capture rebuilding are
+still trusted and are not covered by this milestone's completion claim.
+Configured/forced/adaptive conversions and mixed-tier mutations also remain.
+
+Targeted checks passed for Cold run composition, the physical/frame bridge,
+Cold frame and suffix execution, Trail/Hot layout and cell induction, batched
+execution, the mixed-tier replay helper, capture preparation, and the complete
+reconstruction wrapper. Fresh default full-package verification passed:
+**2259 verified, 0 errors** (3m 24s). Fresh `literal-types` verification also
+passed **2259 verified, 0 errors** (3m 26s). The `compat-all,literal-types`
+suite passed, including 30 three-tier runtime tests and three Cold regressions.
+The release policy matrix passed all four tests with `PROPTEST_CASES=1024`.
+The e-graph/SAT consumer suite passed 1267 tests (45 ignored), with zero
+failures. Formatting, `git diff --check`, and the 81 + 5 source trust count
+passed. All milestone gates are green; the next action is a local signed commit.
+
+
+Next preservation audit: `cold_repr_ok` currently contains pooled layout,
+adjacent-run disjointness, and reconstruction on the saved domain. It does not
+explicitly constrain every stored Cold value to that domain or exclude empty
+runs. Promotion to a Hot `frame_inv_range` needs the former; the documented
+`cold_run_count <= cold_value_count` theorem needs nonempty runs. Establish these
+relationships through run formation and preserve them, without adding ghost
+history or assuming the relationships. Also export a precise contract for
+`cold_value_cut` when verifying physical-prefix truncation.

@@ -41,7 +41,8 @@ for the full milestone protocol.
 | H3: explicit Hot Defer marks | `d14ba85` | `Never` and thresholded shrink checked through `try_mark_with` |
 | H4: public Hot restore | `b904db2` | general `wf`, surviving canonical prefix, Inline/Parallel restore; 2232 package facts verified |
 | Shared physical frame meaning | `acbc404` | common saved-value contract, checked Trail/Hot range replay; 2237 package facts verified |
-| Cold run backends | this checkpoint | checked run replay; 2240 facts under default and literal-types; overflow regression fixed; trust 82 + 5 |
+| Cold run backends | `70cd3ed` | checked run replay; 2240 facts under default and literal-types; overflow regression fixed; trust 82 + 5 |
+| Mixed-tier reconstruction | this checkpoint | 2259 facts under default and literal-types; runtime, feature, policy, consumer gates passed; trust 81 + 5; survivor restoration remains |
 
 At H3:
 
