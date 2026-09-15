@@ -339,6 +339,9 @@ where
 
     fn needs_replayed_indices(&self) -> bool { true }
 
+    #[inline(always)]
+    fn restore_entries_clear_capture(&self) -> bool { true }
+
     fn begin_restore(&mut self, replayed_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_inline_discipline;
         if !TRACK {

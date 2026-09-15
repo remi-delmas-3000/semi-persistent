@@ -60,6 +60,23 @@ impl<I: crate::index_like::IndexLike + core::fmt::Debug> core::fmt::Debug for Fr
 
 verus! {
 
+/// A chronological trail frame: extent `[start, end)` in the container's
+/// `trail_value_pool`, plus the live vector's length at its mark.
+#[derive(Copy)]
+pub struct TrailFrame<I: IndexLike> {
+    pub(crate) saved_len: I,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+impl<I: IndexLike> Clone for TrailFrame<I> {
+    fn clone(&self) -> (r: Self)
+        ensures r == *self,
+    {
+        *self
+    }
+}
+
 /// A hot frame: extent [start, end) in the container's hot_value_pool, plus
 /// the live vector's saved_len at its mark.
 #[derive(Copy)]

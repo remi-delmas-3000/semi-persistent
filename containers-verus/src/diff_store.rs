@@ -373,6 +373,14 @@ where
     fn needs_replayed_indices(&self) -> (b: bool)
         ensures b == self.needs_replayed_indices_spec();
 
+    /// Whether replaying every active entry clears that entry's capture state.
+    /// Runtime restore may skip a separate pre-clear pass when this is true;
+    /// the replayed open frame necessarily names every currently captured slot.
+    #[inline(always)]
+    fn restore_entries_clear_capture(&self) -> bool {
+        false
+    }
+
     fn begin_restore(&mut self, replayed_diffs: &[(T, I)])
         requires
             old(self).wf(),

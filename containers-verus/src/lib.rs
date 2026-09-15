@@ -134,6 +134,7 @@ pub mod sorted_cursor;
 pub mod sorted_vec_cursor;
 pub mod sparse_set;
 pub mod tagged;
+pub mod tier_policy;
 pub mod trail_store;
 pub mod two_stack_log;
 pub mod union_find;
@@ -176,8 +177,12 @@ pub use sorted_cursor::SortedCursor;
 pub use sorted_vec_cursor::SortedVecCursor;
 pub use sparse_set::{SparseSet, SparseSetToken};
 pub use tagged::{BoolTagged, Pair, Tagged};
+pub use tier_policy::{
+    AdaptiveInput, AdaptiveReport, InvalidRatio, Ratio, ReclaimPolicy, RolloverPolicy, TierLimit,
+    TierPolicy, TierStats,
+};
 pub use two_stack_log::TwoStackLog;
-pub use vec::{ShrinkPolicy, Vec, VecToken, VecView, VecViewIter};
+pub use vec::{MarkOptions, ShrinkPolicy, Vec, VecToken, VecView, VecViewIter};
 
 // Production-root parity: names production exports at its crate root, under
 // production's spellings (`Map`/`View`/`ViewIter` alias the renamed types).
@@ -203,9 +208,11 @@ pub type VecI<T, I, const TRACK: bool = true, VC = crate::value_compressor::NoVa
 /// diff log): the SMT-search profile. See `trail_store`.
 pub type VecT<T, I, const TRACK: bool = true> =
     Vec<T, I, crate::trail_store::TrailStore<T, I>, TRACK>;
-/// Runtime-selectable column: the store kind (frame diffs inline/parallel, or
-/// the chronological trail) is chosen at construction. See `dyn_store`.
+/// Runtime-selectable column: the store kind is chosen at construction while
+/// capture semantics follow that store. This preserves the legacy concrete
+/// type, including equality with the defaulted five-parameter `Vec` spelling.
 pub type VecD<T, I, const TRACK: bool = true> = Vec<T, I, crate::dyn_store::DynStore<T, I>, TRACK>;
+
 pub use compression_config::env_diff_store_kind;
 pub use dyn_store::StoreKind;
 

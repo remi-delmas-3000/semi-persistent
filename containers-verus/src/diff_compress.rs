@@ -2057,16 +2057,21 @@ pub fn compress_runs_sorted<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) 
     rf
 }
 
-/// Per-instance compression mode, selected at `Vec` construction (not a const
-/// generic): one binary runs SMT with `None` (speed) and equality saturation
-/// with a per-column mode (memory). `ValueDict` is value-major (dictionary +
-/// codes, for value-repetitive columns like union-find `parent`/`rank`);
-/// `IndexRuns` is index-major (write-order run-coalescing, for columns with
-/// contiguous batch updates — it drops the index column).
+/// Per-instance compression mode for standalone frame codecs such as
+/// [`compress_frame`]. Those codecs preserve the distinct dictionary,
+/// write-order-run, sorted-run, and adaptive encodings described below.
+///
+/// The legacy `Vec::new_with_mode` API now uses these non-`None` variants as
+/// equivalent activation aliases for its single run-only cold representation;
+/// it does not claim that a live Vec retains the selected standalone codec.
+/// Prefer `Vec::new_with_policy` for new Vec code.
 #[derive(Clone, Copy)]
 pub enum CompressionMode {
+    /// Store a plain copy of each frame.
     None,
+    /// Dictionary-encode values and store compact codes.
     ValueDict,
+    /// Coalesce consecutive indices in write order.
     IndexRuns,
     /// Sort-first index-major: sort the frame by index, then run-coalesce
     /// (`compress_runs_sorted`). Captures ALL index contiguity, not just
