@@ -39,7 +39,9 @@ for the full milestone protocol.
 | H2a: Hot push/regrowth core | `8a3745b` | geometric grow-layer proof and checked re-entry |
 | H2: Hot mutators | `5a5a6d4` | public `push`, `pop`, `set_index` checked through Hot-scope dispatch |
 | H3: explicit Hot Defer marks | `d14ba85` | `Never` and thresholded shrink checked through `try_mark_with` |
-| H4: public Hot restore | this checkpoint | general `wf`, surviving canonical prefix, Inline/Parallel restore; 2232 package facts verified |
+| H4: public Hot restore | `b904db2` | general `wf`, surviving canonical prefix, Inline/Parallel restore; 2232 package facts verified |
+| Shared physical frame meaning | `acbc404` | common saved-value contract, checked Trail/Hot range replay; 2237 package facts verified |
+| Cold run backends | this checkpoint | checked run replay; 2240 facts under default and literal-types; overflow regression fixed; trust 82 + 5 |
 
 At H3:
 

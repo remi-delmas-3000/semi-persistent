@@ -577,3 +577,30 @@ This checkpoint establishes the shared interpretation and checked Trail/Hot
 range replay. It does not claim the entire mixed-tier orchestrator is checked.
 Next: discharge the default Cold `DiffStore::restore_run` path used by Inline
 and DynStore, then connect Cold frame replay and the fixed-window telescope.
+
+
+### Cold run primitive — checked backends
+
+Replaced the trusted default `DiffStore::restore_run` with a required contract
+implemented by all four backends. Inline proves a bounded re-encoding loop that
+preserves tags even with `TRACK=false`; DynStore delegates to checked Inline,
+Parallel, and Trail implementations. Removed the unused trusted usize-write
+scaffold. Custom DiffStore implementations must now provide `restore_run`.
+
+A runtime regression first reproduced overflow at `base=u64::MAX` in the old
+Inline and dynamic defaults. The fixed loop clamps before addition; all three
+regressions now pass, including explicit capture-tag preservation. Targeted
+Verus checks report Inline 2 verified and DynStore 1 verified, zero errors.
+Trust falls from 84 to 82 default markers (plus five literal-type registrations).
+The fresh default full-package run passed: **2240 verified, 0 errors**
+(4m 51s). The `compat-all,literal-types` suite passed, including all 30
+three-tier runtime tests and the three new regressions. The release differential
+policy matrix passed all four tests with `PROPTEST_CASES=1024`. E-graph and
+SAT consumer suites passed 1267 tests, with 45 ignored and zero failures.
+Formatting, source trust counts, and `git diff --check` passed.
+
+The mixed-tier restore orchestrator is still trusted; checked run copies alone
+do not close it.
+
+The fresh `literal-types` Verus run also passed: **2240 verified, 0 errors**
+(4m 57s). Both feature configurations were checked from freshly touched source.

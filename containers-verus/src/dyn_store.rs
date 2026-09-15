@@ -420,6 +420,15 @@ where
         }
     }
 
+    fn restore_run(&mut self, base: I, values: &[T]) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::restore_run(s, base, values),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::restore_run(s, base, values),
+            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::restore_run(s, base, values),
+        }
+    }
+
     fn shrink_if(&mut self, factor: usize, headroom: usize) {
         broadcast use crate::diff_store::lemma_dyn_views;
         match self {

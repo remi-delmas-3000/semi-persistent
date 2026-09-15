@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **84** (4 structs + 80 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
-| `literal-types` | **89** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **82** (4 structs + 78 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
+| `literal-types` | **87** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,8 +72,8 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current H4 checkpoint has 84 default-build markers:
-4 opaque structs and 80 functions. The permanent groups below remain the
+boundary. The current Cold-run checkpoint has 82 default-build markers:
+4 opaque structs and 78 functions. The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -95,6 +95,10 @@ public `restore_frame` marker and restricts the existing runtime restore marker
 to `runtime_restore_frame_fallback`, whose precondition excludes the checked
 all-Hot scope. This yields 84 default markers and 89 with `literal-types`.
 The all-Hot dispatch includes Inline fused clearing and Parallel pre-clearing.
+The Cold-run checkpoint removes the trusted default `restore_run` and its
+`set_raw_usize_scaffold` helper. Inline now proves a clamped, tag-preserving
+loop; DynStore dispatches to checked backend implementations. This yields
+82 default markers and 87 with `literal-types`.
 No new trusted body was introduced. The
 three-segment accessor, H1 extractor, Cold/ingress transfer lemmas, and
 `maybe_shrink` pass targeted verification; a clean full Vec-module query reports
@@ -671,7 +675,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **84 default-build `external_body`
+The complete current source count is **82 default-build `external_body`
 markers plus 1 default-build axiom**; execution-first three-tier Vec markers not
 itemized here are enumerated in
 `doc/tasks/three-tier-frame-architecture-goal.md` §8. The `literal-types`

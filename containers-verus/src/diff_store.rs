@@ -554,10 +554,8 @@ where
     /// `[base, base+values.len())` (intersected with `[0, data.len())`) takes
     /// the run values, every other cell is untouched, and the length and
     /// capture flags are unchanged (a raw data write; the bitmap is inert).
-    /// The default is per-element (stores whose cells re-encode, e.g.
-    /// tag-inline, cannot memcpy) and stays a trusted scaffold; the raw stores
-    /// override with a proven copy_from_slice.
-    #[verifier::external_body]
+    /// Each backend proves this operation: tag-inline re-encodes each cell,
+    /// while raw stores use a checked copy_from_slice.
     fn restore_run(&mut self, base: I, values: &[T])
         requires
             old(self).wf(),
@@ -576,25 +574,7 @@ where
                         values@[i - base.as_nat()]
                     } else {
                         old(self).data()[i]
-                    },
-    {
-        let b = base.as_usize();
-        for (q, v) in values.iter().enumerate() {
-            let i = b + q;
-            if i < self.raw_len() {
-                self.set_raw_usize_scaffold(i, *v);
-            }
-        }
-    }
-
-    /// Scaffold raw write by usize (default routes through set_raw when the
-    /// index converts). EXEC-FIRST; folds into set_raw at lock time.
-    #[verifier::external_body]
-    fn set_raw_usize_scaffold(&mut self, i: usize, v: T) {
-        if let Some(ix) = I::try_from_usize(i) {
-            self.set_raw(ix, v);
-        }
-    }
+                    };
 
     fn shrink_if(&mut self, factor: usize, headroom: usize)
         requires old(self).wf(),

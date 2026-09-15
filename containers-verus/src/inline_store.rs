@@ -551,6 +551,46 @@ where
         }
     }
 
+    fn restore_run(&mut self, base: I, values: &[T]) {
+        broadcast use crate::diff_store::lemma_inline_discipline;
+        let b = base.as_usize();
+        let n = self.data.len();
+        let ghost before = self.data@;
+        if b >= n {
+            return;
+        }
+        let count = if values.len() <= n - b { values.len() } else { n - b };
+        let mut q = 0usize;
+        while q < count
+            invariant
+                b < n,
+                count == if values@.len() <= n - b { values@.len() as int } else { n - b },
+                q <= count,
+                self.data@.len() == n,
+                before.len() == n,
+                self.wf_spec(),
+                forall|i: int| 0 <= i < n ==>
+                    T::tag_of(#[trigger] self.data@[i]) == T::tag_of(before[i]),
+                forall|i: int| 0 <= i < n ==>
+                    T::value_of(#[trigger] self.data@[i]) ==
+                        if b <= i < b + q { values@[i - b] }
+                        else { T::value_of(before[i]) },
+            decreases count - q,
+        {
+            let i = b + q;
+            let tag = T::tag(&self.data[i]);
+            let mut repr = values[q].into_repr();
+            if tag {
+                T::set_tag(&mut repr);
+            }
+            self.data.set(i, repr);
+            q += 1;
+        }
+        proof {
+            assert(self.captured_spec() =~= old(self).captured_spec());
+        }
+    }
+
     fn shrink_if(&mut self, factor: usize, headroom: usize) {
         broadcast use crate::diff_store::lemma_inline_discipline;
         // Production formula: shrink capacity when `cap > factor * len`,
