@@ -330,3 +330,55 @@ markers changes the source-derived count from 90 to **87 default**, plus 5
 Next: H3 must connect checked `maybe_shrink` and `hot_defer_mark_checked` through
 explicit `RolloverPolicy::Defer` dispatch for both `ShrinkPolicy::Never` and
 thresholded shrink, then remove the in-scope mark-wrapper trust.
+
+## 2026-09-15 — H3 explicit Hot Defer marks
+
+**Result: explicit unique-capture all-Hot `RolloverPolicy::Defer` marks verify
+through `try_mark_with` for both `ShrinkPolicy::Never` and
+`IfOverallocated`.**
+
+`hot_defer_mark_checked` now requires and preserves general `wf` in addition to
+the physical Hot projection. A mark seals the prior Hot header, opens an empty
+Hot frame, pushes the unchanged live view into `snapshots`, and pushes the
+unchanged `full_trail.len()` as the canonical delimiter. The former top's layer
+becomes an equal snapshot; the new top range is empty. Equal delimiters preserve
+empty-frame token identity, and no adjacent saved-length relation is assumed.
+
+`maybe_shrink` exposes equality of every physical tier sequence.
+`hot_defer_post_mark_shrink_checked` checks the post-mark capacity-only calls,
+and `hot_defer_mark_with_shrink_checked` composes pre-mark shrink, canonical/
+physical mark, and post-mark shrink for both variants. The existing allocator
+helpers remain in the documented capacity-only boundary and prove that element
+sequences are unchanged.
+
+`runtime_push_frame` is now a checked dispatcher. The explicit Hot+Defer branch
+calls the checked composite for either shrink variant. Only the exact complement
+`APPLY_CONFIGURED || !hot_defer_scope || !Defer` reaches
+`runtime_push_frame_fallback`; shrink is intentionally absent from that
+complement. `push_frame_with_options` and `mark_with_options` are checked, so
+`try_mark_with` reaches the verified branch without an in-scope trusted wrapper.
+Configured and forced rollover remain later milestones.
+
+Exact results:
+
+```text
+hot_defer_mark_checked                    1 verified, 0 errors
+lemma_wf_for_snap_transfer                1 verified, 0 errors
+hot_defer_post_mark_shrink_checked        1 verified, 0 errors
+hot_defer_mark_with_shrink_checked        1 verified, 0 errors
+runtime_push_frame dispatcher             1 verified, 0 errors
+push_frame_with_options                    1 verified, 0 errors
+mark_with_options                          1 verified, 0 errors
+try_mark_with                              1 verified, 0 errors
+full vec module                          140 verified, 0 errors
+three_tier_runtime                         30 passed, 0 failed
+```
+
+No persistent Hot sortedness is introduced; the mark opens an unordered empty
+unique frame. No trust marker or assumption was added. Removing two explicit
+mark-wrapper markers changes the source-derived count from 87 to **85 default**,
+plus 5 `literal-types` registrations = **90**.
+
+Next: H4 must preserve canonical/general `wf` through zero and nonzero Hot
+restore, factor exact-negation restore fallback (including fused Inline replay),
+and remove the in-scope `restore_frame` trust.

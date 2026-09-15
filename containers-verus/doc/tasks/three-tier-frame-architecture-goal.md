@@ -898,7 +898,9 @@ including empty unique-state establishment of `hot_defer_wf`; the pre-existing
 Net source counts at H1 were 90 default and 95 with `literal-types`. H1 removes
 one proved accessor marker plus five unreachable legacy scaffold markers. H2
 then verifies public `push`, `pop`, and `set_index` through checked Hot-scope
-dispatch and removes three more markers; current counts are 87 default and 92
+dispatch and removes three more markers; H2 counts were 87 default and 92
+with `literal-types`. H3 verifies explicit Hot `Defer` marks for both shrink
+variants and removes two wrapper markers; current counts are 85 default and 90
 with `literal-types`. No `admit` or `assume` exists in the new proof prefix.
 
 H1 now gives general `wf` named pool-native boundaries (`frame_partition_ok`,

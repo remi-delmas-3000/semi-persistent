@@ -51,7 +51,7 @@ will accept: each `mark` opens a branch in a fork history, each `restore` cuts t
 branches it discards, and a token naming a discarded state is rejected. The
 development uses no `admit`s or `assume`s; run `cargo verus verify` for the
 per-module tally. (That does not mean nothing is trusted; the current
-execution-first branch has 87 default-build `external_body` markers, 92 with
+execution-first branch has 85 default-build `external_body` markers, 90 with
 `literal-types`, enumerated in [Chapter 2](02-trust-boundary.md).)
 
 ## Reference: what is in the crate
