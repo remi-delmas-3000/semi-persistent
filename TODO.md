@@ -3,6 +3,13 @@
 This file is the operational TODO for restoring the main semi-persistence
 theorems across the three-tier Vec runtime and every derived container.
 
+The current execution order follows
+[`all-tier-semi-persistence-goal.md`](containers-verus/doc/tasks/all-tier-semi-persistence-goal.md),
+the user-supplied continuation after H4: establish a shared physical frame
+meaning, prove replay and all-tier composition, prove conversions and survivor
+preservation, then reverify the derived public and parallel paths. H4 is the
+verified Hot-only foundation; all-tier closure remains the goal.
+
 The stable abstraction boundary MUST remain unchanged:
 
 ```text
@@ -65,12 +72,13 @@ trust surface:       85 default external_body markers + 5 literal-types markers
 ## Critical path
 
 ```text
-downstream container verification
+shared physical frame contract
 → Trail replay
 → Trail-to-Hot dedup refinement
 → Hot-to-Cold sort/run refinement
 → mixed-tier restore
 → configured/forced/adaptive policies
+→ downstream public/parallel contract audit
 → final all-container verification
 ```
 
@@ -188,7 +196,7 @@ successful try_restore(token k):
     snapshots_after == snapshots_before[..k]
 ```
 
-## 2. Reverify every derived container — current frontier
+## 2. Reverify every derived container — after all-tier Vec closure
 
 Once the exact Vec theorem is checked through the public path, rerun existing
 composition proofs without redesigning them unless verification exposes an

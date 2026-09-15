@@ -514,3 +514,66 @@ These should expose already-established internal facts without changing the
 runtime algorithms. The full package currently verifies their existing,
 weaker contracts against the updated Vec theorem; that alone does not prove
 stronger public snapshot-stack guarantees.
+
+## 2026-09-15 — Shared physical frame meaning (in progress)
+
+The user's updated execution plan is preserved in
+`all-tier-semi-persistence-goal.md`. It places the shared physical contract and
+all-tier Vec closure before the downstream public-contract pass. The H4 local
+checkpoint is `b904db2`; no push is authorized.
+
+`range_saved_value` interprets a physical Trail/Hot range as the first
+chronological value at an index, or `None` when absent. Its contract is derived
+from `frame_cell_inv` and `first_hitter`. `frame_saved_len` reads the appropriate
+physical header, and `frame_saved_value` uses Trail/Hot pools or Cold runs.
+`lemma_frame_saved_value_contract` derives the same covered/inherited rule for
+all three tiers from the existing invariant; it does not add an assumption or
+use `diff_log` as storage authority.
+
+`lemma_overlay_saved_value` proves length preservation and the earliest-hit
+mapping for backward replay, including duplicate Trail writes. The checked,
+inlined `replay_physical_range` exports that meaning alongside the unchanged
+DiffStore replay/capture guarantees. The real Trail and Hot replay sites now
+call it. `lemma_physical_frame_step` proves the fixed-window telescope step:
+within the frame's saved domain the result equals that frame's snapshot, even
+when that domain is shorter than the target buffer. The full runtime
+composition and Cold replay still need to consume this shared argument.
+
+Targeted Verus evidence (touching `src/vec.rs` before each invocation):
+
+```text
+cargo verus verify -- --verify-only-module vec --verify-function '*saved_value*'
+2 verified; combined tier bridge exceeded the default resource limit
+```
+
+The bridge was then factored to expose only the selected tier, reusing
+`lemma_hot_repr_at` for Hot. No resource-limit increase was needed:
+
+```text
+cargo verus verify -- --verify-only-module vec --verify-function lemma_frame_saved_value_contract
+1 verified, 0 errors
+cargo verus verify -- --verify-only-module vec --verify-function replay_physical_range
+1 verified, 0 errors
+cargo verus verify -- --verify-only-module vec --verify-function lemma_physical_frame_step
+1 verified, 0 errors
+cargo fmt --all -- --check
+exit 0
+```
+
+A fresh full-package run (`touch containers-verus/src/vec.rs`, then
+`cargo verus verify -p semi-persistent-containers-verus -- --time-expanded`) and
+the runtime, feature, and 1024-case policy gates are running. This work is
+uncommitted pending those results and is not an all-tier completion claim.
+
+### Shared-frame checkpoint — milestone gates passed
+
+The fresh full-package run completed with **2237 verified, 0 errors** (4m 48s),
+five more checked facts than H4. The 30 runtime regressions, full
+`compat-all,literal-types` suite, and 1024-case differential matrix (four tests)
+all passed. Formatting and `git diff --check` passed. Trust remains 84 default
+markers plus five literal-type registrations; no assumptions were added.
+
+This checkpoint establishes the shared interpretation and checked Trail/Hot
+range replay. It does not claim the entire mixed-tier orchestrator is checked.
+Next: discharge the default Cold `DiffStore::restore_run` path used by Inline
+and DynStore, then connect Cold frame replay and the fixed-window telescope.

@@ -1017,6 +1017,133 @@ pub open(crate) spec fn frame_cell_inv<T, I: IndexLike>(
     }
 }
 
+/// Logical saved value for a chronological physical range. Choosing the first
+/// hitter also describes a unique Hot range, without assuming sorted indices.
+pub open(crate) spec fn range_saved_value<T, I: IndexLike>(
+    diffs: Seq<(T, I)>, lo: int, hi: int, j: nat,
+) -> Option<T> {
+    if captured_in_range::<T, I>(diffs, lo, hi, j) {
+        let k = choose|k: int| lo <= k < hi
+            && (#[trigger] diffs[k]).1.as_nat() == j
+            && first_hitter::<T, I>(diffs, lo, k, j);
+        Some(diffs[k].0)
+    } else {
+        None
+    }
+}
+
+/// Re-express the existing per-cell invariant through the common optional
+/// saved-value interpretation; no new reconstruction assumption is introduced.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_range_saved_value_contract<T, I: IndexLike>(
+    above: Seq<T>, diffs: Seq<(T, I)>, lo: int, hi: int,
+    snap: Seq<T>, j: int,
+)
+    requires
+        0 <= lo <= hi <= diffs.len(),
+        0 <= j < snap.len(),
+        frame_cell_inv::<T, I>(above, diffs, lo, hi, snap, j),
+    ensures
+        match range_saved_value::<T, I>(diffs, lo, hi, j as nat) {
+            Some(value) => value == snap[j],
+            None => j < above.len() && above[j] == snap[j],
+        },
+{
+    if captured_in_range::<T, I>(diffs, lo, hi, j as nat) {
+        let k = choose|k: int| lo <= k < hi
+            && (#[trigger] diffs[k]).1.as_nat() == j as nat
+            && first_hitter::<T, I>(diffs, lo, k, j as nat);
+        let q = choose|q: int| lo <= q < hi
+            && (#[trigger] diffs[q]).1.as_nat() == j as nat
+            && diffs[q].0 == snap[j]
+            && first_hitter::<T, I>(diffs, lo, q, j as nat);
+        assert(k == q);
+    }
+}
+
+/// Backward physical replay preserves length and implements the saved-value
+/// map. In particular, duplicate Trail writes leave the earliest value last.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_overlay_saved_value<T, I: IndexLike>(
+    base: Seq<T>, diffs: Seq<(T, I)>, lo: int, hi: int, j: int,
+)
+    requires
+        0 <= lo <= hi <= diffs.len(),
+        0 <= j < base.len(),
+    ensures
+        overlay::<T, I>(base, diffs, lo, hi).len() == base.len(),
+        overlay::<T, I>(base, diffs, lo, hi)[j]
+            == match range_saved_value::<T, I>(diffs, lo, hi, j as nat) {
+                Some(value) => value,
+                None => base[j],
+            },
+{
+    lemma_overlay_len::<T, I>(base, diffs, lo, hi);
+    if captured_in_range::<T, I>(diffs, lo, hi, j as nat) {
+        lemma_lowest_hitter::<T, I>(diffs, lo, hi, j as nat);
+        let k = choose|k: int| lo <= k < hi
+            && (#[trigger] diffs[k]).1.as_nat() == j as nat
+            && first_hitter::<T, I>(diffs, lo, k, j as nat);
+        lemma_overlay_lowest::<T, I>(base, diffs, lo, hi, k, j);
+    } else {
+        lemma_overlay_uncaptured::<T, I>(base, diffs, lo, hi, j);
+    }
+}
+
+/// Checked executable boundary used by both Trail and Hot physical replay.
+/// The range may contain duplicate indices, including across frame boundaries.
+/// This retains the store's exact replay/capture contract and additionally
+/// exposes its per-index saved-value effect to the tier-independent argument.
+#[inline(always)]
+#[verifier::spinoff_prover]
+pub(crate) fn replay_physical_range<T, I, S, const TRACK: bool>(
+    store: &mut S, pool: &std::vec::Vec<(T, I)>, lo: usize, hi: usize,
+)
+where
+    T: Copy,
+    I: IndexLike,
+    S: DiffStore<T, I, TRACK>,
+    requires
+        old(store).wf(),
+        lo <= hi <= pool@.len(),
+    ensures
+        final(store).wf(),
+        final(store).unique_capture_spec() == old(store).unique_capture_spec(),
+        final(store).needs_replayed_indices_spec() == old(store).needs_replayed_indices_spec(),
+        final(store).restore_entries_clear_capture_spec()
+            == old(store).restore_entries_clear_capture_spec(),
+        final(store).data() == overlay::<T, I>(
+            old(store).data(), pool@, lo as int, hi as int),
+        final(store).data().len() == old(store).data().len(),
+        forall|j: int| 0 <= j < old(store).data().len() ==>
+            #[trigger] final(store).data()[j]
+                == match range_saved_value::<T, I>(pool@, lo as int, hi as int, j as nat) {
+                    Some(value) => value,
+                    None => old(store).data()[j],
+                },
+        TRACK ==> forall|j: int| 0 <= j < final(store).captured().len()
+            && #[trigger] final(store).captured()[j]
+            ==> j < old(store).captured().len() && old(store).captured()[j],
+        TRACK && old(store).restore_entries_clear_capture_spec() ==>
+            forall|j: int| 0 <= j < final(store).captured().len()
+                && #[trigger] final(store).captured()[j]
+                ==> !captured_in_range::<T, I>(pool@, lo as int, hi as int, j as nat),
+{
+    let ghost base = store.data();
+    store.restore_overlay(pool, lo, hi);
+    proof {
+        lemma_overlay_len::<T, I>(base, pool@, lo as int, hi as int);
+        assert forall|j: int| 0 <= j < base.len() implies
+            #[trigger] store.data()[j]
+                == match range_saved_value::<T, I>(pool@, lo as int, hi as int, j as nat) {
+                    Some(value) => value,
+                    None => base[j],
+                } by {
+            lemma_overlay_saved_value::<T, I>(base, pool@, lo as int, hi as int, j);
+        }
+    }
+}
+
 /// No entry in `[lo, k)` hits `j`: position `k`'s entry is the stratum's
 /// first hitter of `j`. The witness shape `lemma_overlay_lowest` consumes.
 pub open(crate) spec fn first_hitter<T, I: IndexLike>(
@@ -5631,7 +5758,7 @@ where
                 base, pre.hot_value_pool@, 0, pre.hot_value_pool@.len() as int);
         }
         let n = self.hot_value_pool.len();
-        self.store.restore_overlay(&self.hot_value_pool, 0, n);
+        replay_physical_range::<T, I, S, TRACK>(&mut self.store, &self.hot_value_pool, 0, n);
         proof {
             assert(self.store.data().len() == pre.snapshots@[0].len());
             assert forall|j: int| 0 <= j < self.store.data().len() implies
@@ -6079,7 +6206,7 @@ where
             }
         }
         let n = self.hot_value_pool.len();
-        self.store.restore_overlay(&self.hot_value_pool, cut, n);
+        replay_physical_range::<T, I, S, TRACK>(&mut self.store, &self.hot_value_pool, cut, n);
         proof {
             assert(self.store.data().len() == pre.snapshots@[target as int].len());
             assert forall|j: int| 0 <= j < self.store.data().len() implies
@@ -6175,7 +6302,7 @@ where
             // The newest ingress frame is open, so its effective end is the
             // active pool length rather than its not-yet-sealed header end.
             let hi = self.trail_value_pool.len();
-            self.store.restore_overlay(&self.trail_value_pool, lo, hi);
+            replay_physical_range::<T, I, S, TRACK>(&mut self.store, &self.trail_value_pool, lo, hi);
         }
 
         let first_hot = target.saturating_sub(cold).min(hot);
@@ -6189,7 +6316,7 @@ where
             } else {
                 self.hot_stack[hot_end - 1].end
             };
-            self.store.restore_overlay(&self.hot_value_pool, lo, hi);
+            replay_physical_range::<T, I, S, TRACK>(&mut self.store, &self.hot_value_pool, lo, hi);
         }
 
         let cold_end = if target < cold { cold } else { 0 };
@@ -7042,6 +7169,113 @@ where
             && c < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len;
         self.cold_value_pool@[self.cold_index_runs@[r].start as int
             + (c - self.cold_index_runs@[r].base.as_nat()) as int]
+    }
+
+    /// The saved extent is read from the physical header in its age-ordered
+    /// tier, rather than inferred from neighboring frame lengths.
+    pub open(crate) spec fn frame_saved_len(&self, f: int) -> nat {
+        let cc = self.cold_stack@.len();
+        let hc = self.hot_stack@.len();
+        if f < cc {
+            self.cold_stack@[f].saved_len.as_nat()
+        } else if f < cc + hc {
+            self.hot_stack@[f - cc].saved_len.as_nat()
+        } else {
+            self.trail_stack@[f - cc - hc].saved_len.as_nat()
+        }
+    }
+
+    /// Common logical meaning, read only from authoritative physical storage.
+    pub open(crate) spec fn frame_saved_value(&self, f: int, j: nat) -> Option<T> {
+        let cc = self.cold_stack@.len();
+        let hc = self.hot_stack@.len();
+        if f < cc {
+            if self.cold_covered(f, j) { Some(self.cold_value(f, j)) } else { None }
+        } else if f < cc + hc {
+            let h = f - cc;
+            range_saved_value::<T, I>(
+                self.hot_value_pool@, self.phys_hot_start(h), self.phys_hot_end(h), j)
+        } else {
+            let t = f - cc - hc;
+            range_saved_value::<T, I>(
+                self.trail_value_pool@, self.trail_stack@[t].start as int,
+                self.phys_trail_end(t), j)
+        }
+    }
+
+    /// Every tier refines the same per-cell contract. Saved lengths need not be
+    /// monotone, and a missing value explicitly requires the newer cell to exist.
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_frame_saved_value_contract(&self, f: int, j: int)
+        requires
+            self.wf(),
+            0 <= f < self.depth_spec(),
+            0 <= j < self.snapshots@[f].len(),
+        ensures
+            self.frame_saved_len(f) == self.snapshots@[f].len(),
+            match self.frame_saved_value(f, j as nat) {
+                Some(value) => value == self.snapshots@[f][j],
+                None => j < self.layer_above_at(f).len()
+                    && self.layer_above_at(f)[j] == self.snapshots@[f][j],
+            },
+    {
+        reveal(Vec::frame_partition_ok);
+        self.lemma_wf_named_parts();
+        let cc = self.cold_stack@.len();
+        let hc = self.hot_stack@.len();
+        if f < cc {
+            reveal(Vec::cold_repr_ok);
+            assert(self.cold_reconstructs(f));
+        } else if f < cc + hc {
+            let h = f - cc;
+            self.lemma_hot_repr_at(h);
+            lemma_frame_inv_arm_at::<T, I>(
+                self.layer_above_at(f), self.hot_value_pool@,
+                self.phys_hot_start(h), self.phys_hot_end(h),
+                self.snapshots@[f], self.snapshots@[f].len(), j);
+            lemma_range_saved_value_contract::<T, I>(
+                self.layer_above_at(f), self.hot_value_pool@,
+                self.phys_hot_start(h), self.phys_hot_end(h), self.snapshots@[f], j);
+        } else {
+            reveal(Vec::trail_repr_ok);
+            let t = f - cc - hc;
+            let lo = self.trail_stack@[t].start as int;
+            let hi = self.phys_trail_end(t);
+            lemma_frame_inv_arm_at::<T, I>(
+                self.layer_above_at(f), self.trail_value_pool@, lo, hi,
+                self.snapshots@[f], self.snapshots@[f].len(), j);
+            lemma_range_saved_value_contract::<T, I>(
+                self.layer_above_at(f), self.trail_value_pool@, lo, hi,
+                self.snapshots@[f], j);
+        }
+    }
+
+    /// One step of the shared fixed-window telescope. Indices outside this
+    /// frame's saved domain remain pending; no adjacent-length ordering is used.
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_physical_frame_step(
+        &self, f: int, before: Seq<T>, after: Seq<T>,
+    )
+        requires
+            self.wf(),
+            0 <= f < self.depth_spec(),
+            after.len() == before.len(),
+            forall|j: int| 0 <= j < before.len()
+                && j < self.layer_above_at(f).len() ==>
+                    #[trigger] before[j] == self.layer_above_at(f)[j],
+            forall|j: int| 0 <= j < before.len() ==>
+                #[trigger] after[j] == match self.frame_saved_value(f, j as nat) {
+                    Some(value) => value,
+                    None => before[j],
+                },
+        ensures
+            forall|j: int| 0 <= j < after.len() && j < self.snapshots@[f].len() ==>
+                #[trigger] after[j] == self.snapshots@[f][j],
+    {
+        assert forall|j: int| 0 <= j < after.len() && j < self.snapshots@[f].len()
+            implies #[trigger] after[j] == self.snapshots@[f][j] by {
+            self.lemma_frame_saved_value_contract(f, j);
+        }
     }
 
     /// COLD reconstruction (D5's third equivalence), pointwise and IndexLike-only
