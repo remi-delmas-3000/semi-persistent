@@ -700,3 +700,28 @@ gates are green. Trust
 remains 81 default markers plus five literal-type registrations: this narrows
 the remaining fallback's scope without replacing it with another trusted body.
 Nonzero physical-invariant restoration and survivor promotion remain unfinished.
+
+
+### Retained Trail/Hot representation after truncation
+
+The preceding prefix and zero-target checkpoint is `ee746c2`. The actual
+`truncate_restored_history_checked` helper now additionally establishes
+`hot_repr_ok` and `trail_repr_ok`. Each retained physical frame keeps its
+original range, snapshot, and newer layer. In particular, a newly open top
+ends at the same boundary that previously sealed it, and sees the restored
+target snapshot as its unchanged newer layer. Unique Hot captures transfer
+through equality of the retained pool range.
+
+The proof uses a raw-header-end projection and narrow layout accessors; these
+are specifications, not new stored fields. Per-frame transfer and separate
+Trail/Hot quantifiers keep unrelated history predicates opaque. The combined
+proof passes at the default resource limit. Runtime execution and batching
+are unchanged. Cold representation preservation, survivor promotion, and the
+remaining nonzero mixed-tier fallback are still unfinished.
+
+Fresh full-package verification passed in both configurations: **2271 verified,
+0 errors**, default (4m 52s) and `literal-types` (4m 54s). The
+`compat-all,literal-types` suite and all four release differential policy tests
+with `PROPTEST_CASES=1024` passed. E-graph/SAT consumers passed 1267 tests
+(45 ignored), with zero failures. Formatting and whitespace checks passed.
+Trust remains 81 default markers plus five literal-type registrations.

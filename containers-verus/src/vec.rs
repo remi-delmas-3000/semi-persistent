@@ -6725,6 +6725,173 @@ where
         }
     }
 
+    /// Retained snapshots and newer layers are unchanged, including the new
+    /// top frame whose newer layer is now the reconstructed live buffer.
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_layer_at(&self, pre: Self, target: nat, f: int)
+        requires
+            pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target),
+            self.view() == pre.snapshots@[target as int],
+            0 <= f < target,
+        ensures
+            self.snapshots@[f] == pre.snapshots@[f],
+            self.layer_above_at(f) == pre.layer_above_at(f),
+    {
+        hide(Vec::wf);
+        pre.lemma_replay_partition();
+        reveal(Vec::restored_history_prefix);
+    }
+
+    /// Truncating a pair tier keeps each retained frame's original extent.
+    /// A newly open top ends at exactly the cut that used to seal that frame.
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_pair_layout(&self, pre: Self, target: nat, trail: bool, f: int)
+        requires
+            pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target),
+            0 <= f < self.pair_tier_count(trail),
+        ensures
+            f == 0 ==> self.pair_tier_start(trail, f) == 0,
+            self.pair_tier_start(trail, f) <= self.pair_tier_header_end(trail, f)
+                <= self.pair_tier_end(trail, f),
+            f + 1 < self.pair_tier_count(trail) ==>
+                self.pair_tier_header_end(trail, f) == self.pair_tier_start(trail, f + 1)
+                    && self.pair_tier_end(trail, f) == self.pair_tier_start(trail, f + 1),
+            self.pair_tier_count(trail) <= pre.pair_tier_count(trail),
+            self.pair_tier_offset(trail) == pre.pair_tier_offset(trail),
+            self.pair_tier_offset(trail) + f < target,
+            self.pair_tier_start(trail, f) == pre.pair_tier_start(trail, f),
+            self.pair_tier_end(trail, f) == pre.pair_tier_end(trail, f),
+            0 <= self.pair_tier_start(trail, f) <= self.pair_tier_end(trail, f)
+                <= self.pair_tier_pool(trail).len() <= pre.pair_tier_pool(trail).len(),
+            forall|q: int| 0 <= q < self.pair_tier_pool(trail).len() ==>
+                #[trigger] self.pair_tier_pool(trail)[q] == pre.pair_tier_pool(trail)[q],
+    {
+        hide(Vec::wf);
+        reveal(Vec::restored_history_prefix);
+        pre.lemma_replay_partition();
+        let kept = self.pair_tier_count(trail);
+        assert(kept <= pre.pair_tier_count(trail));
+        pre.lemma_pair_tier_frame_layout(trail, f);
+        if kept < pre.pair_tier_count(trail) {
+            pre.lemma_pair_tier_frame_layout(trail, kept as int);
+            pre.lemma_pair_tier_start_order(trail, f + 1, kept as int);
+            assert(self.pair_tier_pool(trail).len() == pre.pair_tier_start(trail, kept as int));
+        }
+    }
+
+    /// Transfer a retained Trail/Hot frame through its unchanged physical
+    /// range, snapshot, and newer layer. No capture-state premise is needed.
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_pair_frame(&self, pre: Self, target: nat, trail: bool, f: int)
+        requires
+            pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target),
+            self.view() == pre.snapshots@[target as int],
+            0 <= f < self.pair_tier_count(trail),
+        ensures
+            frame_inv_range::<T, I>(
+                self.layer_above_at(self.pair_tier_offset(trail) + f),
+                self.pair_tier_pool(trail), self.pair_tier_start(trail, f), self.pair_tier_end(trail, f),
+                self.snapshots@[self.pair_tier_offset(trail) + f],
+                self.snapshots@[self.pair_tier_offset(trail) + f].len()),
+            !trail ==> stratum_unique::<T, I>(self.pair_tier_pool(trail),
+                self.pair_tier_start(trail, f), self.pair_tier_end(trail, f)),
+    {
+        hide(Vec::wf);
+        self.lemma_restored_pair_layout(pre, target, trail, f);
+        let k = self.pair_tier_offset(trail) + f;
+        self.lemma_restored_layer_at(pre, target, k);
+        pre.lemma_wf_named_parts();
+        if trail {
+            reveal(Vec::trail_repr_ok);
+        } else {
+            pre.lemma_hot_repr_at(f);
+            lemma_stratum_unique_local::<T, I>(pre.pair_tier_pool(trail), self.pair_tier_pool(trail),
+                self.pair_tier_start(trail, f), self.pair_tier_end(trail, f));
+        }
+        lemma_frame_inv_range_local::<T, I>(
+            self.layer_above_at(k), pre.pair_tier_pool(trail), self.pair_tier_pool(trail),
+            self.pair_tier_start(trail, f), self.pair_tier_end(trail, f),
+            self.snapshots@[k], self.snapshots@[k].len());
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_pair_repr(&self, pre: Self, target: nat, trail: bool)
+        requires
+            pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target),
+            self.view() == pre.snapshots@[target as int],
+        ensures if trail { self.trail_repr_ok() } else { self.hot_repr_ok() },
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        pre.lemma_truncation_bounds(target as int);
+        pre.lemma_replay_partition();
+        reveal(Vec::restored_history_prefix);
+        assert(self.pair_tier_count(trail) == 0 ==> self.pair_tier_pool(trail).len() == 0);
+        if trail {
+            let ts = self.trail_stack@;
+            let pool = self.trail_value_pool@;
+            let offset = self.cold_stack@.len() + self.hot_stack@.len();
+            assert forall|i: int| 0 <= i < ts.len() implies {
+                &&& (#[trigger] ts[i]).start <= ts[i].end
+                &&& ts[i].end <= pool.len()
+                &&& ts[i].start as int <= self.phys_trail_end(i)
+                &&& self.phys_trail_end(i) <= pool.len() as int
+                &&& (i + 1 < ts.len() ==> {
+                    &&& ts[i].end == ts[i + 1].start
+                    &&& self.phys_trail_end(i) == ts[i + 1].start as int
+                })
+                &&& (i + 1 == ts.len() ==>
+                    self.phys_trail_end(i) == pool.len() as int)
+                &&& frame_inv_range::<T, I>(
+                    self.layer_above_at(offset + i), pool, ts[i].start as int,
+                    self.phys_trail_end(i), self.snapshots@[offset + i],
+                    self.snapshots@[offset + i].len())
+                &&& offset + i < self.snapshots@.len()
+            } by {
+                self.lemma_restored_pair_layout(pre, target, true, i);
+                self.lemma_restored_pair_frame(pre, target, true, i);
+            }
+            if self.pair_tier_count(true) > 0 {
+                self.lemma_restored_pair_layout(pre, target, true, 0);
+            }
+            reveal(Vec::trail_repr_ok);
+        } else {
+            let hs = self.hot_stack@;
+            let pool = self.hot_value_pool@;
+            let cc = self.cold_stack@.len();
+            assert forall|i: int| 0 <= i < hs.len() implies {
+                &&& (#[trigger] hs[i]).start <= hs[i].end
+                &&& hs[i].end <= pool.len()
+                &&& hs[i].start as int <= self.phys_hot_end(i)
+                &&& self.phys_hot_end(i) <= pool.len() as int
+                &&& (i + 1 < hs.len() ==> {
+                    &&& hs[i].end == hs[i + 1].start
+                    &&& self.phys_hot_end(i) == hs[i + 1].start as int
+                })
+                &&& (i + 1 == hs.len() ==>
+                    self.phys_hot_end(i) == pool.len() as int)
+                &&& stratum_unique::<T, I>(
+                    pool, hs[i].start as int, self.phys_hot_end(i))
+                &&& self.phys_frame_inv_range_holds(i)
+                &&& cc + i < self.snapshots@.len()
+            } by {
+                self.lemma_restored_pair_layout(pre, target, false, i);
+                self.lemma_restored_pair_frame(pre, target, false, i);
+            }
+            if self.pair_tier_count(false) > 0 {
+                self.lemma_restored_pair_layout(pre, target, false, 0);
+            }
+            reveal(Vec::hot_repr_ok);
+        }
+    }
+
     /// Retire physical suffixes and the matching canonical ghost history.
     /// Keep the reconstructed store unchanged; ingress promotion follows later.
     #[verifier::spinoff_prover]
@@ -6741,6 +6908,7 @@ where
             final(self).active_saved_len == old(self).active_saved_len,
             final(self).restored_history_prefix(pre, target as nat),
             final(self).wf_for_snap(),
+            final(self).hot_repr_ok(), final(self).trail_repr_ok(),
     {
         hide(Vec::wf);
         proof {
@@ -6801,6 +6969,8 @@ where
             reveal(Vec::restored_history_prefix);
             assert(self.restored_history_prefix(pre, target as nat));
             self.lemma_restored_prefix_canonical(pre, target);
+            self.lemma_restored_pair_repr(pre, target as nat, true);
+            self.lemma_restored_pair_repr(pre, target as nat, false);
         }
     }
 
@@ -7738,6 +7908,10 @@ where
         if trail { self.trail_stack@[f].start as int } else { self.phys_hot_start(f) }
     }
 
+    pub open(crate) spec fn pair_tier_header_end(&self, trail: bool, f: int) -> int {
+        if trail { self.trail_stack@[f].end as int } else { self.hot_stack@[f].end as int }
+    }
+
     pub open(crate) spec fn pair_tier_end(&self, trail: bool, f: int) -> int {
         if trail { self.phys_trail_end(f) } else { self.phys_hot_end(f) }
     }
@@ -7746,6 +7920,11 @@ where
     pub(crate) proof fn lemma_pair_tier_frame_layout(&self, trail: bool, f: int)
         requires self.wf(), 0 <= f < self.pair_tier_count(trail),
         ensures
+            f == 0 ==> self.pair_tier_start(trail, f) == 0,
+            self.pair_tier_start(trail, f) <= self.pair_tier_header_end(trail, f)
+                <= self.pair_tier_end(trail, f),
+            f + 1 < self.pair_tier_count(trail) ==>
+                self.pair_tier_header_end(trail, f) == self.pair_tier_start(trail, f + 1),
             self.pair_tier_offset(trail) + self.pair_tier_count(trail) <= self.depth_spec(),
             0 <= self.pair_tier_start(trail, f) <= self.pair_tier_end(trail, f)
                 <= self.pair_tier_pool(trail).len(),
