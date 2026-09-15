@@ -6919,6 +6919,68 @@ where
             }
     }
 
+    /// THE load-bearing restore theorem (tier-agnostic, ghost-based): the single
+    /// telescope step. Given live data that already equals `snapshots[k+1]` (the
+    /// layer above frame `k`) on the target window, undoing frame `k` yields
+    /// `snapshots[k]`. "Undoing frame k" is captured abstractly by the replay
+    /// effect: a cell touched by frame k's ghost stratum takes `snapshots[k][c]`
+    /// (its captured old value, pinned by frame_inv's captured arm); an
+    /// untouched cell keeps `data_before[c]`. This is INDEPENDENT of how the tier
+    /// physically replays (trail/hot overlay right-to-left, cold run memcpy) -
+    /// each tier's step lemma discharges the replay-effect hypothesis, then this
+    /// lemma composes them into `restore` by induction with invariant
+    /// `data == snapshots[k]`. Fixed window `ln` (== saved_len(target)); cells
+    /// past `snapshots[k].len()` are pending (an older frame restores them).
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(400)]
+    pub(crate) proof fn lemma_telescope_step(
+        &self, k: int, ln: int, data_before: Seq<T>, data_after: Seq<T>,
+    )
+        requires
+            0 <= k,
+            k + 1 < self.trail_frames@.len(),
+            self.frame_inv_range_holds(k),
+            // in-invariant: data_before matches the layer snapshots[k+1] on the
+            // window it covers.
+            forall|c: int| 0 <= c < ln && c < self.snapshots@[k + 1].len() as int
+                ==> #[trigger] data_before[c] == self.snapshots@[k + 1][c],
+            // replay effect over [0, ln): a cell touched by frame k's ghost
+            // stratum takes snapshots[k][c]; an untouched cell is unchanged.
+            forall|c: int| 0 <= c < ln
+                ==> #[trigger] data_after[c] == if captured_in_range::<T, I>(
+                        self.full_trail@, self.g_start(k), self.g_end(k), c as nat) {
+                        self.snapshots@[k][c]
+                    } else {
+                        data_before[c]
+                    },
+        ensures
+            forall|c: int| 0 <= c < ln && c < self.snapshots@[k].len() as int
+                ==> data_after[c] == self.snapshots@[k][c],
+    {
+        // layer_above_at(k) == snapshots[k+1] since k+1 < trail_frames.len().
+        assert(self.layer_above_at(k) == self.snapshots@[k + 1]);
+        let lo = self.g_start(k);
+        let hi = self.g_end(k);
+        let snap = self.snapshots@[k];
+        let above = self.layer_above_at(k);
+        assert forall|c: int| 0 <= c < ln && c < snap.len() as int implies
+            data_after[c] == snap[c] by {
+            // frame_inv's per-cell arm at c.
+            lemma_frame_inv_arm_at::<T, I>(above, self.full_trail@, lo, hi, snap,
+                self.g_saved_len(k), c);
+            if captured_in_range::<T, I>(self.full_trail@, lo, hi, c as nat) {
+                // effect gives data_after[c] == snap[c] directly.
+            } else {
+                // uncaptured arm: c < above.len() && above[c] == snap[c].
+                assert(c < above.len() as int);
+                assert(above[c] == snap[c]);
+                assert(c < self.snapshots@[k + 1].len() as int);
+                assert(data_after[c] == data_before[c]);
+                assert(data_before[c] == self.snapshots@[k + 1][c]);
+            }
+        }
+    }
+
     /// Pointwise Cold reconstruction accessor. Saved lengths are deliberately
     /// non-monotone: an uncovered saved cell must be present in the layer
     /// above, while a saved cell beyond that layer must be covered by Cold.
