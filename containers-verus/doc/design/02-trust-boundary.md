@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **96** (4 structs + 92 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
-| `literal-types` | **101** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **90** (4 structs + 86 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
+| `literal-types` | **95** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,18 +72,24 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current execution-locked branch has 96 default-build markers:
-4 opaque structs and 92 functions. The permanent groups below remain the
+boundary. The current H1 working tree has 90 default-build markers:
+4 opaque structs and 86 functions. The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
-Hot-only proof milestone. That milestone adds three parsing/runtime scaffolds
-(`ExRatio`, `retained_closed_prefix`, and `hot_frame_run_count`) and removes the
-pre-existing `Vec::with_store_policy` marker after proving policy construction;
-therefore the net source-derived counts are 96 default and 101 with
-`literal-types`. The 1 + 5 feature-gated axiom counts are unchanged. The casts
-that were *eliminated* (the `IndexLike`/`DenseId` integer casts) are described in
-§3.
+Hot-only proof milestone. That milestone added three parsing/runtime scaffolds
+(`ExRatio`, `retained_closed_prefix`, and `hot_frame_run_count`) and removed the
+pre-existing `Vec::with_store_policy` marker after proving policy construction,
+for 96 default markers. H1 additionally proves the three-segment
+`frame_saved_len_exec` dispatch and removes its marker. Retiring five unreachable
+legacy scaffolds (`cold_pairs_scaffold`, `frame_sort_order`,
+`cold_pools_shrink_scaffold`, `compress_all_hot`, and `restore_cold`) removes
+five more markers, yielding source-derived counts of 90 default and 95 with
+`literal-types`. The
+three-segment accessor, H1 extractor, Cold/ingress transfer lemmas, and
+`maybe_shrink` pass targeted verification; a clean full Vec-module query reports
+117 verified and 0 errors. The 1 + 5 feature-gated axiom counts are unchanged. The casts that were *eliminated* (the `IndexLike`/`DenseId` integer
+casts) are described in §3.
 
 The groups differ in kind, and the distinction is the point of this chapter:
 
@@ -655,7 +661,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **96 default-build `external_body`
+The complete current source count is **90 default-build `external_body`
 markers plus 1 default-build axiom**; execution-first three-tier Vec markers not
 itemized here are enumerated in
 `doc/tasks/three-tier-frame-architecture-goal.md` §8. The `literal-types`
@@ -748,9 +754,10 @@ forms. The execution-first Vec contracts are additional temporary assumed
 facts and are tracked function-by-function in the three-tier task ledger; they
 must not be described as proved until their checked cores replace the outer
 markers. No `assume`/`admit` occurs in project sources. The first Hot-only
-milestone adds checked capture/set/mark/restore cores but removes no existing
-marker; its five-marker parsing delta and exact source counts are recorded
-above and in the task ledger.
+milestone added checked capture/set/mark/restore cores. H1 removes the
+`frame_saved_len_exec` marker after a checked three-segment body, establishes
+the general-wf-to-Hot bridge, and restores a green full Vec-module gate without
+adding a trust marker.
 
 **Scope note.** "No `assume`/`admit`" is a claim about *this crate's project
 sources*. The sibling `abstract-domains` crate likewise has a project-local

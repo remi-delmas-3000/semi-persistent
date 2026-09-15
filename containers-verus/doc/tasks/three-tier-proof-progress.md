@@ -110,3 +110,123 @@ The next milestone should prove the protocol-specific partition/refinement
 predicate that selects Hot-only Defer from general state, then discharge
 push/pop or the first migration edge without reintroducing `diff_log` as a
 physical authority.
+
+
+## 2026-09-14 — Milestone H1: pool-native general invariant bridge
+
+**Result: H1 fully verified, including the full Vec-module gate.** Work started
+from clean H0 commit `df101348d1617f2ebe8c963b50f7f95a642fbd77` with
+`origin/main` pinned at
+`56a06a5adb450ad41b54ad14b7f66dd0b24a4201`. `containers/` was not changed.
+
+### General invariant replacement
+
+General `Vec::wf` no longer grants physical authority to inert `diff_log`. It
+now composes these closed named predicates:
+
+- `frame_partition_ok`: exact Cold + Hot + Trail header count against snapshots
+  and ghost frame coordinates, plus saved-length mapping for all three age
+  segments; zero-length extents retain their headers/token identity;
+- `hot_repr_ok`: Hot header bounds/adjacency, pool-length effective newest end,
+  per-frame uniqueness, and reconstruction over `hot_value_pool`;
+- `trail_repr_ok`: Trail header bounds/adjacency, pool-length effective newest
+  end, and the named chronological reconstruction boundary over
+  `trail_value_pool`;
+- `cold_repr_ok`: the pre-existing run/value pool partition, empty-pool facts,
+  run disjointness, and named Cold reconstruction boundary;
+- `open_ingress_ok`: `DiffStore::unique_capture_spec()` selects Hot versus Trail,
+  requires only the newest selected frame to be open, and binds capture flags to
+  that real pool.
+
+`proof_compat_ok` is the only general predicate mentioning `diff_log`; it merely
+rules out inert compatibility residue at zero logical depth. It supplies no
+capture, extent, reconstruction, or refinement fact.
+
+`hot_defer_wf` no longer requires compatibility ghost contents or coordinate
+values to be empty/zero; it remains wholly pool-native. The pointwise accessors
+avoid repeatedly exposing nested quantifiers. The bridge
+`lemma_wf_implies_hot_defer_wf` requires general `wf`, `TRACK`, unique capture,
+and empty Trail/Cold stacks and pools, and establishes `hot_defer_wf` without a
+Trail/Cold conversion theorem.
+
+### Exact targeted verification
+
+Every function-scoped query ran from `containers-verus` with `touch src/vec.rs`
+immediately before `cargo verus verify -- --triggers-mode silent
+--verify-only-module vec --verify-function NAME`. Each listed function reported
+`1 verified, 0 errors`:
+
+- H1 accessors/bridge: `lemma_wf_named_parts`, `lemma_hot_repr_at`,
+  `lemma_open_ingress_hot_at`, `lemma_wf_implies_hot_defer_wf`, and
+  `lemma_index_set_transfer`;
+- constructor/dispatch framing: `with_store_mode`, `with_store_policy`,
+  `depth_exec`, `frame_saved_len_exec`, `lemma_hot_start_monotone`,
+  `lemma_untracked_diff_log_empty`, and the retargeted
+  `lemma_phys_cell_eq_overlay`;
+- the complete H0 set remained green:
+  `lemma_frame_inv_range_capture_append`,
+  `lemma_frame_inv_range_set_captured`,
+  `lemma_frame_inv_range_set_outside`,
+  `lemma_hot_defer_start_monotone`,
+  `lemma_hot_defer_cell_eq_overlay`,
+  `hot_defer_capture_checked`, `hot_defer_set_checked`,
+  `hot_defer_mark_checked`, `hot_defer_restore_zero_checked`, and
+  `hot_defer_restore_nonzero_checked`.
+
+The new partition facts make the executable body of `frame_saved_len_exec`
+checkable across Cold, Hot, and Trail. Its `external_body` marker was removed.
+No marker was added.
+
+### Runtime, formatting, and source checks
+
+- `cargo test -p semi-persistent-containers-verus --test three_tier_runtime`:
+  **30 passed**.
+- `cargo test -p semi-persistent-containers-verus --test trail_vec`:
+  **5 passed**.
+- `PROPTEST_CASES=1024 cargo test -p containers-conformance --release --test
+  three_tier_policy_matrix`: **4 passed**, including the generated matrix.
+- `cargo test -p semi-persistent-containers-verus --features
+  "compat-all,literal-types"`: all executed unit/integration/doc tests passed;
+  only the maintained stress/measurement/child-scenario tests were ignored.
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+- Executable source scan found zero `admit(...)`/`assume(...)` calls.
+- Source-derived marker count: **90 default**, plus **5** `literal-types`
+  registrations = **95**; delta from H0 is **-6 / -6**. One proved accessor
+  marker and five unreachable legacy scaffold markers were removed. Axiom
+  counts remain **1 default / 6 literal-types**.
+- The separate partial-API checker remains red with the same broad legacy
+  allowlist drift (40 reported public partial functions); H1 changed none of
+  those APIs and introduced no new public function.
+
+### Full verification resolution
+
+The first full-module runs exposed unreachable legacy proof bodies that encoded
+the former two-stack/inert-log model. Those bodies were retired rather than
+retargeted because the executable dispatch already returned through its
+external runtime path and the old obligations were not conjuncts of the new
+`wf`. `lemma_phys_cell_eq_overlay` was retargeted to authoritative
+`hot_value_pool` and remains verified.
+
+After that retirement, `maybe_shrink` exposed two genuine H1 framing defects.
+First, Cold reconstruction had omitted the per-cell coverage needed for
+non-monotone frame lengths. `cold_reconstructs(f)` now states that every
+uncovered `c < saved_len(f)` is in bounds of `layer_above_at(f)` and equal to
+that layer; a saved cell beyond the layer must therefore be represented by a
+Cold run. Second, `open_ingress_ok` constrained capture bits while `TRACK` was
+false even though `DiffStore` intentionally leaves untracked bits dead. Those
+bit-content clauses are now guarded by `TRACK`.
+
+Named pointwise/transfer lemmas keep both nested invariants solver-controlled.
+The following clean queries pass:
+
+```text
+lemma_cold_reconstructs_at        1 verified, 0 errors
+lemma_cold_reconstructs_transfer  1 verified, 0 errors
+lemma_open_ingress_transfer       1 verified, 0 errors
+maybe_shrink                      1 verified, 0 errors
+full vec module                 117 verified, 0 errors
+```
+
+The full gate command was `touch src/vec.rs && cargo verus verify --
+--verify-only-module vec`. No `external_body`, `admit`, or `assume` was added to
+close H1.

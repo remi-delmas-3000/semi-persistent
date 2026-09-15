@@ -891,16 +891,30 @@ registrations; `Ratio` alone is opaque because its fields are private. Three new
 `external_body` markers are present relative to `44b8657`: `ExRatio`,
 `retained_closed_prefix`, and `hot_frame_run_count`. The two functions hide
 execution-only planner code that uses unsupported std APIs and carry no
-postconditions. `Vec::with_store_mode` and `Vec::with_store_policy` now verify,
+postconditions. `Vec::with_store_mode` and `Vec::with_store_policy` verify,
 including empty unique-state establishment of `hot_defer_wf`; the pre-existing
-`with_store_policy` marker was removed. Net source counts are 96 default and
-101 with `literal-types`. No `admit` or `assume` exists in the new proof prefix.
+`with_store_policy` marker was removed. H1 additionally verifies
+`frame_saved_len_exec` over the Cold|Hot|Trail partition and removes that marker.
+Net source counts are now 90 default and 95 with `literal-types`. H1 removes
+one proved accessor marker plus five unreachable legacy scaffold markers. No
+`admit` or `assume` exists in the new proof prefix.
 
-Remaining boundary: shrink-enabled Defer mark, `runtime_push`/`runtime_pop`,
-ApplyConfigured/ForceClosed conversion, and mixed Trail/Hot/Cold restore remain
-outside `hot_defer_wf`. General `wf` still describes the retired `diff_log`
-proof shadow and does not yet imply the new projection, so the external dispatch
-wrappers remain trusted until the next partition/refinement milestone.
+H1 now gives general `wf` named pool-native boundaries (`frame_partition_ok`,
+`hot_repr_ok`, `trail_repr_ok`, `cold_repr_ok`, and `open_ingress_ok`) and the
+verified `lemma_wf_implies_hot_defer_wf` extractor for unique capture with empty
+Trail/Cold tiers. Inert `diff_log` appears only in `proof_compat_ok`, which says
+an empty logical history has no compatibility residue and grants no physical
+reconstruction, extent, or capture fact. H1 strengthens Cold reconstruction for
+non-monotone saved lengths: an uncovered saved cell must be in bounds of its
+layer above. It also guards dead capture flags by `TRACK`, matching DiffStore's
+untracked contract. Named Cold and ingress transfer lemmas discharge
+`maybe_shrink`. Targeted queries, runtime suites, and a clean full Vec-module
+query are green (`117 verified, 0 errors`).
+
+Remaining boundary: prove shrink-enabled Defer mark and
+`runtime_push`/`runtime_pop`, then remove the in-scope external dispatch wrappers.
+ApplyConfigured/ForceClosed conversion and mixed Trail/Hot/Cold restore remain
+later policy-refinement milestones.
 
 ## 9. Forbidden shortcuts
 

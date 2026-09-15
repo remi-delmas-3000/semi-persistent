@@ -1,7 +1,7 @@
 # Three-tier proof milestone: general Hot-only `Defer` semi-persistence
 
-**Status: DESIGNED. A verified executable prefix exists in the current
-uncommitted working tree and must be independently validated before commit.**
+**Status: H0 CHECKPOINTED AT `df10134`; H1 FULL-MODULE VERIFIED
+(`117 verified, 0 errors`); H2 HOT MUTATORS NEXT.**
 
 This task is the first bounded formal milestone after the three-tier runtime
 lock. It consults `origin/main` at
@@ -34,9 +34,9 @@ out of scope. They begin only after this milestone is complete.
 - Trust ledger: `containers-verus/doc/design/02-trust-boundary.md` and the
   task-local ledger in the architecture goal.
 
-The current working tree contains an interrupted but substantial proof
-milestone. It MUST NOT be reset, stashed away, or overwritten with main. Main is
-reference material only.
+H0 is committed at `df101348d1617f2ebe8c963b50f7f95a642fbd77`.
+Main remains reference material only and must not be merged over the working
+proof branch.
 
 ## 2. The theorem boundary
 
@@ -176,6 +176,24 @@ Required structural facts:
 Do not prove conversion equivalence yet. Trail and Cold semantic refinements MAY
 remain named opaque obligations, but general `wf` MUST stop asserting false
 relationships to inert `diff_log`.
+
+**Current H1 outcome (2026-09-14): FULL-MODULE VERIFIED.** `wf` now
+composes `frame_partition_ok`, `hot_repr_ok`, `trail_repr_ok`,
+`cold_repr_ok`, and `open_ingress_ok`; only `proof_compat_ok` mentions inert
+`diff_log`, and only to rule out residue at zero logical depth. The pool-native
+extractor `lemma_wf_implies_hot_defer_wf` verifies from general `wf`, `TRACK`,
+unique capture, and empty Trail/Cold tiers. Pointwise accessors, both
+constructors, executable depth, and three-segment saved-length dispatch verify.
+`frame_saved_len_exec` lost its `external_body` marker. Cold reconstruction now
+handles non-monotone per-frame saved lengths explicitly: every uncovered saved
+cell must be in bounds of `layer_above_at(f)`, while cells beyond that layer must
+be represented by a Cold run. Capture-flag obligations are guarded by `TRACK`,
+matching the `DiffStore` contract that untracked flags are dead. `maybe_shrink`
+verifies through named Cold and ingress transfer lemmas. A clean
+`cargo verus verify -- --verify-only-module vec` reports `117 verified, 0
+errors`. Focused runtime, policy-matrix, compatibility/literal-type, formatting,
+no-admit/assume, and source-count gates remain recorded green; the source count
+is 90 default / 95 with `literal-types`.
 
 Commit the invariant bridge independently when its targeted queries and runtime
 suite are green.
