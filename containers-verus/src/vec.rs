@@ -5713,7 +5713,11 @@ where
         }
     }
 
-    fn cold_value_cut(&self, runs_start: usize) -> usize {
+    fn cold_value_cut(&self, runs_start: usize) -> (cut: usize)
+        ensures cut == if runs_start < self.cold_index_runs@.len() {
+            self.cold_index_runs@[runs_start as int].start as nat
+        } else { self.cold_value_pool@.len() },
+    {
         if runs_start < self.cold_index_runs.len() {
             self.cold_index_runs[runs_start].start
         } else {
@@ -5725,6 +5729,7 @@ where
     pub(crate) proof fn lemma_replay_ingress(&self)
         requires self.wf(), self.depth_spec() > 0,
         ensures
+            self.store.unique_capture_spec() ==> self.trail_stack@.len() == 0,
             self.pair_tier_count(!self.store.unique_capture_spec()) > 0,
             0 <= self.pair_tier_start(!self.store.unique_capture_spec(),
                 self.pair_tier_count(!self.store.unique_capture_spec()) - 1)
@@ -6525,6 +6530,12 @@ where
             target < pre.depth_spec(),
             *old(self) == (Self { store: old(self).store, ..pre }),
             old(self).store.wf(),
+            TRACK ==> forall|j: int| 0 <= j < old(self).store.captured().len()
+                && #[trigger] old(self).store.captured()[j]
+                ==> j < pre.store.captured().len() && pre.store.captured()[j],
+            TRACK && !old(self).store.restore_entries_clear_capture_spec() ==>
+                forall|j: int| 0 <= j < old(self).store.captured().len() ==>
+                    !(#[trigger] old(self).store.captured()[j]),
             old(self).view().len() == pre.snapshots@[target as int].len(),
             forall|j: int| 0 <= j < old(self).view().len() && j < pre.view().len() ==>
                 #[trigger] old(self).view()[j] == pre.view()[j],
@@ -6532,6 +6543,8 @@ where
             *final(self) == (Self { store: final(self).store, ..pre }),
             final(self).store.wf(),
             final(self).view() == pre.snapshots@[target as int],
+            TRACK ==> forall|j: int| 0 <= j < final(self).store.captured().len() ==>
+                !(#[trigger] final(self).store.captured()[j]),
             final(self).store.unique_capture_spec() == old(self).store.unique_capture_spec(),
             final(self).store.needs_replayed_indices_spec() == old(self).store.needs_replayed_indices_spec(),
             final(self).store.restore_entries_clear_capture_spec()
@@ -6541,7 +6554,10 @@ where
                 ==> j < old(self).store.captured().len() && old(self).store.captured()[j],
     {
         hide(Vec::wf);
-        proof { pre.lemma_replay_partition(); }
+        proof {
+            pre.lemma_replay_partition();
+            pre.lemma_replay_ingress();
+        }
         let cold = self.cold_stack.len();
         let hot = self.hot_stack.len();
         let trail = self.trail_stack.len();
@@ -6598,6 +6614,8 @@ where
             *final(self) == (Self { store: final(self).store, ..*old(self) }),
             final(self).store.wf(),
             final(self).view() == old(self).snapshots@[target as int],
+            forall|j: int| 0 <= j < final(self).store.captured().len() ==>
+                !(#[trigger] final(self).store.captured()[j]),
             final(self).store.unique_capture_spec() == old(self).store.unique_capture_spec(),
             final(self).store.needs_replayed_indices_spec() == old(self).store.needs_replayed_indices_spec(),
             final(self).store.restore_entries_clear_capture_spec()
@@ -6618,32 +6636,138 @@ where
         self.replay_all_tiers_checked(target, Ghost(pre));
     }
 
-    /// Mixed-tier restore remains a later proof milestone. Only states outside
-    /// the checked all-Hot scope may reach this existing trusted fallback.
-    #[verifier::external_body]
-    fn runtime_restore_frame_fallback(&mut self, target: usize)
-    where
-        T: core::default::Default,
-        requires
-            old(self).wf(),
-            TRACK,
-            (target as nat) < old(self).depth_spec(),
-            !old(self).hot_defer_scope(),
+    /// Exact physical and canonical prefix after retiring target and newer
+    /// frames. This predicate deliberately excludes writable-ingress ownership:
+    /// the newest retained frame may still need promotion into that tier.
+    pub closed spec fn restored_history_prefix(&self, pre: Self, target: nat) -> bool {
+        let cc = pre.cold_stack@.len();
+        let hc = pre.hot_stack@.len();
+        let tc = pre.trail_stack@.len();
+        let kc = if target < cc { target } else { cc };
+        let kh = if target <= cc { 0nat }
+            else if target < cc + hc { (target - cc) as nat } else { hc };
+        let kt = if target <= cc + hc { 0nat } else { (target - cc - hc) as nat };
+        let rc = if kc < cc { pre.cold_stack@[kc as int].runs_start as nat }
+            else { pre.cold_index_runs@.len() };
+        let vc = if rc < pre.cold_index_runs@.len() { pre.cold_index_runs@[rc as int].start as nat }
+            else { pre.cold_value_pool@.len() };
+        let hp = if kh < hc { pre.hot_stack@[kh as int].start as nat }
+            else { pre.hot_value_pool@.len() };
+        let tp = if kt < tc { pre.trail_stack@[kt as int].start as nat }
+            else { pre.trail_value_pool@.len() };
+        &&& self.cold_stack@ == pre.cold_stack@.subrange(0, kc as int)
+        &&& self.cold_index_runs@ == pre.cold_index_runs@.subrange(0, rc as int)
+        &&& self.cold_value_pool@ == pre.cold_value_pool@.subrange(0, vc as int)
+        &&& self.hot_stack@ == pre.hot_stack@.subrange(0, kh as int)
+        &&& self.hot_value_pool@ == pre.hot_value_pool@.subrange(0, hp as int)
+        &&& self.trail_stack@ == pre.trail_stack@.subrange(0, kt as int)
+        &&& self.trail_value_pool@ == pre.trail_value_pool@.subrange(0, tp as int)
+        &&& self.snapshots@ == pre.snapshots@.subrange(0, target as int)
+        &&& self.trail_frames@ == pre.trail_frames@.subrange(0, target as int)
+        &&& self.full_trail@ == pre.full_trail@.subrange(0, pre.trail_frames@[target as int] as int)
+        &&& self.diff_log@ == if target == 0 { Seq::empty() } else { pre.diff_log@ }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_truncation_bounds(&self, target: int)
+        requires self.wf(), 0 <= target < self.depth_spec(),
         ensures
-            final(self).wf(),
-            final(self).view() == old(self).snapshots_view()[target as int],
-            final(self).depth_spec() == target as nat,
-            final(self).snapshots_view()
-                == old(self).snapshots_view().subrange(0, target as int),
+            self.repr_ok(),
+            self.hot_stack@.len() == 0 ==> self.hot_value_pool@.len() == 0,
+            self.hot_stack@.len() > 0 ==> self.hot_stack@[0].start == 0,
+            self.trail_stack@.len() == 0 ==> self.trail_value_pool@.len() == 0,
+            self.trail_stack@.len() > 0 ==> self.trail_stack@[0].start == 0,
+            self.cold_stack@.len() == 0 ==> self.cold_value_pool@.len() == 0,
+            self.trail_frames@[target] <= self.full_trail@.len(),
     {
+        self.lemma_wf_named_parts();
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::hot_repr_ok);
+        reveal(Vec::trail_repr_ok);
+        self.lemma_diff_start_le_n(target);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_prefix_partition(&self, pre: Self, target: nat)
+        requires
+            pre.frame_partition_ok(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target),
+        ensures self.frame_partition_ok(), self.depth_spec() == target,
+    {
+        reveal(Vec::restored_history_prefix);
+        reveal(Vec::frame_partition_ok);
+        assert(self.hot_stack@.len() > 0 ==> self.cold_stack@.len() == pre.cold_stack@.len());
+        assert(self.trail_stack@.len() > 0 ==> {
+            &&& self.cold_stack@.len() == pre.cold_stack@.len()
+            &&& self.hot_stack@.len() == pre.hot_stack@.len()
+        });
+    }
+
+    /// The surviving top sees the restored target as its newer layer, exactly
+    /// as before. Thus the unchanged older canonical ranges remain valid.
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_prefix_canonical(&self, pre: Self, target: usize)
+        requires
+            pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target as nat),
+            self.store.wf(), self.view() == pre.snapshots@[target as int],
+        ensures self.wf_for_snap(),
+    {
+        pre.lemma_wf_named_parts();
+        self.lemma_restored_prefix_partition(pre, target as nat);
+        reveal(Vec::restored_history_prefix);
+        if target > 0 {
+            self.lemma_restore_canonical_prefix(pre, target);
+        } else {
+            assert(pre.trail_frames@[0] == 0);
+            assert(self.full_trail@.len() == 0);
+            assert(self.wf_for_snap());
+        }
+    }
+
+    /// Retire physical suffixes and the matching canonical ghost history.
+    /// Keep the reconstructed store unchanged; ingress promotion follows later.
+    #[verifier::spinoff_prover]
+    fn truncate_restored_history_checked(&mut self, target: usize, Ghost(pre): Ghost<Self>)
+        requires
+            pre.wf(), target < pre.depth_spec(),
+            *old(self) == (Self { store: old(self).store, ..pre }),
+            old(self).store.wf(), old(self).view() == pre.snapshots@[target as int],
+        ensures
+            final(self).store == old(self).store,
+            final(self).tier_policy == old(self).tier_policy,
+            final(self).hot_buffer == old(self).hot_buffer,
+            final(self).automatic_rollover_enabled == old(self).automatic_rollover_enabled,
+            final(self).active_saved_len == old(self).active_saved_len,
+            final(self).restored_history_prefix(pre, target as nat),
+            final(self).wf_for_snap(),
+    {
+        hide(Vec::wf);
+        proof {
+            pre.lemma_replay_partition();
+            pre.lemma_truncation_bounds(target as int);
+            assert(pre.cold_stack@.subrange(0, pre.cold_stack@.len() as int) =~= pre.cold_stack@);
+            assert(pre.cold_stack@.subrange(0, 0) =~= Seq::empty());
+            assert(pre.cold_index_runs@.subrange(0, pre.cold_index_runs@.len() as int) =~= pre.cold_index_runs@);
+            assert(pre.cold_index_runs@.subrange(0, 0) =~= Seq::empty());
+            assert(pre.cold_value_pool@.subrange(0, pre.cold_value_pool@.len() as int) =~= pre.cold_value_pool@);
+            assert(pre.cold_value_pool@.subrange(0, 0) =~= Seq::empty());
+            assert(pre.hot_stack@.subrange(0, pre.hot_stack@.len() as int) =~= pre.hot_stack@);
+            assert(pre.hot_stack@.subrange(0, 0) =~= Seq::empty());
+            assert(pre.hot_value_pool@.subrange(0, pre.hot_value_pool@.len() as int) =~= pre.hot_value_pool@);
+            assert(pre.hot_value_pool@.subrange(0, 0) =~= Seq::empty());
+            assert(pre.trail_stack@.subrange(0, pre.trail_stack@.len() as int) =~= pre.trail_stack@);
+            assert(pre.trail_stack@.subrange(0, 0) =~= Seq::empty());
+            assert(pre.trail_value_pool@.subrange(0, pre.trail_value_pool@.len() as int) =~= pre.trail_value_pool@);
+            assert(pre.trail_value_pool@.subrange(0, 0) =~= Seq::empty());
+        }
         let cold = self.cold_stack.len();
         let hot = self.hot_stack.len();
         let trail = self.trail_stack.len();
-        self.reconstruct_target_checked(target);
         let trail_start = cold + hot;
-
         if target >= trail_start {
             let keep = target - trail_start;
+            proof { pre.lemma_pair_tier_frame_layout(true, keep as int); }
             let cut = if keep < trail { self.trail_stack[keep].start } else { self.trail_value_pool.len() };
             self.trail_stack.truncate(keep);
             self.trail_value_pool.truncate(cut);
@@ -6652,6 +6776,7 @@ where
             self.trail_value_pool.clear();
             if target >= cold {
                 let keep = target - cold;
+                proof { pre.lemma_pair_tier_frame_layout(false, keep as int); }
                 let cut = if keep < hot { self.hot_stack[keep].start } else { self.hot_value_pool.len() };
                 self.hot_stack.truncate(keep);
                 self.hot_value_pool.truncate(cut);
@@ -6665,12 +6790,91 @@ where
                 self.cold_value_pool.truncate(values_cut);
             }
         }
+        if target == 0 {
+            self.diff_log.clear();
+        }
         proof {
             let boundary = self.trail_frames@[target as int] as int;
             self.full_trail@ = self.full_trail@.subrange(0, boundary);
             self.trail_frames@ = self.trail_frames@.subrange(0, target as int);
             self.snapshots = Ghost(self.snapshots@.subrange(0, target as int));
+            reveal(Vec::restored_history_prefix);
+            assert(self.restored_history_prefix(pre, target as nat));
+            self.lemma_restored_prefix_canonical(pre, target);
         }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_zero_empty(&self, pre: Self)
+        requires pre.wf(), pre.depth_spec() > 0, self.restored_history_prefix(pre, 0),
+        ensures
+            self.cold_stack@.len() == 0, self.cold_index_runs@.len() == 0,
+            self.cold_value_pool@.len() == 0,
+            self.hot_stack@.len() == 0, self.hot_value_pool@.len() == 0,
+            self.trail_stack@.len() == 0, self.trail_value_pool@.len() == 0,
+            self.snapshots@.len() == 0, self.trail_frames@.len() == 0,
+            self.full_trail@.len() == 0, self.diff_log@.len() == 0,
+    {
+        pre.lemma_wf_named_parts();
+        pre.lemma_truncation_bounds(0);
+        reveal(Vec::restored_history_prefix);
+    }
+
+    /// Complete zero-target restore for every tier layout and store protocol.
+    /// No survivor is promoted; the exact empty prefix closes the invariant.
+    #[verifier::spinoff_prover]
+    fn restore_zero_all_tiers_checked(&mut self)
+    where T: core::default::Default,
+        requires old(self).wf(), TRACK, old(self).depth_spec() > 0,
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots@[0],
+            final(self).depth_spec() == 0,
+            final(self).snapshots@ == old(self).snapshots@.subrange(0, 0),
+    {
+        let ghost pre = *self;
+        self.reconstruct_target_checked(0);
+        self.truncate_restored_history_checked(0, Ghost(pre));
+        proof { self.lemma_restored_zero_empty(pre); }
+        self.active_saved_len = <I as IndexLike>::min();
+        if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_stack, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_index_runs, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_value_pool, 0, 1);
+        }
+        proof {
+            self.store.lemma_wf_captured_len();
+            reveal(Vec::frame_partition_ok);
+            reveal(Vec::hot_repr_ok);
+            reveal(Vec::trail_repr_ok);
+            reveal(Vec::cold_repr_ok);
+            reveal(Vec::open_ingress_ok);
+            reveal(Vec::proof_compat_ok);
+            assert(self.wf());
+        }
+    }
+
+    /// Mixed-tier restore remains a later proof milestone. Only states outside
+    /// the checked all-Hot scope may reach this existing trusted fallback.
+    #[verifier::external_body]
+    fn runtime_restore_frame_fallback(&mut self, target: usize)
+    where
+        T: core::default::Default,
+        requires
+            old(self).wf(),
+            TRACK,
+            0 < target < old(self).depth_spec(),
+            !old(self).hot_defer_scope(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[target as int],
+            final(self).depth_spec() == target as nat,
+            final(self).snapshots_view()
+                == old(self).snapshots_view().subrange(0, target as int),
+    {
+        let ghost pre = *self;
+        self.reconstruct_target_checked(target);
+        self.truncate_restored_history_checked(target, Ghost(pre));
         if target == 0 {
             self.active_saved_len = <I as IndexLike>::min();
         } else {
@@ -6739,6 +6943,8 @@ where
                 self.hot_defer_restore_nonzero_checked(target);
             }
             self.hot_defer_restore_reclaim_checked();
+        } else if target == 0 {
+            self.restore_zero_all_tiers_checked();
         } else {
             self.runtime_restore_frame_fallback(target);
         }
@@ -7560,6 +7766,40 @@ where
         }
     }
 
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_pair_tier_start_order(&self, trail: bool, a: int, b: int)
+        requires self.wf(), 0 <= a <= b < self.pair_tier_count(trail),
+        ensures self.pair_tier_start(trail, a) <= self.pair_tier_start(trail, b),
+        decreases b - a,
+    {
+        hide(Vec::wf);
+        self.lemma_pair_tier_frame_layout(trail, a);
+        if a < b {
+            self.lemma_pair_tier_start_order(trail, a + 1, b);
+        }
+    }
+
+    /// Every surviving pre-replay flag is named in any suffix containing the
+    /// open ingress frame. This is physical-pool membership, not ghost-log
+    /// membership, and applies to duplicate-preserving Trail as well as Hot.
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_ingress_suffix_capture(&self, trail: bool, first: int)
+        requires
+            self.wf(),
+            self.depth_spec() > 0,
+            trail == !self.store.unique_capture_spec(),
+            0 <= first < self.pair_tier_count(trail),
+        ensures
+            forall|j: int| 0 <= j < self.store.captured().len()
+                && #[trigger] self.store.captured()[j] ==>
+                captured_in_range::<T, I>(self.pair_tier_pool(trail),
+                    self.pair_tier_start(trail, first), self.pair_tier_pool(trail).len() as int, j as nat),
+    {
+        hide(Vec::wf);
+        self.lemma_replay_ingress();
+        self.lemma_pair_tier_start_order(trail, first, self.pair_tier_count(trail) - 1);
+    }
+
     /// Pointwise induction over frames within a batched pair-pool replay.
     /// Only inherited cells recurse; covered cells are discharged immediately.
     #[verifier::spinoff_prover]
@@ -7651,6 +7891,9 @@ where
             lo == pre.pair_tier_start(trail, first),
             hi == pool@.len(),
             old(store).wf(),
+            TRACK ==> forall|j: int| 0 <= j < old(store).captured().len()
+                && #[trigger] old(store).captured()[j]
+                ==> j < pre.store.captured().len() && pre.store.captured()[j],
             forall|j: int| 0 <= j < old(store).data().len()
                 && j < pre.layer_above_at(pre.pair_tier_offset(trail) + pre.pair_tier_count(trail) - 1).len() ==>
                 #[trigger] old(store).data()[j]
@@ -7668,6 +7911,10 @@ where
             TRACK ==> forall|j: int| 0 <= j < final(store).captured().len()
                 && #[trigger] final(store).captured()[j]
                 ==> j < old(store).captured().len() && old(store).captured()[j],
+            TRACK && old(store).restore_entries_clear_capture_spec()
+                && trail == !pre.store.unique_capture_spec() ==>
+                forall|j: int| 0 <= j < final(store).captured().len() ==>
+                    !(#[trigger] final(store).captured()[j]),
             TRACK && old(store).restore_entries_clear_capture_spec() ==>
                 forall|j: int| 0 <= j < final(store).captured().len()
                     && #[trigger] final(store).captured()[j]
@@ -7677,7 +7924,16 @@ where
         proof { pre.lemma_pair_tier_frame_layout(trail, first); }
         let ghost before = store.data();
         replay_physical_range::<T, I, S, TRACK>(store, pool, lo, hi);
-        proof { pre.lemma_pair_tier_suffix(trail, first, before); }
+        proof {
+            pre.lemma_pair_tier_suffix(trail, first, before);
+            if TRACK && store.restore_entries_clear_capture_spec()
+                && trail == !pre.store.unique_capture_spec() {
+                pre.lemma_pair_tier_frame_layout(trail, first);
+                pre.lemma_ingress_suffix_capture(trail, first);
+                assert forall|j: int| 0 <= j < store.captured().len() implies
+                    !(#[trigger] store.captured()[j]) by {};
+            }
+        }
     }
 
     #[verifier::spinoff_prover]
@@ -9614,5 +9870,22 @@ where
 {
     fn len(&self) -> usize {
         self.vec.len().as_usize().saturating_sub(self.pos)
+    }
+}
+
+#[cfg(test)]
+mod restore_prefix_tests {
+    #[test]
+    fn zero_restore_clears_inert_compatibility_shadow() {
+        let mut v = crate::VecT::<u32, u32, true>::new_with_policy(crate::TierPolicy::smt());
+        v.try_push(7).unwrap();
+        let token = v.try_mark(crate::ShrinkPolicy::Never).unwrap();
+        // At nonzero depth the inert compatibility vector is unconstrained by
+        // wf; restoration must use physical history and retire this shadow.
+        v.diff_log.push((99, 0));
+        v.set(0u32, 8);
+        v.try_restore(token).unwrap();
+        assert_eq!(v.get(0u32), 7);
+        assert!(v.diff_log.is_empty());
     }
 }

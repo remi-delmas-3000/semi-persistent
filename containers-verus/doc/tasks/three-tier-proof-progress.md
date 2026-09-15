@@ -661,3 +661,42 @@ runs. Promotion to a Hot `frame_inv_range` needs the former; the documented
 relationships through run formation and preserve them, without adding ghost
 history or assuming the relationships. Also export a precise contract for
 `cold_value_cut` when verifying physical-prefix truncation.
+
+
+### Restore prefixes and zero-target closure
+
+The mixed-tier reconstruction checkpoint is `e410180`. Reconstruction now also
+ensures every capture flag is clear: pair-tier header monotonicity proves any
+replayed ingress suffix contains all originally flagged indices. Fused stores
+clear those indices during the existing batch; other stores retain the checked
+pre-clear protocol. No extra capture-clearing pass or persistent state is added.
+
+`restored_history_prefix` specifies exact retained Cold, Hot, Trail, snapshot,
+canonical-boundary, and canonical-entry prefixes. The checked runtime
+`truncate_restored_history_checked` executes the existing tier-specific cuts
+and leaves the reconstructed store unchanged. It also establishes
+`wf_for_snap`, using the unchanged newer layer of the surviving canonical top.
+The Cold value cut now exports its exact physical selector contract.
+
+A regression reproduced a zero-target invariant violation: an allowed nonempty
+inert `diff_log` at positive depth survived a Trail zero restore. The restored
+value was correct, confirming the shadow was not reconstruction authority.
+Zero-target truncation now clears that compatibility vector; nonzero truncation
+preserves it. `restore_zero_all_tiers_checked` composes reconstruction, exact
+empty-prefix retirement, active-length reset, and existing capacity reclamation
+to establish the general invariant for all tier layouts. The dispatcher routes
+zero targets through checked paths, and the trusted mixed-tier fallback now
+requires a strictly positive target.
+
+Targeted checks passed for capture inclusion/clearing, prefix truncation,
+partition and canonical-prefix preservation, zero-target closure, strengthened
+reconstruction, and restore dispatch. The fresh default full-package run passed
+**2267 verified, 0 errors** (4m 38s). Fresh `literal-types` verification also
+passed **2267 verified, 0 errors** (4m 55s). The feature suite passed, including the new zero-depth regression and all
+30 three-tier runtime tests. The 1024-case differential matrix passed all four
+tests. E-graph/SAT consumers passed 1267 tests (45 ignored), with zero failures.
+Formatting, `git diff --check`, and trust-count checks passed. All milestone
+gates are green. Trust
+remains 81 default markers plus five literal-type registrations: this narrows
+the remaining fallback's scope without replacing it with another trusted body.
+Nonzero physical-invariant restoration and survivor promotion remain unfinished.

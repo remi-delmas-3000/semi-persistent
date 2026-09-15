@@ -72,7 +72,7 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current reconstruction checkpoint has 81 default-build markers:
+boundary. The current prefix checkpoint has 81 default-build markers:
 4 opaque structs and 77 functions. The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
@@ -103,6 +103,10 @@ then proves `runtime_begin_restore` after resizing and removes its marker,
 yielding 81 default markers and 86 with `literal-types`. Its checked reconstruction
 phase preserves all history fields and returns the target snapshot. Final
 history truncation and survivor promotion remain in the trusted fallback.
+The subsequent prefix checkpoint checks exact physical/canonical truncation
+and completes zero-target restore for every tier layout. The remaining
+`runtime_restore_frame_fallback` requires `target > 0`; its survivor promotion
+and final invariant remain trusted. Counts remain 81 + 5.
 No new trusted body was introduced. The
 three-segment accessor, H1 extractor, Cold/ingress transfer lemmas, and
 `maybe_shrink` pass targeted verification; a clean full Vec-module query reports
