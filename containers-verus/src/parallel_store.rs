@@ -303,7 +303,12 @@ where
 
     open spec fn needs_replayed_indices_spec(&self) -> bool { false }
 
+    open spec fn restore_entries_clear_capture_spec(&self) -> bool { false }
+
     fn needs_replayed_indices(&self) -> bool { false }
+
+    #[inline(always)]
+    fn restore_entries_clear_capture(&self) -> bool { false }
 
     fn begin_restore(&mut self, _replayed_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_parallel_discipline;

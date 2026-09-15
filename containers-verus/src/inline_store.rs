@@ -337,6 +337,8 @@ where
 
     open spec fn needs_replayed_indices_spec(&self) -> bool { true }
 
+    open spec fn restore_entries_clear_capture_spec(&self) -> bool { true }
+
     fn needs_replayed_indices(&self) -> bool { true }
 
     #[inline(always)]
@@ -448,6 +450,10 @@ where
                     forall|j: int| 0 <= j < self.captured_spec().len()
                         && #[trigger] self.captured_spec()[j]
                         ==> old(self).captured_spec()[j],
+                    forall|j: int| 0 <= j < self.captured_spec().len()
+                        && #[trigger] self.captured_spec()[j]
+                        ==> !crate::vec::captured_in_range::<T, I>(
+                            diff_log@, i as int, hi as int, j as nat),
                 decreases i,
             {
                 i -= 1;
@@ -470,6 +476,19 @@ where
                         && #[trigger] self.captured_spec()[j]
                         implies old(self).captured_spec()[j] by {
                         assert(pre_caps[j]);
+                    }
+                    assert forall|j: int| 0 <= j < self.captured_spec().len()
+                        && #[trigger] self.captured_spec()[j]
+                        implies !crate::vec::captured_in_range::<T, I>(
+                            diff_log@, i as int, hi as int, j as nat) by {
+                        assert(pre_caps[j]);
+                        assert(j != idx.as_nat());
+                        assert forall|q: int| i <= q < hi implies
+                            (#[trigger] diff_log@[q]).1.as_nat() != j as nat by {
+                            if q == i {
+                                assert(diff_log@[q].1 == idx);
+                            }
+                        }
                     }
                 }
             }

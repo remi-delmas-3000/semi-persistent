@@ -32,6 +32,7 @@ for the full milestone protocol.
 | H2a: Hot push/regrowth core | `8a3745b` | geometric grow-layer proof and checked re-entry |
 | H2: Hot mutators | `5a5a6d4` | public `push`, `pop`, `set_index` checked through Hot-scope dispatch |
 | H3: explicit Hot Defer marks | `d14ba85` | `Never` and thresholded shrink checked through `try_mark_with` |
+| H4: public Hot restore | this checkpoint | general `wf`, surviving canonical prefix, Inline/Parallel restore; 2232 package facts verified |
 
 At H3:
 
@@ -64,9 +65,7 @@ trust surface:       85 default external_body markers + 5 literal-types markers
 ## Critical path
 
 ```text
-finish Hot restore
-→ public Hot/Defer theorem
-→ downstream container verification
+downstream container verification
 → Trail replay
 → Trail-to-Hot dedup refinement
 → Hot-to-Cold sort/run refinement
@@ -75,23 +74,34 @@ finish Hot restore
 → final all-container verification
 ```
 
-## 1. Finish Hot restore — current frontier
+## 1. Hot restore — H4 complete
 
-Current uncommitted H4 work adds a proof-visible fused-clear capability to
-`DiffStore` so Inline and Parallel can share the same theorem without changing
-runtime behavior.
+The H4 checkpoint strengthens zero/nonzero Hot restore to preserve
+general `wf`, retains the canonical history prefix for surviving frames, and
+checks the public Hot restore path for both Inline fused clearing and Parallel
+pre-clearing. The existing trusted restore body is restricted to the exact
+complement of `hot_defer_scope()`.
 
-Verified in the current working tree before the zero/general assembly edit:
+Completed local checks:
 
 ```text
-InlineStore:   29 verified, 0 errors
-ParallelStore: 28 verified, 0 errors
-TrailStore:    26 verified, 0 errors
-DynStore:      26 verified, 0 errors
+restore-family query: 14 verified, 0 errors
+InlineStore:          29 verified, 0 errors
+ParallelStore:        29 verified, 0 errors
+TrailStore:           27 verified, 0 errors
+DynStore:             26 verified, 0 errors
+runtime regressions:  30 passed, 0 failed
+feature tests:        passed
+policy matrix:        4 passed, PROPTEST_CASES=1024
+trust surface:        84 default external_body markers + 5 literal-types markers
 ```
 
-The working tree is not yet a checkpoint: zero-target restore is currently being
-strengthened from a physical Hot theorem to a general-`wf` theorem.
+Fresh full-package verification passed: **2232 verified, 0 errors**.
+The first package command reused a cached build and was not counted; the
+fresh invocation touched `src/vec.rs` and used `--time-expanded`. See
+`containers-verus/doc/tasks/three-tier-proof-progress.md` for exact results.
+The obligations below are established for the all-Hot path. Mixed-tier
+fallbacks remain trusted and belong to later milestones.
 
 ### 1.1 Zero target
 
@@ -178,7 +188,7 @@ successful try_restore(token k):
     snapshots_after == snapshots_before[..k]
 ```
 
-## 2. Reverify every derived container
+## 2. Reverify every derived container — current frontier
 
 Once the exact Vec theorem is checked through the public path, rerun existing
 composition proofs without redesigning them unless verification exposes an

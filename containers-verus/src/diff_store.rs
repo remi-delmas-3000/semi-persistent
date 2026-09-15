@@ -100,6 +100,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data().push(value),
             // Flag maintenance is TRACK-conditional: an untracked store may
             // skip it wholesale (production parity — its flags are dead).
@@ -117,6 +119,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             old(self).data().len() == 0 ==> {
                 &&& r is None
                 &&& final(self).data() == old(self).data()
@@ -143,6 +147,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data().update(i.as_nat() as int, value),
             // TRACK-conditional for the same reason as `push`/`pop` above, and
             // it is a performance contract, not just a modelling nicety.
@@ -170,6 +176,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data().subrange(0, len.as_nat() as int),
             TRACK ==> final(self).captured() == old(self).captured().subrange(0, len.as_nat() as int);
 
@@ -191,6 +199,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data(),
             TRACK ==> final(self).captured()
                 == old(self).captured().update(i.as_nat() as int, true);
@@ -215,6 +225,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data().len() == len.as_nat(),
             // existing prefix preserved
             forall|j: int| 0 <= j < len.as_nat() && j < old(self).data().len()
@@ -256,6 +268,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data(),
             TRACK ==> forall|i: int| 0 <= i < saved_len.as_nat() ==>
                 #[trigger] final(self).captured()[i] == false;
@@ -291,6 +305,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data(),
             // First-write-wins (all TRACK-conditional; an untracked store's
             // flags are dead and its capture is a no-op — production parity):
@@ -341,6 +357,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data(),
             (TRACK && i.as_nat() < saved_len.as_nat()) ==> {
                 &&& final(diff_log)@ == old(diff_log)@.push(
@@ -376,10 +394,10 @@ where
     /// Whether replaying every active entry clears that entry's capture state.
     /// Runtime restore may skip a separate pre-clear pass when this is true;
     /// the replayed open frame necessarily names every currently captured slot.
-    #[inline(always)]
-    fn restore_entries_clear_capture(&self) -> bool {
-        false
-    }
+    spec fn restore_entries_clear_capture_spec(&self) -> bool;
+
+    fn restore_entries_clear_capture(&self) -> (b: bool)
+        ensures b == self.restore_entries_clear_capture_spec();
 
     fn begin_restore(&mut self, replayed_diffs: &[(T, I)])
         requires
@@ -401,6 +419,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data(),
             TRACK ==> forall|j: int| 0 <= j < final(self).captured().len()
                 ==> !(#[trigger] final(self).captured()[j]);
@@ -431,11 +451,18 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == crate::vec::overlay::<T, I>(
                 old(self).data(), diff_log@, lo as int, hi as int),
             TRACK ==> forall|j: int| 0 <= j < final(self).captured().len()
                 && #[trigger] final(self).captured()[j]
-                ==> j < old(self).captured().len() && old(self).captured()[j];
+                ==> j < old(self).captured().len() && old(self).captured()[j],
+            TRACK && old(self).restore_entries_clear_capture_spec() ==>
+                forall|j: int| 0 <= j < final(self).captured().len()
+                    && #[trigger] final(self).captured()[j]
+                    ==> !crate::vec::captured_in_range::<T, I>(
+                        diff_log@, lo as int, hi as int, j as nat);
 
     /// Rewind a single slot to `old_value`. Within `[0, target_saved_len)`,
     /// either overwrites the existing slot (`index < data.len()`) or pushes
@@ -462,6 +489,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             // In-frame, in-bounds: overwrite.
             (index.as_nat() < target_saved_len.as_nat()
                 && index.as_nat() < old(self).data().len())
@@ -506,6 +535,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data(),
             // Within `[0, saved_len)`, captured iff some surviving diff entry
             // points at this index. Above `saved_len`, unspecified (those
@@ -535,6 +566,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).captured() == old(self).captured(),
             final(self).data().len() == old(self).data().len(),
             forall|i: int| 0 <= i < final(self).data().len() ==>
@@ -575,6 +608,8 @@ where
             final(self).unique_capture_spec() == old(self).unique_capture_spec(),
             final(self).needs_replayed_indices_spec()
                 == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data(),
             TRACK ==> final(self).captured() == old(self).captured();
 
@@ -612,6 +647,8 @@ where
             ::unique_capture_spec(s) == true,
         #[trigger] <crate::inline_store::InlineStore<T, I> as DiffStore<T, I, TRACK>>
             ::needs_replayed_indices_spec(s) == true,
+        #[trigger] <crate::inline_store::InlineStore<T, I> as DiffStore<T, I, TRACK>>
+            ::restore_entries_clear_capture_spec(s) == true,
 {
 }
 
@@ -626,6 +663,8 @@ where
             ::unique_capture_spec(s) == true,
         #[trigger] <crate::parallel_store::ParallelStore<T, I> as DiffStore<T, I, TRACK>>
             ::needs_replayed_indices_spec(s) == false,
+        #[trigger] <crate::parallel_store::ParallelStore<T, I> as DiffStore<T, I, TRACK>>
+            ::restore_entries_clear_capture_spec(s) == false,
 {
 }
 
@@ -640,6 +679,8 @@ where
             ::unique_capture_spec(s) == false,
         #[trigger] <crate::trail_store::TrailStore<T, I> as DiffStore<T, I, TRACK>>
             ::needs_replayed_indices_spec(s) == false,
+        #[trigger] <crate::trail_store::TrailStore<T, I> as DiffStore<T, I, TRACK>>
+            ::restore_entries_clear_capture_spec(s) == false,
 {
 }
 

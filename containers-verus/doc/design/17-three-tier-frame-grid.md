@@ -12,72 +12,43 @@ The newest frame is nearest the live vector. The oldest retained frame is at the
 bottom. Physical tier order is Cold | Hot | Trail.
 
 ```text
-                                      VECTOR INDEX  j →
-                         0       1       2       3       4       5       6
-                    ┌───────┬───────┬───────┬───────┬───────┬───────┬───────┐
-CURRENT LIVE VECTOR │  v₀   │  v₁   │  v₂   │  v₃   │       │       │       │
-len = 4             └───────┴───────┴───────┴───────┴───────┴───────┴───────┘
-                                          ↑
-                                          │ layer_above(newest frame)
-══════════════════════════════════════════╪════════════════════════════════════
-TRAIL FRAME F₅ — saved_len = 6            │ newest physical tier
-                                          │
-newest writes                 ┌───────┐    │       ┌───────┐
-                              │ old₂  │    │       │ old₃  │
-                    ┌───────┐ ├───────┤    │       ├───────┤
-older writes        │ old₀  │ │ old₁  │    │       │ old₃' │
-                    └───────┘ └───────┘    │       └───────┘
-                         0       1       2       3       4       5
-                    <---------------- saved_len = 6 ---------------->
-                    Multiple entries may stack in one column.
-                    Restore this frame newest write → oldest write.
-──────────────────────────────── FRAME DELIMITER F₅/F₄ ───────────────────────
-TRAIL FRAME F₄ — saved_len = 3
+                                          VECTOR INDEX j →
+frame / tier      saved_len    0    1    2    3    4    5    6    7
+                             ───────────────────────────────────────
+CURRENT LIVE          4      v₀   v₁   v₂   v₃    ·    ·    ·    ·
+                                  ↑ newer layer
+F₅ / Trail            6       C    C    I    I    C    C    ·    ·
+                             ───────── frame delimiter ─────────────
+F₄ / Trail            3       C    I    C    ·    ·    ·    ·    ·
+                             ═════════ Trail / Hot ═════════════════
+F₃ / Hot              7       C    I    C    C    C    C    C    ·
+                             ───────── frame delimiter ─────────────
+F₂ / Hot              4       I    C    I    C    ·    ·    ·    ·
+                             ═════════ Hot / Cold ══════════════════
+F₁ / Cold             8       C    C    C    I    C    C    C    C
+                             ───────── frame delimiter ─────────────
+F₀ / Cold             5       I    C    C    C    C    ·    ·    ·
+                                  OLDEST RETAINED FRAME
 
-                    ┌───────┐                 ┌───────┐
-                    │ old₀  │                 │ old₂  │
-                    └───────┘                 └───────┘
-                         0       1       2
-                    <----- saved_len = 3 ----->
-──────────────────────────── TRAIL → HOT BOUNDARY ────────────────────────────
-HOT FRAME F₃ — saved_len = 7
-
-                            first-capture-wins: at most one entry per column
-
-                    ┌───────┐         ┌───────┐         ┌───────┐
-                    │ snap₀ │         │ snap₂ │         │ snap₄ │
-                    └───────┘         └───────┘         └───────┘
-                         0       1       2       3       4       5       6
-                    <-------------------- saved_len = 7 -------------------->
-──────────────────────────────── FRAME DELIMITER F₃/F₂ ───────────────────────
-HOT FRAME F₂ — saved_len = 4
-
-                            ┌───────┐                 ┌───────┐
-                            │ snap₁ │                 │ snap₃ │
-                            └───────┘                 └───────┘
-                         0       1       2       3
-                    <-------- saved_len = 4 --------->
-───────────────────────────── HOT → COLD BOUNDARY ────────────────────────────
-COLD FRAME F₁ — saved_len = 8
-
-                    ┌───────────────────────┐         ┌───────────────┐
-                    │ contiguous run 0..2   │         │   run 4..5    │
-                    │ snap₀ snap₁ snap₂     │         │ snap₄ snap₅   │
-                    └───────────────────────┘         └───────────────┘
-                         0       1       2       3       4       5       6       7
-                    <---------------------- saved_len = 8 -------------------->
-──────────────────────────────── FRAME DELIMITER F₁/F₀ ───────────────────────
-COLD FRAME F₀ — saved_len = 5
-
-                            ┌───────────────────────────────┐
-                            │ contiguous run 1..4           │
-                            │ snap₁ snap₂ snap₃ snap₄       │
-                            └───────────────────────────────┘
-                         0       1       2       3       4
-                    <------------- saved_len = 5 ------------->
-
-                              OLDEST RETAINED FRAME
+C = physically covered; I = inherited from the newer layer;
+· = outside this row's saved/live domain.
 ```
+
+The cells marked `I` require equality to the newer snapshot's cell (or the
+current live cell for F₅). Each `C` stores this frame's snapshot value, using
+the oldest chronological entry in a Trail column. Captures from distinct
+frames need not have equal values. This is an index-domain diagram: it does
+not prescribe the physical order of Hot entries in memory.
+
+The mandatory coverage where a frame extends beyond its newer layer is:
+
+- F₅: columns 4 and 5, because the live length is 4;
+- F₃: columns 3 through 6, because F₄'s saved length is 3;
+- F₁: columns 4 through 7, because F₂'s saved length is 4.
+
+The illustrated Cold runs are `[0, 3)` and `[4, 8)` for F₁, and `[1, 5)`
+for F₀. Trail cells may contain several entries stacked vertically; section 4
+shows their replay order.
 
 Empty frames retain a delimiter and `saved_len` even when they contain no
 physical entries. The delimiter is logical token identity and must survive
@@ -187,11 +158,17 @@ be required of ordinary Hot writes or restores. The representation-refinement
 target is:
 
 ```text
-reverse_replay(trail_frame)
-    == apply(hot_frame)
-    == apply(cold_frame)
-    == snapshot_at_frame
+base = resize_preserving_prefix(layer_above(f), saved_len(f))
+
+reverse_replay(base, trail_frame)
+    == apply(base, hot_frame)
+    == apply(base, cold_frame)
+    == snapshot[f]
 ```
+
+The equations require the frame's coverage invariant. Any cells introduced
+when extending `base` are physically covered, so their initial filler values
+do not affect the result. Inherited cells retain the newer layer's values.
 
 ## 5. Restore order across tiers
 
@@ -199,6 +176,9 @@ To restore Hot frame `F₂` from the complete stack:
 
 ```text
 CURRENT
+   │
+   ▼
+resize once to saved_len(F₂) = 4, preserving the live prefix
    │
    ▼
 replay F₅ Trail entries newest → oldest
@@ -213,11 +193,19 @@ apply F₃ Hot unique captures
 apply F₂ Hot unique captures
    │
    ▼
-resize exactly to saved_len(F₂) = 4
-   │
-   ▼
-snapshot[F₂]
+snapshot[F₂] (length remains 4)
 ```
+
+All replay writes are restricted to the fixed target-length window. Intermediate
+rows need agree with their snapshots only within both that window and their own
+saved domain; they need not materialize each intermediate snapshot in full.
+When the target is longer than the initial live row, the coverage invariant
+ensures the appropriate frames overwrite every newly introduced filler cell.
+
+After replay, remove the target and newer frames. Preserve exactly the older
+physical and canonical history prefixes, then rebuild capture state for the
+surviving top frame. Clearing the entire canonical history is valid only for
+restore to frame zero.
 
 For an older Cold target, continue with direct Cold run copies. Trail order is
 load-bearing because one column may contain multiple entries. Order within one
@@ -305,7 +293,7 @@ Visually, Hot and Cold may occupy columns but cannot stack entries vertically:
 ```text
 index:       0    1    2    3    4    5
 Hot:        [A]       [C]            [F]     at most one box per column
-Cold run:   [A--------C]             [F]     disjoint horizontal spans
+Cold runs:  [A]       [C]            [F]     three singleton runs
              <--------- saved_len --------->
 ```
 
@@ -330,7 +318,7 @@ U = deduplicated index count // U <= saved_len
 R = Cold run count           // R <= U
 ```
 
-The formal proof should factor this into three named lemmas:
+The formal proof should factor this into four named lemmas:
 
 1. `stratum_unique` plus the per-entry index bound implies
    `hot_entry_count <= saved_len`;

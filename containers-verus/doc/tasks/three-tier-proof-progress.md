@@ -382,3 +382,135 @@ plus 5 `literal-types` registrations = **90**.
 Next: H4 must preserve canonical/general `wf` through zero and nonzero Hot
 restore, factor exact-negation restore fallback (including fused Inline replay),
 and remove the in-scope `restore_frame` trust.
+
+## 2026-09-15 — H4 canonical history prefix (work in progress)
+
+Fresh checkout baseline at `90f3168`:
+
+```text
+cargo verus verify -p semi-persistent-containers-verus
+containers package: 2227 verified, 0 errors
+vstd dependency:    2044 verified, 0 errors (separate count)
+
+cargo test -p semi-persistent-satcore -p semi-persistent-egraph --locked
+exit 0; satcore: 10 passed, 0 failed; egraph suites passed
+```
+
+The frame-grid review found missing mandatory coverage in the illustrative
+stack and a replay diagram that placed resizing after writes. Chapter 17 now
+shows the saved-domain/coverage matrix, resizing before replay over a fixed
+target window, and explicit preservation of the surviving canonical prefix.
+The sparse-frame equivalence also states its newer-layer input.
+
+The existing nonzero Hot restore helper discarded all `full_trail` entries
+while retaining older delimiters and snapshots. This sufficed for its physical
+`hot_defer_wf` postcondition, but could not preserve canonical reconstruction.
+It now retains `pre.full_trail[..pre.trail_frames[target]]`.
+`lemma_restore_canonical_prefix` transfers each surviving canonical frame's
+range and newer layer; the new live view equals the former newer snapshot for
+the surviving top. Both Hot restore helpers now export general `wf` as well as
+the physical projection. Zero restore clears inert compatibility storage to
+establish its zero-depth clause; that storage supplies no reconstruction fact.
+
+Targeted checks from `containers-verus`, touching `src/vec.rs` before each:
+
+```text
+cargo verus verify -- --verify-only-module vec --verify-function lemma_restore_canonical_prefix
+1 verified, 0 errors
+cargo verus verify -- --verify-only-module vec --verify-function hot_defer_restore_zero_checked
+1 verified, 0 errors
+cargo verus verify -- --verify-only-module vec --verify-function hot_defer_restore_nonzero_checked
+1 verified, 0 errors
+```
+
+This is not an H4 milestone checkpoint. Full Vec re-verification is pending.
+Inline fused capture clearing, checked public restore dispatch, full-package
+and runtime gates, and trust-marker removal remain. No trust marker or
+assumption was added; the public contracts are unchanged.
+
+### H4 follow-up — fused replay and checked public dispatch
+
+The initial canonical-prefix slice passed full Vec verification:
+
+```text
+cargo verus verify -- --verify-only-module vec
+142 verified, 0 errors
+```
+
+`DiffStore` now exposes `restore_entries_clear_capture_spec`, refines the
+runtime accessor to it, and preserves the capability across mutations. Its
+`restore_overlay` contract additionally states that, for a fused-clear store,
+any still-set capture flag names no entry in the replayed range. Inline's
+backward replay loop proves this by excluding every already-replayed index;
+Parallel and Trail retain their existing non-fused behavior. DynStore delegates
+the same capability and postcondition. No store algorithm changed.
+
+Full store-module checks with `cargo verus verify -- --verify-only-module MODULE`:
+
+```text
+inline_store:   29 verified, 0 errors
+parallel_store: 29 verified, 0 errors
+trail_store:    27 verified, 0 errors
+dyn_store:      26 verified, 0 errors
+```
+
+Both Hot restore helpers now use fused clearing when supported and pre-clearing
+otherwise, and establish all-clear before rebuilding survivor capture state.
+Each passed a function-scoped check (1 verified, 0 errors). The checked runtime
+dispatcher covers all Hot states; only its exact complement reaches the renamed
+`runtime_restore_frame_fallback`. The public `restore_frame` contract is
+unchanged and its trust marker is removed. Cold allocation reclamation uses the
+existing sequence-preserving capacity primitive and the canonical transfer
+lemma. The default trust count is now 84 (plus 5 literal-type registrations).
+
+```text
+cargo verus verify -- --verify-only-module vec --verify-function '*restore*'
+14 verified, 0 errors (includes runtime_restore_frame, restore_frame, restore)
+cargo fmt --all -- --check
+exit 0
+cargo test -p semi-persistent-containers-verus --test three_tier_runtime
+30 passed, 0 failed
+```
+
+The full-package Verus, feature-test, and 1024-case differential-policy gates
+are running. These edits remain uncommitted until those gates pass. This
+partial Hot milestone does not discharge mixed-tier fallback trust.
+
+H4 gate update: the feature suite passed (exit 0), and
+`PROPTEST_CASES=1024 cargo test -p containers-conformance --release --test three_tier_policy_matrix`
+passed all four tests. The generator reads `PROPTEST_CASES`; each generated tape
+runs through every profile/backend combination.
+
+The first package-level Verus command reused cached build output and produced
+no fresh verification summary. It is NOT counted as a full-package check.
+A fresh check was forced with:
+
+```text
+touch containers-verus/src/vec.rs
+cargo verus verify -p semi-persistent-containers-verus -- --time-expanded
+```
+
+That fresh run remains pending; it is the remaining milestone gate before
+committing H4.
+
+
+### H4 checkpoint — all milestone gates passed
+
+The forced full-package invocation above completed with **2232 verified,
+0 errors** (4m 52s). This is a fresh package result, not the cached command.
+Together with the 30 runtime tests, full `compat-all,literal-types` test suite,
+1024-case policy matrix (four tests), formatting, and source-derived 84+5
+trust-marker count, it closes H4's gates. No public theorem was weakened.
+
+The checkpoint establishes exact snapshot restoration and surviving-prefix
+validity through the real public all-Hot path, including Inline fused capture
+clearing and Parallel pre-clearing. The `!hot_defer_scope()` fallback remains
+trusted; this is not completion of Trail, Cold, or all-policy proofs.
+
+Next is N2/H5 downstream composition. Inspection has identified missing public
+success postconditions in `ListArena::try_restore` and `EClasses::try_restore`,
+and missing archive-prefix postconditions in the Map/BPlus public surface.
+These should expose already-established internal facts without changing the
+runtime algorithms. The full package currently verifies their existing,
+weaker contracts against the updated Vec theorem; that alone does not prove
+stronger public snapshot-stack guarantees.

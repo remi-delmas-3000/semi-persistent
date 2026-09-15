@@ -121,6 +121,10 @@ where
         matches!(self, DynStore::Inline(_))
     }
 
+    open spec fn restore_entries_clear_capture_spec(&self) -> bool {
+        self is Inline
+    }
+
     #[inline(always)]
     fn restore_entries_clear_capture(&self) -> bool {
         match self {
