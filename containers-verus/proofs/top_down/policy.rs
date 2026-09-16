@@ -31,6 +31,22 @@ pub open spec fn plan_ok<T, R: View<T>>(s: R, p: Plan<T>) -> bool {
         && p.frames == s.model().frames.subrange(offset, offset + p.count)
 }
 
+/// Effect of one completed migration, independent of policy selection. The
+/// order may vary, but each source prefix must be legal in its current state.
+pub open spec fn migration_effect<T, R: View<T>>(pre: R, out: R, plan: Plan<T>) -> bool {
+    &&& physical(out) && writable(out) && capture_ok(out)
+    &&& same_protocol(out, pre)
+    &&& out.model() == pre.model()
+    &&& out.canonical() == pre.canonical()
+    &&& if plan.source is Trail {
+        out.cold() == pre.cold() && out.hot() == pre.hot() + plan.count
+            && out.trail() == pre.trail() - plan.count
+    } else {
+        out.cold() == pre.cold() + plan.count && out.hot() == pre.hot() - plan.count
+            && out.trail() == pre.trail()
+    }
+}
+
 pub trait Policies<T>: Mutations<T> {
     /// Thresholds choose a count; the semantic contract requires the complete
     /// source frame meanings and excludes the active writable frame.
@@ -49,7 +65,8 @@ pub trait Policies<T>: Mutations<T> {
     /// rebasing. It exports exact map equality and physical frame-count effects.
     proof fn migrate(pre: Self, plan: Plan<T>) -> (out: Self)
         requires stable(pre), plan_ok(pre, plan),
-        ensures physical(out), writable(out), capture_ok(out), same_protocol(out, pre),
+        ensures migration_effect(pre, out, plan),
+            physical(out), writable(out), capture_ok(out), same_protocol(out, pre),
             out.model() == pre.model(), out.canonical() == pre.canonical(),
             if plan.source is Trail {
                 out.cold() == pre.cold() && out.hot() == pre.hot() + plan.count
@@ -78,6 +95,45 @@ pub proof fn apply_policy<T, R: Policies<T>>(pre: R, policy: Policy) -> (out: R)
     R::migrate(after_trail, hot_plan)
 }
 
+/// A trace records conditional interface effects, not a persistent ghost log.
+/// Stable is required only at its beginning and is established inductively.
+pub open spec fn legal_rollovers<T, R: View<T>>(states: Seq<R>, plans: Seq<Plan<T>>) -> bool {
+    &&& states.len() == plans.len() + 1
+    &&& forall|n: int| 0 <= n < plans.len() ==>
+        plan_ok(states[n], #[trigger] plans[n])
+            && migration_effect(states[n], states[n + 1], plans[n])
+}
+
+#[verifier::spinoff_prover]
+pub proof fn legal_rollover_sequence<T, R: View<T>>(states: Seq<R>, plans: Seq<Plan<T>>, n: int)
+    requires legal_rollovers(states, plans), stable(states[0]), 0 <= n < states.len(),
+    ensures stable(states[n]), states[n].model() == states[0].model(),
+        states[n].canonical() == states[0].canonical(), same_protocol(states[n], states[0]),
+    decreases n,
+{
+    if n > 0 {
+        legal_rollover_sequence(states, plans, n - 1);
+        assert(plan_ok(states[n - 1], plans[n - 1]));
+        assert(migration_effect(states[n - 1], states[n], plans[n - 1]));
+    }
+}
+
+/// Configured, forced, adaptive and deferred policies may be interleaved.
+/// Their selectors establish legality; the common preservation result then
+/// makes each next call well-formed, without any commutativity assumption.
+#[verifier::spinoff_prover]
+pub proof fn apply_policy_sequence<T, R: Policies<T>>(pre: R, policies: Seq<Policy>) -> (out: R)
+    requires stable(pre),
+    ensures stable(out), out.model() == pre.model(), same_protocol(out, pre),
+        out.canonical() == pre.canonical(),
+    decreases policies.len(),
+{
+    if policies.len() == 0 { pre } else {
+        let prefix = apply_policy_sequence(pre, policies.drop_last());
+        apply_policy(prefix, policies.last())
+    }
+}
+
 #[verifier::spinoff_prover]
 pub proof fn mark_public<T, R: Policies<T>>(pre: R, policy: Policy) -> (result: (R, R::Token))
     requires stable(pre), pre.can_mark(),
@@ -91,19 +147,21 @@ pub proof fn mark_public<T, R: Policies<T>>(pre: R, policy: Policy) -> (result: 
 }
 
 /// Every rejected request preserves the state, not merely its current values.
-/// The concrete adapter must additionally retain its existing error variants.
+/// The error projection must preserve the concrete mark guard order.
 #[verifier::spinoff_prover]
-pub proof fn try_mark_public<T, R: Policies<T>>(pre: R, policy: Policy) -> (result: (R, Option<R::Token>))
+pub proof fn try_mark_public<T, R: Policies<T>>(pre: R, policy: Policy) -> (result: (R, Result<R::Token, RequestError>))
     requires stable(pre),
     ensures stable(result.0),
-        result.1 is Some ==> result.0.model() == mark(pre.model())
-            && R::coordinate(result.1->Some_0) == pre.model().frames.len(),
-        result.1 is None ==> result.0 == pre,
+        result.1 is Ok <==> pre.can_mark(),
+        result.1 is Ok ==> result.0.model() == mark(pre.model())
+            && R::coordinate(result.1->Ok_0) == pre.model().frames.len(),
+        result.1 is Err ==> result.0 == pre && pre.mark_error() == Some(result.1->Err_0),
 {
+    R::mark_guard(pre);
     if pre.can_mark() {
         let (out, token) = mark_public(pre, policy);
-        (out, Some(token))
-    } else { (pre, None) }
+        (out, Ok(token))
+    } else { (pre, Err(pre.mark_error()->Some_0)) }
 }
 
 } // verus!

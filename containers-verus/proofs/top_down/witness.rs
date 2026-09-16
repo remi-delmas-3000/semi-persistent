@@ -147,9 +147,12 @@ impl<T> Limits<T> for Witness<T> {
     open spec fn can_grow(self) -> bool { true }
     open spec fn can_mark(self) -> bool { true }
     open spec fn initial_allowed(live: Seq<T>) -> bool { true }
+    open spec fn mark_error(self) -> Option<RequestError> { None }
 }
 
 impl<T> Mutations<T> for Witness<T> {
+    proof fn mark_guard(pre: Self) {}
+
     proof fn construct(live: Seq<T>, unique: bool) -> (out: Self) {
         Witness { m: empty(live), c: 0, h: 0, t: 0, unique, fused: false,
             flags: Set::empty(), active: 0 }
@@ -337,6 +340,31 @@ pub proof fn regrowth_and_policy_cases<T>(a: T, b: T, c: T, replacement: T, uniq
     let hot = apply_policy(regrown, Policy::ForceHot);
     assert(configured.m == regrown.m && adaptive.m == regrown.m
         && trail.m == regrown.m && hot.m == regrown.m);
+    let sequence = apply_policy_sequence(regrown,
+        seq![Policy::Adaptive, Policy::ForceHot, Policy::Configured, Policy::ForceTrail, Policy::Defer]);
+    assert(sequence.m == regrown.m && stable(sequence));
+}
+
+/// A legal Hot-then-Trail trace is also covered, independently of the usual
+/// configured wrapper's Trail-then-Hot execution order.
+#[verifier::spinoff_prover]
+pub proof fn alternative_rollover_order<T>(a: T, b: T, c: T, d: T, e: T)
+{
+    let m = zigzag_model(a, b, c, d, e);
+    let initial = place(m, 2, 1, 2, false, false);
+    let hot_plan = Plan { source: Source::Hot, count: 1, frames: m.frames.subrange(2, 3) };
+    let after_hot = Witness::migrate(initial, hot_plan);
+    let trail_plan = Plan { source: Source::Trail, count: 1, frames: m.frames.subrange(3, 4) };
+    let after_trail = Witness::migrate(after_hot, trail_plan);
+    let states = seq![initial, after_hot, after_trail];
+    let plans = seq![hot_plan, trail_plan];
+    assert forall|n: int| 0 <= n < plans.len() implies
+        plan_ok(states[n], #[trigger] plans[n])
+            && migration_effect(states[n], states[n + 1], plans[n]) by {
+        if n == 0 {} else { assert(n == 1); }
+    }
+    legal_rollover_sequence(states, plans, 2);
+    assert(after_trail.m == initial.m && stable(after_trail));
 }
 
 } // verus!

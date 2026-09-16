@@ -16,29 +16,21 @@ The draft composition verifies with the project's pinned Verus:
 verus --crate-type lib containers-verus/proofs/top_down/composition.rs
 ```
 
-Result on 2026-09-15: **59 verified, 0 errors**, Verus
+Result on 2026-09-15: **79 verified, 0 errors**, Verus
 `0.2026.08.02.b677dd5`, Rust 1.97.1. The target needs only the bundled vstd and
 does not change Cargo's production build or its verification counts.
 
-The conditional milestone is **still in progress**. Before freezing interfaces:
+The first conditional-composition milestone is verified. The
+[interface review and proof classification](proof-classification.md) records
+its requirement audit, remaining concrete obligations, and reuse/adapt decisions.
+No production implementation is discharged merely by this result. The original
+all-tier and derived/parallel-container objective remains active.
 
-1. Review the verified mathematical consistency witness. It implements every
-   provisional method using map storage, so these contracts are jointly realizable.
-   It does not discharge the production encodings, index limits or token semantics.
-2. Finish local encoding and pool-builder contracts underneath completed migration;
-   audit exact unchanged-prefix and source-to-plan obligations.
-3. Review canonical-history and physical-prefix projections against the original
-   public contracts. They are opaque interface obligations here, not erased duties.
-4. Connect encoded duplicate-capture witnesses to the representation interfaces.
-   Existing mathematical witnesses already check saved lengths 3,1,3,2,2; zero,
-   Cold, Hot and Trail survivor cases; both disciplines and flag protocols; an
-   empty sealed frame migrating through Hot/Cold and reopening; repeated first
-   capture; active-domain pop/regrowth; and all policy families.
-5. Review errors and token construction against concrete APIs. This target retains
-   a separate public validity predicate and does not invent genealogy rules.
-6. Then classify existing proofs as reuse, adapt, or replace. Do not weaken this
-   theorem to fit an existing proof. Remove superseded proofs only after their
-   replacements verify.
+The review added arbitrary legal rollover/public-operation sequence induction,
+local encoding and exact pool-append relations, typed rejected-request results,
+and a separation between mutation capability and Default-dependent restoration.
+The mathematical witnesses cover zigzag lengths, all survivor tiers, both store
+protocols, empty frames, encoded duplicates, regrowth and alternate policy order.
 
 Production code and existing proofs were preserved at signed local commit
 `07b6df8`. Its complete gates passed: 2310 Verus obligations in both configurations,
@@ -52,7 +44,9 @@ Nothing was pushed. This target's result is separate from that runtime evidence.
 | `model.rs` | Finite partial-map frame meaning; captured-or-inherited invariant; constructor/set/push/pop/mark/restore closure; arbitrary legal action-sequence closure; mutation after restore; pop/regrowth; frame step; range composition; reconstruction with arbitrary resized filler and saved-length zigzags |
 | `composition.rs` | Conditional resize/preparation, one batch per pair tier, direct Cold-frame suffix, physical/canonical retirement, survivor-tier dispatch, capture finalization, reclamation, valid public restore, unchanged state on invalid restore |
 | `mutation.rs` | Conditional capture/raw-write composition, push/tag repair, capture/pop composition with returned value, mark preparation/opening, constructor, restore–write–restore |
-| `policy.rs` | Plans name exact oldest eligible frame meanings; active ingress excluded; staged Trail then Hot policy composition; mark/token coordinate composition; unchanged state on rejected mark |
+| `policy.rs` | Plans name exact oldest eligible frame meanings; active ingress excluded; arbitrary legal rollover induction, interleaved policy sequences, staged Trail then Hot composition; mark/token coordinate composition; unchanged state on rejected mark |
+| `encoding.rs` | Explicit local map/validity contracts, duplicate append semantics, exact pooled append/publication, logical prefix relocation, empty/nonempty encoded witnesses |
+| `public_sequence.rs` | Complete conditional public-operation dispatcher and arbitrary legal interleaving theorem |
 | `witness.rs` | Checked mathematical implementation of every provisional method and explicit nontrivial history/promotion/regrowth/policy witnesses; not a production adapter |
 
 `Model` and `Frame` are mathematical proof values. They add no persistent ghost
@@ -67,9 +61,9 @@ The proof never assumes monotone saved lengths.
 
 ## Provisional contract inventory
 
-Every row below is conditional. Existing implementations are candidates only;
-no `Runtime` implementation connects them to this target yet. Classification is
-deliberately deferred until the interfaces pass the review above.
+Every row below remains conditional for production; no concrete `Runtime` adapter
+connects these candidates to this target yet. The reviewed classification is in
+[proof-classification.md](proof-classification.md).
 
 | Interface | Concrete candidates | Required transition / next consumer |
 |---|---|---|
@@ -95,6 +89,7 @@ deliberately deferred until the interfaces pass the review above.
 | `open_mark` | mark frame opening/sealing paths | Append empty frame and live snapshot before rollover; seal preceding writable frame |
 | `select_plan` | configured/forced/adaptive policy selection | Exact source frame meanings, eligible count, source tier; supplies migration |
 | `migrate` | Trail/Hot migration and adaptive-plan execution | Exact logical history, physical frame-count effects, stable physical/capture boundary; local transforms and pool rebasing still need interface review |
+| `mark_guard` / `mark_error` | mark guards and early error branches | Exact failure reason with existing Untracked/DepthLimit/CapacityExhausted ordering; state unchanged on rejection |
 | `make_token` | `mark_with_options`, `mark` | Existing returned token coordinate; public validity remains a separate predicate |
 
 `canonical_ok` must retain the existing canonical-history obligations, split

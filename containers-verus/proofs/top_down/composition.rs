@@ -6,13 +6,19 @@
 //! Production code neither imports this target nor trusts these interfaces.
 
 use vstd::prelude::*;
+mod encoding;
 mod model;
 use model::*;
 mod mutation;
 mod policy;
+mod public_sequence;
 mod witness;
 
 verus! {
+
+/// Mirrors the public request-error categories. Concrete adapters must preserve
+/// the existing guard order and map these variants to ContainerError exactly.
+pub enum RequestError { Untracked, DepthLimit, CapacityExhausted, InvalidToken }
 
 pub trait View<T>: Sized {
     type History;
@@ -259,13 +265,15 @@ pub proof fn restore_public<T, R: Runtime<T>>(pre: R, token: R::Token) -> (out: 
 }
 
 /// Rejected fallible requests leave the state itself unchanged.
-pub proof fn try_restore_public<T, R: Runtime<T>>(pre: R, token: R::Token) -> (out: R)
+pub proof fn try_restore_public<T, R: Runtime<T>>(pre: R, token: R::Token) -> (result: (R, Result<(), RequestError>))
     requires stable(pre),
-    ensures stable(out),
-        pre.token_valid(token) ==> out.model() == restore(pre.model(), R::coordinate(token)),
-        !pre.token_valid(token) ==> out == pre,
+    ensures stable(result.0),
+        result.1 is Ok <==> pre.token_valid(token),
+        result.1 is Ok ==> result.0.model() == restore(pre.model(), R::coordinate(token)),
+        result.1 is Err ==> result.0 == pre && result.1 == Err(RequestError::InvalidToken),
 {
-    if pre.token_valid(token) { restore_public(pre, token) } else { pre }
+    if pre.token_valid(token) { (restore_public(pre, token), Ok(())) }
+    else { (pre, Err(RequestError::InvalidToken)) }
 }
 
 } // verus!

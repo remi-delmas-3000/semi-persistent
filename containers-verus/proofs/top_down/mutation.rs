@@ -11,6 +11,7 @@ pub trait Limits<T>: View<T> {
     spec fn can_grow(self) -> bool;
     spec fn can_mark(self) -> bool;
     spec fn initial_allowed(live: Seq<T>) -> bool;
+    spec fn mark_error(self) -> Option<RequestError>;
 }
 
 pub open spec fn captured_if_needed<T, R: View<T>>(s: R, i: nat) -> bool {
@@ -25,7 +26,14 @@ pub open spec fn last_tag_pending<T, R: View<T>>(s: R) -> bool {
             && s.model().frames[s.model().frames.len() - 1].saved.dom().contains(i)
 }
 
-pub trait Mutations<T>: Runtime<T> + Limits<T> {
+// Mutation does not require restoration capability: concrete restore needs
+// T: Default, while set/push/pop/mark support every admitted Copy payload.
+pub trait Mutations<T>: Limits<T> {
+    proof fn mark_guard(pre: Self)
+        requires stable(pre),
+        ensures pre.mark_error() is None <==> pre.can_mark(),
+            pre.mark_error() is Some ==> pre.mark_error()->Some_0 != RequestError::InvalidToken;
+
     proof fn construct(live: Seq<T>, unique: bool) -> (out: Self)
         requires Self::initial_allowed(live),
         ensures physical(out), writable(out), capture_ok(out),
@@ -121,6 +129,16 @@ pub proof fn push_public<T, R: Mutations<T>>(pre: R, value: T) -> (out: R)
     R::finish_regrowth(pushed)
 }
 
+pub proof fn try_push_public<T, R: Mutations<T>>(pre: R, value: T) -> (result: (R, Result<(), RequestError>))
+    requires stable(pre),
+    ensures stable(result.0), result.1 is Ok <==> pre.can_grow(),
+        result.1 is Ok ==> result.0.model() == push(pre.model(), value),
+        result.1 is Err ==> result.0 == pre && result.1 == Err(RequestError::CapacityExhausted),
+{
+    if pre.can_grow() { (push_public(pre, value), Ok(())) }
+    else { (pre, Err(RequestError::CapacityExhausted)) }
+}
+
 /// Token construction and configured/forced/adaptive rollover compose after
 /// this mark core; their contracts are inventoried separately.
 #[verifier::spinoff_prover]
@@ -137,7 +155,7 @@ pub proof fn mark_core<T, R: Mutations<T>>(pre: R) -> (out: R)
 /// The second token is checked against the post-mutation state by the public
 /// wrapper. No new genealogy or token-survival rule is assumed here.
 #[verifier::spinoff_prover]
-pub proof fn restore_write_restore<T, R: Mutations<T>>(
+pub proof fn restore_write_restore<T, R: Mutations<T> + Runtime<T>>(
     pre: R, first: R::Token, second: R::Token, i: nat, value: T,
 ) -> (result: (R, bool))
     requires stable(pre), pre.token_valid(first),
