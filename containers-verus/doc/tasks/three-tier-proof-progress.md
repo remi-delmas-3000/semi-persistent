@@ -1017,3 +1017,57 @@ This closes the remaining trusted Cold restore implementation boundary. It does
 not discharge all-tier mutation/mark/rollover fallbacks, the complete production
 interface instantiation, or derived and parallel container closure. Those remain
 part of the active objective.
+
+### General canonical capture and checked mark wrapper
+
+The nightshift resumes from `d191c4a` under the detailed acceptance checklist in
+`semi-persistence-completion-goal.md` and the execution instructions in
+`nightshift-completion-goal.md`. All four completion milestones remain open.
+
+`lemma_canonical_capture_append` separates canonical-history preservation from
+Hot-only physical assumptions. It proves chronological append preservation,
+including duplicate captures and all older strata, from `wf_for_snap`, unchanged
+live/snapshot/boundary views and the physical caller's partition. Existing
+first-capture, duplicate and unchanged-range lemmas are reused. The original
+Hot canonical capture helper now calls this general lemma with its unchanged
+contract; its no-append branch reuses canonical repartition framing.
+
+The legacy `push_frame` wrapper verifies against the existing dispatcher
+contract, removing one redundant `external_body`. The dispatcher still depends
+on the trusted all-tier mark fallback. Trust is **78 default + 5 literal
+registrations**; CI and the trust ledger agree, and axioms are unchanged.
+These edits change only proof code and verification annotations, with no
+executable statement changes or new resource limits.
+
+Evidence:
+
+- Selected capture proofs: 16 verified, zero errors
+  (`/tmp/sp-d21-canonical-capture-reuse.log`). The new general lemma verified
+  independently before its use replaced the specialized proof block.
+- Selected mark wrapper/dispatcher proofs: 3 verified, zero errors
+  (`/tmp/sp-d21-mark-wrapper.log`).
+- Full default and literal-types: **2375 verified, zero errors** each
+  (`/tmp/sp-d21-capture-general-default.log`,
+  `/tmp/sp-d21-capture-general-literal.log`).
+- Conditional composition: 80 verified, zero errors
+  (`/tmp/sp-d21-capture-general-conditional.log`).
+- Feature tests: 277 passed, 10 ignored
+  (`/tmp/sp-d21-capture-general-features.log`). Formatting and whitespace checks
+  passed; the source trust count matches 78 + 5.
+
+Commands retain the previous milestone's form: `cargo verus verify -p
+semi-persistent-containers-verus -- --time-expanded`, the same command with
+`--features literal-types`, direct `verus --crate-type lib
+containers-verus/proofs/top_down/composition.rs`, and `cargo test -p
+semi-persistent-containers-verus --features 'compat-all,literal-types'`.
+The differential oracle is unchanged. Consumer/differential suites and performance
+benchmarks were not rerun for this proof-only checkpoint; final revision gates
+and benchmark parity remain required, as does the recorded partial-API audit.
+
+Next: prove the physical capture effect and membership preservation for both
+ingress disciplines, then compose with the general canonical lemma. The regrowth
+audit found that Trail's ghost flag is cleared by `TrailStore::push` but the
+trusted Vec fallback only calls `mark_captured` for unique stores. The general
+push proof must restore Trail's ghost membership when reentering a saved domain,
+without weakening the invariant or adding runtime flag overhead. This obligation
+is recorded in the proof classification alongside the existing capture gaps.

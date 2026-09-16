@@ -217,3 +217,32 @@ committed baseline; no entries were added by this change or to the allowlist.
 
 No existing proof is superseded until a concrete replacement verifies. No push
 to origin is authorized.
+
+### General canonical capture preservation
+
+`lemma_canonical_capture_append` now proves chronological ghost-history
+preservation from `wf_for_snap`, a valid saved-domain capture, unchanged live
+contents/snapshots/boundaries, and the caller's new physical partition. It makes
+no Hot-only assumption. The proof retains the existing duplicate/first-capture
+and unchanged-range lemmas; the original checked Hot canonical-capture helper
+now consumes it without changing its executable statements or public contract.
+The selected capture family verifies (16 obligations).
+
+The `push_frame` wrapper also verifies directly against the existing
+`runtime_push_frame` contract (three selected wrapper/dispatcher obligations).
+Its redundant trust marker is removed. The all-tier mark fallback remains
+trusted, so this is wrapper discharge rather than complete mark discharge.
+
+The next capture work must establish the general physical pool effect and
+capture-membership relation for each store-selected ingress, then compose that
+effect with the canonical lemma. The new canonical lemma alone does not prove
+the trusted `runtime_capture`, mutation or mark fallbacks.
+
+The regrowth audit also exposes a concrete ghost-state obligation:
+`TrailStore::push` appends a clear ghost capture flag, whereas
+`runtime_push_fallback` calls `mark_captured` only for unique stores. Regrowth
+below the saved length already has a physical capture, so the Trail branch must
+restore its ghost membership too before claiming `open_ingress_ok`. The checked
+`TrailStore::mark_captured` body is ghost-only; any generic dispatch change must
+still be reviewed for runtime/codegen effects. Do not weaken Trail's capture
+membership invariant to conceal this missing preservation step.

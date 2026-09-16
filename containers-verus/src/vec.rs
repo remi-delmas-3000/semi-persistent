@@ -3774,6 +3774,60 @@ where
         }
     }
 
+    /// Canonical capture preservation is independent of the physical ingress
+    /// tier. The physical caller supplies the new partition and unchanged live
+    /// view; duplicate chronological events retain the original first hitter.
+    #[verifier::spinoff_prover]
+    proof fn lemma_canonical_capture_append(&self, pre: Self, index: I)
+        requires
+            pre.wf_for_snap(),
+            pre.depth_spec() > 0,
+            index.as_nat() < pre.view().len(),
+            index.as_nat() < pre.snapshots@[pre.depth_spec() - 1].len(),
+            self.store.wf(), self.frame_partition_ok(),
+            self.view() == pre.view(), self.snapshots@ == pre.snapshots@,
+            self.trail_frames@ == pre.trail_frames@,
+            self.full_trail@ == pre.full_trail@.push((pre.view()[index.as_nat() as int], index)),
+        ensures self.wf_for_snap(),
+    {
+        let j = index.as_nat() as int;
+        let top = pre.depth_spec() - 1;
+        reveal(Vec::wf_for_snap);
+        assert(self.full_trail@.subrange(0, pre.full_trail@.len() as int)
+            =~= pre.full_trail@);
+        assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
+            #[trigger] frame_inv_range::<T, I>(
+                self.layer_above_at(k), self.full_trail@,
+                self.g_start(k), self.g_end(k), self.snapshots@[k],
+                self.snapshots@[k].len()) by {
+            assert(pre.frame_inv_range_holds(k));
+            assert(self.layer_above_at(k) == pre.layer_above_at(k));
+            assert(self.g_start(k) == pre.g_start(k));
+            if k == top {
+                assert(pre.layer_above_at(k) == pre.view());
+                if captured_in_range::<T, I>(pre.full_trail@,
+                    self.g_start(k), pre.full_trail@.len() as int, j as nat) {
+                    lemma_frame_inv_range_append_duplicate::<T, I>(
+                        pre.view(), pre.full_trail@, self.full_trail@,
+                        self.g_start(k), self.snapshots@[k], self.snapshots@[k].len(), j);
+                } else {
+                    lemma_frame_inv_range_capture_append::<T, I>(
+                        pre.view(), pre.full_trail@, self.full_trail@,
+                        self.g_start(k), self.snapshots@[k], self.snapshots@[k].len(), j);
+                }
+            } else {
+                assert(k + 1 < pre.depth_spec());
+                pre.lemma_diff_start_le_n(k + 1);
+                assert(self.g_end(k) == pre.g_end(k));
+                assert forall|q: int| self.g_start(k) <= q < self.g_end(k) implies
+                    #[trigger] pre.full_trail@[q] == self.full_trail@[q] by {}
+                lemma_frame_inv_range_local::<T, I>(
+                    self.layer_above_at(k), pre.full_trail@, self.full_trail@,
+                    self.g_start(k), self.g_end(k), self.snapshots@[k], self.snapshots@[k].len());
+            }
+        }
+    }
+
     /// Checked unique-Hot capture that maintains both physical first-capture
     /// storage and the canonical chronological ghost trail. Every in-frame
     /// write appends one ghost event; repeated physical captures remain no-ops.
@@ -3841,70 +3895,13 @@ where
                 #[trigger] self.layer_above_at(i) == physical.layer_above_at(i) by {}
             self.lemma_hot_defer_transfer_canonical(physical);
 
-            assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
-                #[trigger] frame_inv_range::<T, I>(
-                    self.layer_above_at(k), self.full_trail@,
-                    self.g_start(k), self.g_end(k), self.snapshots@[k],
-                    self.snapshots@[k].len()) by {
-                assert(pre.frame_inv_range_holds(k));
-                assert(self.layer_above_at(k) == pre.layer_above_at(k));
-                assert(self.g_start(k) == pre.g_start(k));
-                if !append {
-                    assert(self.full_trail@ == pre.full_trail@);
-                    assert(self.g_end(k) == pre.g_end(k));
-                } else {
-                    let top = (depth - 1) as int;
-                    if k == top {
-                        assert(pre.g_end(k) == pre.full_trail@.len() as int);
-                        assert(self.g_end(k) == self.full_trail@.len() as int);
-                        if captured_in_range::<T, I>(
-                            pre.full_trail@, self.g_start(k),
-                            pre.full_trail@.len() as int, j as nat) {
-                            lemma_frame_inv_range_append_duplicate::<T, I>(
-                                pre.view(), pre.full_trail@, self.full_trail@,
-                                self.g_start(k), self.snapshots@[k],
-                                self.snapshots@[k].len(), j);
-                        } else {
-                            lemma_frame_inv_range_capture_append::<T, I>(
-                                pre.view(), pre.full_trail@, self.full_trail@,
-                                self.g_start(k), self.snapshots@[k],
-                                self.snapshots@[k].len(), j);
-                        }
-                    } else {
-                        assert(k + 1 < depth);
-                        assert(self.g_end(k) == pre.g_end(k));
-                        let hi = self.g_end(k);
-                        pre.lemma_diff_start_le_n(k + 1);
-                        assert(hi <= pre.full_trail@.len());
-                        assert forall|q: int| self.g_start(k) <= q < hi implies
-                            #[trigger] pre.full_trail@[q] == self.full_trail@[q] by {}
-                        lemma_frame_inv_range_local::<T, I>(
-                            self.layer_above_at(k), pre.full_trail@,
-                            self.full_trail@, self.g_start(k), hi,
-                            self.snapshots@[k], self.snapshots@[k].len());
-                    }
-                }
-            }
-
             pre.lemma_wf_named_parts();
-            reveal(Vec::wf_for_snap);
-            assert(self.store.wf());
             assert(self.frame_partition_ok());
-            assert(self.snapshots@.len() == self.trail_frames@.len());
-            assert(self.trail_frames@.len() < usize::MAX);
-            assert(self.trail_frames@.len() == 0 ==> self.full_trail@.len() == 0);
-            assert(self.trail_frames@.len() > 0 ==> self.trail_frames@[0] == 0);
-            assert(self.trail_frames@.len() > 0 ==>
-                self.trail_frames@[(self.trail_frames@.len() - 1) as int]
-                    <= self.full_trail@.len());
-            assert forall|k: int|
-                0 <= k && k + 1 < self.trail_frames@.len() implies
-                    #[trigger] self.trail_frames@[k] <= self.trail_frames@[k + 1] by {
-                assert(self.trail_frames@ == pre.trail_frames@);
-                assert(0 <= k && k + 1 < pre.trail_frames@.len());
-                pre.lemma_diff_start_monotone(k, k + 1);
+            if append {
+                self.lemma_canonical_capture_append(pre, index);
+            } else {
+                self.lemma_canonical_history_repartition(pre);
             }
-            assert(self.wf_for_snap());
             reveal(Vec::proof_compat_ok);
             assert(pre.proof_compat_ok());
             assert(self.diff_log@ == pre.diff_log@);
@@ -10412,7 +10409,6 @@ where
 
     #[verifier::spinoff_prover]
     #[verifier::rlimit(1800)]
-    #[verifier::external_body]
     /// The per-vector core of `mark`: push a frame without genealogy. Shared fork
     /// history (doc 10) drives this from a `SyncGroup` while one `History` owns
     /// the branch/depth bookkeeping; `mark` is the standalone wrapper that adds
