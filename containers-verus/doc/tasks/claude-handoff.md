@@ -110,14 +110,30 @@ The final checkpoint removes the last execution-first `Vec` marker
 fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
 `EXPECTED_DEFAULT=50`).
 
-## Next actions
+## Next actions (goal extended by the user on 2026-09-16, evening)
 
-1. The benchmark protocol (`conformance-performance-inventory.md`): legacy vs.
-   verified on the Criterion targets, tolerance and decision rule fixed before
-   measuring, tier-specific operations also compared against `d191c4a`, raw
-   Criterion artifacts retained, a performance report written.
-2. Final audits (trust ledger is current; partial-API discrepancy is the
-   baseline 40 unlisted functions) and the final handoff report.
+1. Finish the protocol report for `f304bc7` (two-run tables, step-3 reruns of
+   inconclusive cases, verdicts), docs-only signed commit, worktree cleanup.
+2. Caching / destination-passing work (from the allocation tour), in order:
+   the Trail→Hot dedupe `HashSet` owned by the `Vec` (scratch field, taken
+   out and put back around a migration pass, named in `tiers_only_changed`);
+   the `SpMap` index keyed by log position instead of cloned keys (removes
+   the per-key clone on every restore; index-agreement invariant to re-prove);
+   `diff_compress::sort_frame_by_index` sorted in place for the cold-stack
+   callers; `HintedArena::note_hint` via `core::mem::swap` instead of a bucket
+   copy.
+3. Store policy for every composite (`scratchpad/store_policy_design.md`):
+   `TaggedFamily`/`PlainFamily` traits with `HotFirst` (today's choices) and
+   `TrailFirst`; parameter `P = HotFirst` on `UnionFind` first, then
+   `SparseSet` (sparse/indices), `CircularList`, `ListArena`, `BPlusTreeSet`,
+   `EClasses`. Module re-verification and consumer suites per step.
+4. E-graph: an `EGraphConfig` associated store for the caches; remove the four
+   `VecD` sites and the `env_diff_store_kind` lever (≈2.5× dispatch cost).
+   Guidance from the traces: Hot-first (VecI/VecP) for equality saturation,
+   VecT for SMT-style mark/backtrack use.
+5. Final audits (trust ledger is current; partial-API discrepancy is the
+   baseline 40 unlisted functions) and the final handoff report, re-running
+   the affected benchmarks after each performance change.
 
 ## Existing proof architecture to reuse
 
