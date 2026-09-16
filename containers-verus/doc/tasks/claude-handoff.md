@@ -97,20 +97,23 @@ reporters/diagnostics and transparent type registrations.
 `328c512` exports derived restore effects (ListArena, EClasses, SpMap,
 CircularList, UnionFind, BPlusTreeSet) and group member models/archives
 (`SyncMember::model`/`archive`, `ForkHistory::mark`/`restore`, parallel
-variants over the documented rayon boundary). The following checkpoint checks
+variants over the documented rayon boundary). `9df28cb` checks
 `pending_restore_indices` (exact captured-index set) and adds
 `sequence_witness_checked`, the production instantiation of the sequence
 theorem; the Step 3 dependency map is `proofs/top_down/interface-inventory.md`.
+The following checkpoint exports the `EClasses` component contents (entries,
+reprs, uses, minimum pool: views at the token's frame and archive prefixes)
+through `restore`/`try_restore`, closing the derived-contract audit table.
 Trust: 51 default + 5 literal (CI `EXPECTED_DEFAULT=51`).
 
 ## Next actions
 
-1. `EClasses` component contents beyond roots (entries, reprs, uses, pool) —
-   established inside `restore`, not yet exported.
+1. The benchmark protocol (`conformance-performance-inventory.md`): legacy vs.
+   verified on the Criterion targets, tolerance and decision rule fixed before
+   measuring, tier-specific operations also compared against `d191c4a`, raw
+   Criterion artifacts retained, a performance report written.
 2. Final audits (trust ledger is current; partial-API discrepancy is the
-   baseline 40 unlisted functions) and the benchmark protocol
-   (`conformance-performance-inventory.md`): legacy vs. verified on the
-   Criterion targets, tolerance and decision rule fixed before measuring.
+   baseline 40 unlisted functions) and the final handoff report.
 
 ## Existing proof architecture to reuse
 
@@ -138,8 +141,9 @@ Important helpers still in use:
 - `append_cold_sorted_checked` and the `lemma_cold_append_*` lemmas: exact Cold
   frame formation from a strictly sorted unique slice (`cold_encode::run_prefix`).
 
-Mark configured/forced fallbacks remain open because actual rollover
-preservation is unfinished. Never add assumed postconditions to discharge them.
+Mark configured/forced fallbacks are checked (`runtime_apply_configured_rollover`,
+`runtime_rollover_on_mark`, `runtime_push_frame_fallback`). Never add assumed
+postconditions anywhere; decompose instead.
 
 ## Broader remaining scope and audit caveats
 
@@ -149,10 +153,12 @@ fan-out, pending-restore consumers, and relevant supporting structures such as
 DenseSpanMap. Review `proofs/top_down/derived-contract-audit.md`; exact component
 archive/depth contracts and error framing matter, not just primary contents.
 
-Last documented trust inventory: **74 default + 5 literal external_body**
-(default: four opaque structs and 70 functions); axioms unchanged at one default
-plus five literal. The selection patch contains no new trust. Reaudit on final
-source, and do not mislabel semantic fallbacks as allocator/diagnostic trust.
+Current trust inventory: **51 default + 5 literal external_body** (CI
+`EXPECTED_DEFAULT=51`; the session started at 74 + 5); default axioms are the
+hasher axioms plus the per-index-type `obeys_key_model` axioms
+(`axiom_key_model_*`), and the one trusted std contract is
+`std_sort::sort_pairs_by_index`. Reaudit on final source, and do not mislabel
+semantic fallbacks as allocator/diagnostic trust.
 
 Known partial-API CI discrepancy remains open: 73 partial public APIs, 33 allowed,
 40 unlisted, zero unsafe-public at the baseline. Review contracts/exposure instead

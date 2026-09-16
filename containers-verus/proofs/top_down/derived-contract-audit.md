@@ -44,6 +44,7 @@ remain required for concrete changes.
 | `SyncMember` / `ForkHistory::mark`, `restore` | Trait gains an object-safe `model`/`archive` pair with an archive-depth obligation; the `Vec` member proves them from `seal_frame`/`restore_frame`. Group mark exports unchanged member models and one archived model per member; group restore exports every member's model at the token's depth and the archive prefix; rejected requests leave the group unchanged |
 | `ForkHistory::mark_parallel`, `restore_parallel` | Same contracts as the sequential paths. The bodies remain the documented rayon fan-out boundary (trust ledger 3.6d): per-member effects come from the members' checked contracts and disjoint `&mut` borrows; the trusted step is that rayon applies the closure to every member exactly once |
 
-Remaining from the initial table: `EClasses` component contents beyond roots
-(entries, reprs, uses, pool) are established inside `restore` but not yet
-exported; `SparseSet`, `AppendOnlyVec` were already complete.
+| `EClasses::restore` / `try_restore` (component contents) | Success: every component column at the token's frame and every retained archive prefix — entries (`CircularList` model and node views, both archives), reprs (`SparseSet` dense/sparse/indices views and archives), uses (`ListArena` model view and archive), minimum pool (`Vec` view and archive) — through `pub open(crate)` accessors that project the components' own views; nothing is stored twice |
+
+Nothing remains from the initial table: `SparseSet` and `AppendOnlyVec` were
+already complete, and the `EClasses` component contents are now exported.

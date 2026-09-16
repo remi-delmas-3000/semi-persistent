@@ -2006,3 +2006,39 @@ consumers **1267 passed, 45 ignored** (`/tmp/sp-d21-pending-consumers.log`);
 canary **2 passed** (`/tmp/sp-d21-pending-canary.log`); partial-API audit at the
 unchanged baseline (73/33/40/0). Formatting, whitespace and the unchanged-legacy
 check passed; the CI trust constant moves to 51.
+
+
+## 2026-09-16 — EClasses component contents exported through restore
+
+`EClasses::restore` and `try_restore` now state every column of an e-class
+state at the token's frame and every retained archive prefix, not only the
+union-find roots: entries (`CircularList` model and node views, both archives),
+representatives (`SparseSet` dense/sparse/indices views and archives), uses
+(`ListArena` model view and archive) and the minimum pool (`Vec` view and
+archive). The new `pub open(crate)` accessors (`entries_model_view`,
+`entries_archive`, `reprs_*_view`/`_archive`, `uses_model_view`/`_archive`,
+`pool_view`/`_archive`) only project the components' own verified views; the
+facts come from the component restores' existing contracts, so no proof body
+changed and no runtime code moved. This closes the derived-contract audit
+table (`proofs/top_down/derived-contract-audit.md`).
+
+Targeted evidence: `eclasses` `*restore*` **3 verified, zero errors**
+(`/tmp/sp-d21-eclasses1.log`). Trust unchanged at **51 default + 5 literal**.
+Gate evidence follows.
+
+EClasses checkpoint evidence (fresh, touched source before each Verus run):
+full default **2589 verified, zero errors** (`/tmp/sp-d21-eclasses-default.log`);
+literal-types **2589 verified, zero errors** (`/tmp/sp-d21-eclasses-literal.log`);
+conditional composition **80 verified, zero errors**
+(`/tmp/sp-d21-eclasses-composition.log`); `au-verus` **29 verified, zero
+errors** (`/tmp/sp-d21-eclasses-au.log`); feature suite **277 passed, 10
+ignored** (`/tmp/sp-d21-eclasses-tests.log`); release differential policy matrix
+with `PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-eclasses-policy.log`);
+e-graph/SAT consumers **1267 passed, 45 ignored**
+(`/tmp/sp-d21-eclasses-consumers.log`); canary **2 passed**
+(`/tmp/sp-d21-eclasses-canary.log`); partial-API audit at the unchanged
+baseline (73/33/40/0). Formatting, whitespace and the unchanged-legacy check
+passed; trust unchanged at 51 default + 5 literal. The same commit records the
+final performance protocol (`doc/tasks/final-performance-report.md`, tolerance
+and decision rule fixed before measurement) and the comparison script
+`tools/bench_compare.py`.

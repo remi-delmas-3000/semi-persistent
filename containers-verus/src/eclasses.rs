@@ -562,6 +562,65 @@ where
         self.uf.roots_snapshots_view()
     }
 
+    // Component views and archives, exposed so the restore contracts can name
+    // every column an e-class state is made of (each is a spec projection of
+    // the component's own verified view; nothing is stored twice).
+    pub open(crate) spec fn entries_model_view(&self) -> Seq<Seq<usize>> {
+        self.entries.model_view()
+    }
+
+    pub open(crate) spec fn entries_model_archive(&self) -> Seq<Seq<Seq<usize>>> {
+        self.entries.model_snapshots_view()
+    }
+
+    pub open(crate) spec fn entries_archive(&self) -> Seq<Seq<crate::circular_list::CircularListNode<Opt<K>, T>>> {
+        self.entries.entries_snapshots_view()
+    }
+
+    pub open(crate) spec fn entries_nodes_view(&self) -> Seq<crate::circular_list::CircularListNode<Opt<K>, T>> {
+        self.entries.entries_view()
+    }
+
+    pub open(crate) spec fn reprs_dense_view(&self) -> Seq<ClassData<L, T>> {
+        self.reprs.dense_view()
+    }
+
+    pub open(crate) spec fn reprs_sparse_view(&self) -> Seq<<T as DenseId>::Index> {
+        self.reprs.sparse_view()
+    }
+
+    pub open(crate) spec fn reprs_indices_view(&self) -> Seq<<T as DenseId>::Index> {
+        self.reprs.indices_view()
+    }
+
+    pub open(crate) spec fn reprs_dense_archive(&self) -> Seq<Seq<ClassData<L, T>>> {
+        self.reprs.dense_snapshots_view()
+    }
+
+    pub open(crate) spec fn reprs_sparse_archive(&self) -> Seq<Seq<<T as DenseId>::Index>> {
+        self.reprs.sparse_snapshots_view()
+    }
+
+    pub open(crate) spec fn reprs_indices_archive(&self) -> Seq<Seq<<T as DenseId>::Index>> {
+        self.reprs.indices_snapshots_view()
+    }
+
+    pub open(crate) spec fn uses_model_view(&self) -> Seq<Seq<usize>> {
+        self.uses.model_view()
+    }
+
+    pub open(crate) spec fn uses_model_archive(&self) -> Seq<Seq<Seq<usize>>> {
+        self.uses.model_snapshots_view()
+    }
+
+    pub open(crate) spec fn pool_view(&self) -> Seq<Opt<T>> {
+        self.min_pool.view()
+    }
+
+    pub open(crate) spec fn pool_archive(&self) -> Seq<Seq<Opt<T>>> {
+        self.min_pool.snapshots_view()
+    }
+
     /// Mark depth (spec): the number of live frames.
     pub open(crate) spec fn depth_spec(&self) -> nat {
         self.min_pool.snapshots_view().len()
@@ -3131,15 +3190,27 @@ where
         ensures
             final(self).wf(),
             final(self).min_width_spec() == old(self).min_width_spec(),
-            old(self).is_restorable_full_spec(token) ==> {
-                &&& final(self).roots_view() == old(self).roots_archive_view()[
-                        token.frame_idx_spec() as int]
-                &&& final(self).n_spec() == old(self).roots_archive_view()[
-                        token.frame_idx_spec() as int].len()
+            old(self).is_restorable_full_spec(token) ==> ({
+                let f = token.frame_idx_spec() as int;
+                &&& final(self).roots_view() == old(self).roots_archive_view()[f]
+                &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
                 &&& final(self).depth_spec() == token.frame_idx_spec()
-                &&& final(self).roots_archive_view()
-                    == old(self).roots_archive_view().subrange(0, token.frame_idx_spec() as int)
-            },
+                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f)
+                &&& final(self).entries_model_view() == old(self).entries_model_archive()[f]
+                &&& final(self).entries_nodes_view() == old(self).entries_archive()[f]
+                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f)
+                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f)
+                &&& final(self).reprs_dense_view() == old(self).reprs_dense_archive()[f]
+                &&& final(self).reprs_sparse_view() == old(self).reprs_sparse_archive()[f]
+                &&& final(self).reprs_indices_view() == old(self).reprs_indices_archive()[f]
+                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f)
+                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f)
+                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f)
+                &&& final(self).uses_model_view() == old(self).uses_model_archive()[f]
+                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f)
+                &&& final(self).pool_view() == old(self).pool_archive()[f]
+                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f)
+            }),
     {
         if !(self.entries.is_valid_token(&token.entries)
             && self.reprs.is_valid_token(&token.reprs)
@@ -3414,6 +3485,20 @@ where
                 &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
                 &&& final(self).depth_spec() == token.frame_idx_spec()
                 &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f)
+                &&& final(self).entries_model_view() == old(self).entries_model_archive()[f]
+                &&& final(self).entries_nodes_view() == old(self).entries_archive()[f]
+                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f)
+                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f)
+                &&& final(self).reprs_dense_view() == old(self).reprs_dense_archive()[f]
+                &&& final(self).reprs_sparse_view() == old(self).reprs_sparse_archive()[f]
+                &&& final(self).reprs_indices_view() == old(self).reprs_indices_archive()[f]
+                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f)
+                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f)
+                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f)
+                &&& final(self).uses_model_view() == old(self).uses_model_archive()[f]
+                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f)
+                &&& final(self).pool_view() == old(self).pool_archive()[f]
+                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f)
             }),
             r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
