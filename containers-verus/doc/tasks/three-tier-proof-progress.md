@@ -1968,3 +1968,41 @@ canary **2 passed** (`/tmp/sp-d21-derived-canary.log`); partial-API audit at the
 unchanged baseline (73/33/40/0). Formatting, whitespace and the unchanged-legacy
 check passed; trust remains 53 default + 5 literal. The Step 3 dependency map is
 `proofs/top_down/interface-inventory.md`.
+
+
+## 2026-09-16 — Checked pending-restore indices and the production sequence witness
+
+`pending_restore_indices` is now checked with an exact contract: `Some` iff the
+token is restorable, and `names_index(out, j)` iff some frame in
+`[token, depth)` captures `j` (`frame_captures`, the physical saved-value
+lookup). The `external_body` Cold scaffold is replaced by
+`pending_cold_indices_checked` (frames, runs, cells) and the Hot/Trail walks by
+`pending_pair_indices_checked`; `lemma_pending_union` joins the three passes and
+`lemma_frame_captures_cold`/`_pair` bridge each tier's predicate to
+`frame_captures`. The loops are the original ones; the exec length call bounds
+the run-range addition.
+
+`sequence_witness_checked` is the Step 3 production instantiation: from the
+public contracts alone it proves that after mark, write, mark, restore, write,
+`apply_tier_policy` and an older restore the live view equals the archived
+snapshot, the depth the token's frame and the archive its prefix. The interface
+inventory (`proofs/top_down/interface-inventory.md`) maps every provisional
+`Runtime` method to its checked production function, supplier and consumer.
+
+Targeted evidence: `pending_cold_indices_checked` 4, `pending_pair_indices_checked` 3,
+`lemma_pending_union` 1, `lemma_frame_captures_*` 1 each, `pending_restore_indices` 1,
+`sequence_witness_checked` 1 (`/tmp/sp-d21-pending*-*.log`). Trust: **51 default +
+5 literal** (two markers removed, no new trust). Gate evidence follows.
+
+Pending-indices/witness checkpoint evidence (fresh, touched source before each
+Verus run): full default **2589 verified, zero errors**
+(`/tmp/sp-d21-pending-default.log`); literal-types **2589 verified, zero errors**
+(`/tmp/sp-d21-pending-literal.log`); conditional composition **80 verified, zero
+errors** (`/tmp/sp-d21-pending-composition.log`); `au-verus` **29 verified, zero
+errors** (`/tmp/sp-d21-pending-au.log`); feature suite **277 passed, 10 ignored**
+(`/tmp/sp-d21-pending-tests.log`); release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-pending-policy.log`); e-graph/SAT
+consumers **1267 passed, 45 ignored** (`/tmp/sp-d21-pending-consumers.log`);
+canary **2 passed** (`/tmp/sp-d21-pending-canary.log`); partial-API audit at the
+unchanged baseline (73/33/40/0). Formatting, whitespace and the unchanged-legacy
+check passed; the CI trust constant moves to 51.

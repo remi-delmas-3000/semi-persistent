@@ -465,3 +465,16 @@ live contents, snapshots, canonical history, store and policy are untouched,
 which is the Step 2 rollover-composition invariant in concrete form. Policy
 legality (eligible source frames, active frame excluded) is enforced by the
 primitives' preconditions rather than assumed.
+
+
+### Production sequence witness and read-only consumers
+
+`sequence_witness_checked` composes the public API on one representative
+interleaving (mark, write, mark, restore, write, tier policy, older restore) and
+asserts, from the public contracts alone, that the live view is always the
+archived snapshot, the depth the token's frame and the archive its prefix. It is
+the concrete counterpart of `composition.rs`'s conditional theorem; the
+dependency map is `interface-inventory.md`. `pending_restore_indices` is checked
+with `names_index(out, j) <==> exists f in [token, depth): frame_captures(f, j)`,
+built from the per-tier passes and `lemma_pending_union`; consumers that repair
+content-keyed indexes around a restore can rely on that set exactly.

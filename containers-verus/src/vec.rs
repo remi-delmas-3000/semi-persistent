@@ -273,30 +273,6 @@ pub(crate) fn log_shrink_capacity<T: Copy, I: IndexLike>(
 
 
 
-/// Diagnostic: the index spans of the cold frames [lo_f, hi_f), expanded.
-/// EXEC-FIRST SCAFFOLD.
-#[verifier::external_body]
-// Index loops walk the run/value pools by offset; the index is load-bearing.
-#[allow(clippy::needless_range_loop)]
-pub(crate) fn pending_cold_indices_scaffold<I: IndexLike>(
-    cold_stack: &std::vec::Vec<crate::frame::ColdFrameHdr<I>>,
-    runs: &std::vec::Vec<crate::frame::IndexRun<I>>,
-    lo_f: usize, hi_f: usize, out: &mut std::vec::Vec<I>,
-) {
-    for f in lo_f..hi_f {
-        let h = cold_stack[f];
-        for r in h.runs_start..h.runs_start + h.runs_len {
-            let run = runs[r];
-            let b = run.base.as_usize();
-            for q in 0..run.len {
-                if let Some(ix) = I::try_from_usize(b + q) {
-                    out.push(ix);
-                }
-            }
-        }
-    }
-}
-
 pub open(crate) spec fn overlay<T, I: IndexLike>(
     base: Seq<T>,
     diffs: Seq<(T, I)>,
@@ -13556,59 +13532,467 @@ where
     /// and re-inserts the same ids from restored content AFTER. The diff log
     /// already carries this set deduplicated, so no separate dirty list is
     /// needed alongside the column.
-    #[verifier::external_body]
+    /// Some retained entry of `out` names index `j`.
+    pub open(crate) spec fn names_index(out: Seq<I>, j: nat) -> bool {
+        exists|i: int| 0 <= i < out.len() && (#[trigger] out[i]).as_nat() == j
+    }
+
+    /// Frame `f` (any tier) captures index `j`.
+    pub open(crate) spec fn frame_captures(&self, f: int, j: nat) -> bool {
+        self.frame_saved_value(f, j) is Some
+    }
+
+    /// Cold frames `[lo_f, hi_f)`: append every covered cell index.
+    #[verifier::spinoff_prover]
+    fn pending_cold_indices_checked(&self, lo_f: usize, hi_f: usize, out: &mut std::vec::Vec<I>)
+        requires self.wf(), lo_f <= hi_f <= self.cold_stack@.len(),
+        ensures forall|j: nat| #[trigger] Self::names_index(final(out)@, j)
+            <==> Self::names_index(old(out)@, j)
+                || exists|f: int| lo_f <= f < hi_f && #[trigger] self.cold_covered(f, j),
+    {
+        hide(Vec::wf);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_payload_ok);
+        proof {
+            self.lemma_wf_named_parts();
+            assert(self.repr_ok() && self.cold_payload_ok()) by { reveal(Vec::cold_repr_ok); }
+        }
+        let ghost base_out = out@;
+        let mut f = lo_f;
+        while f < hi_f
+            invariant lo_f <= f <= hi_f <= self.cold_stack@.len(), self.repr_ok(), self.cold_payload_ok(),
+                forall|j: nat| #[trigger] Self::names_index(out@, j)
+                    <==> Self::names_index(base_out, j)
+                        || exists|g: int| lo_f <= g < f && #[trigger] self.cold_covered(g, j),
+            decreases hi_f - f,
+        {
+            let h = self.cold_stack[f];
+            let saved = h.saved_len;
+            let runs_len = self.cold_index_runs.len();
+            proof {
+                self.lemma_cold_layout_header_at(f as int);
+                assert(h == self.cold_stack@[f as int]);
+                assert(h.runs_start + h.runs_len <= runs_len);
+                saved.lemma_as_nat_bounded();
+                I::lemma_max_nat_fits_usize();
+            }
+            let mut r = h.runs_start;
+            let rend = h.runs_start + h.runs_len;
+            let ghost before_frame = out@;
+            while r < rend
+                invariant h == self.cold_stack@[f as int], h.runs_start <= r <= rend,
+                    rend == h.runs_start + h.runs_len, rend <= self.cold_index_runs@.len(),
+                    self.repr_ok(), self.cold_payload_ok(), f < hi_f <= self.cold_stack@.len(),
+                    saved == h.saved_len, saved.as_nat() < I::max_nat(), I::max_nat() <= usize::MAX as nat + 1,
+                    forall|j: nat| #[trigger] Self::names_index(out@, j)
+                        <==> Self::names_index(before_frame, j)
+                            || exists|q: int| h.runs_start <= q < r
+                                && cold_run_covers::<I>(#[trigger] self.cold_index_runs@[q], j),
+                decreases rend - r,
+            {
+                let run = self.cold_index_runs[r];
+                proof {
+                    assert(run.base.as_nat() + run.len <= saved.as_nat()) by { reveal(Vec::cold_payload_ok); }
+                }
+                let b = run.base.as_usize();
+                let ghost before_run = out@;
+                let mut q = 0usize;
+                while q < run.len
+                    invariant run == self.cold_index_runs@[r as int], q <= run.len,
+                        b as nat == run.base.as_nat(),
+                        run.base.as_nat() + run.len < I::max_nat(), I::max_nat() <= usize::MAX as nat + 1,
+                        forall|j: nat| #[trigger] Self::names_index(out@, j)
+                            <==> Self::names_index(before_run, j)
+                                || (run.base.as_nat() <= j < run.base.as_nat() + q),
+                    decreases run.len - q,
+                {
+                    let ghost before_cell = out@;
+                    if let Some(ix) = I::try_from_usize(b + q) {
+                        out.push(ix);
+                        proof {
+                            assert forall|j: nat| #[trigger] Self::names_index(out@, j)
+                                <==> Self::names_index(before_run, j)
+                                    || (run.base.as_nat() <= j < run.base.as_nat() + q + 1) by {
+                                if Self::names_index(out@, j) {
+                                    let i = choose|i: int| 0 <= i < out@.len() && (#[trigger] out@[i]).as_nat() == j;
+                                    if i < before_cell.len() {
+                                        assert(before_cell[i] == out@[i]);
+                                        assert(Self::names_index(before_cell, j));
+                                    } else {
+                                        assert(out@[i] == ix);
+                                    }
+                                } else {
+                                    if Self::names_index(before_run, j)
+                                        || (run.base.as_nat() <= j < run.base.as_nat() + q) {
+                                        assert(Self::names_index(before_cell, j));
+                                        let i = choose|i: int| 0 <= i < before_cell.len()
+                                            && (#[trigger] before_cell[i]).as_nat() == j;
+                                        assert(out@[i] == before_cell[i]);
+                                        assert(Self::names_index(out@, j));
+                                    }
+                                    if j == run.base.as_nat() + q {
+                                        assert(out@[before_cell.len() as int] == ix);
+                                        assert(Self::names_index(out@, j));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    q += 1;
+                }
+                proof {
+                    assert forall|j: nat| #[trigger] Self::names_index(out@, j)
+                        <==> Self::names_index(before_frame, j)
+                            || exists|q2: int| h.runs_start <= q2 < r + 1
+                                && cold_run_covers::<I>(#[trigger] self.cold_index_runs@[q2], j) by {
+                        if Self::names_index(out@, j) && !Self::names_index(before_run, j) {
+                            assert(cold_run_covers::<I>(self.cold_index_runs@[r as int], j));
+                        }
+                        if exists|q2: int| h.runs_start <= q2 < r + 1
+                            && cold_run_covers::<I>(#[trigger] self.cold_index_runs@[q2], j) {
+                            let q2 = choose|q2: int| h.runs_start <= q2 < r + 1
+                                && cold_run_covers::<I>(#[trigger] self.cold_index_runs@[q2], j);
+                            if q2 < r {
+                                assert(Self::names_index(before_run, j));
+                            }
+                        }
+                    }
+                }
+                r += 1;
+            }
+            proof {
+                assert forall|j: nat| #[trigger] Self::names_index(out@, j)
+                    <==> Self::names_index(base_out, j)
+                        || exists|g: int| lo_f <= g < f + 1 && #[trigger] self.cold_covered(g, j) by {
+                    if Self::names_index(out@, j) && !Self::names_index(before_frame, j) {
+                        let q = choose|q: int| h.runs_start <= q < rend
+                            && cold_run_covers::<I>(#[trigger] self.cold_index_runs@[q], j);
+                        assert(self.cold_covered(f as int, j));
+                    }
+                    if exists|g: int| lo_f <= g < f + 1 && #[trigger] self.cold_covered(g, j) {
+                        let g = choose|g: int| lo_f <= g < f + 1 && #[trigger] self.cold_covered(g, j);
+                        if g == f {
+                            let q = choose|q: int| self.cold_stack@[g].runs_start <= q
+                                < self.cold_stack@[g].runs_start + self.cold_stack@[g].runs_len
+                                && (#[trigger] self.cold_index_runs@[q]).base.as_nat() <= j
+                                && j < self.cold_index_runs@[q].base.as_nat() + self.cold_index_runs@[q].len;
+                            assert(cold_run_covers::<I>(self.cold_index_runs@[q], j));
+                        } else {
+                            assert(Self::names_index(before_frame, j));
+                        }
+                    }
+                }
+            }
+            f += 1;
+        }
+    }
+
+    /// Pair frames `[lo, hi)` of one tier: append every captured index.
+    #[verifier::spinoff_prover]
+    fn pending_pair_indices_checked(&self, trail: bool, lo: usize, hi: usize, out: &mut std::vec::Vec<I>)
+        requires self.wf(), lo <= hi <= self.pair_tier_count(trail),
+        ensures forall|j: nat| #[trigger] Self::names_index(final(out)@, j)
+            <==> Self::names_index(old(out)@, j)
+                || exists|g: int| lo <= g < hi && #[trigger] captured_in_range::<T, I>(
+                    self.pair_tier_pool(trail), self.pair_tier_start(trail, g), self.pair_tier_end(trail, g), j),
+    {
+        hide(Vec::wf);
+        let ghost base_out = out@;
+        let mut g = lo;
+        while g < hi
+            invariant lo <= g <= hi <= self.pair_tier_count(trail), self.wf(),
+                forall|j: nat| #[trigger] Self::names_index(out@, j)
+                    <==> Self::names_index(base_out, j)
+                        || exists|k: int| lo <= k < g && #[trigger] captured_in_range::<T, I>(
+                            self.pair_tier_pool(trail), self.pair_tier_start(trail, k), self.pair_tier_end(trail, k), j),
+            decreases hi - g,
+        {
+            proof { self.lemma_pair_tier_frame_layout(trail, g as int); }
+            let (start, end) = if trail {
+                let frame = self.trail_stack[g];
+                let end = if g + 1 == self.trail_stack.len() { self.trail_value_pool.len() } else { frame.end };
+                (frame.start, end)
+            } else {
+                let frame = self.hot_stack[g];
+                let end = if g + 1 == self.hot_stack.len() { self.hot_value_pool.len() } else { frame.end };
+                (frame.start, end)
+            };
+            proof {
+                assert(start as int == self.pair_tier_start(trail, g as int));
+                assert(end as int == self.pair_tier_end(trail, g as int));
+            }
+            let ghost before_frame = out@;
+            let mut p = start;
+            while p < end
+                invariant start <= p <= end, start as int == self.pair_tier_start(trail, g as int),
+                    end as int == self.pair_tier_end(trail, g as int),
+                    end <= self.pair_tier_pool(trail).len(),
+                    trail ==> end <= self.trail_value_pool@.len(),
+                    !trail ==> end <= self.hot_value_pool@.len(),
+                    forall|j: nat| #[trigger] Self::names_index(out@, j)
+                        <==> Self::names_index(before_frame, j)
+                            || exists|q: int| start <= q < p
+                                && (#[trigger] self.pair_tier_pool(trail)[q]).1.as_nat() == j,
+                decreases end - p,
+            {
+                let ghost before_cell = out@;
+                let index = if trail { self.trail_value_pool[p].1 } else { self.hot_value_pool[p].1 };
+                proof { assert(index == self.pair_tier_pool(trail)[p as int].1); }
+                out.push(index);
+                proof {
+                    assert forall|j: nat| #[trigger] Self::names_index(out@, j)
+                        <==> Self::names_index(before_frame, j)
+                            || exists|q: int| start <= q < p + 1
+                                && (#[trigger] self.pair_tier_pool(trail)[q]).1.as_nat() == j by {
+                        if Self::names_index(out@, j) {
+                            let i = choose|i: int| 0 <= i < out@.len() && (#[trigger] out@[i]).as_nat() == j;
+                            if i < before_cell.len() {
+                                assert(before_cell[i] == out@[i]);
+                                assert(Self::names_index(before_cell, j));
+                            } else {
+                                assert(out@[i] == index);
+                                assert(self.pair_tier_pool(trail)[p as int].1.as_nat() == j);
+                            }
+                        } else {
+                            if Self::names_index(before_cell, j) {
+                                let i = choose|i: int| 0 <= i < before_cell.len()
+                                    && (#[trigger] before_cell[i]).as_nat() == j;
+                                assert(out@[i] == before_cell[i]);
+                                assert(Self::names_index(out@, j));
+                            }
+                            if self.pair_tier_pool(trail)[p as int].1.as_nat() == j {
+                                assert(out@[before_cell.len() as int] == index);
+                                assert(Self::names_index(out@, j));
+                            }
+                        }
+                    }
+                }
+                p += 1;
+            }
+            proof {
+                assert forall|j: nat| #[trigger] Self::names_index(out@, j)
+                    <==> Self::names_index(base_out, j)
+                        || exists|k: int| lo <= k < g + 1 && #[trigger] captured_in_range::<T, I>(
+                            self.pair_tier_pool(trail), self.pair_tier_start(trail, k), self.pair_tier_end(trail, k), j) by {
+                    if Self::names_index(out@, j) && !Self::names_index(before_frame, j) {
+                        assert(captured_in_range::<T, I>(self.pair_tier_pool(trail),
+                            self.pair_tier_start(trail, g as int), self.pair_tier_end(trail, g as int), j));
+                    }
+                    if exists|k: int| lo <= k < g + 1 && #[trigger] captured_in_range::<T, I>(
+                        self.pair_tier_pool(trail), self.pair_tier_start(trail, k), self.pair_tier_end(trail, k), j) {
+                        let k = choose|k: int| lo <= k < g + 1 && #[trigger] captured_in_range::<T, I>(
+                            self.pair_tier_pool(trail), self.pair_tier_start(trail, k), self.pair_tier_end(trail, k), j);
+                        if k < g {
+                            assert(Self::names_index(before_frame, j));
+                        } else {
+                            let q = choose|q: int| start <= q < end && 0 <= q < self.pair_tier_pool(trail).len()
+                                && (#[trigger] self.pair_tier_pool(trail)[q]).1.as_nat() == j;
+                            assert(Self::names_index(out@, j));
+                        }
+                    }
+                }
+            }
+            g += 1;
+        }
+    }
+
+    /// A Cold frame captures `j` exactly when one of its runs covers `j`.
+    #[verifier::spinoff_prover]
+    proof fn lemma_frame_captures_cold(&self, f: int, j: nat)
+        requires 0 <= f < self.cold_stack@.len(),
+        ensures self.frame_captures(f, j) == self.cold_covered(f, j),
+    {}
+
+    /// A pair-tier frame captures `j` exactly when its physical range does.
+    #[verifier::spinoff_prover]
+    proof fn lemma_frame_captures_pair(&self, trail: bool, g: int, j: nat)
+        requires 0 <= g < self.pair_tier_count(trail),
+        ensures self.frame_captures(self.pair_tier_offset(trail) + g, j)
+            == captured_in_range::<T, I>(self.pair_tier_pool(trail),
+                self.pair_tier_start(trail, g), self.pair_tier_end(trail, g), j),
+    {
+        hide(range_saved_value);
+        let f = self.pair_tier_offset(trail) + g;
+        if trail {
+            assert(self.frame_saved_value(f, j) == range_saved_value::<T, I>(self.trail_value_pool@,
+                self.trail_stack@[g].start as int, self.phys_trail_end(g), j));
+        } else {
+            assert(self.frame_saved_value(f, j) == range_saved_value::<T, I>(self.hot_value_pool@,
+                self.phys_hot_start(g), self.phys_hot_end(g), j));
+        }
+        reveal(range_saved_value);
+    }
+
+    /// The three tier passes together name exactly the captured indices of
+    /// frames `[tok, depth)`.
+    #[verifier::spinoff_prover]
+    proof fn lemma_pending_union(
+        &self, tok: nat, cold_lo: nat, hot_lo: nat, trail_lo: nat,
+        after_cold: Seq<I>, after_hot: Seq<I>, out: Seq<I>,
+    )
+        requires self.wf(), tok < self.depth_spec(),
+            cold_lo as int == (if tok < self.cold_stack@.len() { tok as int } else { self.cold_stack@.len() as int }),
+            hot_lo as int == (if tok < self.cold_stack@.len() { 0int }
+                else if tok < self.cold_stack@.len() + self.hot_stack@.len() { tok - self.cold_stack@.len() }
+                else { self.hot_stack@.len() as int }),
+            trail_lo as int == (if tok < self.cold_stack@.len() + self.hot_stack@.len() { 0int }
+                else { tok - self.cold_stack@.len() - self.hot_stack@.len() }),
+            forall|j: nat| #[trigger] Self::names_index(after_cold, j)
+                <==> exists|f: int| cold_lo <= f < self.cold_stack@.len() && #[trigger] self.cold_covered(f, j),
+            forall|j: nat| #[trigger] Self::names_index(after_hot, j)
+                <==> Self::names_index(after_cold, j)
+                    || exists|g: int| hot_lo <= g < self.hot_stack@.len() && #[trigger] captured_in_range::<T, I>(
+                        self.pair_tier_pool(false), self.pair_tier_start(false, g), self.pair_tier_end(false, g), j),
+            forall|j: nat| #[trigger] Self::names_index(out, j)
+                <==> Self::names_index(after_hot, j)
+                    || exists|g: int| trail_lo <= g < self.trail_stack@.len() && #[trigger] captured_in_range::<T, I>(
+                        self.pair_tier_pool(true), self.pair_tier_start(true, g), self.pair_tier_end(true, g), j),
+        ensures forall|j: nat| #[trigger] Self::names_index(out, j)
+            <==> exists|f: int| tok <= f < self.depth_spec() && #[trigger] self.frame_captures(f, j),
+    {
+        hide(Vec::wf);
+        hide(range_saved_value);
+        self.lemma_partition_counts();
+        let cc = self.cold_stack@.len() as int;
+        let hc = self.hot_stack@.len() as int;
+        let tc = self.trail_stack@.len() as int;
+        assert forall|j: nat| #[trigger] Self::names_index(out, j)
+            <==> exists|f: int| tok <= f < self.depth_spec() && #[trigger] self.frame_captures(f, j) by {
+            if Self::names_index(out, j) {
+                if exists|g: int| trail_lo <= g < tc && #[trigger] captured_in_range::<T, I>(
+                    self.pair_tier_pool(true), self.pair_tier_start(true, g), self.pair_tier_end(true, g), j) {
+                    let g = choose|g: int| trail_lo <= g < tc && #[trigger] captured_in_range::<T, I>(
+                        self.pair_tier_pool(true), self.pair_tier_start(true, g), self.pair_tier_end(true, g), j);
+                    self.lemma_frame_captures_pair(true, g, j);
+                    assert(self.frame_captures(cc + hc + g, j));
+                } else if exists|g: int| hot_lo <= g < hc && #[trigger] captured_in_range::<T, I>(
+                    self.pair_tier_pool(false), self.pair_tier_start(false, g), self.pair_tier_end(false, g), j) {
+                    let g = choose|g: int| hot_lo <= g < hc && #[trigger] captured_in_range::<T, I>(
+                        self.pair_tier_pool(false), self.pair_tier_start(false, g), self.pair_tier_end(false, g), j);
+                    self.lemma_frame_captures_pair(false, g, j);
+                    assert(self.frame_captures(cc + g, j));
+                } else {
+                    let f = choose|f: int| cold_lo <= f < cc && #[trigger] self.cold_covered(f, j);
+                    self.lemma_frame_captures_cold(f, j);
+                    assert(self.frame_captures(f, j));
+                }
+            } else {
+                if exists|f: int| tok <= f < self.depth_spec() && #[trigger] self.frame_captures(f, j) {
+                    let f = choose|f: int| tok <= f < self.depth_spec() && #[trigger] self.frame_captures(f, j);
+                    if f < cc {
+                        self.lemma_frame_captures_cold(f, j);
+                        assert(Self::names_index(after_cold, j));
+                        assert(Self::names_index(after_hot, j));
+                    } else if f < cc + hc {
+                        self.lemma_frame_captures_pair(false, f - cc, j);
+                        assert(Self::names_index(after_hot, j));
+                    } else {
+                        self.lemma_frame_captures_pair(true, f - cc - hc, j);
+                    }
+                    assert(Self::names_index(out, j));
+                }
+            }
+        }
+    }
+
+    /// The indices whose live cells a restore to `token` would rewrite: every
+    /// cell captured by a frame at or above the token's frame, oldest tier
+    /// first. `None` when the token is not restorable now. Read-only.
+    ///
+    /// This is the map-repair enabler: an unverified associate structure
+    /// keyed by slot content (the e-graph's hashcons index) reads this BEFORE
+    /// a restore to remove exactly the entries whose keys are about to change,
+    /// and re-inserts the same ids from restored content AFTER.
+    #[verifier::spinoff_prover]
     pub fn pending_restore_indices(&self, token: &VecToken) -> (r: Option<std::vec::Vec<I>>)
         requires
             self.wf(),
         ensures
-            r is Some ==> self.is_restorable_spec(*token),
+            r is Some <==> self.is_restorable_spec(*token),
+            r matches Some(out) ==> forall|j: nat| #[trigger] Self::names_index(out@, j)
+                <==> exists|f: int| token.frame_idx_spec() <= f < self.depth_spec()
+                    && #[trigger] self.frame_captures(f, j),
     {
+        hide(Vec::wf);
+        hide(range_saved_value);
         if !self.is_valid_token(token) {
             return None;
         }
+        proof { self.lemma_partition_counts(); }
         let cold = self.cold_stack.len();
         let hot = self.hot_stack.len();
         let trail = self.trail_stack.len();
+        let tok = token.frame_idx;
         let mut out: std::vec::Vec<I> = std::vec::Vec::new();
 
-        if token.frame_idx < cold {
-            pending_cold_indices_scaffold(
-                &self.cold_stack,
-                &self.cold_index_runs,
-                token.frame_idx,
-                cold,
-                &mut out,
-            );
-        }
-        if token.frame_idx < cold + hot {
-            let first = token.frame_idx.saturating_sub(cold).min(hot);
-            for (offset, frame) in self.hot_stack[first..].iter().enumerate() {
-                let frame_index = first + offset;
-                let end = if frame_index + 1 == hot && trail == 0 {
-                    self.hot_value_pool.len()
-                } else {
-                    frame.end
-                };
-                for &(_, index) in &self.hot_value_pool[frame.start..end] {
-                    out.push(index);
-                }
-            }
-        }
-        if token.frame_idx < cold + hot + trail {
-            let first = token.frame_idx.saturating_sub(cold + hot).min(trail);
-            for (offset, frame) in self.trail_stack[first..].iter().enumerate() {
-                let frame_index = first + offset;
-                let end = if frame_index + 1 == trail {
-                    self.trail_value_pool.len()
-                } else {
-                    frame.end
-                };
-                for &(_, index) in &self.trail_value_pool[frame.start..end] {
-                    out.push(index);
-                }
-            }
+        let cold_lo = if tok < cold { tok } else { cold };
+        self.pending_cold_indices_checked(cold_lo, cold, &mut out);
+        let ghost after_cold = out@;
+        let hot_lo = if tok < cold { 0 } else if tok < cold + hot { tok - cold } else { hot };
+        self.pending_pair_indices_checked(false, hot_lo, hot, &mut out);
+        let ghost after_hot = out@;
+        let trail_lo = if tok < cold + hot { 0 } else { tok - cold - hot };
+        self.pending_pair_indices_checked(true, trail_lo, trail, &mut out);
+        proof {
+            self.lemma_pending_union(tok as nat, cold_lo as nat, hot_lo as nat, trail_lo as nat,
+                after_cold, after_hot, out@);
         }
         Some(out)
+    }
+
+    /// Production instantiation of the sequence theorem on one representative
+    /// interleaving: every fact below follows from the public contracts alone.
+    /// Mark, write, mark, restore, write again, restore to the older mark, roll
+    /// history over, and restore again: the live view is always the archived
+    /// snapshot, the depth the token's frame, and the archive its prefix.
+    #[verifier::spinoff_prover]
+    #[allow(dead_code)]
+    pub(crate) fn sequence_witness_checked(&mut self, i: I, a: T, b: T)
+        where T: core::default::Default
+        requires old(self).wf(), TRACK, i.as_nat() < old(self).view().len(),
+            old(self).depth_spec() + 2 < u32::MAX,
+        ensures final(self).wf(),
+    {
+        let ghost v0 = self.view();
+        let ghost d0 = self.depth_spec();
+        let ghost s0 = self.snapshots_view();
+        let t1 = match self.try_mark_with(MarkOptions::default()) {
+            Ok(t) => t,
+            Err(_) => { return; }
+        };
+        assert(self.view() == v0 && self.depth_spec() == d0 + 1 && self.snapshots_view() == s0.push(v0));
+        self.set_index(i, a);
+        assert(self.view() == v0.update(i.as_nat() as int, a));
+        let ghost v1 = self.view();
+        let t2 = match self.try_mark_with(MarkOptions::default()) {
+            Ok(t) => t,
+            Err(_) => { return; }
+        };
+        assert(self.snapshots_view() == s0.push(v0).push(v1) && self.depth_spec() == d0 + 2);
+        self.set_index(i, b);
+        // Restore to the second mark: the write of `b` is undone.
+        match self.try_restore(t2) {
+            Ok(()) => {
+                assert(self.view() == v1);
+                assert(self.depth_spec() == d0 + 1);
+                assert(self.snapshots_view() == s0.push(v0));
+            }
+            Err(_) => { return; }
+        }
+        // Mutate again after the restore, then roll history over.
+        self.set_index(i, b);
+        self.apply_tier_policy();
+        assert(self.view() == v1.update(i.as_nat() as int, b));
+        assert(self.snapshots_view() == s0.push(v0));
+        // Restore to the older mark: back to the original view.
+        match self.try_restore(t1) {
+            Ok(()) => {
+                assert(self.view() == v0);
+                assert(self.depth_spec() == d0);
+                assert(self.snapshots_view() == s0);
+            }
+            Err(_) => {}
+        }
     }
 
     /// The public token-validity check: "restorable now", STRUCTURALLY.

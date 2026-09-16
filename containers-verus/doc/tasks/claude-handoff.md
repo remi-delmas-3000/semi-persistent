@@ -92,13 +92,25 @@ All rollover dispatch is checked: `runtime_closed_history_bytes`,
 `partial-api-allowlist.txt`. The remaining `vec.rs` markers are byte
 reporters/diagnostics and transparent type registrations.
 
+## Derived and Step 3 checkpoints (2026-09-16)
+
+`328c512` exports derived restore effects (ListArena, EClasses, SpMap,
+CircularList, UnionFind, BPlusTreeSet) and group member models/archives
+(`SyncMember::model`/`archive`, `ForkHistory::mark`/`restore`, parallel
+variants over the documented rayon boundary). The following checkpoint checks
+`pending_restore_indices` (exact captured-index set) and adds
+`sequence_witness_checked`, the production instantiation of the sequence
+theorem; the Step 3 dependency map is `proofs/top_down/interface-inventory.md`.
+Trust: 51 default + 5 literal (CI `EXPECTED_DEFAULT=51`).
+
 ## Next actions
 
-1. Step 3: instantiate the end-to-end sequence theorem on the production public
-   dispatch (`proofs/top_down/composition.rs` provisional interfaces).
-2. Derived containers and the parallel/group scope
-   (`proofs/top_down/derived-contract-audit.md`), final audits (partial-API,
-   trust ledger), and the benchmark protocol.
+1. `EClasses` component contents beyond roots (entries, reprs, uses, pool) —
+   established inside `restore`, not yet exported.
+2. Final audits (trust ledger is current; partial-API discrepancy is the
+   baseline 40 unlisted functions) and the benchmark protocol
+   (`conformance-performance-inventory.md`): legacy vs. verified on the
+   Criterion targets, tolerance and decision rule fixed before measuring.
 
 ## Existing proof architecture to reuse
 
