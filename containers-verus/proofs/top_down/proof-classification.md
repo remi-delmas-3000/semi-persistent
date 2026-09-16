@@ -377,3 +377,11 @@ the previously recorded clone-contract gap for payload assembly while retaining
 bulk transfer and generic Copy payloads. The loop proves exact pool concatenation,
 header ordering/offsets, unchanged source fields and emptied temporaries. Plan
 selection semantics and source retirement/global invariants remain pending.
+
+Retirement implementation is now checked separately:
+`discard_prefix_checked` proves bulk shift/truncate retains the exact suffix;
+Trail/Hot retirement helpers prove survivor header order, saved lengths and exact
+rebasing. All four ordinary/adaptive migration paths call them. Reuse
+`lemma_range_saved_value_retire_prefix` to transfer full physical saved maps.
+Still discharge caller-supplied bounds, source/destination frame correspondence,
+final global invariants and configured/forced/adaptive policy execution.

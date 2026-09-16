@@ -1281,6 +1281,21 @@ pub(crate) proof fn lemma_range_saved_value_subrange<T, I: IndexLike>(
     }
 }
 
+/// Prefix retirement rebases coordinates without changing any saved value.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_range_saved_value_retire_prefix<T, I: IndexLike>(
+    a: Seq<(T, I)>, cut: int, lo: int, hi: int, j: nat,
+)
+    requires 0 <= cut <= lo <= hi <= a.len(),
+    ensures range_saved_value::<T, I>(a, lo, hi, j)
+        == range_saved_value::<T, I>(a.subrange(cut, a.len() as int), lo - cut, hi - cut, j),
+{
+    let b = a.subrange(cut, a.len() as int);
+    lemma_range_saved_value_subrange::<T, I>(a, lo, hi, j);
+    lemma_range_saved_value_subrange::<T, I>(b, lo - cut, hi - cut, j);
+    assert(b.subrange(lo - cut, hi - cut) =~= a.subrange(lo, hi));
+}
+
 /// Re-express the existing per-cell invariant through the common optional
 /// saved-value interpretation; no new reconstruction assumption is introduced.
 #[verifier::spinoff_prover]
@@ -5905,6 +5920,134 @@ where
         add(add(trail, hot), cold)
     }
 
+    /// Retire a Copy prefix using the same bulk overlapping shift as drain,
+    /// with an exact retained-suffix contract and no element-removal loop.
+    #[verifier::spinoff_prover]
+    fn discard_prefix_checked<U: Copy>(data: &mut std::vec::Vec<U>, cut: usize)
+        requires cut <= old(data)@.len(),
+        ensures final(data)@ == old(data)@.subrange(cut as int, old(data)@.len() as int),
+    {
+        let len = data.len();
+        data.as_mut_slice().copy_within(cut..len, 0);
+        data.truncate(len - cut);
+        proof {
+            assert(data@ =~= old(data)@.subrange(cut as int, old(data)@.len() as int));
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    fn retire_trail_prefix_checked(&mut self, count: usize)
+        requires count < old(self).trail_stack@.len(),
+            old(self).trail_stack@[count as int].start <= old(self).trail_value_pool@.len(),
+            forall|f: int| count <= f < old(self).trail_stack@.len() ==>
+                old(self).trail_stack@[count as int].start <= (#[trigger] old(self).trail_stack@[f]).start
+                && old(self).trail_stack@[count as int].start <= old(self).trail_stack@[f].end,
+        ensures
+            *final(self) == (Self { trail_stack: final(self).trail_stack,
+                trail_value_pool: final(self).trail_value_pool, ..*old(self) }),
+            final(self).trail_value_pool@ == old(self).trail_value_pool@.subrange(
+                old(self).trail_stack@[count as int].start as int, old(self).trail_value_pool@.len() as int),
+            final(self).trail_stack@.len() == old(self).trail_stack@.len() - count,
+            forall|f: int| 0 <= f < final(self).trail_stack@.len() ==> {
+                let h = #[trigger] final(self).trail_stack@[f];
+                let old_h = old(self).trail_stack@[count + f];
+                &&& h.saved_len == old_h.saved_len
+                &&& h.start == old_h.start - old(self).trail_stack@[count as int].start
+                &&& h.end == old_h.end - old(self).trail_stack@[count as int].start
+            },
+    {
+        let ghost pre = *self;
+        let cut = self.trail_stack[count].start;
+        Self::discard_prefix_checked(&mut self.trail_value_pool, cut);
+        Self::discard_prefix_checked(&mut self.trail_stack, count);
+        let mut f = 0usize;
+        while f < self.trail_stack.len()
+            invariant
+                f <= self.trail_stack@.len(),
+                cut == pre.trail_stack@[count as int].start,
+                count < pre.trail_stack@.len(),
+                self.trail_stack@.len() == pre.trail_stack@.len() - count,
+                *self == (Self { trail_stack: self.trail_stack, trail_value_pool: self.trail_value_pool, ..pre }),
+                self.trail_value_pool@ == pre.trail_value_pool@.subrange(cut as int, pre.trail_value_pool@.len() as int),
+                forall|q: int| count <= q < pre.trail_stack@.len() ==>
+                    cut <= (#[trigger] pre.trail_stack@[q]).start && cut <= pre.trail_stack@[q].end,
+                forall|q: int| f <= q < self.trail_stack@.len() ==>
+                    #[trigger] self.trail_stack@[q] == pre.trail_stack@[count + q],
+                forall|q: int| 0 <= q < f ==> {
+                    let h = #[trigger] self.trail_stack@[q];
+                    let old_h = pre.trail_stack@[count + q];
+                    &&& h.saved_len == old_h.saved_len
+                    &&& h.start == old_h.start - cut
+                    &&& h.end == old_h.end - cut
+                },
+            decreases self.trail_stack.len() - f,
+        {
+            self.trail_stack[f].start -= cut;
+            self.trail_stack[f].end -= cut;
+            f += 1;
+        }
+    }
+
+    spec fn hot_retirement_cut(&self, count: nat) -> nat {
+        if count < self.hot_stack@.len() { self.hot_stack@[count as int].start as nat }
+        else { self.hot_value_pool@.len() }
+    }
+
+    #[verifier::spinoff_prover]
+    fn retire_hot_prefix_checked(&mut self, count: usize)
+        requires count <= old(self).hot_stack@.len(),
+            old(self).hot_retirement_cut(count as nat) <= old(self).hot_value_pool@.len(),
+            forall|f: int| count <= f < old(self).hot_stack@.len() ==>
+                old(self).hot_retirement_cut(count as nat) <= (#[trigger] old(self).hot_stack@[f]).start
+                && old(self).hot_retirement_cut(count as nat) <= old(self).hot_stack@[f].end,
+        ensures
+            *final(self) == (Self { hot_stack: final(self).hot_stack,
+                hot_value_pool: final(self).hot_value_pool, ..*old(self) }),
+            final(self).hot_value_pool@ == old(self).hot_value_pool@.subrange(
+                old(self).hot_retirement_cut(count as nat) as int, old(self).hot_value_pool@.len() as int),
+            final(self).hot_stack@.len() == old(self).hot_stack@.len() - count,
+            forall|f: int| 0 <= f < final(self).hot_stack@.len() ==> {
+                let h = #[trigger] final(self).hot_stack@[f];
+                let old_h = old(self).hot_stack@[count + f];
+                &&& h.saved_len == old_h.saved_len
+                &&& h.start == old_h.start - old(self).hot_retirement_cut(count as nat)
+                &&& h.end == old_h.end - old(self).hot_retirement_cut(count as nat)
+            },
+    {
+        let ghost pre = *self;
+        let cut = if count < self.hot_stack.len() {
+            self.hot_stack[count].start
+        } else { self.hot_value_pool.len() };
+        Self::discard_prefix_checked(&mut self.hot_value_pool, cut);
+        Self::discard_prefix_checked(&mut self.hot_stack, count);
+        let mut f = 0usize;
+        while f < self.hot_stack.len()
+            invariant
+                f <= self.hot_stack@.len(),
+                cut == pre.hot_retirement_cut(count as nat),
+                count <= pre.hot_stack@.len(),
+                self.hot_stack@.len() == pre.hot_stack@.len() - count,
+                *self == (Self { hot_stack: self.hot_stack, hot_value_pool: self.hot_value_pool, ..pre }),
+                self.hot_value_pool@ == pre.hot_value_pool@.subrange(cut as int, pre.hot_value_pool@.len() as int),
+                forall|q: int| count <= q < pre.hot_stack@.len() ==>
+                    cut <= (#[trigger] pre.hot_stack@[q]).start && cut <= pre.hot_stack@[q].end,
+                forall|q: int| f <= q < self.hot_stack@.len() ==>
+                    #[trigger] self.hot_stack@[q] == pre.hot_stack@[count + q],
+                forall|q: int| 0 <= q < f ==> {
+                    let h = #[trigger] self.hot_stack@[q];
+                    let old_h = pre.hot_stack@[count + q];
+                    &&& h.saved_len == old_h.saved_len
+                    &&& h.start == old_h.start - cut
+                    &&& h.end == old_h.end - cut
+                },
+            decreases self.hot_stack.len() - f,
+        {
+            self.hot_stack[f].start -= cut;
+            self.hot_stack[f].end -= cut;
+            f += 1;
+        }
+    }
+
     /// Execute an exact oldest closed Trail prefix through deterministic
     /// first-capture dedupe. Sorting `(index, chronological_position)` avoids
     /// the old quadratic `Vec::contains` scan while retaining the first write.
@@ -5945,13 +6088,7 @@ where
                 &mut self.hot_value_pool, &mut self.hot_stack,
                 entries, selected.as_slice(), frame.saved_len);
         }
-        let cut = self.trail_stack[count].start;
-        self.trail_value_pool.drain(0..cut);
-        self.trail_stack.drain(0..count);
-        for frame in self.trail_stack.iter_mut() {
-            frame.start -= cut;
-            frame.end -= cut;
-        }
+        self.retire_trail_prefix_checked(count);
     }
 
     /// Append the selected chronological positions without changing the
@@ -6139,13 +6276,7 @@ where
         let closed = self.trail_stack.len().saturating_sub(1);
         assert!(count <= closed, "adaptive Trail plan must name a closed prefix");
         self.append_trail_plan_checked(planned);
-        let cut = self.trail_stack[count].start;
-        self.trail_value_pool.drain(0..cut);
-        self.trail_stack.drain(0..count);
-        for frame in self.trail_stack.iter_mut() {
-            frame.start -= cut;
-            frame.end -= cut;
-        }
+        self.retire_trail_prefix_checked(count);
     }
 
     /// Migrate an oldest closed trail prefix through first-capture dedupe.
@@ -6416,17 +6547,7 @@ where
             entries.sort_unstable_by_key(|(_, index)| index.as_usize());
             self.append_cold_sorted_checked(entries.as_slice(), frame.saved_len);
         }
-        let cut = if count < self.hot_stack.len() {
-            self.hot_stack[count].start
-        } else {
-            self.hot_value_pool.len()
-        };
-        self.hot_value_pool.drain(0..cut);
-        self.hot_stack.drain(0..count);
-        for frame in self.hot_stack.iter_mut() {
-            frame.start -= cut;
-            frame.end -= cut;
-        }
+        self.retire_hot_prefix_checked(count);
         if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
             self.hot_value_pool.shrink_to_fit();
             self.cold_value_pool.shrink_to_fit();
@@ -6455,17 +6576,7 @@ where
             let frame = self.hot_stack[f];
             self.append_cold_sorted_checked(entries.as_slice(), frame.saved_len);
         }
-        let cut = if count < self.hot_stack.len() {
-            self.hot_stack[count].start
-        } else {
-            self.hot_value_pool.len()
-        };
-        self.hot_value_pool.drain(0..cut);
-        self.hot_stack.drain(0..count);
-        for frame in self.hot_stack.iter_mut() {
-            frame.start -= cut;
-            frame.end -= cut;
-        }
+        self.retire_hot_prefix_checked(count);
     }
 
     /// Migrate an oldest closed unique prefix to direct-restorable runs.

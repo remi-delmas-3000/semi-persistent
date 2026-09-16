@@ -1528,3 +1528,45 @@ Owned assembly checkpoint evidence: full default **2432 verified, zero errors**
 Formatting/whitespace checks pass; legacy `containers/` is unchanged. Trust and
 axiom counts are unchanged. Literal-types verification, consumer/final audits and
 benchmark parity remain required with migration closure.
+
+## Checked pair-pool retirement and header rebasing
+
+`discard_prefix_checked` uses the pinned, already specified overlapping
+`copy_within` operation followed by truncation. It proves that the result is
+exactly the old suffix after the cut. This replaces unspecified `Vec::drain`
+for Copy pools and headers, preserving bulk linear memory movement rather than
+introducing per-element removal or new trust.
+
+`retire_trail_prefix_checked` and `retire_hot_prefix_checked` prove exact payload
+suffixes, exact surviving header counts/order, unchanged saved lengths, offsets
+reduced by the cut, and unchanged unrelated Self fields. Their concrete
+preconditions expose the bounds needed to avoid subtraction underflow. Trail
+retirement retains a header; Hot retirement additionally supports removing all
+Hot frames. Both ordinary and adaptive Trail/Hot migration callers now use these
+checked helpers. Source precondition suppliers still require proof as part of
+complete migration; the existing caller trust markers remain.
+
+`lemma_range_saved_value_retire_prefix` relates any retained physical range to its
+rebased range with full optional saved-value equality, including absent captures.
+It reuses the checked subrange lemma and extensional sequence equality. No
+persistent history or new semantic assumption is introduced.
+
+Targeted retirement helpers: **5 verified, zero errors**
+(`/tmp/sp-d21-retire-pairs2.log`). Full verification/regression results follow.
+Global partition restoration, selected-payload/source identity and policy closure
+remain pending. Final benchmark parity must cover the drain-to-copy/truncate
+change; equal bulk-work structure is not a timing measurement.
+
+Selection follow-up: the existing checked `diff_compress::sort_frame_by_index`
+is insertion sort with a quadratic worst case. Do not substitute it for migration's
+current unstable sort merely to obtain a proof. Preserve the migration complexity
+and benchmark acceptance while resolving sorting/earliest-capture selection.
+
+Retirement checkpoint full evidence: default and literal-types each **2438
+verified, zero errors** (`/tmp/sp-d21-retire-pairs-default.log`,
+`/tmp/sp-d21-retire-pairs-literal.log`); feature suite **277 passed, 10 ignored**
+(`/tmp/sp-d21-retire-pairs-features.log`); release differential policy matrix,
+`PROPTEST_CASES=1024`, **4 passed** (`/tmp/sp-d21-retire-pairs-policy.log`).
+Formatting/whitespace checks pass, trust counts are unchanged, and legacy
+`containers/` remains unchanged from `d191c4a`. Full migration composition,
+consumer/final audits and measured benchmark parity remain open requirements.
