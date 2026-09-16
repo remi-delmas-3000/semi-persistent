@@ -75,16 +75,103 @@ env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench -p containers-conformance --be
 env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench -p containers-conformance --bench <name> -- --save-baseline runB
 ```
 
-Checkpoint comparison: a git worktree at `d191c4a` shares the workspace
-`target/` directory (`CARGO_TARGET_DIR`), runs `three_tier_bench` with the same
-settings under `--save-baseline d191c4a_A` / `d191c4a_B`, and the final tree's
-`runA`/`runB` baselines are compared to them by the same rule.
+Checkpoint comparison: a git worktree at `d191c4a`
+(`/Users/remidelmas/projects/sp-d21-d191c4a`, its own build directory) runs
+`three_tier_bench` with the same settings under `--save-baseline d191c4a_A` /
+`d191c4a_B`; both trees write to one `CRITERION_HOME`
+(`<final tree>/target/criterion`), and the final tree's `runA`/`runB`
+baselines are compared to the checkpoint ones by the same rule. Runs are
+interleaved (A final, A checkpoint, B final, B checkpoint) so slow machine
+drift affects both sides alike; bench binaries are built before the first
+timing command so no compilation overlaps a measurement.
 
 Raw artifacts: `target/criterion/**/{runA,runB,d191c4a_A,d191c4a_B}/estimates.json`
 plus the full Criterion logs under `/tmp/sp-d21-bench-*.log`; the comparison
 tables below are generated from the `estimates.json` files by
 `containers-verus/tools/bench_compare.py` (ratio, interval, status).
 
+## Preliminary run and regression investigation (2026-09-16, revision `09f00b0`)
+
+The first execution of the protocol was stopped after run A of every target
+plus the checkpoint's `three_tier_bench` run A, because run A already showed
+reproducible regressions (intervals of ±0.5 % or tighter) that had to be fixed
+before a final two-run evaluation could mean anything. Everything measured is
+retained under baselines `runA`, `d191c4a_A` and the partial `runB`
+(`tracked_vec_bench` only); the paired targets were additionally run once at
+the checkpoint (`d191c4a_A`) so each legacy gap could be classified as
+pre-existing or introduced by this branch.
+
+Findings, per case class:
+
+1. **Introduced by this branch, adaptive Trail dedupe (fixed).**
+   `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_trail`
+   ×7.0, `three_tier_v2/adaptive/unique_W512_U512_R1/budget_4096/dyn_trail`
+   ×1.09 and `three_tier/adaptive_decision/low_duplicates_no_convert/512`
+   ×1.09 against the checkpoint. Cause: `dedupe_trail_range` inserted into a
+   `HashSet` created empty (`HashSet::default()`) for every pass, so a
+   512-entry frame paid ~9 rehashes. Fix: `seen.reserve(end - start)` and
+   `out.reserve(end - start)` at the start of the pass (vstd-specified,
+   view-preserving). After the fix the two shuffled-order cases run at 2.14 µs
+   against the checkpoint's 9.16 µs (ratio 0.23 — the old pass sorted a
+   scratch copy), and the ascending-order singleton case at 1.76 µs against
+   1.35 µs (ratio 1.31): pdqsort is O(n) on already-sorted input while the
+   hash pass is order-blind. That residual is inherent to the index-set
+   dedupe chosen for this branch and is reported as such below.
+2. **Introduced by this branch, closed-history byte fold.**
+   `three_tier_v2/large/W64_U16_R1_frames256/budget_unbounded/dyn_inline`
+   ×1.16–1.19 and `dyn_parallel` ×1.10 against the checkpoint (154 ns → ~180
+   ns on the adaptive early-return path). The checked fold reads each frame
+   through `pair_frame_entries` inside a `while` loop with a runtime bounds
+   check per frame where the old code folded over a slice. The disassembly of
+   the `DynStore<u64, usize>` instantiation showed the difference exactly: the
+   checkpoint's loop is seven instructions with one counter, the checked
+   loop carried a second down-counter for the index bound (an explicit
+   `min(closed, len)` bound did not remove it — LLVM kept both counters).
+   Fix: fold over the whole stack, whose length is the loop bound, and take
+   the open frame's entries back out once (`checked_sub`, refusing on
+   underflow like the additions); same counts, same checked arithmetic. After
+   the fix: `dyn_inline` 156 ns vs 154 ns (ratio 1.01) and `dyn_parallel`
+   148 ns vs 156 ns (0.95), both pass. A forced-alignment build of the
+   pre-fix source had left both at ×1.17–1.18, confirming this one was not
+   layout.
+3. **Introduced by this branch, code layout only.**
+   `eclasses/find_sweep/verified/4096` (×1.43 vs legacy, 1.00 at the
+   checkpoint) and `tracked_vecp/mark_churn/verus/1000000` (×1.10 vs legacy,
+   1.03 at the checkpoint). Bisected by commit: the find sweep is clean at
+   `a831cc1` and regressed at `9df28cb`; the mark churn is clean at `990eb08`
+   (1.02) and regressed at `a831cc1` (1.10). Neither interval changes any
+   function on the measured path (`find_const` → `get_index` → store read;
+   `try_mark` → Hot-defer mark → `set_index` → `try_restore`): the commits
+   change specs, migration/adaptive code and marker attributes only, and the
+   bodies of the mark-path fallbacks are textually identical before and
+   after. Controlled test: the same source built with
+   `-C llvm-args=-align-all-functions=6 -C llvm-args=-align-all-nofallthru-blocks=5`
+   (separate target directory, everything else identical) measures the
+   find sweep at 221.7 µs verified vs 252.2 µs retained (ratio 0.88) and the
+   mark churn at 1.240 ms vs 1.221 ms (1.015): both pass, and the *legacy*
+   arms moved as much as the verified ones (retained find sweep 212 → 252
+   µs). Code placement, not work, explains these two cases. No source change
+   is made for them; the default-build numbers are reported as measured with
+   this control beside them.
+4. **Pre-existing against legacy (unchanged by this branch).**
+   `bplus/from_sorted_then_scan/verus` ×1.90 and `bplus/insert_shuffled/verus`
+   ×1.12–1.13 are identical at `d191c4a`; `aov/log/verified` is ×1.08–1.11
+   with a wide interval at both revisions (inconclusive). The B+ tree and
+   append-only vector were not touched by this branch.
+5. **Workload controls, pre-existing.** The `three_tier/*` and
+   `three_tier_v1/*` verified-versus-production rows exceed the tolerance by
+   ×1.1–×6.7 at both revisions (the checkpoint comparison of the same ids is
+   ≤1.08 except the cases in items 1–2). These production arms are workload
+   controls, not equivalent operations: the production `Vec` has no Trail
+   tier, no tier policy and no adaptive pass, so they measure the cost of the
+   three-tier design itself, as the inventory anticipated. They are reported
+   with their ratios; they are not evidence about this branch's proof work.
+
+`three_tier_v1/restore/deep_64_frames/dyn_trail` (×1.11 in run A) measured
+1.01 on the rebuilt binary with no change to its code path; it is treated as a
+run-to-run layout/noise effect and re-evaluated in the final two-run
+protocol like every other case.
+
 ## Results
 
-(to be appended after the timing runs)
+(final two-run evaluation to be appended)

@@ -2042,3 +2042,42 @@ passed; trust unchanged at 51 default + 5 literal. The same commit records the
 final performance protocol (`doc/tasks/final-performance-report.md`, tolerance
 and decision rule fixed before measurement) and the comparison script
 `tools/bench_compare.py`.
+
+
+## 2026-09-16 — Final checkpoint: last Vec marker removed, benchmark-driven fixes
+
+`try_mark_adaptive` was the last execution-first `Vec` marker: a public entry
+point with a trusted semantic postcondition (view unchanged, depth + 1,
+snapshot pushed) whose body — three guards, `mark_with_options`,
+`runtime_apply_adaptive` — had become fully checked in earlier checkpoints.
+The marker is removed with the body unchanged (the three index-bound lemma
+calls the sibling `try_mark_with_options` uses are added before the capacity
+guard) and the contract follows from the callees'. Trust: **50 default + 5
+literal**; CI `EXPECTED_DEFAULT=50`. No default marker carries a semantic
+postcondition about container contents any more.
+
+The first execution of the frozen benchmark protocol
+(`doc/tasks/final-performance-report.md`) attributed every regressed case and
+led to two constant-factor changes, neither of which alters an algorithm:
+`trail_select::dedupe_trail_range` reserves its hash set and output for the
+frame up front (`HashSet::reserve`/`Vec::reserve`, both vstd-specified and
+view-preserving; the set was growing from empty through ~9 rehashes per
+512-entry frame), and `runtime_closed_history_bytes` states its loop bounds
+explicitly with the per-frame accessor forced inline. Targeted evidence:
+`trail_select` **8 verified**, `pair_frame_entries` **1 verified**,
+`runtime_closed_history_bytes` **3 verified**, `try_mark_adaptive` **1
+verified**, zero errors (`/tmp/sp-d21-fix1-*.log`, `/tmp/sp-d21-fix2-rchb.log`,
+`/tmp/sp-d21-tma.log`). Gate evidence follows.
+
+Final checkpoint evidence (fresh, touched source before each Verus run): full
+default **2590 verified, zero errors** (`/tmp/sp-d21-final-default.log`);
+literal-types **2590 verified, zero errors** (`/tmp/sp-d21-final-literal.log`);
+conditional composition **80 verified, zero errors**
+(`/tmp/sp-d21-final-composition.log`); `au-verus` **29 verified, zero errors**
+(`/tmp/sp-d21-final-au.log`); feature suite **277 passed, 10 ignored**
+(`/tmp/sp-d21-final-tests.log`); release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-final-policy.log`); e-graph/SAT
+consumers **1267 passed, 45 ignored** (`/tmp/sp-d21-final-consumers.log`);
+canary **2 passed** (`/tmp/sp-d21-final-canary.log`); partial-API audit at the
+unchanged baseline (73/33/40/0). Formatting, whitespace and the unchanged-legacy
+check passed; trust **50 default + 5 literal**, CI `EXPECTED_DEFAULT=50`.

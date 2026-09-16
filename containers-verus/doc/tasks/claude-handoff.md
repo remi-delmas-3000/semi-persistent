@@ -104,7 +104,11 @@ theorem; the Step 3 dependency map is `proofs/top_down/interface-inventory.md`.
 The following checkpoint exports the `EClasses` component contents (entries,
 reprs, uses, minimum pool: views at the token's frame and archive prefixes)
 through `restore`/`try_restore`, closing the derived-contract audit table.
-Trust: 51 default + 5 literal (CI `EXPECTED_DEFAULT=51`).
+The final checkpoint removes the last execution-first `Vec` marker
+(`try_mark_adaptive`, now checked from `mark_with_options` and
+`runtime_apply_adaptive`) and carries the benchmark-driven constant-factor
+fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
+`EXPECTED_DEFAULT=50`).
 
 ## Next actions
 
@@ -153,8 +157,8 @@ fan-out, pending-restore consumers, and relevant supporting structures such as
 DenseSpanMap. Review `proofs/top_down/derived-contract-audit.md`; exact component
 archive/depth contracts and error framing matter, not just primary contents.
 
-Current trust inventory: **51 default + 5 literal external_body** (CI
-`EXPECTED_DEFAULT=51`; the session started at 74 + 5); default axioms are the
+Current trust inventory: **50 default + 5 literal external_body** (CI
+`EXPECTED_DEFAULT=50`; the session started at 74 + 5); default axioms are the
 hasher axioms plus the per-index-type `obeys_key_model` axioms
 (`axiom_key_model_*`), and the one trusted std contract is
 `std_sort::sort_pairs_by_index`. Reaudit on final source, and do not mislabel

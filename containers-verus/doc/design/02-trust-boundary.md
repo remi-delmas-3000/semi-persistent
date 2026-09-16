@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **51** (3 structs + 48 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
-| `literal-types` | **56** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **50** (3 structs + 47 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
+| `literal-types` | **55** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,8 +72,8 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current pending-indices checkpoint has 51 default-build markers:
-3 opaque structs and 48 functions. The permanent groups below remain the
+boundary. The current final checkpoint has 50 default-build markers:
+3 opaque structs and 47 functions. The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -219,6 +219,17 @@ token's frame captures it (`frame_captures`, the physical saved-value lookup).
 Two markers are removed with no new trusted item, for 51 default markers and 56
 with `literal-types`. The same checkpoint adds the checked production sequence
 witness `sequence_witness_checked` (Step 3).
+
+The final checkpoint removes the last execution-first `Vec` marker,
+`try_mark_adaptive`: the public "mark, then one adaptive pass" entry point had
+kept a trusted semantic postcondition (view unchanged, depth + 1, snapshot
+pushed) after every function it calls became checked. Its body is unchanged —
+the three guards, the checked `mark_with_options` and the checked
+`runtime_apply_adaptive` — and the contract now follows from theirs. One
+marker removed, no new trusted item: **50 default markers and 55 with
+`literal-types`**. Every remaining default marker is itemized in §4 or in the
+frame-architecture ledger's diagnostics rows; none carries a semantic
+postcondition about container contents.
 
 ## 1. Group A: `ContainerId` (trusted by design), 3 items
 
@@ -768,7 +779,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **51 default-build `external_body`
+The complete current source count is **50 default-build `external_body`
 markers plus 4 default-build axioms** (plus one generated `obeys_key_model`
 axiom per `define_id*!` id type in consumer crates); execution-first three-tier Vec markers not
 itemized here are enumerated in

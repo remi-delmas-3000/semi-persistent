@@ -215,6 +215,10 @@ pub(crate) fn dedupe_trail_range<T: Copy, I: IndexLike>(
     let ghost base = out@;
     let ghost lo = base.len() as int;
     seen.clear();
+    // Size both buffers for the frame up front: the set otherwise grows from
+    // empty through a chain of rehashes on every pass.
+    seen.reserve(end - start);
+    out.reserve(end - start);
     proof {
         assert(seen_prefix::<T, I>(pool@, start as int, start as int, seen@)) by {
             reveal(seen_prefix);

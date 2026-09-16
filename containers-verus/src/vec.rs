@@ -5912,6 +5912,7 @@ where
 
     /// Entries of closed frame `f` of the selected pair tier.
     #[verifier::spinoff_prover]
+    #[inline(always)]
     fn pair_frame_entries(&self, trail: bool, f: usize) -> (r: usize)
         requires self.wf(), f < self.pair_tier_count(trail),
         ensures r == self.pair_tier_header_end(trail, f as int) - self.pair_tier_start(trail, f as int),
@@ -6114,38 +6115,58 @@ where
         requires self.wf(),
     {
         hide(Vec::wf);
-        let trail_closed = self.trail_stack.len().saturating_sub(1);
-        let mut trail_entries = 0usize;
+        // Fold over the whole stack (the loop bound is the length, so the
+        // per-frame index carries no second bound) and take the open frame
+        // back out once; the closed sum is the same either way.
+        let trail_len = self.trail_stack.len();
+        let trail_closed = trail_len.saturating_sub(1);
+        let mut trail_total = 0usize;
         let mut f = 0usize;
-        while f < trail_closed
-            invariant f <= trail_closed, trail_closed <= self.trail_stack@.len(), self.wf(),
-            decreases trail_closed - f,
+        while f < trail_len
+            invariant f <= trail_len, trail_len == self.trail_stack@.len(), self.wf(),
+            decreases trail_len - f,
         {
             let n = self.pair_frame_entries(true, f);
-            trail_entries = match trail_entries.checked_add(n) {
+            trail_total = match trail_total.checked_add(n) {
                 Some(v) => v,
                 None => crate::guard::refuse("logical closed-history entry count overflow"),
             };
             f += 1;
         }
-        let hot_closed = if self.store.unique_capture() {
-            self.hot_stack.len().saturating_sub(1)
+        let trail_entries = if trail_len > 0 {
+            let open = self.pair_frame_entries(true, trail_len - 1);
+            match trail_total.checked_sub(open) {
+                Some(v) => v,
+                None => crate::guard::refuse("logical closed-history entry count underflow"),
+            }
         } else {
-            self.hot_stack.len()
+            0
         };
-        let mut hot_entries = 0usize;
+        let hot_len = self.hot_stack.len();
+        let hot_open = self.store.unique_capture() && hot_len > 0;
+        let hot_closed = if hot_open { hot_len - 1 } else { hot_len };
+        let mut hot_total = 0usize;
         let mut g = 0usize;
-        while g < hot_closed
-            invariant g <= hot_closed, hot_closed <= self.hot_stack@.len(), self.wf(),
-            decreases hot_closed - g,
+        while g < hot_len
+            invariant g <= hot_len, hot_len == self.hot_stack@.len(), self.wf(),
+            decreases hot_len - g,
         {
             let n = self.pair_frame_entries(false, g);
-            hot_entries = match hot_entries.checked_add(n) {
+            hot_total = match hot_total.checked_add(n) {
                 Some(v) => v,
                 None => crate::guard::refuse("logical closed-history entry count overflow"),
             };
             g += 1;
         }
+        let hot_entries = if hot_open {
+            let open = self.pair_frame_entries(false, hot_len - 1);
+            match hot_total.checked_sub(open) {
+                Some(v) => v,
+                None => crate::guard::refuse("logical closed-history entry count underflow"),
+            }
+        } else {
+            hot_total
+        };
         let trail = Self::closed_history_add(
             Self::closed_history_mul(trail_closed, core::mem::size_of::<crate::frame::TrailFrame<I>>()),
             Self::closed_history_mul(trail_entries, core::mem::size_of::<(T, I)>()),
@@ -13418,7 +13439,6 @@ where
     /// The old frame is sealed and its replacement opens with the existing
     /// immutable `DiffStore` ingress protocol before planning starts. No
     /// configured rollover is applied by this operation.
-    #[verifier::external_body]
     #[cold]
     #[inline(never)]
     pub fn try_mark_adaptive(
@@ -13445,6 +13465,11 @@ where
         }
         if !(self.depth_exec() < (u32::MAX as usize)) {
             return Err(crate::error::ContainerError::DepthLimit);
+        }
+        proof {
+            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
+            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
+            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
         }
         if !(self.store.raw_len() <= <I as crate::index_like::IndexLike>::max().as_usize()) {
             return Err(crate::error::ContainerError::CapacityExhausted);
