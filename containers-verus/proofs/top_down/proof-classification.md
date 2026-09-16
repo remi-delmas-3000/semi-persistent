@@ -343,8 +343,9 @@ Next mark obligations:
   borrowed active-range coverage required by the actual DiffStore method, all
   live flags cleared, and exact non-store framing. Full default verification:
   2413 verified, zero errors (`/tmp/sp-d21-mark-prepare-default.log`).
-- Replace the fallback's Hot-only explicit-Defer shortcut with a checked general
-  opening operation. A unique ingress tier does not imply absence of Cold history.
+- Completed: the invalid mixed-history Hot shortcut is removed; explicit Defer
+  dispatch now uses the checked general opening/reclamation path outside the
+  retained Hot specialization.
 - Completed: `open_mark_headers_checked` proves exact sealing/opening header
   sequences, snapshot/boundary append and frame partition. Shared canonical mark
   lemmas transfer the former live layer to the equal new snapshot; the existing
@@ -354,8 +355,8 @@ Next mark obligations:
   `lemma_mark_cold_repr` preserves the full Cold representation across snapshot
   append through a narrower per-frame transfer lemma. Existing transfer contracts
   remain checked wrappers.
-- Aggregate old pair-frame preservation and new empty-frame facts into complete
-  Hot/Trail invariants, then compose cleared capture flags, compatibility and
-  canonical reconstruction into general wf.
+- Completed: aggregate Hot/Trail preservation, cleared-flag ingress, compatibility,
+  Cold and canonical proofs establish full general wf in `open_mark_checked`.
+  `mark_defer_checked` composes shrinking and opening for explicit Defer marks.
 - Compose actual rollover and reclamation afterward. Mark remains incomplete
   until its policy dependencies and shared-model effects are discharged.

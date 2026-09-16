@@ -1388,3 +1388,53 @@ whitespace checks pass, and `containers/` is unchanged from `d191c4a`. This
 checkpoint contains only proof/specification changes, so runtime regression tests
 were not repeated; the preceding structural checkpoint recorded 277 passing
 feature tests. Benchmark parity remains unmeasured and required.
+
+## General mark opening and explicit Defer dispatch
+
+`mark_open_effect` is a local specification of the exact existing header/store
+transition, not stored ghost history. `lemma_mark_hot_repr` and
+`lemma_mark_trail_repr` aggregate old-frame preservation and new empty-frame
+reconstruction; `lemma_mark_ingress` establishes cleared-flag agreement and proof
+compatibility. `lemma_mark_preserves` combines these with the existing canonical
+and Cold preservation lemmas to establish full general wf.
+
+`open_mark_checked` executes actual DiffStore preparation and header opening and
+proves this effect plus the public snapshot/depth result. `mark_defer_checked`
+composes pre-mark shrinking, opening and checked post-mark reclamation. The actual
+dispatch now uses this path for every explicit Defer mark outside the retained
+Hot specialization, including older Cold history and chronological stores.
+
+The fallback uses the same checked opening/reclamation. Its invalid Hot-only
+shortcut has been removed. A first attempt to check the entire fallback exposed
+unsupported direct `shrink_to_fit` calls; these now use the existing
+`shrink_vec_capacity(..., 0, 1)` capacity primitive, as restore already does.
+Reclamation was separated to avoid broad invariant expansion after a resource
+failure, without raising limits. The resulting dispatch attempt identified the
+remaining semantic gap: `runtime_apply_configured_rollover` and
+`runtime_rollover_on_mark` have no preservation contracts. No assumed contracts
+were added to them. The configured/forced fallback retains its existing trust
+marker until concrete policy preservation is proved.
+
+Targeted mark checks: **25 verified, zero errors**
+(`/tmp/sp-d21-mark-defer.log`). Trust counts and axioms are unchanged. Full gate
+results follow below. Runtime changes preserve the pre-shrink/open/rollover/
+post-shrink order and add no traversal or allocation. Final benchmark parity
+remains required, including any effect from the dispatch/helper refactoring.
+
+General opening checkpoint evidence:
+
+- Full default and literal-types: **2426 verified, zero errors** each
+  (`/tmp/sp-d21-mark-general-default.log`, `/tmp/sp-d21-mark-general-literal.log`).
+- Feature regression suite: **277 passed, 10 ignored**
+  (`/tmp/sp-d21-mark-general-features.log`).
+- Release differential policy matrix with `PROPTEST_CASES=1024`: **4 passed**
+  (`/tmp/sp-d21-mark-general-policy.log`).
+- Conditional composition: **80 verified, zero errors**
+  (`/tmp/sp-d21-mark-general-composition.log`).
+- Formatting/whitespace pass; trust remains **74 default + 5 literal**;
+  `containers/` is unchanged from `d191c4a`.
+
+Step 1 remains open for configured/forced mark's actual policy dependencies and
+shared-model interface closure. Next discharge closed-prefix Trail-to-Hot and
+Hot-to-Cold migration and assembly, then their policy selectors/execution. Derived
+and parallel closure, final consumer/CI audits and benchmark parity remain due.

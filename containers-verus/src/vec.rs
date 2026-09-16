@@ -6929,6 +6929,59 @@ where
         }
     }
 
+    #[verifier::spinoff_prover]
+    fn mark_reclaim_checked(&mut self, shrink: ShrinkPolicy)
+        requires old(self).wf(),
+        ensures final(self).wf(), final(self).view() == old(self).view(),
+            final(self).snapshots@ == old(self).snapshots@,
+            final(self).trail_frames@ == old(self).trail_frames@,
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::cold_repr_ok);
+        hide(Vec::open_ingress_ok);
+        let ghost pre = *self;
+        if let ShrinkPolicy::IfOverallocated { factor, headroom } = shrink {
+            // Apply the same thresholded reclaim rule to the executable
+            // three-tier pools. This replaces the earlier unconditional
+            // shrink-to-fit shortcut while preserving mark-time reclamation.
+            log_shrink_capacity(&mut self.trail_value_pool, factor, headroom);
+            log_shrink_capacity(&mut self.hot_value_pool, factor, headroom);
+            if matches!(
+                self.tier_policy.cold_reclaim,
+                crate::tier_policy::ReclaimPolicy::ShrinkToFit
+            ) {
+                crate::parallel_store::shrink_vec_capacity(&mut self.cold_value_pool, 0, 1);
+                crate::parallel_store::shrink_vec_capacity(&mut self.cold_index_runs, 0, 1);
+            }
+        }
+        proof {
+            pre.lemma_wf_named_parts();
+            assert(pre.store.wf()) by { reveal(Vec::wf_for_snap); }
+            self.lemma_survivor_history_transfer(pre);
+            self.lemma_open_ingress_transfer(pre);
+            reveal(Vec::wf);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    fn mark_defer_checked(&mut self, shrink: ShrinkPolicy)
+        requires old(self).wf(), TRACK,
+            old(self).depth_spec() < u32::MAX,
+            old(self).view().len() < I::max_nat(),
+        ensures final(self).wf(), final(self).view() == old(self).view(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).snapshots@ == old(self).snapshots@.push(old(self).view()),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        self.maybe_shrink(shrink);
+        self.open_mark_checked();
+        self.mark_reclaim_checked(shrink);
+    }
+
     #[verifier::external_body]
     fn runtime_push_frame_fallback<const APPLY_CONFIGURED: bool>(&mut self, options: MarkOptions)
         requires
@@ -6945,20 +6998,10 @@ where
             final(self).snapshots_view()
                 == old(self).snapshots_view().push(old(self).view()),
     {
-        if !APPLY_CONFIGURED
-            && self.store.unique_capture()
-            && matches!(options.shrink, ShrinkPolicy::Never)
-            && matches!(options.rollover, crate::tier_policy::RolloverPolicy::Defer)
-        {
-            self.hot_defer_mark_checked();
-            return;
-        }
         // Preserve the established thresholded reclaim contract. Rollover is
         // independent and still occurs only after the replacement frame opens.
         self.maybe_shrink(options.shrink);
-        let saved_len = self.store.len();
-        self.prepare_mark_checked(saved_len);
-        self.open_mark_headers_checked(saved_len);
+        self.open_mark_checked();
         // Rollover is deliberately after the new frame opens. Migration
         // helpers therefore see only closed oldest prefixes and cannot change
         // depth, token coordinates, snapshots, or the writable frame.
@@ -6969,20 +7012,7 @@ where
         } else {
             self.runtime_rollover_on_mark(options.rollover);
         }
-        if let ShrinkPolicy::IfOverallocated { factor, headroom } = options.shrink {
-            // Apply the same thresholded reclaim rule to the executable
-            // three-tier pools. This replaces the earlier unconditional
-            // shrink-to-fit shortcut while preserving mark-time reclamation.
-            log_shrink_capacity(&mut self.trail_value_pool, factor, headroom);
-            log_shrink_capacity(&mut self.hot_value_pool, factor, headroom);
-            if matches!(
-                self.tier_policy.cold_reclaim,
-                crate::tier_policy::ReclaimPolicy::ShrinkToFit
-            ) {
-                self.cold_value_pool.shrink_to_fit();
-                self.cold_index_runs.shrink_to_fit();
-            }
-        }
+        self.mark_reclaim_checked(options.shrink);
     }
 
     fn runtime_push_frame<const APPLY_CONFIGURED: bool>(&mut self, options: MarkOptions)
@@ -7005,6 +7035,10 @@ where
         {
             proof { self.lemma_hot_defer_scope_implies_projection(); }
             self.hot_defer_mark_with_shrink_checked(options.shrink);
+        } else if !APPLY_CONFIGURED
+            && matches!(options.rollover, crate::tier_policy::RolloverPolicy::Defer)
+        {
+            self.mark_defer_checked(options.shrink);
         } else {
             self.runtime_push_frame_fallback::<APPLY_CONFIGURED>(options);
         }
@@ -7247,6 +7281,66 @@ where
         }
     }
 
+    closed spec fn mark_open_effect(&self, pre: Self) -> bool {
+        &&& self.store.wf()
+        &&& self.view() == pre.view()
+        &&& self.store.unique_capture_spec() == pre.store.unique_capture_spec()
+        &&& self.active_saved_len.as_nat() == self.view().len()
+        &&& forall|j: int| 0 <= j < self.store.captured().len() ==>
+            !(#[trigger] self.store.captured()[j])
+        &&& *self == (Self {
+                store: self.store, hot_stack: self.hot_stack, trail_stack: self.trail_stack,
+                snapshots: self.snapshots, trail_frames: self.trail_frames,
+                active_saved_len: self.active_saved_len, ..pre
+            })
+        &&& self.frame_partition_ok()
+        &&& self.snapshots@ == pre.snapshots@.push(pre.view())
+        &&& self.trail_frames@ == pre.trail_frames@.push(pre.full_trail@.len() as nat)
+        &&& pre.store.unique_capture_spec() ==> {
+                &&& self.trail_stack@ == pre.trail_stack@
+                &&& self.hot_stack@ == (if pre.hot_stack@.len() == 0 {
+                    pre.hot_stack@
+                } else {
+                    pre.hot_stack@.update(pre.hot_stack@.len() - 1,
+                        crate::frame::HotFrame {
+                            end: pre.hot_value_pool@.len() as usize,
+                            ..pre.hot_stack@[pre.hot_stack@.len() - 1]
+                        })
+                }).push(crate::frame::HotFrame {
+                    saved_len: self.active_saved_len, start: pre.hot_value_pool@.len() as usize,
+                    end: pre.hot_value_pool@.len() as usize,
+                })
+            }
+        &&& !pre.store.unique_capture_spec() ==> {
+                &&& self.hot_stack@ == pre.hot_stack@
+                &&& self.trail_stack@ == (if pre.trail_stack@.len() == 0 {
+                    pre.trail_stack@
+                } else {
+                    pre.trail_stack@.update(pre.trail_stack@.len() - 1,
+                        crate::frame::TrailFrame {
+                            end: pre.trail_value_pool@.len() as usize,
+                            ..pre.trail_stack@[pre.trail_stack@.len() - 1]
+                        })
+                }).push(crate::frame::TrailFrame {
+                    saved_len: self.active_saved_len, start: pre.trail_value_pool@.len() as usize,
+                    end: pre.trail_value_pool@.len() as usize,
+                })
+            }
+        &&& forall|trail: bool, f: int| 0 <= f < pre.pair_tier_count(trail) ==> {
+                &&& self.pair_tier_offset(trail) == pre.pair_tier_offset(trail)
+                &&& self.pair_tier_start(trail, f) == pre.pair_tier_start(trail, f)
+                &&& #[trigger] self.pair_tier_end(trail, f) == pre.pair_tier_end(trail, f)
+            }
+        &&& self.pair_tier_count(!pre.store.unique_capture_spec())
+                == pre.pair_tier_count(!pre.store.unique_capture_spec()) + 1
+        &&& self.pair_tier_start(!pre.store.unique_capture_spec(),
+                pre.pair_tier_count(!pre.store.unique_capture_spec()) as int)
+                == self.pair_tier_pool(!pre.store.unique_capture_spec()).len()
+        &&& self.pair_tier_end(!pre.store.unique_capture_spec(),
+                pre.pair_tier_count(!pre.store.unique_capture_spec()) as int)
+                == self.pair_tier_pool(!pre.store.unique_capture_spec()).len()
+    }
+
     /// Seal the selected writable header and append the new empty frame.
     /// Capture preparation has already happened; reconstruction is composed
     /// separately from this exact structural transition.
@@ -7338,6 +7432,148 @@ where
         }
         self.active_saved_len = saved_len;
         proof { reveal(Vec::frame_partition_ok); }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_mark_hot_repr(&self, pre: Self)
+        requires pre.wf(), self.mark_open_effect(pre),
+        ensures self.hot_repr_ok(),
+    {
+        hide(Vec::wf);
+        reveal(Vec::mark_open_effect);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::hot_repr_ok);
+        reveal(Vec::frame_partition_ok);
+        let hs = self.hot_stack@;
+        let pool = self.hot_value_pool@;
+        let cc = self.cold_stack@.len();
+        assert forall|i: int| 0 <= i < hs.len() implies {
+            &&& (#[trigger] hs[i]).start <= hs[i].end
+            &&& hs[i].end <= pool.len()
+            &&& hs[i].start as int <= self.phys_hot_end(i)
+            &&& self.phys_hot_end(i) <= pool.len() as int
+            &&& (i + 1 < hs.len() ==> {
+                &&& hs[i].end == hs[i + 1].start
+                &&& self.phys_hot_end(i) == hs[i + 1].start as int
+            })
+            &&& (i + 1 == hs.len() ==> self.phys_hot_end(i) == pool.len() as int)
+            &&& stratum_unique::<T, I>(pool, hs[i].start as int, self.phys_hot_end(i))
+            &&& self.phys_frame_inv_range_holds(i)
+            &&& cc + i < self.snapshots@.len()
+        } by {
+            if i < pre.hot_stack@.len() {
+                self.lemma_mark_pair_frame(pre, false, i);
+            } else {
+                assert(i == pre.hot_stack@.len());
+                assert(cc + i == pre.snapshots@.len()) by { reveal(Vec::open_ingress_ok); }
+                assert(self.layer_above_at(cc + i) == self.view());
+                assert(self.snapshots@[cc + i] == self.view());
+                assert(self.phys_hot_start(i) == self.phys_hot_end(i));
+                assert forall|j: int| 0 <= j < self.view().len() implies
+                    #[trigger] frame_cell_inv::<T, I>(self.view(), pool,
+                        self.phys_hot_start(i), self.phys_hot_end(i), self.view(), j) by {}
+            }
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_mark_trail_repr(&self, pre: Self)
+        requires pre.wf(), self.mark_open_effect(pre),
+        ensures self.trail_repr_ok(),
+    {
+        hide(Vec::wf);
+        reveal(Vec::mark_open_effect);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::trail_repr_ok);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        let ts = self.trail_stack@;
+        let pool = self.trail_value_pool@;
+        let offset = self.cold_stack@.len() + self.hot_stack@.len();
+        assert forall|i: int| 0 <= i < ts.len() implies {
+            &&& (#[trigger] ts[i]).start <= ts[i].end
+            &&& ts[i].end <= pool.len()
+            &&& ts[i].start as int <= self.phys_trail_end(i)
+            &&& self.phys_trail_end(i) <= pool.len() as int
+            &&& (i + 1 < ts.len() ==> {
+                &&& ts[i].end == ts[i + 1].start
+                &&& self.phys_trail_end(i) == ts[i + 1].start as int
+            })
+            &&& (i + 1 == ts.len() ==> self.phys_trail_end(i) == pool.len() as int)
+            &&& frame_inv_range::<T, I>(self.layer_above_at(offset + i), pool,
+                ts[i].start as int, self.phys_trail_end(i), self.snapshots@[offset + i],
+                self.snapshots@[offset + i].len())
+            &&& offset + i < self.snapshots@.len()
+        } by {
+            if i < pre.trail_stack@.len() {
+                self.lemma_mark_pair_frame(pre, true, i);
+            } else {
+                assert(i == pre.trail_stack@.len());
+                assert(offset + i == pre.snapshots@.len());
+                assert(self.layer_above_at(offset + i) == self.view());
+                assert(self.snapshots@[offset + i] == self.view());
+                assert(ts[i].start as int == self.phys_trail_end(i));
+                assert forall|j: int| 0 <= j < self.view().len() implies
+                    #[trigger] frame_cell_inv::<T, I>(self.view(), pool,
+                        ts[i].start as int, self.phys_trail_end(i), self.view(), j) by {}
+            }
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_mark_ingress(&self, pre: Self)
+        requires pre.wf(), self.mark_open_effect(pre),
+        ensures self.open_ingress_ok(), self.proof_compat_ok(),
+    {
+        hide(Vec::wf);
+        reveal(Vec::mark_open_effect);
+        pre.lemma_wf_named_parts();
+        self.store.lemma_wf_captured_len();
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::proof_compat_ok);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_mark_preserves(&self, pre: Self)
+        requires pre.wf(), TRACK, pre.depth_spec() < u32::MAX,
+            self.mark_open_effect(pre),
+        ensures self.wf(),
+    {
+        hide(Vec::wf);
+        self.lemma_mark_hot_repr(pre);
+        self.lemma_mark_trail_repr(pre);
+        self.lemma_mark_ingress(pre);
+        reveal(Vec::mark_open_effect);
+        pre.lemma_wf_named_parts();
+        self.lemma_mark_cold_repr(pre);
+        self.lemma_canonical_mark(pre);
+        reveal(Vec::wf);
+    }
+
+    #[verifier::spinoff_prover]
+    fn open_mark_checked(&mut self)
+        requires old(self).wf(), TRACK,
+            old(self).depth_spec() < u32::MAX,
+            old(self).view().len() < I::max_nat(),
+        ensures final(self).wf(), final(self).mark_open_effect(*old(self)),
+            final(self).view() == old(self).view(),
+            final(self).snapshots@ == old(self).snapshots@.push(old(self).view()),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+    {
+        hide(Vec::wf);
+        let ghost pre = *self;
+        proof { self.lemma_wf_named_parts(); }
+        let saved_len = self.store.len();
+        self.prepare_mark_checked(saved_len);
+        proof {
+            reveal(Vec::frame_partition_ok);
+            reveal(Vec::open_ingress_ok);
+        }
+        self.open_mark_headers_checked(saved_len);
+        proof {
+            reveal(Vec::mark_open_effect);
+            self.lemma_mark_preserves(pre);
+        }
     }
 
     #[verifier::spinoff_prover]
