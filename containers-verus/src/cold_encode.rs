@@ -175,6 +175,85 @@ pub(crate) fn append_sorted<T: Copy, I: IndexLike>(
     }
     ColdFrameHdr { saved_len, runs_start: rs, runs_len: runs.len() - rs }
 }
+
+/// Some run in `[lo, hi)` holds value-pool offset `o`.
+pub(crate) open spec fn offset_covered<I: IndexLike>(
+    runs: Seq<IndexRun<I>>, lo: int, hi: int, o: int,
+) -> bool {
+    exists|k: int| lo <= k < hi && (#[trigger] runs[k]).start <= o
+        && o < runs[k].start + runs[k].len
+}
+
+/// The appended runs tile `[runs[r].start, vs + done)`: every offset from run
+/// `r` on is inside some run at or after `r`.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_run_prefix_covers<T, I: IndexLike>(
+    runs: Seq<IndexRun<I>>, rs: int, vs: int, entries: Seq<(T, I)>, done: int, limit: nat, r: int,
+)
+    requires run_prefix(runs, rs, vs, entries, done, limit), rs <= r < runs.len(),
+    ensures forall|o: int| runs[r].start <= o < vs + done ==>
+        #[trigger] offset_covered(runs, r, runs.len() as int, o),
+    decreases runs.len() - r,
+{
+    lemma_run_prefix_layout(runs, rs, vs, entries, done, limit);
+    lemma_run_prefix_run_at(runs, rs, vs, entries, done, limit, r);
+    if r + 1 < runs.len() {
+        lemma_run_prefix_covers(runs, rs, vs, entries, done, limit, r + 1);
+    }
+    assert forall|o: int| runs[r].start <= o < vs + done implies
+        #[trigger] offset_covered(runs, r, runs.len() as int, o) by {
+        if o < runs[r].start + runs[r].len {
+            assert(runs[r].start <= o && o < runs[r].start + runs[r].len);
+        } else {
+            assert(r + 1 < runs.len());
+            assert(runs[r + 1].start <= o);
+            assert(offset_covered(runs, r + 1, runs.len() as int, o));
+            let k = choose|k: int| r + 1 <= k < runs.len() && (#[trigger] runs[k]).start <= o
+                && o < runs[k].start + runs[k].len;
+            assert(r <= k < runs.len() && runs[k].start <= o && o < runs[k].start + runs[k].len);
+        }
+    }
+}
+
+/// Input entry `p` is reached by a run covering its index, at the value-pool
+/// offset `vs + p`.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_run_prefix_entry<T, I: IndexLike>(
+    runs: Seq<IndexRun<I>>, rs: int, vs: int, entries: Seq<(T, I)>, done: int, limit: nat, p: int,
+)
+    requires run_prefix(runs, rs, vs, entries, done, limit), 0 <= p < done,
+    ensures exists|k: int| rs <= k < runs.len()
+        && (#[trigger] runs[k]).base.as_nat() <= entries[p].1.as_nat()
+        && entries[p].1.as_nat() < runs[k].base.as_nat() + runs[k].len
+        && runs[k].start + (entries[p].1.as_nat() - runs[k].base.as_nat()) == vs + p,
+{
+    lemma_run_prefix_layout(runs, rs, vs, entries, done, limit);
+    lemma_run_prefix_covers(runs, rs, vs, entries, done, limit, rs);
+    let o = vs + p;
+    assert(offset_covered(runs, rs, runs.len() as int, o));
+    let k = choose|k: int| rs <= k < runs.len() && (#[trigger] runs[k]).start <= o
+        && o < runs[k].start + runs[k].len;
+    lemma_run_prefix_run_at(runs, rs, vs, entries, done, limit, k);
+    let q = o - runs[k].start;
+    assert(entries[runs[k].start - vs + q].1.as_nat() == runs[k].base.as_nat() + q);
+    assert(runs[k].start - vs + q == p);
+}
+
+/// A run's cell `q` names the input entry at its offset, which is unique in a
+/// strictly sorted input, so the run's value is that entry's value.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_run_prefix_cell<T, I: IndexLike>(
+    runs: Seq<IndexRun<I>>, rs: int, vs: int, entries: Seq<(T, I)>, done: int, limit: nat,
+    r: int, q: int,
+)
+    requires run_prefix(runs, rs, vs, entries, done, limit), rs <= r < runs.len(),
+        0 <= q < runs[r].len,
+    ensures 0 <= runs[r].start - vs + q < done,
+        entries[runs[r].start - vs + q].1.as_nat() == runs[r].base.as_nat() + q,
+{
+    lemma_run_prefix_run_at(runs, rs, vs, entries, done, limit, r);
+}
+
 } // verus!
 
 #[cfg(test)]

@@ -1586,19 +1586,12 @@ proof fn lemma_sorted_distinct_strict<T, I: IndexLike>(r: Seq<(T, I)>, a: int, b
     }
 }
 
-/// Sort one finalized frame ascending by index. VERIFIED insertion sort by
-/// adjacent swaps: each swap is `remove(j).insert(j-1, ..)` at the spec level,
-/// so the multiset is preserved by the vstd lemmas; sortedness is the standard
-/// insertion invariant; uniqueness transfers through the permutation via the
-/// no-duplicates bridge (a duplicate index in the output would need either a
-/// duplicated pair, impossible when the input's pairs are distinct, or two
-/// distinct pairs sharing an index, which the input forbids). Discharged from
-/// the trust ledger 2026-09 (formerly `sort_unstable_by_key` behind a trusted
-/// contract); the `sort_frame_roundtrip` proptest stays as a belt. Insertion
-/// sort is O(n) on the ascending capture order the write path usually
-/// produces; if an adversarial frame profile ever measures the quadratic
-/// worst case, the upgrade path is a verified merge sort behind this same
-/// contract.
+/// Sort one finalized frame ascending by index: a copy of `d` sorted in place
+/// by std's unstable sort under the trusted std contract
+/// (`std_sort::sort_pairs_by_index`, trust ledger group B). The multiset is
+/// the contract's; uniqueness transfers through the permutation because a
+/// unique range permuted within itself stays unique. This replaces the former
+/// verified insertion sort, whose quadratic worst case was a runtime hazard.
 pub fn sort_frame_by_index<T: Copy, I: IndexLike>(d: &Vec<(T, I)>) -> (r: Vec<(T, I)>)
     ensures
         r@.len() == d@.len(),
@@ -1607,7 +1600,6 @@ pub fn sort_frame_by_index<T: Copy, I: IndexLike>(d: &Vec<(T, I)>) -> (r: Vec<(T
             ==> (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
         unique_idx(d@) ==> unique_idx(r@),
 {
-    broadcast use vstd::seq_lib::group_to_multiset_ensures;
     let mut r: Vec<(T, I)> = Vec::new();
     let n = d.len();
     let mut c: usize = 0;
@@ -1621,75 +1613,15 @@ pub fn sort_frame_by_index<T: Copy, I: IndexLike>(d: &Vec<(T, I)>) -> (r: Vec<(T
     proof {
         assert(r@ =~= d@);
     }
-    let mut i: usize = if n == 0 { 0 } else { 1 };
-    while i < n
-        invariant
-            n == r@.len(),
-            n == d@.len(),
-            i <= n,
-            n == 0 || 1 <= i,
-            r@.to_multiset() == d@.to_multiset(),
-            forall|a: int, b: int| 0 <= a < b < i
-                ==> (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
-        decreases n - i,
-    {
-        let mut j: usize = i;
-        while j > 0 && r[j - 1].1.as_usize() > r[j].1.as_usize()
-            invariant
-                n == r@.len(),
-                n == d@.len(),
-                0 <= j <= i < n,
-                r@.to_multiset() == d@.to_multiset(),
-                // Ordered among positions [0, i] excluding the hole j.
-                forall|a: int, b: int| 0 <= a < b <= i as int && a != j && b != j
-                    ==> (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
-                // The moving element is below everything after the hole.
-                forall|b: int| j < b <= i as int
-                    ==> r@[j as int].1.as_nat() <= (#[trigger] r@[b]).1.as_nat(),
-            decreases j,
-        {
-            let x = r[j - 1];
-            let y = r[j];
-            let ghost pre = r@;
-            r.set(j - 1, y);
-            r.set(j, x);
-            proof {
-                assert(r@ =~= pre.remove(j as int).insert(j as int - 1, pre[j as int]));
-                vstd::seq_lib::to_multiset_remove(pre, j as int);
-                vstd::seq_lib::to_multiset_insert(
-                    pre.remove(j as int), j as int - 1, pre[j as int]);
-                assert(pre.to_multiset().count(pre[j as int]) >= 1) by {
-                    assert(pre.contains(pre[j as int]));
-                    vstd::seq_lib::to_multiset_contains(pre, pre[j as int]);
-                }
-                assert(pre.to_multiset().remove(pre[j as int]).insert(pre[j as int])
-                    =~= pre.to_multiset()) by {
-                    broadcast use vstd::multiset::group_multiset_axioms;
-                }
-            }
-            j -= 1;
-        }
-        proof {
-            // Loop exit: hole at 0, or in-order with its predecessor; either
-            // way [0, i] is fully sorted.
-            assert forall|a: int, b: int| 0 <= a < b <= i as int implies
-                (#[trigger] r@[a]).1.as_nat() <= (#[trigger] r@[b]).1.as_nat() by {
-                if a == j as int {
-                    // covered by the hole clause
-                } else if b == j as int {
-                    assert(j > 0);
-                    assert(r@[j as int - 1].1.as_nat() <= r@[j as int].1.as_nat());
-                    if a < j as int - 1 {
-                        assert(r@[a].1.as_nat() <= r@[j as int - 1].1.as_nat());
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
+    let ghost copied = r@;
+    crate::std_sort::sort_pairs_by_index(&mut r, 0, n);
     proof {
+        assert(r@.subrange(0, n as int) =~= r@);
+        assert(copied.subrange(0, n as int) =~= copied);
         if unique_idx(d@) {
-            lemma_unique_idx_multiset(d@, r@);
+            assert(crate::vec::stratum_unique::<T, I>(copied, 0, n as int));
+            crate::vec::lemma_unique_range_permutation::<T, I>(copied, r@, 0, n as int);
+            assert(unique_idx(r@));
         }
     }
     r

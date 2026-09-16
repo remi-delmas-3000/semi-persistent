@@ -62,29 +62,35 @@ with a proved `accepts`. Trust: 68 default + 5 literal `external_body` markers
 (CI `EXPECTED_DEFAULT=68`); default axioms 1 -> 4 (`DenseId31`, `DenseId63`,
 `DenseUsize` key model) plus one generated per `define_id*!` id type.
 
-## Audit of remaining runtime waste (user asked for these to go)
+## Hot-to-Cold checkpoint (2026-09-16)
 
-1. `runtime_migrate_hot_count`: `to_vec()` copy per frame then sort — sort the
-   pool slice in place (Hot frames are unordered) and encode from the slice.
-2. `runtime_hot_shape` + `hot_plan: Vec<Vec<(T, I)>>` in the adaptive Hot stage:
-   copy+sort per inspected frame, allocation per accepted frame — same in-place
-   sort, count runs on the slice, encode directly.
-3. `hot_frame_run_count`: collects `Vec<usize>` and sorts just to count runs.
-4. `diff_compress::sort_frame_by_index`: copying insertion sort used by
-   `ColdStack::seal_runs` (2 sites) and 3 `diff_compress` sites.
-5. `runtime_closed_history_bytes` recomputed three times per adaptive pass.
-6. `diff_compress::dedupe_first` is quadratic but has no runtime callers.
+Closed Hot frames are sorted in place in the Hot pool (std unstable sort under
+the trusted `std_sort::sort_pairs_by_index` contract, the one new trusted item)
+and encoded into Cold straight from the slice; the copies, plan vectors and the
+run-count scratch are gone. Checked: `hot_frame_sort/encode_checked`,
+`hot_migration_finish_checked` (+ `lemma_hot_migration_wf`),
+`reclaim_after_hot_migration_checked`, `runtime_migrate_hot_count`,
+`runtime_migrate_hot`, `adaptive_hot_stage_checked`; `sort_frame_by_index` now
+uses the std contract too. Trust: 64 default + 5 literal (CI
+`EXPECTED_DEFAULT=64`).
+
+## Remaining runtime waste from the audit
+
+- `runtime_closed_history_bytes` is recomputed three times per adaptive pass.
+- `diff_compress::dedupe_first` is quadratic but has no runtime callers.
+- `sort_frame_by_index` still returns a sorted copy (its `(&Vec) -> Vec` API);
+  `ColdStack::seal_runs` callers could sort their own buffer in place.
 
 ## Next actions
 
-1. Hot-to-Cold: add the trusted in-place std sort contract
-   (`sort_pairs_by_index`), per-frame `hot_frame_sort/encode_checked` and
-   `hot_migration_finish_checked` over a `hot_migrating` state predicate,
-   checked `runtime_migrate_hot_count`, `runtime_migrate_hot` and the adaptive
-   Hot stage; then make `runtime_apply_adaptive` fully checked (byte counting
-   with `checked_*` + `guard::refuse`).
-2. Configured/forced/mark dispatch wrappers, then derived containers and the
-   parallel/group scope, final audits, and the benchmark protocol.
+1. Make `runtime_apply_adaptive` fully checked (`runtime_closed_history_bytes`
+   with `checked_*` + `guard::refuse`, `runtime_reclaim_adaptive_tier_capacities`
+   via `shrink_vec_capacity`), then `runtime_apply_tier_policy`,
+   `runtime_apply_configured_rollover`, `runtime_rollover_on_mark`,
+   `runtime_push_frame_fallback` and the public wrappers `apply_tier_policy`,
+   `flush_trail`, `compress_hot`, `apply_adaptive`.
+2. Derived containers and the parallel/group scope, final audits, and the
+   benchmark protocol.
 
 ## Existing proof architecture to reuse
 

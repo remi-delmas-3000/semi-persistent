@@ -428,3 +428,24 @@ header), `trail_frame_discard_checked` (truncate a rejected frame) and
 over these primitives; policy selection stays separate from the shared
 preservation lemma. The planned-payload executors were removed with the plan
 vectors they consumed.
+
+
+### Hot-to-Cold migration primitives
+
+Hot frames are unordered, so `hot_frame_sort_checked` sorts a closed frame in
+place in the Hot pool (std's unstable sort under the trusted
+`std_sort::sort_pairs_by_index` contract) and proves through
+`lemma_unique_range_permutation` that a unique range permuted within itself
+keeps its earliest-capture map. `hot_frame_encode_checked` appends the frame as
+Cold runs straight from the pool slice via `cold_encode::append_sorted`;
+`lemma_hot_frame_encoded_new` derives coverage-is-capture and cell values from
+the `run_prefix` partition (`cold_encode::lemma_run_prefix_entry`/`_cell`).
+`hot_migration_finish_checked` retires the encoded prefix in one bulk move and
+recovers `wf` through `lemma_hot_migration_wf` (partition, kept and new Cold
+frames, rebased Hot frames, unchanged Trail, ingress, canonical history). The
+state predicates `hot_migrating`, `hot_migrating_hot`, `hot_migrating_cold` and
+`hot_retired_from` are closed and read through accessor lemmas to keep every
+query below the default resource limit. `runtime_migrate_hot_count`,
+`runtime_migrate_hot` (including the `TierLimit::Adaptive` run-count loop over
+`count_index_runs`) and `adaptive_hot_stage_checked` are checked loops over
+these primitives; rejected frames stay in Hot, sorted.

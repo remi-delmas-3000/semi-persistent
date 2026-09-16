@@ -176,13 +176,6 @@ macro_rules! define_id_impl {
             }
         }
 
-        /// ASSUMED (trust ledger group D shape): a clean id's `==` and `Hash`
-        /// are structural over its masked `raw` field, which the type invariant
-        /// makes the identity mask, so equal ids are identical values and
-        /// hashing is deterministic — the std hash-table key model.
-        pub broadcast axiom fn axiom_key_model_id()
-            ensures #[trigger] ::vstd::std_specs::hash::obeys_key_model::<$Name>();
-
         impl $crate::index_like::IndexLike for $Name {
             proof fn lemma_obeys_key_model() {
                 broadcast use axiom_key_model_id;
@@ -231,6 +224,11 @@ macro_rules! define_id_impl {
             #[inline(always)]
             fn le(self, other: Self) -> bool { self.raw <= other.raw }
         }
+
+        /// ASSUMED (trust ledger group D shape): a clean id's `==`/`Hash` are structural
+        /// over its masked `raw`, the identity mask under the type invariant, so equal
+        /// ids are identical values and hashing is deterministic.
+        pub broadcast axiom fn axiom_key_model_id() ensures #[trigger] ::vstd::std_specs::hash::obeys_key_model::<$Name>();
 
         impl $crate::opt::DenseId for $Name {
             type Index = $Int;

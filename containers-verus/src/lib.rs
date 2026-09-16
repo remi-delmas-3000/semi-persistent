@@ -118,6 +118,7 @@ pub mod guard;
 pub mod hasher_spec;
 pub mod history;
 pub mod id_factory;
+mod std_sort;
 mod trail_select;
 // Shared mathematical model used by the conditional proof and concrete adapters.
 // This adds no fields or maintained history to any runtime container.

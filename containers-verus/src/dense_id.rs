@@ -124,13 +124,6 @@ impl core::default::Default for DenseId31 {
 // `tracked self` obligation via `use_type_invariant`.
 // ---------------------------------------------------------------------------
 
-/// ASSUMED (trust ledger group D shape): `DenseId31`'s `==` and `Hash` are the
-/// structural `raw` comparisons of its convenience impls, so equal ids are
-/// identical values and hashing is deterministic — the std hash-table key
-/// model that `HashSet<DenseId31, _>` membership relies on.
-pub broadcast axiom fn axiom_key_model_dense_id31()
-    ensures #[trigger] vstd::std_specs::hash::obeys_key_model::<DenseId31>();
-
 impl IndexLike for DenseId31 {
     proof fn lemma_obeys_key_model() {
         broadcast use axiom_key_model_dense_id31;
@@ -181,6 +174,10 @@ impl IndexLike for DenseId31 {
 
     fn le(self, other: Self) -> bool { self.raw <= other.raw }
 }
+
+/// ASSUMED (trust ledger group D shape): `DenseId31`'s `==`/`Hash` are structural
+/// over `raw`, so equal ids are identical values and hashing is deterministic.
+pub broadcast axiom fn axiom_key_model_dense_id31() ensures #[trigger] vstd::std_specs::hash::obeys_key_model::<DenseId31>();
 
 // ---------------------------------------------------------------------------
 // DenseId: the 31-bit id family (production's `define_id31!`). `Index = u32`:
@@ -383,13 +380,6 @@ impl core::default::Default for DenseId63 {
     }
 }
 
-/// ASSUMED (trust ledger group D shape): `DenseId63`'s `==` and `Hash` are the
-/// structural `raw` comparisons of its convenience impls, so equal ids are
-/// identical values and hashing is deterministic — the std hash-table key
-/// model that `HashSet<DenseId63, _>` membership relies on.
-pub broadcast axiom fn axiom_key_model_dense_id63()
-    ensures #[trigger] vstd::std_specs::hash::obeys_key_model::<DenseId63>();
-
 impl IndexLike for DenseId63 {
     proof fn lemma_obeys_key_model() {
         broadcast use axiom_key_model_dense_id63;
@@ -442,6 +432,10 @@ impl IndexLike for DenseId63 {
 
     fn le(self, other: Self) -> bool { self.raw <= other.raw }
 }
+
+/// ASSUMED (trust ledger group D shape): `DenseId63`'s `==`/`Hash` are structural
+/// over `raw`, so equal ids are identical values and hashing is deterministic.
+pub broadcast axiom fn axiom_key_model_dense_id63() ensures #[trigger] vstd::std_specs::hash::obeys_key_model::<DenseId63>();
 
 impl Tagged for DenseId63 {
     type Repr = u64;

@@ -1827,3 +1827,62 @@ consumers **1267 passed, 45 ignored** (`/tmp/sp-d21-dedupe-consumers.log`);
 canary **2 passed** (`/tmp/sp-d21-dedupe-canary.log`). Formatting, whitespace and
 the unchanged-legacy check passed; the CI trust constant moves to 68. Benchmark
 parity remains an open acceptance criterion and is measured at the end.
+
+
+## 2026-09-16 — Hot-to-Cold migration through in-place std sort
+
+**Algorithm change (user-directed).** Hot frames are unordered, so a closed
+Hot frame is now sorted in place inside the Hot pool by std's unstable sort and
+encoded into Cold straight from that slice. This removes the per-frame `to_vec`
+copy of `runtime_migrate_hot_count`, the adaptive stage's per-frame copy plus
+`Vec<Vec<(T, I)>>` plan (`runtime_hot_shape`, `runtime_execute_hot_plan`), and
+the `Vec<usize>` scratch of `hot_frame_run_count`; runs are counted on the
+sorted slice by `count_index_runs` with no allocation. A frame the adaptive
+policies reject stays in Hot, sorted, which is meaning-preserving.
+
+**Trusted std contract.** `std_sort::sort_pairs_by_index(v, start, end)` states
+std's documented `sort_unstable_by_key` behaviour for the index key: same
+length, nothing outside `[start, end)` touched, same multiset on the range,
+non-decreasing `as_nat` order (trust ledger group B, contract-carrying). It is
+the only new trusted item; `diff_compress::sort_frame_by_index` now uses it too,
+dropping the former verified insertion sort's quadratic worst case while keeping
+that function's contract.
+
+**Checked migration.** `lemma_unique_range_permutation` proves a unique range
+permuted within itself stays unique with the same earliest-capture map. The
+closed state predicates `hot_migrating` (= `hot_migrating_hot` for the pool and
+`hot_migrating_cold` for the appended Cold frames) and `hot_retired_from` are
+maintained by `hot_frame_sort_checked`, `hot_frame_encode_checked` and
+`hot_migration_finish_checked`, and read through accessor lemmas so every query
+stays below the default resource limit. The encode step derives the new Cold
+frame's coverage-is-capture and cell values from `cold_encode::run_prefix`
+(`lemma_run_prefix_covers`/`_entry`/`_cell`), and `lemma_cold_append_keeps_*`
+transfer kept frames. `lemma_hot_migration_wf` recovers the full invariant after
+the bulk retirement: partition, kept and new Cold reconstruction
+(`lemma_captured_cell_value` reads the frame contract through the map), rebased
+Hot frames (`lemma_range_saved_value_retire_prefix`), unchanged Trail
+representation, ingress (the last Hot frame's capture range rebases), canonical
+history. `reclaim_after_hot_migration_checked` keeps the `ShrinkToFit`
+reclamation of the three pools. `runtime_migrate_hot_count`, `runtime_migrate_hot`
+(with the `TierLimit::Adaptive` run-count loop) and `adaptive_hot_stage_checked`
+(the byte-budget Hot stage, called by the still-external `runtime_apply_adaptive`)
+are checked loops over the primitives.
+
+Trust: **64 default + 5 literal** markers (five removed, one trusted std sort
+contract added); default axioms unchanged at 4. Targeted evidence for every new
+lemma and primitive is in `/tmp/sp-d21-hot*.log`; the final whole-module run is
+`/tmp/sp-d21-vec-full3.log`. Gate evidence follows.
+
+Hot-to-Cold checkpoint evidence (fresh, touched source before each Verus run):
+full default **2561 verified, zero errors** (`/tmp/sp-d21-hotcold-default.log`);
+literal-types **2561 verified, zero errors** (`/tmp/sp-d21-hotcold-literal.log`);
+conditional composition **80 verified, zero errors**
+(`/tmp/sp-d21-hotcold-composition.log`); `au-verus` **29 verified, zero errors**
+(`/tmp/sp-d21-hotcold-au.log`); feature suite **277 passed, 10 ignored**
+(`/tmp/sp-d21-hotcold-tests.log`); release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-hotcold-policy.log`);
+e-graph/SAT consumers **1267 passed, 45 ignored**
+(`/tmp/sp-d21-hotcold-consumers.log`); canary **2 passed**
+(`/tmp/sp-d21-hotcold-canary.log`). Formatting, whitespace, the key-model axiom
+discipline grep and the unchanged-legacy check passed; the CI trust constant
+moves to 64. Benchmark parity remains an open acceptance criterion.

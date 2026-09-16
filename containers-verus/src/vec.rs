@@ -1079,6 +1079,25 @@ pub(crate) proof fn lemma_cold_run_order<I: IndexLike>(
     }
 }
 
+/// Adjacent-disjoint runs cover each cell at most once.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_runs_cover_unique<I: IndexLike>(
+    runs: Seq<crate::frame::IndexRun<I>>, lo: int, hi: int, r1: int, r2: int, j: nat,
+)
+    requires 0 <= lo, hi <= runs.len(), lo <= r1 < hi, lo <= r2 < hi,
+        forall|r: int| lo <= r && r + 1 < hi ==>
+            (#[trigger] runs[r]).base.as_nat() + runs[r].len <= runs[r + 1].base.as_nat(),
+        runs[r1].base.as_nat() <= j < runs[r1].base.as_nat() + runs[r1].len,
+        runs[r2].base.as_nat() <= j < runs[r2].base.as_nat() + runs[r2].len,
+    ensures r1 == r2,
+{
+    if r1 < r2 {
+        lemma_cold_run_order::<I>(runs, lo, hi, r1, r2);
+    } else if r2 < r1 {
+        lemma_cold_run_order::<I>(runs, lo, hi, r2, r1);
+    }
+}
+
 #[verifier::spinoff_prover]
 pub(crate) proof fn lemma_cold_range_extend<T, I: IndexLike>(
     runs: Seq<crate::frame::IndexRun<I>>, values: Seq<T>, lo: int, r: int, j: nat,
@@ -1208,6 +1227,95 @@ pub open(crate) spec fn range_saved_value<T, I: IndexLike>(
         Some(diffs[k].0)
     } else {
         None
+    }
+}
+
+/// In a unique range the earliest-capture lookup is membership: any hitter is
+/// the first hitter, and absence means no hitter.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_unique_range_saved_value<T, I: IndexLike>(
+    a: Seq<(T, I)>, lo: int, hi: int, j: nat,
+)
+    requires 0 <= lo <= hi <= a.len(), stratum_unique::<T, I>(a, lo, hi),
+    ensures
+        forall|k: int| lo <= k < hi && (#[trigger] a[k]).1.as_nat() == j ==>
+            range_saved_value::<T, I>(a, lo, hi, j) == Some(a[k].0),
+        !captured_in_range::<T, I>(a, lo, hi, j) ==> range_saved_value::<T, I>(a, lo, hi, j) is None,
+{
+    assert forall|k: int| lo <= k < hi && (#[trigger] a[k]).1.as_nat() == j implies
+        range_saved_value::<T, I>(a, lo, hi, j) == Some(a[k].0) by {
+        assert(captured_in_range::<T, I>(a, lo, hi, j));
+        lemma_lowest_hitter::<T, I>(a, lo, hi, j);
+        let p = choose|p: int| lo <= p < hi && (#[trigger] a[p]).1.as_nat() == j
+            && first_hitter::<T, I>(a, lo, p, j);
+        assert(p == k);
+    }
+}
+
+/// A unique range permuted within itself stays unique and keeps its map.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_unique_range_permutation<T, I: IndexLike>(
+    a: Seq<(T, I)>, b: Seq<(T, I)>, lo: int, hi: int,
+)
+    requires 0 <= lo <= hi <= a.len(), hi <= b.len(),
+        stratum_unique::<T, I>(a, lo, hi),
+        a.subrange(lo, hi).to_multiset() == b.subrange(lo, hi).to_multiset(),
+    ensures stratum_unique::<T, I>(b, lo, hi),
+        forall|j: nat| #[trigger] range_saved_value::<T, I>(a, lo, hi, j)
+            == range_saved_value::<T, I>(b, lo, hi, j),
+{
+    broadcast use vstd::seq_lib::group_to_multiset_ensures;
+    let sa = a.subrange(lo, hi);
+    let sb = b.subrange(lo, hi);
+    assert forall|x: (T, I)| #[trigger] sa.contains(x) <==> sb.contains(x) by {
+        vstd::seq_lib::to_multiset_contains(sa, x);
+        vstd::seq_lib::to_multiset_contains(sb, x);
+    }
+    assert(sa.no_duplicates()) by {
+        assert forall|i: int, k: int| 0 <= i < sa.len() && 0 <= k < sa.len() && i != k
+            implies sa[i] != sa[k] by {
+            assert(sa[i] == a[lo + i]);
+            assert(sa[k] == a[lo + k]);
+        }
+    }
+    sa.lemma_multiset_has_no_duplicates();
+    sb.lemma_multiset_has_no_duplicates_conv();
+    assert forall|p: int, q: int| lo <= p < hi && lo <= q < hi && p != q implies
+        (#[trigger] b[p]).1.as_nat() != (#[trigger] b[q]).1.as_nat() by {
+        if b[p].1.as_nat() == b[q].1.as_nat() {
+            let x = b[p];
+            let y = b[q];
+            assert(sb[p - lo] == x);
+            assert(sb[q - lo] == y);
+            assert(x != y);
+            assert(sa.contains(x));
+            assert(sa.contains(y));
+            let p2 = choose|i: int| 0 <= i < sa.len() && sa[i] == x;
+            let q2 = choose|i: int| 0 <= i < sa.len() && sa[i] == y;
+            assert(a[lo + p2] == x);
+            assert(a[lo + q2] == y);
+            assert(p2 != q2);
+        }
+    }
+    assert forall|j: nat| #[trigger] range_saved_value::<T, I>(a, lo, hi, j)
+        == range_saved_value::<T, I>(b, lo, hi, j) by {
+        lemma_unique_range_saved_value::<T, I>(a, lo, hi, j);
+        lemma_unique_range_saved_value::<T, I>(b, lo, hi, j);
+        if captured_in_range::<T, I>(a, lo, hi, j) {
+            let k = choose|k: int| lo <= k < hi && 0 <= k < a.len() && (#[trigger] a[k]).1.as_nat() == j;
+            assert(sa[k - lo] == a[k]);
+            assert(sa.contains(a[k]));
+            assert(sb.contains(a[k]));
+            let m = choose|i: int| 0 <= i < sb.len() && sb[i] == a[k];
+            assert(b[lo + m] == a[k]);
+        } else if captured_in_range::<T, I>(b, lo, hi, j) {
+            let k = choose|k: int| lo <= k < hi && 0 <= k < b.len() && (#[trigger] b[k]).1.as_nat() == j;
+            assert(sb[k - lo] == b[k]);
+            assert(sb.contains(b[k]));
+            assert(sa.contains(b[k]));
+            let m = choose|i: int| 0 <= i < sa.len() && sa[i] == b[k];
+            assert(a[lo + m] == b[k]);
+        }
     }
 }
 
@@ -6006,27 +6114,6 @@ where
     }
 
     #[verifier::external_body]
-    fn runtime_hot_shape(
-        &self,
-        frame: crate::frame::HotFrame<I>,
-        sorted_entries: &mut std::vec::Vec<(T, I)>,
-    ) -> (usize, usize) {
-        sorted_entries.clear();
-        sorted_entries.extend_from_slice(&self.hot_value_pool[frame.start..frame.end]);
-        sorted_entries.sort_unstable_by_key(|(_, index)| index.as_usize());
-        let mut runs = 0usize;
-        let mut previous: Option<usize> = None;
-        for &(_, index) in sorted_entries.iter() {
-            let index = index.as_usize();
-            if previous.map(|p| p + 1 != index).unwrap_or(true) {
-                runs += 1;
-            }
-            previous = Some(index);
-        }
-        (frame.end - frame.start, runs)
-    }
-
-    #[verifier::external_body]
     fn runtime_closed_history_bytes(&self) -> usize {
         fn bytes(count: usize, width: usize) -> usize {
             count
@@ -7187,24 +7274,6 @@ where
         self.runtime_migrate_trail_count(count);
     }
 
-    #[verifier::external_body]
-    fn hot_frame_run_count(&self, frame: crate::frame::HotFrame<I>) -> usize {
-        let mut indices: std::vec::Vec<usize> = self.hot_value_pool[frame.start..frame.end]
-            .iter()
-            .map(|(_, index)| index.as_usize())
-            .collect();
-        indices.sort_unstable();
-        let mut runs = 0usize;
-        let mut previous: Option<usize> = None;
-        for index in indices {
-            if previous.map(|p| p + 1 != index).unwrap_or(true) {
-                runs += 1;
-            }
-            previous = Some(index);
-        }
-        runs
-    }
-
     #[verifier::spinoff_prover]
     proof fn lemma_cold_layout_basics(&self)
         requires self.repr_ok(),
@@ -7396,94 +7465,1868 @@ where
         }
     }
 
-    /// Execute an exact oldest closed Hot prefix as direct-restorable runs.
-    #[verifier::external_body]
-    #[cold]
-    #[inline(never)]
-    fn runtime_migrate_hot_count(&mut self, count: usize) {
+    /// `cold_payload_ok` depends on the Cold headers and runs only.
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_payload_ok_transfer(&self, other: Self)
+        requires other.cold_payload_ok(), self.cold_stack@ == other.cold_stack@,
+            self.cold_index_runs@ == other.cold_index_runs@,
+        ensures self.cold_payload_ok(),
+    {
+        reveal(Vec::cold_payload_ok);
+    }
+
+    /// Closed Hot frames: all but the writable top under the unique-capture
+    /// discipline; every Hot frame under the chronological discipline.
+    pub open(crate) spec fn hot_closed_count(&self) -> nat {
+        if self.store.unique_capture_spec() {
+            if self.hot_stack@.len() > 0 { (self.hot_stack@.len() - 1) as nat } else { 0 }
+        } else { self.hot_stack@.len() }
+    }
+
+    /// A closed Hot frame's sealed header end is its physical end.
+    #[verifier::spinoff_prover]
+    proof fn lemma_closed_hot_frame_end(&self, f: int)
+        requires self.wf(), 0 <= f < self.hot_closed_count(),
+        ensures self.hot_stack@[f].start <= self.hot_stack@[f].end <= self.hot_value_pool@.len(),
+            self.hot_stack@[f].end as int == self.phys_hot_end(f),
+            self.phys_hot_start(f) == self.hot_stack@[f].start as int,
+            f + 1 < self.hot_stack@.len() ==> self.hot_stack@[f].end == self.hot_stack@[f + 1].start,
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        self.lemma_pair_tier_frame_layout(false, f);
+        if f + 1 == self.hot_stack@.len() {
+            reveal(Vec::open_ingress_ok);
+        }
+    }
+
+    /// Hot-side facts of a migration in progress: the pool keeps its length,
+    /// cells from frame `count + 1` on are untouched, and every frame up to
+    /// `count` is still unique with its original saved map (it may be permuted).
+    closed spec fn hot_migrating_hot(&self, pre: Self, count: nat) -> bool {
+        &&& self.hot_value_pool@.len() == pre.hot_value_pool@.len()
+        &&& forall|q: int| pre.hot_retirement_cut(count + 1) <= q < pre.hot_value_pool@.len() ==>
+            #[trigger] self.hot_value_pool@[q] == pre.hot_value_pool@[q]
+        &&& forall|f: int| 0 <= f <= count && f < pre.hot_stack@.len() ==> {
+            &&& stratum_unique::<T, I>(self.hot_value_pool@, pre.phys_hot_start(f), pre.phys_hot_end(f))
+            &&& forall|j: nat| #[trigger] range_saved_value::<T, I>(self.hot_value_pool@,
+                    pre.phys_hot_start(f), pre.phys_hot_end(f), j)
+                == range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(f), pre.phys_hot_end(f), j)
+        }
+    }
+
+    /// Cold-side facts of a migration in progress: the original Cold storage
+    /// is a prefix, the tier stays well laid out, and the `count` new frames
+    /// carry exactly the saved maps of Hot frames `[0, count)` of `pre`.
+    closed spec fn hot_migrating_cold(&self, pre: Self, count: nat) -> bool {
+        let cc = pre.cold_stack@.len() as int;
+        &&& self.cold_stack@.len() == cc + count
+        &&& self.cold_stack@.subrange(0, cc) == pre.cold_stack@
+        &&& self.cold_index_runs@.subrange(0, pre.cold_index_runs@.len() as int) == pre.cold_index_runs@
+        &&& self.cold_value_pool@.subrange(0, pre.cold_value_pool@.len() as int) == pre.cold_value_pool@
+        &&& pre.cold_index_runs@.len() <= self.cold_index_runs@.len()
+        &&& pre.cold_value_pool@.len() <= self.cold_value_pool@.len()
+        &&& self.repr_ok()
+        &&& self.cold_payload_ok()
+        &&& self.cold_runs_disjoint()
+        &&& forall|q: int| 0 <= q < count ==> {
+            &&& (#[trigger] self.cold_stack@[cc + q]).saved_len == pre.hot_stack@[q].saved_len
+            &&& forall|j: nat| #[trigger] self.cold_covered(cc + q, j)
+                <==> range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(q), pre.phys_hot_end(q), j) is Some
+            &&& forall|j: nat| self.cold_covered(cc + q, j) ==>
+                Some(#[trigger] self.cold_value(cc + q, j))
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(q), pre.phys_hot_end(q), j)
+        }
+    }
+
+    /// Physical state while an oldest closed Hot prefix is being encoded into
+    /// Cold: frames `[0, count)` of `pre` were sorted in place and encoded as
+    /// the newest `count` Cold frames; frame `count` may have been sorted in
+    /// place; every other cell is untouched.
+    closed spec fn hot_migrating(&self, pre: Self, count: nat) -> bool {
+        &&& pre.wf()
+        &&& count <= pre.hot_closed_count()
+        &&& *self == (Self { cold_stack: self.cold_stack, cold_index_runs: self.cold_index_runs,
+            cold_value_pool: self.cold_value_pool, hot_value_pool: self.hot_value_pool, ..pre })
+        &&& self.hot_migrating_hot(pre, count)
+        &&& self.hot_migrating_cold(pre, count)
+    }
+
+    /// The Cold-side facts survive any change confined to Hot fields.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_cold_transfer(&self, other: Self, pre: Self, count: nat)
+        requires other.hot_migrating_cold(pre, count),
+            self.cold_stack@ == other.cold_stack@,
+            self.cold_index_runs@ == other.cold_index_runs@,
+            self.cold_value_pool@ == other.cold_value_pool@,
+        ensures self.hot_migrating_cold(pre, count),
+    {
+        reveal(Vec::hot_migrating_cold);
+        self.lemma_cold_payload_ok_transfer(other);
+        let cc = pre.cold_stack@.len() as int;
+        assert forall|q: int| 0 <= q < count implies {
+            &&& (#[trigger] self.cold_stack@[cc + q]).saved_len == pre.hot_stack@[q].saved_len
+            &&& forall|j: nat| #[trigger] self.cold_covered(cc + q, j)
+                <==> range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(q), pre.phys_hot_end(q), j) is Some
+            &&& forall|j: nat| self.cold_covered(cc + q, j) ==>
+                Some(#[trigger] self.cold_value(cc + q, j))
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(q), pre.phys_hot_end(q), j)
+        } by {
+            assert(self.cold_stack@[cc + q] == other.cold_stack@[cc + q]);
+            assert forall|j: nat| #[trigger] self.cold_covered(cc + q, j)
+                <==> range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(q), pre.phys_hot_end(q), j) is Some by {
+                assert(self.cold_covered(cc + q, j) == other.cold_covered(cc + q, j));
+            }
+            assert forall|j: nat| self.cold_covered(cc + q, j) implies
+                Some(#[trigger] self.cold_value(cc + q, j))
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(q), pre.phys_hot_end(q), j) by {
+                assert(other.cold_covered(cc + q, j));
+                assert(self.cold_value(cc + q, j) == other.cold_value(cc + q, j));
+            }
+        }
+    }
+
+    /// The Hot-side facts survive any change confined to Cold fields.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_hot_transfer(&self, other: Self, pre: Self, count: nat)
+        requires other.hot_migrating_hot(pre, count), self.hot_value_pool@ == other.hot_value_pool@,
+        ensures self.hot_migrating_hot(pre, count),
+    {
+        reveal(Vec::hot_migrating_hot);
+    }
+
+    /// Frame `f`'s cells are in non-decreasing index order.
+    pub open(crate) spec fn hot_frame_sorted(&self, f: int) -> bool {
+        forall|a: int, b: int| self.phys_hot_start(f) <= a < b < self.phys_hot_end(f) ==>
+            (#[trigger] self.hot_value_pool@[a]).1.as_nat()
+                <= (#[trigger] self.hot_value_pool@[b]).1.as_nat()
+    }
+
+    /// An unchanged well-formed container is the empty Hot migration state.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_start(&self, pre: Self)
+        requires *self == pre, pre.wf(),
+        ensures self.hot_migrating(pre, 0),
+    {
+        hide(Vec::wf);
+        reveal(Vec::hot_migrating);
+        reveal(Vec::hot_migrating_hot);
+        reveal(Vec::hot_migrating_cold);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::hot_repr_ok);
+        assert(self.cold_stack@.subrange(0, pre.cold_stack@.len() as int) =~= pre.cold_stack@);
+        assert(self.cold_index_runs@.subrange(0, pre.cold_index_runs@.len() as int) =~= pre.cold_index_runs@);
+        assert(self.cold_value_pool@.subrange(0, pre.cold_value_pool@.len() as int) =~= pre.cold_value_pool@);
+    }
+
+    /// Hot-side facts after permuting closed frame `f` within its own range.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_sorted_hot_part(&self, mid: Self, pre: Self, f: int, before: Seq<(T, I)>)
+        requires pre.wf(), 0 <= f < pre.hot_closed_count(), mid.hot_migrating_hot(pre, f as nat),
+            mid.hot_stack@ == pre.hot_stack@, self.hot_stack@ == pre.hot_stack@,
+            before == mid.hot_value_pool@,
+            self.hot_value_pool@.len() == before.len(),
+            forall|q: int| 0 <= q < before.len()
+                && !(pre.hot_stack@[f].start <= q < pre.hot_stack@[f].end) ==>
+                #[trigger] self.hot_value_pool@[q] == before[q],
+            self.hot_value_pool@.subrange(pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int).to_multiset()
+                == before.subrange(pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int).to_multiset(),
+            forall|a: int, b: int| pre.hot_stack@[f].start <= a < b < pre.hot_stack@[f].end ==>
+                (#[trigger] self.hot_value_pool@[a]).1.as_nat() <= (#[trigger] self.hot_value_pool@[b]).1.as_nat(),
+        ensures self.hot_migrating_hot(pre, f as nat), self.hot_frame_sorted(f),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating_hot);
+        hide(stratum_unique);
+        hide(range_saved_value);
+        pre.lemma_closed_hot_frame_end(f);
+        mid.lemma_hot_migrating_hot_unchanged(pre, f as nat);
+        let start = pre.hot_stack@[f].start as int;
+        let end = pre.hot_stack@[f].end as int;
+        mid.lemma_hot_migrating_hot_frame_map(pre, f as nat, f);
+        assert(pre.phys_hot_start(f) == start);
+        assert(pre.phys_hot_end(f) == end);
+        lemma_unique_range_permutation::<T, I>(before, self.hot_value_pool@, start, end);
+        assert forall|g: int| 0 <= g <= f && g < pre.hot_stack@.len() implies {
+            &&& stratum_unique::<T, I>(self.hot_value_pool@, pre.phys_hot_start(g), pre.phys_hot_end(g))
+            &&& forall|j: nat| #[trigger] range_saved_value::<T, I>(self.hot_value_pool@,
+                    pre.phys_hot_start(g), pre.phys_hot_end(g), j)
+                == range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(g), pre.phys_hot_end(g), j)
+        } by {
+            if g < f {
+                mid.lemma_hot_migrating_hot_frame_map(pre, f as nat, g);
+                pre.lemma_pair_tier_frame_layout(false, g);
+                pre.lemma_pair_tier_start_order(false, g + 1, f);
+                assert forall|q: int| pre.phys_hot_start(g) <= q < pre.phys_hot_end(g) implies
+                    #[trigger] self.hot_value_pool@[q] == before[q] by {}
+                assert(stratum_unique::<T, I>(self.hot_value_pool@, pre.phys_hot_start(g), pre.phys_hot_end(g))) by {
+                    reveal(stratum_unique);
+                }
+                assert forall|j: nat| #[trigger] range_saved_value::<T, I>(self.hot_value_pool@,
+                        pre.phys_hot_start(g), pre.phys_hot_end(g), j)
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(g), pre.phys_hot_end(g), j) by {
+                    lemma_range_saved_value_local::<T, I>(before, self.hot_value_pool@,
+                        pre.phys_hot_start(g), pre.phys_hot_end(g), j);
+                }
+            } else {
+                assert(stratum_unique::<T, I>(self.hot_value_pool@, start, end));
+                assert forall|j: nat| #[trigger] range_saved_value::<T, I>(self.hot_value_pool@,
+                        pre.phys_hot_start(g), pre.phys_hot_end(g), j)
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(g), pre.phys_hot_end(g), j) by {
+                    assert(range_saved_value::<T, I>(before, start, end, j)
+                        == range_saved_value::<T, I>(self.hot_value_pool@, start, end, j));
+                    assert(range_saved_value::<T, I>(before, start, end, j)
+                        == range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j));
+                }
+            }
+        }
+        assert forall|q: int| pre.hot_retirement_cut(f as nat + 1) <= q < pre.hot_value_pool@.len() implies
+            #[trigger] self.hot_value_pool@[q] == pre.hot_value_pool@[q] by {
+            assert(self.hot_value_pool@[q] == before[q]);
+        }
+        assert(self.hot_migrating_hot(pre, f as nat)) by { reveal(Vec::hot_migrating_hot); }
+        assert(self.phys_hot_start(f) == start);
+        assert(self.phys_hot_end(f) == end);
+        assert(self.hot_frame_sorted(f));
+    }
+
+    /// A closed frame permuted within its own range keeps the migration state.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_sorted_state(&self, mid: Self, pre: Self, f: int, before: Seq<(T, I)>)
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            before == mid.hot_value_pool@,
+            *self == (Self { hot_value_pool: self.hot_value_pool, ..mid }),
+            self.hot_value_pool@.len() == before.len(),
+            forall|q: int| 0 <= q < before.len()
+                && !(pre.hot_stack@[f].start <= q < pre.hot_stack@[f].end) ==>
+                #[trigger] self.hot_value_pool@[q] == before[q],
+            self.hot_value_pool@.subrange(pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int).to_multiset()
+                == before.subrange(pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int).to_multiset(),
+            forall|a: int, b: int| pre.hot_stack@[f].start <= a < b < pre.hot_stack@[f].end ==>
+                (#[trigger] self.hot_value_pool@[a]).1.as_nat() <= (#[trigger] self.hot_value_pool@[b]).1.as_nat(),
+        ensures self.hot_migrating(pre, f as nat), self.hot_frame_sorted(f),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(stratum_unique);
+        hide(range_saved_value);
+        mid.lemma_hot_migrating_frame(pre, f as nat);
+        self.lemma_hot_migrating_cold_transfer(mid, pre, f as nat);
+        self.lemma_hot_sorted_hot_part(mid, pre, f, before);
+        reveal(Vec::hot_migrating);
+    }
+
+    /// Sort closed Hot frame `f` in place. A unique frame permuted within its
+    /// own range keeps its saved map, so this is meaning-preserving.
+    #[verifier::spinoff_prover]
+    fn hot_frame_sort_checked(&mut self, f: usize, Ghost(pre): Ghost<Self>)
+        requires old(self).hot_migrating(pre, f as nat), f < pre.hot_closed_count(),
+        ensures final(self).hot_migrating(pre, f as nat), final(self).hot_frame_sorted(f as int),
+            *final(self) == (Self { hot_value_pool: final(self).hot_value_pool, ..*old(self) }),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(stratum_unique);
+        hide(range_saved_value);
+        proof {
+            self.lemma_hot_migrating_frame(pre, f as nat);
+            pre.lemma_closed_hot_frame_end(f as int);
+        }
+        let start = self.hot_stack[f].start;
+        let end = self.hot_stack[f].end;
+        let ghost before = self.hot_value_pool@;
+        let ghost mid = *self;
+        crate::std_sort::sort_pairs_by_index(&mut self.hot_value_pool, start, end);
+        proof { self.lemma_hot_frame_sorted_state(mid, pre, f as int, before); }
+    }
+
+    /// Count maximal consecutive index runs of a sorted range (no allocation).
+    #[verifier::spinoff_prover]
+    fn count_index_runs(pool: &std::vec::Vec<(T, I)>, start: usize, end: usize) -> (r: usize)
+        requires start <= end <= pool@.len(),
+            forall|q: int| start <= q < end ==> (#[trigger] pool@[q]).1.as_nat() < usize::MAX,
+        ensures r <= end - start,
+    {
+        let mut runs = 0usize;
+        let mut previous: Option<usize> = None;
+        let mut q = start;
+        while q < end
+            invariant start <= q <= end <= pool@.len(), runs <= q - start,
+                forall|k: int| start <= k < end ==> (#[trigger] pool@[k]).1.as_nat() < usize::MAX,
+                previous matches Some(p) ==> p < usize::MAX,
+            decreases end - q,
+        {
+            let index = pool[q].1.as_usize();
+            let fresh = match previous {
+                Some(p) => p + 1 != index,
+                None => true,
+            };
+            if fresh {
+                runs += 1;
+            }
+            previous = Some(index);
+            q += 1;
+        }
+        runs
+    }
+
+    /// Retirement cuts are monotone in the number of retired frames.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_cut_order(&self, a: nat, b: nat)
+        requires self.wf(), a <= b,
+        ensures self.hot_retirement_cut(a) <= self.hot_retirement_cut(b),
+            self.hot_retirement_cut(b) <= self.hot_value_pool@.len(),
+    {
+        hide(Vec::wf);
+        if b < self.hot_stack@.len() {
+            self.lemma_pair_tier_start_order(false, a as int, b as int);
+            self.lemma_pair_tier_frame_layout(false, b as int);
+        } else if a < self.hot_stack@.len() {
+            self.lemma_pair_tier_frame_layout(false, a as int);
+        }
+    }
+
+    /// Frame `f`'s runs and payload cells are untouched by an append.
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_append_keeps_layout(&self, mid: Self, f: int)
+        requires mid.repr_ok(), 0 <= f < mid.cold_stack@.len(),
+            mid.cold_stack@.len() <= self.cold_stack@.len(),
+            mid.cold_index_runs@.len() <= self.cold_index_runs@.len(),
+            mid.cold_value_pool@.len() <= self.cold_value_pool@.len(),
+            self.cold_stack@.subrange(0, mid.cold_stack@.len() as int) == mid.cold_stack@,
+            self.cold_index_runs@.subrange(0, mid.cold_index_runs@.len() as int) == mid.cold_index_runs@,
+            self.cold_value_pool@.subrange(0, mid.cold_value_pool@.len() as int) == mid.cold_value_pool@,
+        ensures self.cold_stack@[f] == mid.cold_stack@[f],
+            mid.cold_stack@[f].runs_start + mid.cold_stack@[f].runs_len <= mid.cold_index_runs@.len(),
+            forall|r: int| mid.cold_stack@[f].runs_start <= r
+                < mid.cold_stack@[f].runs_start + mid.cold_stack@[f].runs_len ==>
+                #[trigger] self.cold_index_runs@[r] == mid.cold_index_runs@[r]
+                && mid.cold_index_runs@[r].start + mid.cold_index_runs@[r].len <= mid.cold_value_pool@.len()
+                && (forall|i: int| mid.cold_index_runs@[r].start <= i
+                    < mid.cold_index_runs@[r].start + mid.cold_index_runs@[r].len ==>
+                    #[trigger] self.cold_value_pool@[i] == mid.cold_value_pool@[i]),
+    {
+        hide(Vec::repr_ok);
+        mid.lemma_cold_layout_header_at(f);
+        assert(self.cold_stack@[f] == self.cold_stack@.subrange(0, mid.cold_stack@.len() as int)[f]);
+        let h = mid.cold_stack@[f];
+        assert forall|r: int| h.runs_start <= r < h.runs_start + h.runs_len implies
+            #[trigger] self.cold_index_runs@[r] == mid.cold_index_runs@[r]
+            && mid.cold_index_runs@[r].start + mid.cold_index_runs@[r].len <= mid.cold_value_pool@.len()
+            && (forall|i: int| mid.cold_index_runs@[r].start <= i
+                < mid.cold_index_runs@[r].start + mid.cold_index_runs@[r].len ==>
+                #[trigger] self.cold_value_pool@[i] == mid.cold_value_pool@[i]) by {
+            assert(self.cold_index_runs@[r]
+                == self.cold_index_runs@.subrange(0, mid.cold_index_runs@.len() as int)[r]);
+            mid.lemma_cold_layout_run_at(r);
+            assert forall|i: int| mid.cold_index_runs@[r].start <= i
+                < mid.cold_index_runs@[r].start + mid.cold_index_runs@[r].len implies
+                #[trigger] self.cold_value_pool@[i] == mid.cold_value_pool@[i] by {
+                assert(self.cold_value_pool@[i]
+                    == self.cold_value_pool@.subrange(0, mid.cold_value_pool@.len() as int)[i]);
+            }
+        }
+    }
+
+    /// Appending Cold storage leaves every earlier frame's coverage.
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_append_keeps_coverage(&self, mid: Self, f: int, j: nat)
+        requires mid.repr_ok(), 0 <= f < mid.cold_stack@.len(),
+            mid.cold_stack@.len() <= self.cold_stack@.len(),
+            mid.cold_index_runs@.len() <= self.cold_index_runs@.len(),
+            mid.cold_value_pool@.len() <= self.cold_value_pool@.len(),
+            self.cold_stack@.subrange(0, mid.cold_stack@.len() as int) == mid.cold_stack@,
+            self.cold_index_runs@.subrange(0, mid.cold_index_runs@.len() as int) == mid.cold_index_runs@,
+            self.cold_value_pool@.subrange(0, mid.cold_value_pool@.len() as int) == mid.cold_value_pool@,
+        ensures self.cold_covered(f, j) == mid.cold_covered(f, j),
+    {
+        hide(Vec::repr_ok);
+        self.lemma_cold_append_keeps_layout(mid, f);
+        let h = mid.cold_stack@[f];
+        if self.cold_covered(f, j) {
+            let r = choose|r: int|
+                self.cold_stack@[f].runs_start <= r
+                    < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len
+                && (#[trigger] self.cold_index_runs@[r]).base.as_nat() <= j
+                && j < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len;
+            assert(mid.cold_index_runs@[r] == self.cold_index_runs@[r]);
+            assert(mid.cold_covered(f, j));
+        }
+        if mid.cold_covered(f, j) {
+            let r = choose|r: int|
+                mid.cold_stack@[f].runs_start <= r
+                    < mid.cold_stack@[f].runs_start + mid.cold_stack@[f].runs_len
+                && (#[trigger] mid.cold_index_runs@[r]).base.as_nat() <= j
+                && j < mid.cold_index_runs@[r].base.as_nat() + mid.cold_index_runs@[r].len;
+            assert(self.cold_index_runs@[r] == mid.cold_index_runs@[r]);
+            assert(self.cold_covered(f, j));
+        }
+    }
+
+    /// A frame's runs are pairwise adjacent-disjoint (accessor for the
+    /// crate-wide disjointness predicate).
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_frame_adjacent(&self, f: int)
+        requires self.cold_runs_disjoint(), 0 <= f < self.cold_stack@.len(),
+        ensures forall|r: int| self.cold_stack@[f].runs_start <= r
+            && r + 1 < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len ==>
+            (#[trigger] self.cold_index_runs@[r]).base.as_nat() + self.cold_index_runs@[r].len
+                <= self.cold_index_runs@[r + 1].base.as_nat(),
+    {
+        assert forall|r: int| self.cold_stack@[f].runs_start <= r
+            && r + 1 < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len implies
+            (#[trigger] self.cold_index_runs@[r]).base.as_nat() + self.cold_index_runs@[r].len
+                <= self.cold_index_runs@[r + 1].base.as_nat() by {
+            assert(self.cold_stack@[f].runs_start <= r);
+        }
+    }
+
+    /// Appending Cold storage leaves every earlier frame's covered cells.
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_append_keeps_value(&self, mid: Self, f: int, j: nat)
+        requires mid.repr_ok(), mid.cold_runs_disjoint(), 0 <= f < mid.cold_stack@.len(),
+            mid.cold_stack@.len() <= self.cold_stack@.len(),
+            mid.cold_index_runs@.len() <= self.cold_index_runs@.len(),
+            mid.cold_value_pool@.len() <= self.cold_value_pool@.len(),
+            self.cold_stack@.subrange(0, mid.cold_stack@.len() as int) == mid.cold_stack@,
+            self.cold_index_runs@.subrange(0, mid.cold_index_runs@.len() as int) == mid.cold_index_runs@,
+            self.cold_value_pool@.subrange(0, mid.cold_value_pool@.len() as int) == mid.cold_value_pool@,
+            self.cold_covered(f, j), mid.cold_covered(f, j),
+        ensures self.cold_value(f, j) == mid.cold_value(f, j),
+    {
+        hide(Vec::repr_ok);
+        hide(Vec::cold_runs_disjoint);
+        self.lemma_cold_append_keeps_layout(mid, f);
+        let r1 = choose|r: int|
+            self.cold_stack@[f].runs_start <= r
+                < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len
+            && (#[trigger] self.cold_index_runs@[r]).base.as_nat() <= j
+            && j < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len;
+        let r2 = choose|r: int|
+            mid.cold_stack@[f].runs_start <= r
+                < mid.cold_stack@[f].runs_start + mid.cold_stack@[f].runs_len
+            && (#[trigger] mid.cold_index_runs@[r]).base.as_nat() <= j
+            && j < mid.cold_index_runs@[r].base.as_nat() + mid.cold_index_runs@[r].len;
+        assert(mid.cold_index_runs@[r1] == self.cold_index_runs@[r1]);
+        mid.lemma_cold_frame_adjacent(f);
+        lemma_runs_cover_unique::<I>(mid.cold_index_runs@, mid.cold_stack@[f].runs_start as int,
+            mid.cold_stack@[f].runs_start + mid.cold_stack@[f].runs_len, r1, r2, j);
+        let idx = mid.cold_index_runs@[r1].start as int
+            + (j - mid.cold_index_runs@[r1].base.as_nat()) as int;
+        assert(self.cold_value_pool@[idx] == mid.cold_value_pool@[idx]);
+        assert(self.cold_value(f, j) == self.cold_value_pool@[idx]);
+        assert(mid.cold_value(f, j) == mid.cold_value_pool@[idx]);
+    }
+
+    /// Appending Cold storage leaves every earlier frame's coverage and cells.
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_append_keeps_frame(&self, mid: Self, f: int, j: nat)
+        requires mid.repr_ok(), mid.cold_runs_disjoint(), 0 <= f < mid.cold_stack@.len(),
+            mid.cold_stack@.len() <= self.cold_stack@.len(),
+            mid.cold_index_runs@.len() <= self.cold_index_runs@.len(),
+            mid.cold_value_pool@.len() <= self.cold_value_pool@.len(),
+            self.cold_stack@.subrange(0, mid.cold_stack@.len() as int) == mid.cold_stack@,
+            self.cold_index_runs@.subrange(0, mid.cold_index_runs@.len() as int) == mid.cold_index_runs@,
+            self.cold_value_pool@.subrange(0, mid.cold_value_pool@.len() as int) == mid.cold_value_pool@,
+        ensures self.cold_covered(f, j) == mid.cold_covered(f, j),
+            self.cold_covered(f, j) ==> self.cold_value(f, j) == mid.cold_value(f, j),
+    {
+        hide(Vec::repr_ok);
+        hide(Vec::cold_runs_disjoint);
+        self.lemma_cold_append_keeps_coverage(mid, f, j);
+        if self.cold_covered(f, j) {
+            self.lemma_cold_append_keeps_value(mid, f, j);
+        }
+    }
+
+    /// A Hot header's saved length is its snapshot's length.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_saved_len(&self, f: int)
+        requires self.wf(), 0 <= f < self.hot_stack@.len(),
+        ensures self.hot_stack@[f].saved_len.as_nat()
+            == self.snapshots@[self.cold_stack@.len() + f].len(),
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+    }
+
+    /// A sorted unique closed frame is strictly increasing.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_strict(&self, pre: Self, f: int)
+        requires self.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            self.hot_frame_sorted(f),
+        ensures ({
+            let entries = self.hot_value_pool@.subrange(
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int);
+            forall|a: int, b: int| 0 <= a < b < entries.len() ==>
+                (#[trigger] entries[a]).1.as_nat() < (#[trigger] entries[b]).1.as_nat()
+        }),
+            pre.hot_stack@[f].start <= pre.hot_stack@[f].end <= self.hot_value_pool@.len(),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating_cold);
+        reveal(Vec::hot_migrating);
+        reveal(Vec::hot_migrating_hot);
+        pre.lemma_closed_hot_frame_end(f);
+        let start = pre.hot_stack@[f].start as int;
+        let end = pre.hot_stack@[f].end as int;
+        let entries = self.hot_value_pool@.subrange(start, end);
+        assert(self.phys_hot_start(f) == start);
+        assert(self.phys_hot_end(f) == end);
+        assert(pre.phys_hot_start(f) == start);
+        assert(pre.phys_hot_end(f) == end);
+        assert(stratum_unique::<T, I>(self.hot_value_pool@, start, end));
+        assert forall|a: int, b: int| 0 <= a < b < entries.len() implies
+            (#[trigger] entries[a]).1.as_nat() < (#[trigger] entries[b]).1.as_nat() by {
+            assert(entries[a] == self.hot_value_pool@[start + a]);
+            assert(entries[b] == self.hot_value_pool@[start + b]);
+            assert(self.hot_value_pool@[start + a].1.as_nat() != self.hot_value_pool@[start + b].1.as_nat());
+        }
+    }
+
+    /// Every index of a migrating frame lies below its saved length.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_index_bound(&self, pre: Self, f: int, q: int)
+        requires self.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            pre.hot_stack@[f].start + q < pre.hot_stack@[f].end, 0 <= q,
+        ensures self.hot_value_pool@[pre.hot_stack@[f].start + q].1.as_nat()
+            < pre.hot_stack@[f].saved_len.as_nat(),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating_cold);
+        reveal(Vec::hot_migrating);
+        reveal(Vec::hot_migrating_hot);
+        pre.lemma_closed_hot_frame_end(f);
+        pre.lemma_hot_saved_len(f);
+        let start = pre.hot_stack@[f].start as int;
+        let end = pre.hot_stack@[f].end as int;
+        let cc = pre.cold_stack@.len() as int;
+        assert(pre.phys_hot_start(f) == start);
+        assert(pre.phys_hot_end(f) == end);
+        pre.lemma_pair_tier_contract(false, f);
+        let j = self.hot_value_pool@[start + q].1.as_nat();
+        lemma_unique_range_saved_value::<T, I>(self.hot_value_pool@, start, end, j);
+        assert(range_saved_value::<T, I>(self.hot_value_pool@, start, end, j) is Some);
+        assert(range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j) is Some);
+        assert(captured_in_range::<T, I>(pre.hot_value_pool@, start, end, j));
+        let k = choose|k: int| start <= k < end && 0 <= k < pre.hot_value_pool@.len()
+            && (#[trigger] pre.hot_value_pool@[k]).1.as_nat() == j;
+        assert(pre.hot_value_pool@[k].1.as_nat() < pre.snapshots@[cc + f].len());
+    }
+
+    /// A sorted unique closed frame is a strictly increasing sequence whose
+    /// indices lie below the frame's saved length: the Cold encoder's input.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encode_ready(&self, pre: Self, f: int)
+        requires self.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            self.hot_frame_sorted(f),
+        ensures ({
+            let entries = self.hot_value_pool@.subrange(
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int);
+            &&& forall|a: int, b: int| 0 <= a < b < entries.len() ==>
+                (#[trigger] entries[a]).1.as_nat() < (#[trigger] entries[b]).1.as_nat()
+            &&& forall|q: int| 0 <= q < entries.len() ==>
+                (#[trigger] entries[q]).1.as_nat() < pre.hot_stack@[f].saved_len.as_nat()
+        }),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(stratum_unique);
+        hide(range_saved_value);
+        self.lemma_hot_frame_strict(pre, f);
+        let start = pre.hot_stack@[f].start as int;
+        let end = pre.hot_stack@[f].end as int;
+        let entries = self.hot_value_pool@.subrange(start, end);
+        assert forall|q: int| 0 <= q < entries.len() implies
+            (#[trigger] entries[q]).1.as_nat() < pre.hot_stack@[f].saved_len.as_nat() by {
+            assert(entries[q] == self.hot_value_pool@[start + q]);
+            self.lemma_hot_frame_index_bound(pre, f, q);
+        }
+    }
+
+    /// Hot side of an encode step: the pool is untouched, so one more frame
+    /// enters the migrating scope.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encoded_hot(&self, mid: Self, pre: Self, f: int)
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            self.hot_value_pool@ == mid.hot_value_pool@,
+        ensures self.hot_migrating_hot(pre, f as nat + 1),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating_cold);
+        hide(stratum_unique);
+        reveal(Vec::hot_migrating);
+        reveal(Vec::hot_migrating_hot);
+        pre.lemma_hot_cut_order(f as nat + 1, f as nat + 2);
+        assert forall|q: int| pre.hot_retirement_cut(f as nat + 2) <= q < pre.hot_value_pool@.len() implies
+            #[trigger] self.hot_value_pool@[q] == pre.hot_value_pool@[q] by {
+            assert(pre.hot_retirement_cut(f as nat + 1) <= q);
+        }
+        assert forall|g: int| 0 <= g <= f + 1 && g < pre.hot_stack@.len() implies {
+            &&& stratum_unique::<T, I>(self.hot_value_pool@, pre.phys_hot_start(g), pre.phys_hot_end(g))
+            &&& forall|j: nat| #[trigger] range_saved_value::<T, I>(self.hot_value_pool@,
+                    pre.phys_hot_start(g), pre.phys_hot_end(g), j)
+                == range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(g), pre.phys_hot_end(g), j)
+        } by {
+            if g == f + 1 {
+                pre.lemma_wf_named_parts();
+                pre.lemma_pair_tier_frame_layout(false, g);
+                assert(pre.hot_retirement_cut(f as nat + 1) == pre.hot_stack@[g].start as nat);
+                assert forall|q: int| pre.phys_hot_start(g) <= q < pre.phys_hot_end(g) implies
+                    #[trigger] self.hot_value_pool@[q] == pre.hot_value_pool@[q] by {}
+                assert(stratum_unique::<T, I>(pre.hot_value_pool@, pre.phys_hot_start(g), pre.phys_hot_end(g))) by {
+                    reveal(Vec::hot_repr_ok);
+                }
+                assert(stratum_unique::<T, I>(self.hot_value_pool@, pre.phys_hot_start(g), pre.phys_hot_end(g))) by {
+                    reveal(stratum_unique);
+                }
+                assert forall|j: nat| #[trigger] range_saved_value::<T, I>(self.hot_value_pool@,
+                        pre.phys_hot_start(g), pre.phys_hot_end(g), j)
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(g), pre.phys_hot_end(g), j) by {
+                    lemma_range_saved_value_local::<T, I>(pre.hot_value_pool@, self.hot_value_pool@,
+                        pre.phys_hot_start(g), pre.phys_hot_end(g), j);
+                }
+            }
+        }
+    }
+
+    /// Cold side of an encode step: prefixes, kept frames, and the new frame.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encoded_cold(
+        &self, mid: Self, pre: Self, f: int, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>,
+    )
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            entries == mid.hot_value_pool@.subrange(
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int),
+            self.cold_stack@ == mid.cold_stack@.push(cold),
+            self.cold_index_runs@.subrange(0, mid.cold_index_runs@.len() as int) == mid.cold_index_runs@,
+            self.cold_value_pool@.subrange(0, mid.cold_value_pool@.len() as int) == mid.cold_value_pool@,
+            mid.cold_index_runs@.len() <= self.cold_index_runs@.len(),
+            self.cold_value_pool@.len() == mid.cold_value_pool@.len() + entries.len(),
+            forall|q: int| 0 <= q < entries.len() ==>
+                #[trigger] self.cold_value_pool@[mid.cold_value_pool@.len() + q] == entries[q].0,
+            cold.saved_len == pre.hot_stack@[f].saved_len,
+            cold.runs_start == mid.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                mid.cold_index_runs@.len() as int, mid.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+            self.repr_ok(), self.cold_payload_ok(), self.cold_runs_disjoint(),
+        ensures self.hot_migrating_cold(pre, f as nat + 1),
+    {
+        hide(Vec::wf);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_runs_disjoint);
+        hide(Vec::hot_migrating_hot);
+        hide(stratum_unique);
+        hide(range_saved_value);
+        hide(Vec::cold_payload_ok);
+        hide(crate::cold_encode::run_prefix);
+        reveal(Vec::hot_migrating);
+        reveal(Vec::hot_migrating_cold);
+        let cc = pre.cold_stack@.len() as int;
+        assert(self.cold_stack@.subrange(0, cc) =~= pre.cold_stack@);
+        assert(self.cold_index_runs@.subrange(0, pre.cold_index_runs@.len() as int) =~= pre.cold_index_runs@);
+        assert(self.cold_value_pool@.subrange(0, pre.cold_value_pool@.len() as int) =~= pre.cold_value_pool@);
+        assert(self.cold_stack@.subrange(0, mid.cold_stack@.len() as int) =~= mid.cold_stack@);
+        let k = cc + f;
+        assert(self.cold_stack@[k] == cold);
+        self.lemma_hot_frame_encoded_new(mid, pre, f, entries, cold);
+        assert forall|q: int| 0 <= q < f + 1 implies {
+            &&& (#[trigger] self.cold_stack@[cc + q]).saved_len == pre.hot_stack@[q].saved_len
+            &&& forall|j: nat| #[trigger] self.cold_covered(cc + q, j)
+                <==> range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(q), pre.phys_hot_end(q), j) is Some
+            &&& forall|j: nat| self.cold_covered(cc + q, j) ==>
+                Some(#[trigger] self.cold_value(cc + q, j))
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(q), pre.phys_hot_end(q), j)
+        } by {
+            if q < f {
+                assert(self.cold_stack@[cc + q] == mid.cold_stack@[cc + q]);
+                assert forall|j: nat| #[trigger] self.cold_covered(cc + q, j)
+                    <==> range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(q), pre.phys_hot_end(q), j) is Some by {
+                    self.lemma_cold_append_keeps_frame(mid, cc + q, j);
+                }
+                assert forall|j: nat| self.cold_covered(cc + q, j) implies
+                    Some(#[trigger] self.cold_value(cc + q, j))
+                        == range_saved_value::<T, I>(pre.hot_value_pool@,
+                            pre.phys_hot_start(q), pre.phys_hot_end(q), j) by {
+                    self.lemma_cold_append_keeps_frame(mid, cc + q, j);
+                    assert(mid.cold_covered(cc + q, j));
+                }
+            }
+        }
+    }
+
+    /// The appended Cold frame carries exactly the encoded Hot frame's saved
+    /// map, and the migration state advances by one frame.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encoded(
+        &self, mid: Self, pre: Self, f: int, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>,
+    )
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            mid.hot_frame_sorted(f),
+            entries == mid.hot_value_pool@.subrange(
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int),
+            *self == (Self { cold_stack: self.cold_stack, cold_index_runs: self.cold_index_runs,
+                cold_value_pool: self.cold_value_pool, ..mid }),
+            self.cold_stack@ == mid.cold_stack@.push(cold),
+            self.cold_index_runs@.subrange(0, mid.cold_index_runs@.len() as int) == mid.cold_index_runs@,
+            self.cold_value_pool@.subrange(0, mid.cold_value_pool@.len() as int) == mid.cold_value_pool@,
+            mid.cold_index_runs@.len() <= self.cold_index_runs@.len(),
+            self.cold_value_pool@.len() == mid.cold_value_pool@.len() + entries.len(),
+            forall|q: int| 0 <= q < entries.len() ==>
+                #[trigger] self.cold_value_pool@[mid.cold_value_pool@.len() + q] == entries[q].0,
+            cold.saved_len == pre.hot_stack@[f].saved_len,
+            cold.runs_start == mid.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                mid.cold_index_runs@.len() as int, mid.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+            self.repr_ok(), self.cold_payload_ok(), self.cold_runs_disjoint(),
+        ensures self.hot_migrating(pre, f as nat + 1),
+    {
+        hide(Vec::wf);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_runs_disjoint);
+        hide(stratum_unique);
+        hide(range_saved_value);
+        hide(Vec::cold_payload_ok);
+        hide(crate::cold_encode::run_prefix);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        reveal(Vec::hot_migrating);
+        self.lemma_hot_frame_encoded_hot(mid, pre, f);
+        self.lemma_hot_frame_encoded_cold(mid, pre, f, entries, cold);
+    }
+
+    /// The new Cold frame's coverage is capture in the source frame, and each
+    /// covered cell holds the captured value.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encoded_new(
+        &self, mid: Self, pre: Self, f: int, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>,
+    )
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            entries == mid.hot_value_pool@.subrange(
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int),
+            self.cold_stack@ == mid.cold_stack@.push(cold),
+            self.cold_value_pool@.len() == mid.cold_value_pool@.len() + entries.len(),
+            forall|q: int| 0 <= q < entries.len() ==>
+                #[trigger] self.cold_value_pool@[mid.cold_value_pool@.len() + q] == entries[q].0,
+            cold.runs_start == mid.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                mid.cold_index_runs@.len() as int, mid.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+        ensures ({
+            let k = pre.cold_stack@.len() + f;
+            &&& forall|j: nat| #[trigger] self.cold_covered(k, j)
+                <==> range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(f), pre.phys_hot_end(f), j) is Some
+            &&& forall|j: nat| self.cold_covered(k, j) ==>
+                Some(#[trigger] self.cold_value(k, j))
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(f), pre.phys_hot_end(f), j)
+        }),
+    {
+        hide(Vec::wf);
+        hide(stratum_unique);
+        hide(crate::cold_encode::run_prefix);
+        reveal(Vec::hot_migrating);
+        reveal(Vec::hot_migrating_hot);
+        pre.lemma_closed_hot_frame_end(f);
+        let cc = pre.cold_stack@.len() as int;
+        let start = pre.hot_stack@[f].start as int;
+        let end = pre.hot_stack@[f].end as int;
+        let rs = mid.cold_index_runs@.len() as int;
+        let vs = mid.cold_value_pool@.len() as int;
+        let n = entries.len() as int;
+        let runs = self.cold_index_runs@;
+        let limit = cold.saved_len.as_nat();
+        let k = cc + f;
+        assert(mid.cold_stack@.len() == k);
+        assert(self.cold_stack@[k] == cold);
+        assert(pre.phys_hot_start(f) == start);
+        assert(pre.phys_hot_end(f) == end);
+        assert(stratum_unique::<T, I>(mid.hot_value_pool@, start, end));
+        crate::cold_encode::lemma_run_prefix_layout(runs, rs, vs, entries, n, limit);
+        assert forall|j: nat| #[trigger] self.cold_covered(k, j)
+            <==> range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j) is Some by {
+            lemma_unique_range_saved_value::<T, I>(mid.hot_value_pool@, start, end, j);
+            if self.cold_covered(k, j) {
+                let r = choose|r: int|
+                    self.cold_stack@[k].runs_start <= r
+                        < self.cold_stack@[k].runs_start + self.cold_stack@[k].runs_len
+                    && (#[trigger] self.cold_index_runs@[r]).base.as_nat() <= j
+                    && j < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len;
+                let q = (j - runs[r].base.as_nat()) as int;
+                crate::cold_encode::lemma_run_prefix_cell(runs, rs, vs, entries, n, limit, r, q);
+                let o = runs[r].start - vs + q;
+                assert(entries[o] == mid.hot_value_pool@[start + o]);
+                assert(mid.hot_value_pool@[start + o].1.as_nat() == j);
+                assert(range_saved_value::<T, I>(mid.hot_value_pool@, start, end, j)
+                    == Some(mid.hot_value_pool@[start + o].0));
+            }
+            if range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j) is Some {
+                assert(range_saved_value::<T, I>(mid.hot_value_pool@, start, end, j) is Some);
+                assert(captured_in_range::<T, I>(mid.hot_value_pool@, start, end, j));
+                let k0 = choose|k0: int| start <= k0 < end && 0 <= k0 < mid.hot_value_pool@.len()
+                    && (#[trigger] mid.hot_value_pool@[k0]).1.as_nat() == j;
+                let p = k0 - start;
+                assert(entries[p] == mid.hot_value_pool@[k0]);
+                crate::cold_encode::lemma_run_prefix_entry(runs, rs, vs, entries, n, limit, p);
+                let r = choose|r: int| rs <= r < runs.len()
+                    && (#[trigger] runs[r]).base.as_nat() <= entries[p].1.as_nat()
+                    && entries[p].1.as_nat() < runs[r].base.as_nat() + runs[r].len
+                    && runs[r].start + (entries[p].1.as_nat() - runs[r].base.as_nat()) == vs + p;
+                assert(self.cold_stack@[k].runs_start <= r
+                    < self.cold_stack@[k].runs_start + self.cold_stack@[k].runs_len);
+                assert(self.cold_covered(k, j));
+            }
+        }
+        assert forall|j: nat| self.cold_covered(k, j) implies
+            Some(#[trigger] self.cold_value(k, j))
+                == range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j) by {
+            lemma_unique_range_saved_value::<T, I>(mid.hot_value_pool@, start, end, j);
+            let r = choose|r: int|
+                self.cold_stack@[k].runs_start <= r
+                    < self.cold_stack@[k].runs_start + self.cold_stack@[k].runs_len
+                && (#[trigger] self.cold_index_runs@[r]).base.as_nat() <= j
+                && j < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len;
+            let q = (j - runs[r].base.as_nat()) as int;
+            crate::cold_encode::lemma_run_prefix_cell(runs, rs, vs, entries, n, limit, r, q);
+            let o = runs[r].start - vs + q;
+            assert(entries[o] == mid.hot_value_pool@[start + o]);
+            assert(mid.hot_value_pool@[start + o].1.as_nat() == j);
+            assert(self.cold_value(k, j) == self.cold_value_pool@[runs[r].start as int + q]);
+            assert(runs[r].start as int + q == vs + o);
+            assert(self.cold_value_pool@[vs + o] == entries[o].0);
+            assert(range_saved_value::<T, I>(mid.hot_value_pool@, start, end, j)
+                == Some(mid.hot_value_pool@[start + o].0));
+        }
+    }
+
+    /// Encode sorted closed Hot frame `f` as the newest Cold frame, straight
+    /// from the Hot pool slice.
+    #[verifier::spinoff_prover]
+    fn hot_frame_encode_checked(&mut self, f: usize, Ghost(pre): Ghost<Self>)
+        requires old(self).hot_migrating(pre, f as nat), f < pre.hot_closed_count(),
+            old(self).hot_frame_sorted(f as int),
+        ensures final(self).hot_migrating(pre, f as nat + 1),
+            *final(self) == (Self { cold_stack: final(self).cold_stack,
+                cold_index_runs: final(self).cold_index_runs,
+                cold_value_pool: final(self).cold_value_pool, ..*old(self) }),
+    {
+        hide(Vec::wf);
+        hide(stratum_unique);
+        hide(range_saved_value);
+        hide(Vec::cold_payload_ok);
+        hide(crate::cold_encode::run_prefix);
+        proof {
+            reveal(Vec::hot_migrating);
+            reveal(Vec::hot_migrating_cold);
+            pre.lemma_closed_hot_frame_end(f as int);
+            self.lemma_hot_frame_encode_ready(pre, f as int);
+        }
+        let frame = self.hot_stack[f];
+        let ghost mid = *self;
+        let ghost entries = self.hot_value_pool@.subrange(frame.start as int, frame.end as int);
+        let cold = crate::cold_encode::append_sorted(
+            &mut self.cold_index_runs, &mut self.cold_value_pool,
+            &self.hot_value_pool[frame.start..frame.end], frame.saved_len);
+        self.cold_stack.push(cold);
+        proof {
+            assert(self.cold_stack@ == mid.cold_stack@.push(cold));
+            self.lemma_cold_append_structure(mid, entries, cold);
+            self.lemma_cold_append_payload(mid, entries, cold);
+            self.lemma_cold_append_disjoint(mid, entries, cold);
+            self.lemma_hot_frame_encoded(mid, pre, f as int, entries, cold);
+        }
+    }
+
+    /// Physical effects of retiring the migrated Hot prefix from `mid`.
+    closed spec fn hot_retired_from(&self, mid: Self, count: nat) -> bool {
+        let cut = mid.hot_retirement_cut(count);
+        &&& count <= mid.hot_stack@.len()
+        &&& *self == (Self { hot_stack: self.hot_stack, hot_value_pool: self.hot_value_pool, ..mid })
+        &&& cut <= mid.hot_value_pool@.len()
+        &&& self.hot_value_pool@ == mid.hot_value_pool@.subrange(cut as int, mid.hot_value_pool@.len() as int)
+        &&& self.hot_stack@.len() == mid.hot_stack@.len() - count
+        &&& forall|f: int| 0 <= f < self.hot_stack@.len() ==> {
+            let h = #[trigger] self.hot_stack@[f];
+            let old_h = mid.hot_stack@[count + f];
+            &&& h.saved_len == old_h.saved_len
+            &&& h.start == old_h.start - cut
+            &&& h.end == old_h.end - cut
+        }
+    }
+
+    /// Partition counts of a well-formed container.
+    #[verifier::spinoff_prover]
+    proof fn lemma_partition_counts(&self)
+        requires self.wf(),
+        ensures self.snapshots@.len() == self.trail_frames@.len(),
+            self.cold_stack@.len() + self.hot_stack@.len() + self.trail_stack@.len() == self.snapshots@.len(),
+            !TRACK ==> self.snapshots@.len() == 0,
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+    }
+
+    /// A Cold header's saved length is its snapshot's length.
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_saved_len(&self, f: int)
+        requires self.wf(), 0 <= f < self.cold_stack@.len(),
+        ensures self.cold_stack@[f].saved_len.as_nat() == self.snapshots@[f].len(),
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+    }
+
+    /// A Trail header's saved length is its snapshot's length.
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_saved_len(&self, f: int)
+        requires self.wf(), 0 <= f < self.trail_stack@.len(),
+        ensures self.trail_stack@[f].saved_len.as_nat()
+            == self.snapshots@[self.cold_stack@.len() + self.hot_stack@.len() + f].len(),
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+    }
+
+    /// Header accessor for the Cold side of a migration in progress.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_cold_headers(&self, pre: Self, count: nat)
+        requires self.hot_migrating_cold(pre, count),
+        ensures self.cold_stack@.len() == pre.cold_stack@.len() + count,
+            forall|f: int| 0 <= f < pre.cold_stack@.len() ==>
+                #[trigger] self.cold_stack@[f] == pre.cold_stack@[f],
+            forall|q: int| 0 <= q < count ==>
+                (#[trigger] self.cold_stack@[pre.cold_stack@.len() + q]).saved_len
+                    == pre.hot_stack@[q].saved_len,
+    {
+        reveal(Vec::hot_migrating_cold);
+        let cc = pre.cold_stack@.len() as int;
+        assert forall|f: int| 0 <= f < cc implies #[trigger] self.cold_stack@[f] == pre.cold_stack@[f] by {
+            assert(self.cold_stack@[f] == self.cold_stack@.subrange(0, cc)[f]);
+        }
+    }
+
+    /// Accessor for the migration state's framing and bounds.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_frame(&self, pre: Self, count: nat)
+        requires self.hot_migrating(pre, count),
+        ensures pre.wf(), count <= pre.hot_closed_count(),
+            *self == (Self { cold_stack: self.cold_stack, cold_index_runs: self.cold_index_runs,
+                cold_value_pool: self.cold_value_pool, hot_value_pool: self.hot_value_pool, ..pre }),
+            self.hot_migrating_hot(pre, count), self.hot_migrating_cold(pre, count),
+            self.hot_value_pool@.len() == pre.hot_value_pool@.len(),
+    {
+        reveal(Vec::hot_migrating);
+        reveal(Vec::hot_migrating_hot);
+    }
+
+    /// Accessor for the retirement effect.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_retired_frame(&self, mid: Self, count: nat)
+        requires self.hot_retired_from(mid, count),
+        ensures count <= mid.hot_stack@.len(),
+            *self == (Self { hot_stack: self.hot_stack, hot_value_pool: self.hot_value_pool, ..mid }),
+            mid.hot_retirement_cut(count) <= mid.hot_value_pool@.len(),
+            self.hot_value_pool@ == mid.hot_value_pool@.subrange(
+                mid.hot_retirement_cut(count) as int, mid.hot_value_pool@.len() as int),
+            self.hot_stack@.len() == mid.hot_stack@.len() - count,
+            forall|f: int| 0 <= f < self.hot_stack@.len() ==> {
+                let h = #[trigger] self.hot_stack@[f];
+                let old_h = mid.hot_stack@[count + f];
+                let cut = mid.hot_retirement_cut(count);
+                &&& h.saved_len == old_h.saved_len
+                &&& h.start == old_h.start - cut
+                &&& h.end == old_h.end - cut
+            },
+    {
+        reveal(Vec::hot_retired_from);
+    }
+
+    /// Frame counts and saved lengths after moving `count` Hot frames to Cold.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migration_partition(&self, mid: Self, pre: Self, count: nat)
+        requires mid.hot_migrating(pre, count), self.hot_retired_from(mid, count),
+        ensures self.frame_partition_ok(),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::hot_retired_from);
+        mid.lemma_hot_migrating_frame(pre, count);
+        mid.lemma_hot_migrating_cold_headers(pre, count);
+        self.lemma_hot_retired_frame(mid, count);
+        pre.lemma_partition_counts();
+        let cc = pre.cold_stack@.len() as int;
+        let hc = pre.hot_stack@.len() as int;
+        assert(self.cold_stack@ == mid.cold_stack@);
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            (#[trigger] self.cold_stack@[f]).saved_len.as_nat() == self.snapshots@[f].len() by {
+            if f < cc {
+                assert(self.cold_stack@[f] == pre.cold_stack@[f]);
+                pre.lemma_cold_saved_len(f);
+            } else {
+                let q = f - cc;
+                assert(mid.cold_stack@[cc + q].saved_len == pre.hot_stack@[q].saved_len);
+                assert(cc + q == f);
+                pre.lemma_hot_saved_len(q);
+            }
+        }
+        assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
+            (#[trigger] self.hot_stack@[i]).saved_len.as_nat()
+                == self.snapshots@[self.cold_stack@.len() + i].len() by {
+            assert(self.hot_stack@[i].saved_len == pre.hot_stack@[count + i].saved_len);
+            pre.lemma_hot_saved_len(count + i);
+        }
+        assert forall|i: int| 0 <= i < self.trail_stack@.len() implies
+            (#[trigger] self.trail_stack@[i]).saved_len.as_nat()
+                == self.snapshots@[self.cold_stack@.len() + self.hot_stack@.len() + i].len() by {
+            pre.lemma_trail_saved_len(i);
+        }
+        reveal(Vec::frame_partition_ok);
+    }
+
+    /// Trail representation is untouched by a Hot-to-Cold move: the tier's
+    /// offset `cold + hot` and every referenced layer are unchanged.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migration_trail_repr(&self, pre: Self)
+        requires pre.wf(),
+            self.trail_stack@ == pre.trail_stack@, self.trail_value_pool@ == pre.trail_value_pool@,
+            self.snapshots@ == pre.snapshots@, self.trail_frames@ == pre.trail_frames@,
+            self.view() == pre.view(),
+            self.cold_stack@.len() + self.hot_stack@.len() == pre.cold_stack@.len() + pre.hot_stack@.len(),
+        ensures self.trail_repr_ok(),
+    {
+        hide(Vec::wf);
+        hide(frame_inv_range);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::trail_repr_ok);
+        let offset = self.cold_stack@.len() + self.hot_stack@.len();
+        assert forall|i: int| 0 <= i < self.trail_stack@.len() implies
+            self.phys_trail_end(i) == pre.phys_trail_end(i)
+            && self.layer_above_at(offset + i) == pre.layer_above_at(offset + i) by {}
+    }
+
+    /// Canonical history and compatibility residue are untouched by a
+    /// Hot-to-Cold move once the frame partition is restored.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migration_history(&self, pre: Self)
+        requires pre.wf(), self.frame_partition_ok(),
+            self.view() == pre.view(), self.snapshots@ == pre.snapshots@,
+            self.trail_frames@ == pre.trail_frames@, self.full_trail@ == pre.full_trail@,
+            self.diff_log@ == pre.diff_log@, self.store == pre.store,
+        ensures self.wf_for_snap(), self.proof_compat_ok(),
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        assert(self.store.wf()) by { reveal(Vec::wf_for_snap); }
+        self.lemma_canonical_history_repartition(pre);
+        reveal(Vec::proof_compat_ok);
+    }
+
+    /// Accessor: Cold storage of `pre` is a prefix and the tier is laid out.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_cold_prefix(&self, pre: Self, count: nat)
+        requires self.hot_migrating_cold(pre, count),
+        ensures self.cold_stack@.len() == pre.cold_stack@.len() + count,
+            self.cold_stack@.subrange(0, pre.cold_stack@.len() as int) == pre.cold_stack@,
+            self.cold_index_runs@.subrange(0, pre.cold_index_runs@.len() as int) == pre.cold_index_runs@,
+            self.cold_value_pool@.subrange(0, pre.cold_value_pool@.len() as int) == pre.cold_value_pool@,
+            pre.cold_index_runs@.len() <= self.cold_index_runs@.len(),
+            pre.cold_value_pool@.len() <= self.cold_value_pool@.len(),
+            self.repr_ok(), self.cold_payload_ok(), self.cold_runs_disjoint(),
+    {
+        reveal(Vec::hot_migrating_cold);
+    }
+
+    /// Accessor: the new Cold frame `q` carries Hot frame `q`'s saved map.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_cold_new_frame(&self, pre: Self, count: nat, q: int)
+        requires self.hot_migrating_cold(pre, count), 0 <= q < count,
+        ensures ({
+            let k = pre.cold_stack@.len() + q;
+            &&& self.cold_stack@[k].saved_len == pre.hot_stack@[q].saved_len
+            &&& forall|j: nat| #[trigger] self.cold_covered(k, j)
+                <==> range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(q), pre.phys_hot_end(q), j) is Some
+            &&& forall|j: nat| self.cold_covered(k, j) ==>
+                Some(#[trigger] self.cold_value(k, j))
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(q), pre.phys_hot_end(q), j)
+        }),
+    {
+        reveal(Vec::hot_migrating_cold);
+    }
+
+    /// Accessor: Hot frame `g <= count` is unique with `pre`'s saved map.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_hot_frame_map(&self, pre: Self, count: nat, g: int)
+        requires self.hot_migrating_hot(pre, count), 0 <= g <= count, g < pre.hot_stack@.len(),
+        ensures stratum_unique::<T, I>(self.hot_value_pool@, pre.phys_hot_start(g), pre.phys_hot_end(g)),
+            forall|j: nat| #[trigger] range_saved_value::<T, I>(self.hot_value_pool@,
+                    pre.phys_hot_start(g), pre.phys_hot_end(g), j)
+                == range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(g), pre.phys_hot_end(g), j),
+    {
+        reveal(Vec::hot_migrating_hot);
+    }
+
+    /// Accessor: cells from frame `count + 1` on are untouched.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_hot_unchanged(&self, pre: Self, count: nat)
+        requires self.hot_migrating_hot(pre, count),
+        ensures self.hot_value_pool@.len() == pre.hot_value_pool@.len(),
+            forall|q: int| pre.hot_retirement_cut(count + 1) <= q < pre.hot_value_pool@.len() ==>
+                #[trigger] self.hot_value_pool@[q] == pre.hot_value_pool@[q],
+    {
+        reveal(Vec::hot_migrating_hot);
+    }
+
+    /// The frame contract at one cell, read through the earliest-capture map.
+    #[verifier::spinoff_prover]
+    proof fn lemma_captured_cell_value(
+        above: Seq<T>, diffs: Seq<(T, I)>, lo: int, hi: int, snap: Seq<T>, saved_len: nat, c: int,
+    )
+        requires frame_inv_range::<T, I>(above, diffs, lo, hi, snap, saved_len), 0 <= c < saved_len,
+            0 <= lo <= hi <= diffs.len(),
+        ensures
+            captured_in_range::<T, I>(diffs, lo, hi, c as nat) ==>
+                range_saved_value::<T, I>(diffs, lo, hi, c as nat) == Some(snap[c]),
+            !captured_in_range::<T, I>(diffs, lo, hi, c as nat) ==>
+                c < above.len() && above[c] == snap[c],
+    {
+        lemma_frame_inv_arm_at::<T, I>(above, diffs, lo, hi, snap, saved_len, c);
+        if captured_in_range::<T, I>(diffs, lo, hi, c as nat) {
+            let k = choose|k: int| lo <= k < hi
+                && (#[trigger] diffs[k]).1.as_nat() == c as nat
+                && diffs[k].0 == snap[c]
+                && first_hitter::<T, I>(diffs, lo, k, c as nat);
+            let p = choose|p: int| lo <= p < hi
+                && (#[trigger] diffs[p]).1.as_nat() == c as nat
+                && first_hitter::<T, I>(diffs, lo, p, c as nat);
+            if p < k {
+                assert(diffs[p].1.as_nat() != c as nat);
+            } else if k < p {
+                assert(diffs[k].1.as_nat() != c as nat);
+            }
+            assert(range_saved_value::<T, I>(diffs, lo, hi, c as nat) == Some(diffs[p].0));
+        }
+    }
+
+    /// Every Cold frame reconstructs after the move: kept frames keep their
+    /// cells, and each new frame carries its source Hot frame's contract.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migration_cold_reconstructs(&self, mid: Self, pre: Self, count: nat, k: int)
+        requires mid.hot_migrating(pre, count), self.hot_retired_from(mid, count),
+            0 <= k < self.cold_stack@.len(),
+        ensures self.cold_reconstructs(k),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::hot_retired_from);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_runs_disjoint);
+        hide(Vec::cold_payload_ok);
+        hide(stratum_unique);
+        mid.lemma_hot_migrating_frame(pre, count);
+        mid.lemma_hot_migrating_cold_prefix(pre, count);
+        self.lemma_hot_retired_frame(mid, count);
+        pre.lemma_wf_named_parts();
+        let cc = pre.cold_stack@.len() as int;
+        assert(self.cold_stack@ == mid.cold_stack@);
+        assert(self.cold_index_runs@ == mid.cold_index_runs@);
+        assert(self.cold_value_pool@ == mid.cold_value_pool@);
+        assert(self.snapshots@ == pre.snapshots@);
+        assert(self.trail_frames@ == pre.trail_frames@);
+        assert(self.view() == pre.view());
+        if k < cc {
+            assert(pre.repr_ok() && pre.cold_runs_disjoint() && pre.cold_reconstructs(k)) by {
+                reveal(Vec::cold_repr_ok);
+            }
+            assert forall|c: int| #![trigger self.cold_covered(k, c as nat)]
+                0 <= c < self.g_saved_len(k) as int implies
+                if self.cold_covered(k, c as nat) {
+                    self.cold_value(k, c as nat) == self.snapshots@[k][c]
+                } else {
+                    &&& c < self.layer_above_at(k).len()
+                    &&& self.snapshots@[k][c] == self.layer_above_at(k)[c]
+                } by {
+                pre.lemma_cold_reconstructs_at(k, c);
+                self.lemma_cold_append_keeps_frame(pre, k, c as nat);
+                assert(self.layer_above_at(k) == pre.layer_above_at(k));
+            }
+            assert(self.cold_reconstructs(k)) by { reveal(Vec::cold_reconstructs); }
+        } else {
+            let q = k - cc;
+            mid.lemma_hot_migrating_cold_new_frame(pre, count, q);
+            assert(cc + q == k);
+            pre.lemma_pair_tier_contract(false, q);
+            pre.lemma_pair_tier_frame_layout(false, q);
+            pre.lemma_hot_saved_len(q);
+            let s = pre.phys_hot_start(q);
+            let e = pre.phys_hot_end(q);
+            let saved = pre.snapshots@[k].len();
+            assert forall|c: int| #![trigger self.cold_covered(k, c as nat)]
+                0 <= c < self.g_saved_len(k) as int implies
+                if self.cold_covered(k, c as nat) {
+                    self.cold_value(k, c as nat) == self.snapshots@[k][c]
+                } else {
+                    &&& c < self.layer_above_at(k).len()
+                    &&& self.snapshots@[k][c] == self.layer_above_at(k)[c]
+                } by {
+                Self::lemma_captured_cell_value(pre.layer_above_at(k), pre.hot_value_pool@, s, e,
+                    pre.snapshots@[k], saved, c);
+                assert(self.layer_above_at(k) == pre.layer_above_at(k));
+                assert(mid.cold_covered(k, c as nat) == self.cold_covered(k, c as nat));
+                if self.cold_covered(k, c as nat) {
+                    assert(self.cold_value(k, c as nat) == mid.cold_value(k, c as nat));
+                    assert(captured_in_range::<T, I>(pre.hot_value_pool@, s, e, c as nat));
+                }
+            }
+            assert(self.cold_reconstructs(k)) by { reveal(Vec::cold_reconstructs); }
+        }
+    }
+
+    /// Retained Hot frame `i` (source frame `count + i`) keeps its saved map
+    /// and uniqueness on its rebased range.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migration_hot_map(&self, mid: Self, pre: Self, count: nat, i: int)
+        requires mid.hot_migrating(pre, count), self.hot_retired_from(mid, count),
+            0 <= i < self.hot_stack@.len(),
+        ensures
+            self.phys_hot_start(i) == pre.phys_hot_start(count + i) - pre.hot_retirement_cut(count),
+            self.phys_hot_end(i) == pre.phys_hot_end(count + i) - pre.hot_retirement_cut(count),
+            0 <= self.phys_hot_start(i) <= self.phys_hot_end(i) <= self.hot_value_pool@.len(),
+            stratum_unique::<T, I>(self.hot_value_pool@, self.phys_hot_start(i), self.phys_hot_end(i)),
+            forall|j: nat| #[trigger] range_saved_value::<T, I>(self.hot_value_pool@,
+                    self.phys_hot_start(i), self.phys_hot_end(i), j)
+                == range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(count + i), pre.phys_hot_end(count + i), j),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::hot_retired_from);
+        hide(range_saved_value);
+        hide(stratum_unique);
+        mid.lemma_hot_migrating_frame(pre, count);
+        mid.lemma_hot_migrating_hot_unchanged(pre, count);
+        self.lemma_hot_retired_frame(mid, count);
+        let g = count + i;
+        let len = pre.hot_stack@.len() as int;
+        assert(mid.hot_stack@ == pre.hot_stack@);
+        assert(count < len);
+        let cut = pre.hot_retirement_cut(count) as int;
+        assert(mid.hot_retirement_cut(count) == pre.hot_retirement_cut(count));
+        pre.lemma_pair_tier_frame_layout(false, g);
+        pre.lemma_pair_tier_start_order(false, count as int, g);
+        let s = pre.phys_hot_start(g);
+        let e = pre.phys_hot_end(g);
+        assert(cut <= s);
+        assert(self.phys_hot_start(i) == s - cut);
+        assert(self.phys_hot_end(i) == e - cut);
+        // mid's frame g has pre's map
+        assert(stratum_unique::<T, I>(mid.hot_value_pool@, s, e)
+            && forall|j: nat| #[trigger] range_saved_value::<T, I>(mid.hot_value_pool@, s, e, j)
+                == range_saved_value::<T, I>(pre.hot_value_pool@, s, e, j)) by {
+            if g <= count {
+                mid.lemma_hot_migrating_hot_frame_map(pre, count, g);
+            } else {
+                pre.lemma_pair_tier_start_order(false, count as int + 1, g);
+                assert(pre.hot_retirement_cut(count + 1) == pre.hot_stack@[count as int + 1].start as nat);
+                assert forall|q: int| s <= q < e implies
+                    #[trigger] mid.hot_value_pool@[q] == pre.hot_value_pool@[q] by {}
+                assert(stratum_unique::<T, I>(pre.hot_value_pool@, s, e)) by {
+                    pre.lemma_wf_named_parts();
+                    reveal(Vec::hot_repr_ok);
+                }
+                assert(stratum_unique::<T, I>(mid.hot_value_pool@, s, e)) by { reveal(stratum_unique); }
+                assert forall|j: nat| #[trigger] range_saved_value::<T, I>(mid.hot_value_pool@, s, e, j)
+                    == range_saved_value::<T, I>(pre.hot_value_pool@, s, e, j) by {
+                    lemma_range_saved_value_local::<T, I>(pre.hot_value_pool@, mid.hot_value_pool@, s, e, j);
+                }
+            }
+        }
+        // rebase
+        assert forall|j: nat| #[trigger] range_saved_value::<T, I>(self.hot_value_pool@, s - cut, e - cut, j)
+            == range_saved_value::<T, I>(mid.hot_value_pool@, s, e, j) by {
+            lemma_range_saved_value_retire_prefix::<T, I>(mid.hot_value_pool@, cut, s, e, j);
+        }
+        assert(stratum_unique::<T, I>(self.hot_value_pool@, s - cut, e - cut)) by {
+            reveal(stratum_unique);
+            assert forall|a: int, b: int| s - cut <= a < e - cut && s - cut <= b < e - cut && a != b implies
+                (#[trigger] self.hot_value_pool@[a]).1.as_nat() != (#[trigger] self.hot_value_pool@[b]).1.as_nat() by {
+                assert(self.hot_value_pool@[a] == mid.hot_value_pool@[cut + a]);
+                assert(self.hot_value_pool@[b] == mid.hot_value_pool@[cut + b]);
+            }
+        }
+    }
+
+    /// Retained Hot frame `i` satisfies its physical frame contract.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migration_hot_frame(&self, mid: Self, pre: Self, count: nat, i: int)
+        requires mid.hot_migrating(pre, count), self.hot_retired_from(mid, count),
+            0 <= i < self.hot_stack@.len(),
+        ensures self.phys_frame_inv_range_holds(i),
+            stratum_unique::<T, I>(self.hot_value_pool@, self.phys_hot_start(i), self.phys_hot_end(i)),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::hot_retired_from);
+        hide(range_saved_value);
+        hide(stratum_unique);
+        hide(frame_inv_range);
+        mid.lemma_hot_migrating_frame(pre, count);
+        mid.lemma_hot_migrating_cold_prefix(pre, count);
+        self.lemma_hot_retired_frame(mid, count);
+        self.lemma_hot_migration_hot_map(mid, pre, count, i);
+        let g = count + i;
+        let cc = pre.cold_stack@.len() as int;
+        pre.lemma_pair_tier_contract(false, g);
+        pre.lemma_pair_tier_frame_layout(false, g);
+        assert(self.cold_stack@.len() == cc + count);
+        assert(self.snapshots@ == pre.snapshots@);
+        assert(self.trail_frames@ == pre.trail_frames@);
+        assert(self.view() == pre.view());
+        assert(self.layer_above_at(cc + g) == pre.layer_above_at(cc + g));
+        lemma_frame_inv_range_same_saved_map::<T, I>(pre.layer_above_at(cc + g), pre.hot_value_pool@,
+            pre.phys_hot_start(g), pre.phys_hot_end(g), self.hot_value_pool@,
+            self.phys_hot_start(i), self.phys_hot_end(i), pre.snapshots@[cc + g], pre.snapshots@[cc + g].len());
+    }
+
+    /// Hot representation after retiring the encoded prefix.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migration_hot_repr(&self, mid: Self, pre: Self, count: nat)
+        requires mid.hot_migrating(pre, count), self.hot_retired_from(mid, count),
+            self.frame_partition_ok(),
+        ensures self.hot_repr_ok(),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::hot_retired_from);
+        hide(range_saved_value);
+        hide(stratum_unique);
+        hide(frame_inv_range);
+        mid.lemma_hot_migrating_frame(pre, count);
+        self.lemma_hot_retired_frame(mid, count);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+        let cut = pre.hot_retirement_cut(count) as int;
+        let len = pre.hot_stack@.len() as int;
+        let hs = self.hot_stack@;
+        let pool = self.hot_value_pool@;
+        assert(mid.hot_stack@ == pre.hot_stack@);
+        assert(mid.hot_retirement_cut(count) == pre.hot_retirement_cut(count));
+        pre.lemma_hot_cut_order(count, count);
+        assert(pool.len() == pre.hot_value_pool@.len() - cut);
+        if hs.len() == 0 {
+            assert(count == len);
+            assert(pool.len() == 0);
+        } else {
+            assert(count < len);
+            pre.lemma_pair_tier_frame_layout(false, count as int);
+            assert(hs[0].start == pre.hot_stack@[count as int].start - cut);
+        }
+        assert forall|i: int| 0 <= i < hs.len() implies {
+            &&& (#[trigger] hs[i]).start <= hs[i].end
+            &&& hs[i].end <= pool.len()
+            &&& hs[i].start as int <= self.phys_hot_end(i)
+            &&& self.phys_hot_end(i) <= pool.len() as int
+            &&& (i + 1 < hs.len() ==> {
+                &&& hs[i].end == hs[i + 1].start
+                &&& self.phys_hot_end(i) == hs[i + 1].start as int
+            })
+            &&& (i + 1 == hs.len() ==> self.phys_hot_end(i) == pool.len() as int)
+            &&& stratum_unique::<T, I>(pool, hs[i].start as int, self.phys_hot_end(i))
+            &&& self.phys_frame_inv_range_holds(i)
+            &&& self.cold_stack@.len() + i < self.snapshots@.len()
+        } by {
+            let g = count + i;
+            pre.lemma_pair_tier_frame_layout(false, g);
+            pre.lemma_pair_tier_start_order(false, count as int, g);
+            self.lemma_hot_migration_hot_frame(mid, pre, count, i);
+            self.lemma_hot_migration_hot_map(mid, pre, count, i);
+            if i + 1 < hs.len() {
+                pre.lemma_pair_tier_frame_layout(false, g + 1);
+            }
+        }
+        reveal(Vec::hot_repr_ok);
+    }
+
+    /// Capture ownership after retiring the encoded prefix.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migration_ingress(&self, mid: Self, pre: Self, count: nat)
+        requires mid.hot_migrating(pre, count), self.hot_retired_from(mid, count),
+        ensures self.open_ingress_ok(),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::hot_retired_from);
+        hide(stratum_unique);
+        hide(frame_inv_range);
+        mid.lemma_hot_migrating_frame(pre, count);
+        self.lemma_hot_retired_frame(mid, count);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::open_ingress_ok);
+        let depth = self.snapshots@.len();
+        let hs = self.hot_stack@;
+        let len = pre.hot_stack@.len() as int;
+        let cut = pre.hot_retirement_cut(count) as int;
+        assert(mid.hot_stack@ == pre.hot_stack@);
+        assert(mid.hot_retirement_cut(count) == pre.hot_retirement_cut(count));
+        assert(self.store == pre.store);
+        assert(self.view() == pre.view());
+        assert(self.snapshots@ == pre.snapshots@);
+        assert(self.active_saved_len == pre.active_saved_len);
+        assert(self.trail_stack@ == pre.trail_stack@);
+        assert(self.trail_value_pool@ == pre.trail_value_pool@);
+        if self.store.unique_capture_spec() {
+            if depth > 0 {
+                assert(pre.hot_stack@.len() > 0);
+                assert(count <= pre.hot_closed_count());
+                assert(count < len);
+                let i = hs.len() - 1;
+                let g = len - 1;
+                assert(count + i == g);
+                self.lemma_hot_migration_hot_map(mid, pre, count, i);
+                assert(pre.phys_hot_end(g) == pre.hot_value_pool@.len() as int);
+                assert(self.phys_hot_end(i) == self.hot_value_pool@.len() as int);
+                assert forall|j: int| 0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
+                    (#[trigger] self.store.captured()[j])
+                        == captured_in_range::<T, I>(self.hot_value_pool@,
+                            hs[i].start as int, self.hot_value_pool@.len() as int, j as nat) by {
+                    assert(range_saved_value::<T, I>(self.hot_value_pool@,
+                            self.phys_hot_start(i), self.phys_hot_end(i), j as nat)
+                        == range_saved_value::<T, I>(pre.hot_value_pool@,
+                            pre.phys_hot_start(g), pre.phys_hot_end(g), j as nat));
+                }
+            }
+        } else {
+            if hs.len() > 0 {
+                assert(count < len);
+                assert(hs[hs.len() - 1].end == pre.hot_stack@[len - 1].end - cut);
+                pre.lemma_hot_cut_order(count, count);
+            }
+        }
+    }
+
+    /// A completed Hot-to-Cold migration restores the full invariant.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migration_wf(&self, mid: Self, pre: Self, count: nat)
+        requires mid.hot_migrating(pre, count), self.hot_retired_from(mid, count),
+        ensures self.wf(),
+            *self == (Self { cold_stack: self.cold_stack, cold_index_runs: self.cold_index_runs,
+                cold_value_pool: self.cold_value_pool, hot_stack: self.hot_stack,
+                hot_value_pool: self.hot_value_pool, ..pre }),
+            self.cold_stack@.len() == pre.cold_stack@.len() + count,
+            self.hot_stack@.len() == pre.hot_stack@.len() - count,
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::hot_retired_from);
+        hide(Vec::wf_for_snap);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::open_ingress_ok);
+        hide(Vec::cold_repr_ok);
+        hide(Vec::proof_compat_ok);
+        hide(Vec::frame_partition_ok);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_payload_ok);
+        hide(Vec::cold_runs_disjoint);
+        mid.lemma_hot_migrating_frame(pre, count);
+        mid.lemma_hot_migrating_cold_prefix(pre, count);
+        self.lemma_hot_retired_frame(mid, count);
+        self.lemma_hot_migration_partition(mid, pre, count);
+        self.lemma_hot_migration_hot_repr(mid, pre, count);
+        self.lemma_hot_migration_trail_repr(pre);
+        self.lemma_hot_migration_ingress(mid, pre, count);
+        self.lemma_hot_migration_history(pre);
+        assert(self.cold_stack@ == mid.cold_stack@);
+        assert(self.cold_index_runs@ == mid.cold_index_runs@);
+        assert(self.cold_value_pool@ == mid.cold_value_pool@);
+        assert(self.repr_ok()) by { reveal(Vec::repr_ok); }
+        assert(self.cold_runs_disjoint()) by { reveal(Vec::cold_runs_disjoint); }
+        self.lemma_cold_payload_ok_transfer(mid);
+        assert(self.cold_repr_ok()) by {
+            reveal(Vec::cold_repr_ok);
+            assert forall|k: int| 0 <= k < self.cold_stack@.len() implies
+                #[trigger] self.cold_reconstructs(k) by {
+                self.lemma_hot_migration_cold_reconstructs(mid, pre, count, k);
+            }
+        }
+        self.lemma_wf_from_named_parts();
+    }
+
+    /// Retire the encoded Hot prefix and restore the full invariant.
+    #[verifier::spinoff_prover]
+    fn hot_migration_finish_checked(&mut self, count: usize, Ghost(pre): Ghost<Self>)
+        requires old(self).hot_migrating(pre, count as nat),
+        ensures final(self).wf(),
+            *final(self) == (Self { cold_stack: final(self).cold_stack,
+                cold_index_runs: final(self).cold_index_runs,
+                cold_value_pool: final(self).cold_value_pool, hot_stack: final(self).hot_stack,
+                hot_value_pool: final(self).hot_value_pool, ..pre }),
+            final(self).cold_stack@.len() == pre.cold_stack@.len() + count,
+            final(self).hot_stack@.len() == pre.hot_stack@.len() - count,
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::hot_retired_from);
+        let ghost mid = *self;
+        proof {
+            mid.lemma_hot_migrating_frame(pre, count as nat);
+            pre.lemma_hot_cut_order(count as nat, count as nat);
+        }
         if count == 0 {
+            proof {
+                assert(self.hot_retired_from(mid, 0)) by {
+                    reveal(Vec::hot_retired_from);
+                    if pre.hot_stack@.len() > 0 {
+                        pre.lemma_pair_tier_frame_layout(false, 0);
+                    } else {
+                        pre.lemma_wf_named_parts();
+                        reveal(Vec::hot_repr_ok);
+                    }
+                    assert(self.hot_value_pool@ =~= mid.hot_value_pool@.subrange(
+                        mid.hot_retirement_cut(0) as int, mid.hot_value_pool@.len() as int));
+                }
+                self.lemma_hot_migration_wf(mid, pre, 0);
+            }
             return;
         }
-        let closed = if self.store.unique_capture() {
-            self.hot_stack.len().saturating_sub(1)
-        } else {
-            self.hot_stack.len()
-        };
-        assert!(count <= closed, "adaptive Hot plan must name a closed prefix");
-
-        for f in 0..count {
-            let frame = self.hot_stack[f];
-            let mut entries = self.hot_value_pool[frame.start..frame.end].to_vec();
-            entries.sort_unstable_by_key(|(_, index)| index.as_usize());
-            self.append_cold_sorted_checked(entries.as_slice(), frame.saved_len);
+        proof {
+            assert forall|f: int| count <= f < mid.hot_stack@.len() implies
+                mid.hot_retirement_cut(count as nat) <= (#[trigger] mid.hot_stack@[f]).start
+                && mid.hot_retirement_cut(count as nat) <= mid.hot_stack@[f].end by {
+                pre.lemma_pair_tier_start_order(false, count as int, f);
+                pre.lemma_pair_tier_frame_layout(false, f);
+            }
         }
         self.retire_hot_prefix_checked(count);
+        proof {
+            assert(self.hot_retired_from(mid, count as nat)) by { reveal(Vec::hot_retired_from); }
+            self.lemma_hot_migration_wf(mid, pre, count as nat);
+        }
+    }
+
+    /// Every index of a migrating frame fits below `usize::MAX`, so the run
+    /// counter's successor probe cannot overflow.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_indices_fit(&self, pre: Self, f: int)
+        requires self.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            pre.hot_stack@[f].saved_len.as_nat() <= usize::MAX,
+        ensures forall|q: int| pre.hot_stack@[f].start <= q < pre.hot_stack@[f].end ==>
+            (#[trigger] self.hot_value_pool@[q]).1.as_nat() < usize::MAX,
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating_cold);
+        hide(stratum_unique);
+        hide(range_saved_value);
+        assert forall|q: int| pre.hot_stack@[f].start <= q < pre.hot_stack@[f].end implies
+            (#[trigger] self.hot_value_pool@[q]).1.as_nat() < usize::MAX by {
+            self.lemma_hot_frame_index_bound(pre, f, q - pre.hot_stack@[f].start);
+        }
+    }
+
+    /// Reclaim the pools a Hot-to-Cold move touched when the policy asks for
+    /// it. Capacity only: every view, the store and the history are unchanged.
+    #[verifier::spinoff_prover]
+    fn reclaim_after_hot_migration_checked(&mut self)
+        requires old(self).wf(),
+        ensures final(self).wf(),
+            *final(self) == (Self { hot_value_pool: final(self).hot_value_pool,
+                cold_value_pool: final(self).cold_value_pool,
+                cold_index_runs: final(self).cold_index_runs, ..*old(self) }),
+            final(self).hot_value_pool@ == old(self).hot_value_pool@,
+            final(self).cold_value_pool@ == old(self).cold_value_pool@,
+            final(self).cold_index_runs@ == old(self).cold_index_runs@,
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::cold_repr_ok);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::open_ingress_ok);
+        let ghost pre = *self;
         if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
-            self.hot_value_pool.shrink_to_fit();
-            self.cold_value_pool.shrink_to_fit();
-            self.cold_index_runs.shrink_to_fit();
+            crate::parallel_store::shrink_vec_capacity(&mut self.hot_value_pool, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_value_pool, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_index_runs, 0, 1);
+        }
+        proof {
+            pre.lemma_wf_named_parts();
+            assert(pre.store.wf()) by { reveal(Vec::wf_for_snap); }
+            self.lemma_survivor_history_transfer(pre);
+            self.lemma_persistence_views_framing(pre);
+            self.lemma_open_ingress_transfer(pre);
+            reveal(Vec::wf);
         }
     }
 
-    /// Execute sorted unique payloads retained by the adaptive planner without
-    /// rescanning or resorting accepted Hot frames.
-    #[verifier::external_body]
+    /// Execute an exact oldest closed Hot prefix as direct-restorable runs:
+    /// each frame is sorted in place and encoded straight from the pool, then
+    /// the prefix is retired in one bulk move.
+    #[verifier::spinoff_prover]
     #[cold]
     #[inline(never)]
-    fn runtime_execute_hot_plan(&mut self, planned: &[std::vec::Vec<(T, I)>]) {
-        let count = planned.len();
+    fn runtime_migrate_hot_count(&mut self, count: usize)
+        requires old(self).wf(), count <= old(self).hot_closed_count(),
+        ensures final(self).wf(),
+            *final(self) == (Self { cold_stack: final(self).cold_stack,
+                cold_index_runs: final(self).cold_index_runs,
+                cold_value_pool: final(self).cold_value_pool, hot_stack: final(self).hot_stack,
+                hot_value_pool: final(self).hot_value_pool, ..*old(self) }),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
         if count == 0 {
             return;
         }
-        let closed = if self.store.unique_capture() {
-            self.hot_stack.len().saturating_sub(1)
-        } else {
-            self.hot_stack.len()
-        };
-        assert!(count <= closed, "adaptive Hot plan must name a closed prefix");
-
-        for (f, entries) in planned.iter().enumerate() {
-            let frame = self.hot_stack[f];
-            self.append_cold_sorted_checked(entries.as_slice(), frame.saved_len);
+        let ghost pre = *self;
+        proof { self.lemma_hot_migrating_start(pre); }
+        let mut f = 0usize;
+        while f < count
+            invariant self.hot_migrating(pre, f as nat), f <= count, count <= pre.hot_closed_count(),
+            decreases count - f,
+        {
+            self.hot_frame_sort_checked(f, Ghost(pre));
+            self.hot_frame_encode_checked(f, Ghost(pre));
+            f += 1;
         }
-        self.retire_hot_prefix_checked(count);
+        self.hot_migration_finish_checked(count, Ghost(pre));
+        self.reclaim_after_hot_migration_checked();
     }
 
-    /// Migrate an oldest closed unique prefix to direct-restorable runs.
-    #[verifier::external_body]
+    /// Migrate an oldest closed unique prefix to direct-restorable runs. The
+    /// `Adaptive` limit keeps encoding oldest-first while each frame's run count
+    /// stays at most half its entries; the first frame that does not stops the
+    /// pass (it stays in Hot, sorted in place).
+    #[verifier::spinoff_prover]
     #[cold]
     #[inline(never)]
-    fn runtime_migrate_hot(&mut self, compress_all: bool) {
+    fn runtime_migrate_hot(&mut self, compress_all: bool)
+        requires old(self).wf(),
+        ensures final(self).wf(),
+            *final(self) == (Self { cold_stack: final(self).cold_stack,
+                cold_index_runs: final(self).cold_index_runs,
+                cold_value_pool: final(self).cold_value_pool, hot_stack: final(self).hot_stack,
+                hot_value_pool: final(self).hot_value_pool, ..*old(self) }),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
         let closed = if self.store.unique_capture() {
             self.hot_stack.len().saturating_sub(1)
         } else {
             self.hot_stack.len()
         };
+        proof { assert(closed == self.hot_closed_count()); }
         if closed == 0 {
             return;
         }
-        let mut count = if compress_all {
-            closed
-        } else {
-            self.retained_closed_prefix(
-                false,
-                closed,
-                self.tier_policy.hot,
-                core::mem::size_of::<(T, I)>(),
-            )
+        let adaptive = match self.tier_policy.hot {
+            crate::tier_policy::TierLimit::Adaptive => true,
+            _ => false,
         };
-        if !compress_all && matches!(self.tier_policy.hot, crate::tier_policy::TierLimit::Adaptive) {
-            count = 0;
-            while count < closed {
+        if !compress_all && adaptive {
+            let ghost pre = *self;
+            proof { self.lemma_hot_migrating_start(pre); }
+            let mut count = 0usize;
+            while count < closed
+                invariant self.hot_migrating(pre, count as nat), count <= closed,
+                    closed == pre.hot_closed_count(),
+                decreases closed - count,
+            {
+                self.hot_frame_sort_checked(count, Ghost(pre));
+                proof {
+                    self.lemma_hot_migrating_frame(pre, count as nat);
+                    pre.lemma_closed_hot_frame_end(count as int);
+                }
                 let frame = self.hot_stack[count];
+                let saved_len = frame.saved_len;
                 let entries = frame.end - frame.start;
-                if entries == 0 || self.hot_frame_run_count(frame).saturating_mul(2) > entries {
+                proof {
+                    saved_len.lemma_as_nat_bounded();
+                    I::lemma_max_nat_fits_usize();
+                    self.lemma_hot_frame_indices_fit(pre, count as int);
+                }
+                let runs = Self::count_index_runs(&self.hot_value_pool, frame.start, frame.end);
+                let doubled = match runs.checked_mul(2) {
+                    Some(d) => d,
+                    None => usize::MAX,
+                };
+                if entries == 0 || doubled > entries {
                     break;
                 }
+                self.hot_frame_encode_checked(count, Ghost(pre));
                 count += 1;
             }
+            self.hot_migration_finish_checked(count, Ghost(pre));
+            if count > 0 {
+                self.reclaim_after_hot_migration_checked();
+            }
+            return;
         }
+        let count = if compress_all {
+            closed
+        } else {
+            self.retained_closed_prefix(false, closed, self.tier_policy.hot, core::mem::size_of::<(T, I)>())
+        };
         self.runtime_migrate_hot_count(count);
+    }
+
+    /// Adaptive Hot stage: sort closed Hot frames in place oldest-first and
+    /// encode each into Cold while the closed-history budget is exceeded and
+    /// the frame's run shape pays for it. An ineligible frame stops the stage
+    /// and stays in Hot. Returns the updated logical byte estimate.
+    #[verifier::spinoff_prover]
+    #[cold]
+    #[inline(never)]
+    fn adaptive_hot_stage_checked(
+        &mut self, input: &crate::tier_policy::AdaptiveInput,
+        report: &mut crate::tier_policy::AdaptiveReport, logical: usize, preexisting_hot_frames: usize,
+    ) -> (r: usize)
+        requires old(self).wf(),
+            old(report).inspected_hot_frames == 0, old(report).migrated_hot_frames == 0,
+        ensures final(self).wf(),
+            *final(self) == (Self { cold_stack: final(self).cold_stack,
+                cold_index_runs: final(self).cold_index_runs,
+                cold_value_pool: final(self).cold_value_pool, hot_stack: final(self).hot_stack,
+                hot_value_pool: final(self).hot_value_pool, ..*old(self) }),
+            *final(report) == (crate::tier_policy::AdaptiveReport {
+                inspected_hot_frames: final(report).inspected_hot_frames,
+                migrated_hot_frames: final(report).migrated_hot_frames,
+                uniques: final(report).uniques, runs: final(report).runs, ..*old(report) }),
+            final(report).migrated_hot_frames == old(self).hot_stack@.len() - final(self).hot_stack@.len(),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        let hot_closed = if self.store.unique_capture() {
+            self.hot_stack.len().saturating_sub(1)
+        } else {
+            self.hot_stack.len()
+        };
+        proof { assert(hot_closed == self.hot_closed_count()); }
+        let pair_bytes = core::mem::size_of::<(T, I)>();
+        let hot_header_bytes = core::mem::size_of::<crate::frame::HotFrame<I>>();
+        let cold_header_bytes = core::mem::size_of::<crate::frame::ColdFrameHdr<I>>();
+        let value_bytes = core::mem::size_of::<T>();
+        let run_bytes = core::mem::size_of::<crate::frame::IndexRun<I>>();
+        let ghost pre = *self;
+        let ghost report0 = *report;
+        proof { self.lemma_hot_migrating_start(pre); }
+        let mut logical = logical;
+        let mut hot_count = 0usize;
+        while hot_count < hot_closed && logical > input.max_closed_history_bytes
+            invariant_except_break
+                report.inspected_hot_frames == hot_count,
+            invariant
+                self.hot_migrating(pre, hot_count as nat),
+                hot_count <= hot_closed, hot_closed == pre.hot_closed_count(),
+                *report == (crate::tier_policy::AdaptiveReport {
+                    inspected_hot_frames: report.inspected_hot_frames,
+                    uniques: report.uniques, runs: report.runs, ..report0 }),
+            decreases hot_closed - hot_count,
+        {
+            self.hot_frame_sort_checked(hot_count, Ghost(pre));
+            proof {
+                self.lemma_hot_migrating_frame(pre, hot_count as nat);
+                pre.lemma_closed_hot_frame_end(hot_count as int);
+            }
+            let frame = self.hot_stack[hot_count];
+            let saved_len = frame.saved_len;
+            let uniques = frame.end - frame.start;
+            proof {
+                saved_len.lemma_as_nat_bounded();
+                I::lemma_max_nat_fits_usize();
+                self.lemma_hot_frame_indices_fit(pre, hot_count as int);
+            }
+            let runs = Self::count_index_runs(&self.hot_value_pool, frame.start, frame.end);
+            report.inspected_hot_frames = report.inspected_hot_frames + 1;
+            if hot_count < preexisting_hot_frames {
+                report.uniques = Self::adaptive_add_total(report.uniques, uniques);
+            }
+            report.runs = Self::adaptive_add_total(report.runs, runs);
+            let hot_bytes = Self::adaptive_frame_bytes(hot_header_bytes, uniques, pair_bytes);
+            let values = match uniques.checked_mul(value_bytes) {
+                Some(v) => v,
+                None => crate::guard::refuse("logical adaptive Cold byte count overflow"),
+            };
+            let cold_bytes = match cold_header_bytes.checked_add(values) {
+                Some(b) => {
+                    let run_total = match runs.checked_mul(run_bytes) {
+                        Some(v) => v,
+                        None => crate::guard::refuse("logical adaptive Cold byte count overflow"),
+                    };
+                    match b.checked_add(run_total) {
+                        Some(c) => c,
+                        None => crate::guard::refuse("logical adaptive Cold byte count overflow"),
+                    }
+                }
+                None => crate::guard::refuse("logical adaptive Cold byte count overflow"),
+            };
+            let eligible = if uniques == 0 {
+                cold_bytes <= hot_bytes
+            } else {
+                input.min_uniques_per_run.accepts(uniques, runs) && cold_bytes <= hot_bytes
+            };
+            if !eligible {
+                break;
+            }
+            logical = match logical.checked_sub(hot_bytes) {
+                Some(v) => v,
+                None => crate::guard::refuse("adaptive logical byte estimate underflow"),
+            };
+            logical = match logical.checked_add(cold_bytes) {
+                Some(v) => v,
+                None => crate::guard::refuse("adaptive logical byte estimate overflow"),
+            };
+            self.hot_frame_encode_checked(hot_count, Ghost(pre));
+            hot_count += 1;
+        }
+        report.migrated_hot_frames = hot_count;
+        self.hot_migration_finish_checked(hot_count, Ghost(pre));
+        logical
     }
 
     #[verifier::external_body]
@@ -7512,21 +9355,6 @@ where
         &mut self,
         input: crate::tier_policy::AdaptiveInput,
     ) -> crate::tier_policy::AdaptiveReport {
-        fn frame_bytes(header: usize, entries: usize, entry: usize) -> usize {
-            header
-                .checked_add(
-                    entries
-                        .checked_mul(entry)
-                        .expect("logical adaptive frame byte count overflow"),
-                )
-                .expect("logical adaptive frame byte count overflow")
-        }
-        fn add_total(total: &mut usize, value: usize) {
-            *total = total
-                .checked_add(value)
-                .expect("adaptive W/U/R total overflow");
-        }
-
         let mut report = crate::tier_policy::AdaptiveReport::default();
         let mut logical = self.runtime_closed_history_bytes();
         report.logical_bytes_before = logical;
@@ -7535,64 +9363,13 @@ where
             return report;
         }
 
-        let pair_bytes = core::mem::size_of::<(T, I)>();
         let preexisting_hot_frames = self.hot_stack.len();
         logical = self.adaptive_trail_stage_checked(&input, &mut report, logical);
 
         // Trail -> Hot is executed first. Recompute exact pressure before the
         // Hot scan so the second stage sees the actual closed representation.
         logical = self.runtime_closed_history_bytes();
-        let hot_closed = if self.store.unique_capture() {
-            self.hot_stack.len().saturating_sub(1)
-        } else {
-            self.hot_stack.len()
-        };
-        let mut sorted_entries: std::vec::Vec<(T, I)> = std::vec::Vec::new();
-        let mut hot_plan: std::vec::Vec<std::vec::Vec<(T, I)>> = std::vec::Vec::new();
-        let mut hot_count = 0usize;
-        while hot_count < hot_closed && logical > input.max_closed_history_bytes {
-            let frame = self.hot_stack[hot_count];
-            let (uniques, runs) = self.runtime_hot_shape(frame, &mut sorted_entries);
-            report.inspected_hot_frames += 1;
-            if hot_count < preexisting_hot_frames {
-                add_total(&mut report.uniques, uniques);
-            }
-            add_total(&mut report.runs, runs);
-
-            let hot_bytes = frame_bytes(
-                core::mem::size_of::<crate::frame::HotFrame<I>>(),
-                uniques,
-                pair_bytes,
-            );
-            let cold_bytes = core::mem::size_of::<crate::frame::ColdFrameHdr<I>>()
-                .checked_add(
-                    uniques
-                        .checked_mul(core::mem::size_of::<T>())
-                        .expect("logical adaptive Cold byte count overflow"),
-                )
-                .and_then(|bytes| {
-                    bytes.checked_add(
-                        runs
-                            .checked_mul(core::mem::size_of::<crate::frame::IndexRun<I>>())
-                            .expect("logical adaptive Cold byte count overflow"),
-                    )
-                })
-                .expect("logical adaptive Cold byte count overflow");
-            let eligible = if uniques == 0 {
-                cold_bytes <= hot_bytes
-            } else {
-                input.min_uniques_per_run.accepts(uniques, runs)
-                    && cold_bytes <= hot_bytes
-            };
-            if !eligible {
-                break;
-            }
-            logical = logical - hot_bytes + cold_bytes;
-            hot_plan.push(core::mem::take(&mut sorted_entries));
-            hot_count += 1;
-        }
-        report.migrated_hot_frames = hot_plan.len();
-        self.runtime_execute_hot_plan(&hot_plan);
+        logical = self.adaptive_hot_stage_checked(&input, &mut report, logical, preexisting_hot_frames);
 
         report.inspected_frames = report.inspected_trail_frames + report.inspected_hot_frames;
         report.migrated_frames = report.migrated_trail_frames + report.migrated_hot_frames;
