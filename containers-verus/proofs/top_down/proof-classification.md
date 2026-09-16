@@ -409,15 +409,22 @@ that actual selection produces it, then remove the executor trust only after the
 producer/consumer chain verifies. Hot-to-Cold and policy closure remain separate.
 
 
-### Trail selection producer helpers
+### Trail deduplication and migration primitives
 
-Reuse `trail_select::build_keys` and `select_positions`: these checked functions
-now execute in ordinary migration (the builder also executes in adaptive shape
-analysis). Reuse `lemma_keyed_permutation`, `lemma_group_first`,
-`lemma_selected_first` and `lemma_selected_covers` for source correspondence,
-earliest capture and index coverage. Their sorting/permutation premises remain
-explicit obligations of the actual sort, not assumed library contracts.
-Selected payload uniqueness/map equality and adaptive dedup/reordering still
-need proof before these helpers supply `trail_plan_matches`. Preserve the
-existing sorting complexity; the existing quadratic insertion sort is not a
-runtime substitute for this path.
+The Trail-to-Hot producer is `trail_select::dedupe_trail_range`: one
+left-to-right pass with a `HashSet<I, IndexHasher>` membership test, first
+capture wins, unique payload appended to the destination pool in chronological
+order of first capture. Its contract (`dedupe_prefix`, uniqueness and full
+optional saved-map equality with the source range) is the matching predicate the
+storage theorem needed; no sort or permutation obligation remains on this path.
+Migration is composed from checked per-frame primitives over the closed state
+predicates `trail_migrating`/`trail_tentative`: `trail_frame_tentative_checked`
+(dedupe into the pool, no header), `trail_frame_commit_checked` (publish the
+header), `trail_frame_discard_checked` (truncate a rejected frame) and
+`trail_migration_finish_checked` (bulk retirement plus
+`lemma_trail_migration_wf`). `runtime_migrate_trail_count`,
+`runtime_migrate_trail` (including the `TierLimit::Adaptive` shape loop) and
+`adaptive_trail_stage_checked` (byte-budget planner stage) are checked loops
+over these primitives; policy selection stays separate from the shared
+preservation lemma. The planned-payload executors were removed with the plan
+vectors they consumed.

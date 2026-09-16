@@ -38,104 +38,53 @@ Read it and the linked acceptance checklist before continuing.
 ## Repository and current checkpoint
 
 - Working directory: `/Users/remidelmas/projects/sp-d21-exec`
-- Branch: `d21-exec`
-- HEAD: `9617902` — `Prove full Trail migration preservation for matched plans`
-- Last observed local tracking status: ahead of `origin/d21-exec` by 33 commits
-  (local ref comparison, not a new remote fetch).
-- The current selection work is **uncommitted**. Preserve it.
+- Branch: `d21-exec`; commits are local and signed; **nothing is pushed**.
+- `e28ac37` committed the (since superseded) sort-based Trail selection
+  helpers; the Trail-dedupe checkpoint that follows it replaces that algorithm.
 
-At HEAD, default and literal-types each passed **2457 verified, zero errors**;
-conditional composition passed **80 verified, zero errors**. Evidence:
-`/tmp/sp-d21-trail-wf-default.log`, `...-literal.log`, `...-composition.log`.
-The previous runtime checkpoint had 277 feature tests passing, 10 ignored,
-and four release policy-matrix tests passing. Do not confuse those with the
-current uncommitted source's results.
+## Trail-dedupe checkpoint (2026-09-16)
 
-## Current uncommitted work
+User direction: the Trail-to-Hot dedupe must be the smallest algorithm — a
+left-to-right fold through a hash set keyed by the generic index type `I`
+(first capture wins), writing straight into the Hot pool; no `usize`-widened
+key buffers, no positions buffer, no plan vectors, no sorting. Hot-to-Cold is
+where a slice sort belongs, and it must be std's in-place sort under a trusted
+std contract, not a verified insertion sort.
 
-Modified:
-- `containers-verus/src/lib.rs`: registers private module `trail_select`.
-- `containers-verus/src/vec.rs`: both Trail key builders now call checked
-  `trail_select::build_keys`; ordinary migration's group-selection loop now calls
-  checked `trail_select::select_positions`.
-- `containers-verus/doc/tasks/three-tier-proof-progress.md`: new producer section.
-- `containers-verus/proofs/top_down/proof-classification.md`: reuse/remaining-gap note.
+Implemented and verified (see `three-tier-proof-progress.md`, last section):
+`trail_select::dedupe_trail_range`; `IndexLike::lemma_obeys_key_model`;
+`trail_migrating`/`trail_tentative` with the per-frame primitives
+`trail_frame_tentative/commit/discard_checked` and
+`trail_migration_finish_checked`; checked `runtime_migrate_trail_count`,
+`runtime_migrate_trail`, `retained_closed_prefix`, `adaptive_trail_stage_checked`
+(called from the still-external `runtime_apply_adaptive`); Verus-native `Ratio`
+with a proved `accepts`. Trust: 68 default + 5 literal `external_body` markers
+(CI `EXPECTED_DEFAULT=68`); default axioms 1 -> 4 (`DenseId31`, `DenseId63`,
+`DenseUsize` key model) plus one generated per `define_id*!` id type.
 
-New:
-- `containers-verus/src/trail_select.rs` (untracked until added).
-- This handoff file.
+## Audit of remaining runtime waste (user asked for these to go)
 
-The new module contains:
+1. `runtime_migrate_hot_count`: `to_vec()` copy per frame then sort — sort the
+   pool slice in place (Hot frames are unordered) and encode from the slice.
+2. `runtime_hot_shape` + `hot_plan: Vec<Vec<(T, I)>>` in the adaptive Hot stage:
+   copy+sort per inspected frame, allocation per accepted frame — same in-place
+   sort, count runs on the slice, encode directly.
+3. `hot_frame_run_count`: collects `Vec<usize>` and sorts just to count runs.
+4. `diff_compress::sort_frame_by_index`: copying insertion sort used by
+   `ColdStack::seal_runs` (2 sites) and 3 `diff_compress` sites.
+5. `runtime_closed_history_bytes` recomputed three times per adaptive pass.
+6. `diff_compress::dedupe_first` is quadratic but has no runtime callers.
 
-- `keyed_source(entries, keys)`: exact length, each key names a valid physical source
-  position with the matching index, and every source position occurs.
-- `keys_sorted(keys)`: lexicographic order on `(index, chronological position)`.
-- `build_keys`: checked reserved linear loop, exporting exact keys and correspondence.
-- `group_positions(keys,n)`: recursive mathematical result of scanning group heads.
-  This is a spec sequence, not a runtime or persistent ghost buffer.
-- `select_positions`: checked actual linear scan; exports exactly `group_positions`.
-- `lemma_group_first`: a sorted group head names the earliest source capture.
-- `lemma_selected_first`: all selected positions are valid earliest captures.
-- `lemma_selected_covers`: every input index has a retained group head.
-- `lemma_keyed_permutation`: multiset equality preserves source correspondence.
+## Next actions
 
-Targeted verification: **9 verified, zero errors** in
-`/tmp/sp-d21-trail-select5.log`.
-Full default verification of this source: **2466 verified, zero errors** in
-`/tmp/sp-d21-select-default.log` (finished in 3m38s). Literal-types also passed
-**2466 verified, zero errors**, in `/tmp/sp-d21-select-literal.log` (3m46s).
-Conditional composition passed **80 verified, zero errors** in
-`/tmp/sp-d21-select-composition.log`.
-Formatting/whitespace and unchanged-legacy checks passed before the latest prose
-handoff addition. No trust was introduced or removed by this extraction.
-
-**Limits:** `sort_unstable` still has no checked semantic contract in the pinned
-vstd. The new lemmas explicitly require sortedness/permutation; no caller may
-assume those facts. Selected-payload uniqueness, full map equality, chronological
-reordering, and adaptive deduplication still need proof. Surrounding migration
-and planner bodies remain external until their real dependencies verify.
-
-Runtime shape remains the same buffers and sorting calls, with one reserved
-linear key-building loop and the existing linear group scan. Performance parity
-has NOT been measured. Do not substitute the existing quadratic insertion sort
-for the current sorting implementation merely to obtain a proof.
-
-## Validation at handoff creation (resolved)
-
-A sequential `set -e` shell was launched through Codex exec session **99198**.
-Default and literal-types verification both finished successfully, and
-composition passed (80 verified, zero errors). That shell was killed with the
-Codex session while the feature suite was running (its log stopped before
-`eclasses_behavior` reported), so the feature suite and the policy matrix were
-rerun from scratch afterwards: **277 passed, 10 ignored** and **4 passed**
-(`/tmp/sp-d21-select-tests.log`, `/tmp/sp-d21-select-policy.log`). Formatting,
-whitespace and the unchanged-legacy check also passed on this source. The
-original queue was:
-
-```sh
-cargo fmt --all
-touch containers-verus/src/trail_select.rs
-cargo verus verify -p semi-persistent-containers-verus -- --time-expanded > /tmp/sp-d21-select-default.log 2>&1
-touch containers-verus/src/trail_select.rs
-cargo verus verify -p semi-persistent-containers-verus --features literal-types -- --time-expanded > /tmp/sp-d21-select-literal.log 2>&1
-verus --crate-type lib containers-verus/proofs/top_down/composition.rs > /tmp/sp-d21-select-composition.log 2>&1
-cargo test -p semi-persistent-containers-verus --features 'compat-all,literal-types' > /tmp/sp-d21-select-tests.log 2>&1
-PROPTEST_CASES=1024 cargo test -p containers-conformance --release --test three_tier_policy_matrix > /tmp/sp-d21-select-policy.log 2>&1
-cargo fmt --all -- --check
-git diff --check
-git diff --quiet d191c4a -- containers
-```
-
-Codex session handles may not transfer to Claude. Inspect terminal log endings
-and actual process state before starting anything duplicate. Missing later logs
-can simply mean earlier checks have not finished. Because this uses `set -e`, an
-error stops subsequent checks. An observation timeout is not a terminal result.
-Do not edit sources while these checks are still measuring this revision.
-
-Pinned tools: Verus `0.2026.08.02.b677dd5`, Rust `1.97.1`, vstd `2026-08-02`,
-macOS aarch64. cargo-verus can cache across changed verifier flags; touch a source
-before switching flags when there was no source change. Full checks take several
-minutes. Capture terminal results, not just partial log text.
+1. Hot-to-Cold: add the trusted in-place std sort contract
+   (`sort_pairs_by_index`), per-frame `hot_frame_sort/encode_checked` and
+   `hot_migration_finish_checked` over a `hot_migrating` state predicate,
+   checked `runtime_migrate_hot_count`, `runtime_migrate_hot` and the adaptive
+   Hot stage; then make `runtime_apply_adaptive` fully checked (byte counting
+   with `checked_*` + `guard::refuse`).
+2. Configured/forced/mark dispatch wrappers, then derived containers and the
+   parallel/group scope, final audits, and the benchmark protocol.
 
 ## Existing proof architecture to reuse
 
@@ -153,41 +102,18 @@ Already checked:
 - `cold_encode::append_sorted` and direct `cold_decode` primitives.
 - Exact Trail payload publication, source retirement and frame-partition repair.
 
-Important Trail helpers:
-- `append_selected_hot_frame_checked`: ordinary selected-position copy loop.
-- `append_owned_hot_frame_checked`: adaptive owned bulk `Vec::append`, empties
-  the source payload. The planner drops these payloads immediately afterward.
-- `append_trail_plan_checked`: exact concatenation, header offsets and saved lengths.
+Important helpers still in use:
 - `discard_prefix_checked`: `copy_within` plus `truncate`, exact bulk retained suffix.
 - `retire_trail_prefix_checked`, `retire_hot_prefix_checked`: exact rebased survivors.
-- `execute_trail_plan_storage_checked`: actual append plus retirement and exact
-  physical effects. **Full wf is conditional on `pre.trail_plan_matches(plan)`.**
-- `trail_plan_matches`: each payload unique, with full optional saved-map equality
-  to its source Trail frame, including absence. This is a producer obligation.
+- `trail_plan_prefix` and the `lemma_trail_*` preservation lemmas, now over
+  `Seq<Seq<(T, I)>>` ghost plans of pool subranges; `lemma_trail_migration_frames`
+  and `lemma_trail_migration_wf` recover `wf` after a matched migration.
 - `lemma_frame_inv_range_same_saved_map`: transfers reconstruction/domain bounds.
-- `lemma_trail_plan_contract_at`, `lemma_trail_moved_frame`: matched payload meaning
-  transfers to the actual destination range.
-- `lemma_trail_retained_frame`, `lemma_trail_old_hot_frame`, fixed-history/ingress/
-  representation lemmas, and `lemma_wf_from_named_parts`: recover the original wf.
+- `append_cold_sorted_checked` and the `lemma_cold_append_*` lemmas: exact Cold
+  frame formation from a strictly sorted unique slice (`cold_encode::run_prefix`).
 
-`runtime_execute_trail_plan` still being external is intentional unfinished work:
-the actual planner must prove `trail_plan_matches` before semantic trust can go.
-Mark configured/forced fallbacks similarly remain open because actual rollover
+Mark configured/forced fallbacks remain open because actual rollover
 preservation is unfinished. Never add assumed postconditions to discharge them.
-
-## Next actions
-
-1. Resolve the in-flight gate results and update progress evidence. If they pass,
-   review and commit this selection checkpoint locally with signing; do not push.
-2. Finish the selection producer: prove unique selected indices and exact optional
-   saved-map equality, including absence; prove chronological permutation preserves
-   the unique map; connect ordinary and adaptive producers to the storage contract.
-3. Discharge actual sorting while preserving the required performance profile and
-   avoiding new trust. Keep its separate sortedness and permutation interfaces.
-4. Finish Hot-to-Cold semantic assembly/retirement and actual legal policy selection
-   and execution. Connect configured/forced/adaptive/mark dispatch to checked effects.
-5. Instantiate production sequence composition, then close the full derived/group
-   scope and final audit/benchmark gates. Do not stop at Vec.
 
 ## Broader remaining scope and audit caveats
 

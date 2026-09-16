@@ -6,6 +6,8 @@
 //! retained and writable. `Unbounded` is explicit and never rolls history
 //! automatically.
 
+use vstd::prelude::*;
+
 /// Controls Trail -> Hot -> Cold conversion performed by one mark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RolloverPolicy {
@@ -124,19 +126,110 @@ pub struct TierStats {
     pub cold_values: usize,
 }
 
+verus! {
+
 /// A non-negative integer ratio used by explicit adaptive history planning.
 ///
 /// Construction validates that the denominator is nonzero. Comparisons use
 /// cross multiplication, so planning never depends on floating-point rounding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub struct Ratio {
     numerator: usize,
-    denominator: core::num::NonZeroUsize,
+    denominator: usize,
 }
 
 /// Returned when a [`Ratio`] is constructed with a zero denominator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub struct InvalidRatio;
+
+impl Ratio {
+    /// The denominator is never zero; every constructor checks it.
+    #[verifier::type_invariant]
+    spec fn inv(self) -> bool {
+        self.denominator != 0
+    }
+
+    /// Ghost denominator value.
+    pub closed spec fn denominator_spec(self) -> usize {
+        self.denominator
+    }
+
+    /// Ghost numerator value.
+    pub closed spec fn numerator_spec(self) -> usize {
+        self.numerator
+    }
+
+    /// Construct an exact integer ratio.
+    pub const fn new(numerator: usize, denominator: usize) -> (r: Result<Self, InvalidRatio>)
+        ensures
+            r is Ok <==> denominator != 0,
+            r is Ok ==> r->Ok_0.numerator_spec() == numerator && r->Ok_0.denominator_spec() == denominator,
+    {
+        if denominator == 0 {
+            Err(InvalidRatio)
+        } else {
+            Ok(Self {
+                numerator,
+                denominator,
+            })
+        }
+    }
+
+    pub const fn numerator(self) -> (r: usize)
+        ensures r == self.numerator_spec(),
+    {
+        self.numerator
+    }
+
+    pub const fn denominator(self) -> (r: usize)
+        ensures r == self.denominator_spec(),
+    {
+        self.denominator
+    }
+
+    /// Return whether `left / right` is at least this ratio.
+    pub(crate) fn accepts(self, left: usize, right: usize) -> (r: bool)
+        ensures r == (left * self.denominator_spec() >= right * self.numerator_spec()),
+    {
+        let den = self.denominator();
+        proof {
+            assert((left as u128) * (den as u128) <= (u64::MAX as u128) * (u64::MAX as u128)) by (nonlinear_arith)
+                requires left <= u64::MAX, den <= u64::MAX;
+            assert((right as u128) * (self.numerator as u128) <= (u64::MAX as u128) * (u64::MAX as u128)) by (nonlinear_arith)
+                requires right <= u64::MAX, self.numerator <= u64::MAX;
+        }
+        (left as u128) * (den as u128) >= (right as u128) * (self.numerator as u128)
+    }
+}
+
+} // verus!
+
+impl core::fmt::Debug for Ratio {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Ratio")
+            .field("numerator", &self.numerator)
+            .field("denominator", &self.denominator)
+            .finish()
+    }
+}
+impl PartialEq for Ratio {
+    fn eq(&self, other: &Self) -> bool {
+        self.numerator == other.numerator && self.denominator == other.denominator
+    }
+}
+impl Eq for Ratio {}
+
+impl core::fmt::Debug for InvalidRatio {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("InvalidRatio")
+    }
+}
+impl PartialEq for InvalidRatio {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for InvalidRatio {}
 
 impl core::fmt::Display for InvalidRatio {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -145,32 +238,6 @@ impl core::fmt::Display for InvalidRatio {
 }
 
 impl std::error::Error for InvalidRatio {}
-
-impl Ratio {
-    /// Construct an exact integer ratio.
-    pub const fn new(numerator: usize, denominator: usize) -> Result<Self, InvalidRatio> {
-        match core::num::NonZeroUsize::new(denominator) {
-            Some(denominator) => Ok(Self {
-                numerator,
-                denominator,
-            }),
-            None => Err(InvalidRatio),
-        }
-    }
-
-    pub const fn numerator(self) -> usize {
-        self.numerator
-    }
-
-    pub const fn denominator(self) -> usize {
-        self.denominator.get()
-    }
-
-    /// Return whether `left / right` is at least this ratio.
-    pub(crate) fn accepts(self, left: usize, right: usize) -> bool {
-        (left as u128) * (self.denominator() as u128) >= (right as u128) * (self.numerator as u128)
-    }
-}
 
 /// Explicit inputs for one deterministic adaptive closed-history pass.
 ///

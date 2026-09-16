@@ -1744,3 +1744,86 @@ first feature-suite run was interrupted by a session exit before `eclasses_behav
 reported and was rerun from scratch; the recorded log is the complete rerun.
 Formatting/whitespace pass, trust remains **74 default + 5 literal**, and legacy
 `containers/` is unchanged from `d191c4a`. Benchmark parity remains open.
+
+
+## 2026-09-16 — Trail deduplication through an index set; checked Trail migration and selectors
+
+**Algorithm change (user-directed).** Trail-to-Hot first-capture selection no
+longer sorts `(index, chronological position)` keys. A Trail frame is
+chronological, so the earliest capture per index is found by one left-to-right
+fold with a membership set: `trail_select::dedupe_trail_range` inserts each
+index into a reusable `HashSet<I, IndexHasher>` and, on first insertion, pushes
+the entry straight into the Hot pool. No `usize`-widened key buffer, no
+positions buffer, no sort, no intermediate payload. The set is keyed by the
+generic index type, so 16/32/64-bit indices keep their width.
+
+**Checked producer.** `dedupe_prefix` states that the appended range holds
+exactly the physical first hitters of the source range; `seen_prefix` states
+the set's contents. `lemma_dedupe_saved_value` derives full optional saved-map
+equality, including absence, from uniqueness plus that contract. The exec loop
+verifies through four step lemmas (`lemma_seen_step`, `lemma_dedupe_fresh`,
+`lemma_dedupe_dup`, `lemma_dedupe_push`, `lemma_dedupe_skip`) after the first
+attempt exceeded the resource limit as one query. The set relies on vstd's
+hash-table model: `IndexLike` gains `lemma_obeys_key_model`, discharged from
+vstd's shipped axioms for `u8`..`usize` and stated as justified axioms for
+`DenseId31`, `DenseId63`, `DenseUsize` and every `define_id*!` type (structural
+`raw` equality/hashing under the clean-id invariant).
+
+**Checked migration.** Two closed state predicates, `trail_migrating` (unique
+payloads published with headers) and `trail_tentative` (next frame deduplicated
+into the pool, header pending), are maintained by four checked primitives:
+`trail_frame_tentative_checked` (returns `(start, writes, uniques)`),
+`trail_frame_commit_checked` (publishes the header and extends the ghost plan),
+`trail_frame_discard_checked` (truncates a rejected frame) and
+`trail_migration_finish_checked` (one bulk prefix retirement, then
+`lemma_trail_migration_frames`/`lemma_trail_migration_wf`). The plan lemmas were
+generalized from `Seq<Vec<(T, I)>>` to `Seq<Seq<(T, I)>>` so a ghost plan of
+pool subranges reuses them; `lemma_trail_plan_prefix_push` supplies prefix
+stability. The actual executors are now checked loops over these primitives:
+`runtime_migrate_trail_count`; `runtime_migrate_trail`, whose
+`TierLimit::Adaptive` branch commits a frame while `writes >= 2 * uniques` and
+discards the first frame that fails; the closure-free, tier-indexed
+`retained_closed_prefix` (with `pair_frame_entries`); and
+`adaptive_trail_stage_checked`, the byte-budget Trail stage of
+`runtime_apply_adaptive`, which discards the first ineligible frame and stops.
+`Ratio` is now a Verus-native struct (`denominator: usize` under a type
+invariant instead of `NonZeroUsize`, whose vstd specs are feature-gated) with a
+proved `accepts`; its opaque registration is gone. The `AdaptiveReport`
+accounting order (inspected/W/U before eligibility) is unchanged.
+
+Removed as dead: `runtime_trail_shape`, `runtime_execute_trail_plan`,
+`execute_trail_plan_storage_checked`, `append_trail_plan_checked`,
+`append_owned_hot_frame_checked`, `append_selected_hot_frame_checked`,
+`plan_views`, and the sort-based `trail_select` items. Behavioral notes: the
+adaptive stage guards overflow with `checked_*` and `guard::refuse` where the
+external body used `expect`/plain arithmetic (same unreachable-overflow panic
+semantics); `saturating_mul` is written as `checked_mul` with a `usize::MAX`
+fallback because vstd carries no `saturating_mul` contract.
+
+Targeted evidence: `trail_select` **17 verified** (`/tmp/sp-d21-dedupe4.log`,
+later 8 after removing the sort items, `/tmp/sp-d21-dedupe5.log`); all `*trail*`
+Vec functions **39 verified** (`/tmp/sp-d21-select-checked1.log`); `tier_policy`
+**8 verified** (`/tmp/sp-d21-ratio3.log`); full Vec module **346 verified, 1
+error** before the final `invariant_except_break` fix
+(`/tmp/sp-d21-vec-full1.log`), then `adaptive_trail_stage_checked` **verified**
+(`/tmp/sp-d21-adaptive2.log`). Trust: **68 default + 5 literal** markers
+(from 74); default axioms 1 -> 4 plus one generated per consumer id type.
+
+Remaining on this front: Hot-to-Cold (in-place slice sort of `(T, I)` by `I`
+under a std `sort_unstable_by_key` contract, replacing the copying insertion
+sort in `cold_stack`/`diff_compress` and the per-frame `to_vec` copies),
+`hot_frame_run_count`, the adaptive Hot stage and reclamation, the configured/
+forced/mark dispatch wrappers, derived/parallel closure, and benchmark parity.
+
+Trail-dedupe checkpoint evidence (fresh, touched source before each Verus
+run): full default **2503 verified, zero errors** (`/tmp/sp-d21-dedupe-default.log`);
+literal-types **2503 verified, zero errors** (`/tmp/sp-d21-dedupe-literal.log`);
+conditional composition **80 verified, zero errors**
+(`/tmp/sp-d21-dedupe-composition.log`); `au-verus` **29 verified, zero errors**
+(`/tmp/sp-d21-dedupe-au.log`); feature suite **277 passed, 10 ignored**
+(`/tmp/sp-d21-dedupe-tests.log`); release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-dedupe-policy.log`); e-graph/SAT
+consumers **1267 passed, 45 ignored** (`/tmp/sp-d21-dedupe-consumers.log`);
+canary **2 passed** (`/tmp/sp-d21-dedupe-canary.log`). Formatting, whitespace and
+the unchanged-legacy check passed; the CI trust constant moves to 68. Benchmark
+parity remains an open acceptance criterion and is measured at the end.

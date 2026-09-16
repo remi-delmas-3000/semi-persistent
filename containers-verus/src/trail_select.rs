@@ -1,216 +1,270 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Physical first-capture selection for chronological Trail frames.
+//! First-capture deduplication of chronological Trail frames into unique Hot payloads.
 use vstd::prelude::*;
 
 verus! {
 use crate::index_like::IndexLike;
 
-pub(crate) open spec fn has_position(keys: Seq<(usize, usize)>, p: int) -> bool {
-    exists|q: int| 0 <= q < keys.len() && (#[trigger] keys[q]).1 == p
+/// `out[lo..]` is exactly the earliest capture of every index in
+/// `pool[start..q)`: each retained entry is a physical first hitter, and every
+/// physical first hitter is retained.
+pub(crate) open spec fn dedupe_prefix<T, I: IndexLike>(
+    pool: Seq<(T, I)>, start: int, q: int, out: Seq<(T, I)>, lo: int,
+) -> bool {
+    &&& 0 <= lo <= out.len()
+    &&& forall|k: int| lo <= k < out.len() ==> exists|p: int| start <= p < q
+        && (#[trigger] out[k]) == pool[p]
+        && crate::vec::first_hitter::<T, I>(pool, start, p, pool[p].1.as_nat())
+    &&& forall|p: int| start <= p < q
+        && crate::vec::first_hitter::<T, I>(pool, start, p, (#[trigger] pool[p]).1.as_nat())
+        ==> exists|k: int| lo <= k < out.len() && (#[trigger] out[k]) == pool[p]
 }
 
-/// Each key identifies an actual source position, and every source position
-/// occurs. This relation survives a permutation of the key buffer.
-pub(crate) open spec fn keyed_source<T, I: IndexLike>(entries: Seq<(T, I)>, keys: Seq<(usize, usize)>) -> bool {
-    &&& keys.len() == entries.len()
-    &&& forall|q: int| 0 <= q < keys.len() ==> {
-        &&& (#[trigger] keys[q]).1 < entries.len()
-        &&& keys[q].0 as nat == entries[keys[q].1 as int].1.as_nat()
-    }
-    &&& forall|p: int| 0 <= p < entries.len() ==>
-        #[trigger] has_position(keys, p)
-}
-
-pub(crate) open spec fn keys_sorted(keys: Seq<(usize, usize)>) -> bool {
-    forall|a: int, b: int| 0 <= a < b < keys.len() ==>
-        (#[trigger] keys[a]).0 < (#[trigger] keys[b]).0
-        || (keys[a].0 == keys[b].0 && keys[a].1 <= keys[b].1)
-}
-
+/// A unique retained range with the dedupe contract has the source range's
+/// earliest-capture map, including absence.
 #[verifier::spinoff_prover]
-pub(crate) fn build_keys<T: Copy, I: IndexLike>(
-    entries: &[(T, I)], keys: &mut std::vec::Vec<(usize, usize)>,
+pub(crate) proof fn lemma_dedupe_saved_value<T, I: IndexLike>(
+    pool: Seq<(T, I)>, start: int, end: int, out: Seq<(T, I)>, lo: int, j: nat,
 )
-    ensures final(keys)@.len() == entries@.len(),
-        forall|q: int| 0 <= q < entries@.len() ==> {
-            &&& (#[trigger] final(keys)@[q]).0 as nat == entries@[q].1.as_nat()
-            &&& final(keys)@[q].1 == q
-        },
-        keyed_source::<T, I>(entries@, final(keys)@),
+    requires 0 <= start <= end <= pool.len(), 0 <= lo <= out.len(),
+        crate::vec::stratum_unique::<T, I>(out, lo, out.len() as int),
+        dedupe_prefix::<T, I>(pool, start, end, out, lo),
+    ensures crate::vec::range_saved_value::<T, I>(out, lo, out.len() as int, j)
+        == crate::vec::range_saved_value::<T, I>(pool, start, end, j),
 {
-    keys.clear();
-    let n = entries.len();
-    keys.reserve(n);
-    let mut q = 0usize;
-    while q < n
-        invariant q <= n == entries@.len(), keys@.len() == q,
-            forall|p: int| 0 <= p < q ==> {
-                &&& (#[trigger] keys@[p]).0 as nat == entries@[p].1.as_nat()
-                &&& keys@[p].1 == p
-            },
-        decreases n - q,
-    {
-        let index = entries[q].1.as_usize();
-        keys.push((index, q));
-        q += 1;
-    }
-    proof {
-        assert forall|p: int| 0 <= p < entries@.len() implies
-            #[trigger] has_position(keys@, p) by {
-            assert(keys@[p].1 == p);
-        }
-    }
-}
-
-/// Lexicographic ordering places the least chronological position first in
-/// every index group; duplicate later writes cannot replace that saved value.
-#[verifier::spinoff_prover]
-pub(crate) proof fn lemma_group_first<T, I: IndexLike>(
-    entries: Seq<(T, I)>, keys: Seq<(usize, usize)>, q: int,
-)
-    requires keyed_source::<T, I>(entries, keys), keys_sorted(keys),
-        0 <= q < keys.len(), q == 0 || keys[q - 1].0 != keys[q].0,
-    ensures keys[q].1 < entries.len(),
-        entries[keys[q].1 as int].1.as_nat() == keys[q].0 as nat,
-        crate::vec::first_hitter::<T, I>(entries, 0, keys[q].1 as int, keys[q].0 as nat),
-{
-    assert forall|p: int| 0 <= p < keys[q].1 implies
-        (#[trigger] entries[p]).1.as_nat() != keys[q].0 as nat by {
-        if entries[p].1.as_nat() == keys[q].0 as nat {
-            assert(has_position(keys, p));
-            let r = choose|r: int| 0 <= r < keys.len() && (#[trigger] keys[r]).1 == p;
-            assert(keys[r].0 == keys[q].0);
-            if r > q { assert(keys[q].1 <= keys[r].1); }
-            assert(r < q);
-            assert(q > 0);
-            if r < q - 1 { assert(keys[r].0 <= keys[q - 1].0); }
-            assert(keys[q - 1].0 <= keys[q].0);
-            assert(keys[q - 1].0 == keys[q].0);
-        }
-    }
-}
-/// Positions retained by the production scan of the first `n` sorted keys.
-pub(crate) open spec fn group_positions(keys: Seq<(usize, usize)>, n: int) -> Seq<usize>
-    recommends 0 <= n <= keys.len(),
-    decreases n,
-{
-    if n <= 0 { Seq::empty() }
-    else if n == 1 || keys[n - 2].0 != keys[n - 1].0 {
-        group_positions(keys, n - 1).push(keys[n - 1].1)
-    } else { group_positions(keys, n - 1) }
-}
-
-/// The same linear group scan used by ordinary Trail migration, with an exact
-/// result contract. Sorting and source correspondence are separate obligations.
-#[verifier::spinoff_prover]
-pub(crate) fn select_positions(keys: &[(usize, usize)], selected: &mut std::vec::Vec<usize>)
-    ensures final(selected)@ == group_positions(keys@, keys@.len() as int),
-{
-    selected.clear();
-    let mut previous: Option<usize> = None;
-    let mut q = 0usize;
-    while q < keys.len()
-        invariant q <= keys@.len(),
-            selected@ == group_positions(keys@, q as int),
-            previous == (if q == 0 { None } else { Some(keys@[q as int - 1].0) }),
-        decreases keys@.len() - q,
-    {
-        let (index, position) = keys[q];
-        if previous != Some(index) {
-            selected.push(position);
-            previous = Some(index);
-        }
-        q += 1;
-    }
-}
-
-/// Every retained position is a group head, hence the source's earliest capture.
-#[verifier::spinoff_prover]
-pub(crate) proof fn lemma_selected_first<T, I: IndexLike>(
-    entries: Seq<(T, I)>, keys: Seq<(usize, usize)>, n: int,
-)
-    requires keyed_source::<T, I>(entries, keys), keys_sorted(keys), 0 <= n <= keys.len(),
-    ensures forall|p: usize| #[trigger] group_positions(keys, n).contains(p) ==> {
-        &&& p < entries.len()
-        &&& crate::vec::first_hitter::<T, I>(entries, 0, p as int, entries[p as int].1.as_nat())
-    },
-    decreases n,
-{
-    if n > 0 {
-        lemma_selected_first::<T, I>(entries, keys, n - 1);
-        if n == 1 || keys[n - 2].0 != keys[n - 1].0 {
-            lemma_group_first::<T, I>(entries, keys, n - 1);
-        }
-    }
-    assert forall|p: usize| #[trigger] group_positions(keys, n).contains(p) implies {
-        &&& p < entries.len()
-        &&& crate::vec::first_hitter::<T, I>(entries, 0, p as int, entries[p as int].1.as_nat())
-    } by {
-        if n > 0 {
-            if (n == 1 || keys[n - 2].0 != keys[n - 1].0) && p == keys[n - 1].1 {
-            } else {
-                assert(group_positions(keys, n - 1).contains(p));
+    let hi = out.len() as int;
+    if crate::vec::captured_in_range::<T, I>(pool, start, end, j) {
+        crate::vec::lemma_lowest_hitter::<T, I>(pool, start, end, j);
+        let p = choose|p: int| start <= p < end && (#[trigger] pool[p]).1.as_nat() == j
+            && crate::vec::first_hitter::<T, I>(pool, start, p, j);
+        let k = choose|k: int| lo <= k < out.len() && (#[trigger] out[k]) == pool[p];
+        assert(crate::vec::captured_in_range::<T, I>(out, lo, hi, j));
+        crate::vec::lemma_lowest_hitter::<T, I>(out, lo, hi, j);
+        let k2 = choose|k2: int| lo <= k2 < hi && (#[trigger] out[k2]).1.as_nat() == j
+            && crate::vec::first_hitter::<T, I>(out, lo, k2, j);
+        assert(k2 == k);
+        let p2 = choose|p2: int| start <= p2 < end && (#[trigger] pool[p2]).1.as_nat() == j
+            && crate::vec::first_hitter::<T, I>(pool, start, p2, j);
+        assert(p2 == p);
+        assert(crate::vec::range_saved_value::<T, I>(out, lo, hi, j) == Some(out[k2].0));
+        assert(crate::vec::range_saved_value::<T, I>(pool, start, end, j) == Some(pool[p2].0));
+    } else {
+        assert(!crate::vec::captured_in_range::<T, I>(out, lo, hi, j)) by {
+            if crate::vec::captured_in_range::<T, I>(out, lo, hi, j) {
+                let k = choose|k: int| lo <= k < hi && 0 <= k < out.len()
+                    && (#[trigger] out[k]).1.as_nat() == j;
+                let p = choose|p: int| start <= p < end && (#[trigger] out[k]) == pool[p]
+                    && crate::vec::first_hitter::<T, I>(pool, start, p, pool[p].1.as_nat());
+                assert(pool[p].1.as_nat() == j);
             }
         }
     }
 }
-/// Sorting must supply multiset equality; no sorting contract is assumed here.
+
+/// The membership set holds exactly the indices of `pool[start..q)`.
+pub(crate) open spec fn seen_prefix<T, I: IndexLike>(
+    pool: Seq<(T, I)>, start: int, q: int, seen: Set<I>,
+) -> bool {
+    forall|i: I| #[trigger] seen.contains(i)
+        <==> exists|p: int| start <= p < q && (#[trigger] pool[p]).1 == i
+}
+
 #[verifier::spinoff_prover]
-pub(crate) proof fn lemma_keyed_permutation<T, I: IndexLike>(
-    entries: Seq<(T, I)>, before: Seq<(usize, usize)>, after: Seq<(usize, usize)>,
-)
-    requires keyed_source::<T, I>(entries, before), before.to_multiset() == after.to_multiset(),
-    ensures keyed_source::<T, I>(entries, after),
+pub(crate) proof fn lemma_seen_step<T, I: IndexLike>(pool: Seq<(T, I)>, start: int, q: int, seen: Set<I>)
+    requires 0 <= start <= q < pool.len(), seen_prefix::<T, I>(pool, start, q, seen),
+    ensures seen_prefix::<T, I>(pool, start, q + 1, seen.insert(pool[q].1)),
 {
-    broadcast use vstd::seq_lib::group_to_multiset_ensures;
-    vstd::seq_lib::to_multiset_len(before);
-    vstd::seq_lib::to_multiset_len(after);
-    assert(before.len() == after.len());
-    assert forall|q: int| 0 <= q < after.len() implies {
-        &&& (#[trigger] after[q]).1 < entries.len()
-        &&& after[q].0 as nat == entries[after[q].1 as int].1.as_nat()
-    } by {
-        assert(after.contains(after[q]));
-        vstd::seq_lib::to_multiset_contains(after, after[q]);
-        vstd::seq_lib::to_multiset_contains(before, after[q]);
-        let r = choose|r: int| 0 <= r < before.len() && before[r] == after[q];
-    }
-    assert forall|p: int| 0 <= p < entries.len() implies
-        #[trigger] has_position(after, p) by {
-        assert(has_position(before, p));
-        let r = choose|r: int| 0 <= r < before.len() && (#[trigger] before[r]).1 == p;
-        assert(before.contains(before[r]));
-        vstd::seq_lib::to_multiset_contains(before, before[r]);
-        vstd::seq_lib::to_multiset_contains(after, before[r]);
-        let q = choose|q: int| 0 <= q < after.len() && after[q] == before[r];
-        assert(after[q].1 == p);
+    let next = seen.insert(pool[q].1);
+    assert forall|i: I| #[trigger] next.contains(i)
+        <==> exists|p: int| start <= p < q + 1 && (#[trigger] pool[p]).1 == i by {
+        if next.contains(i) {
+            if i == pool[q].1 { assert(pool[q].1 == i); }
+        } else {
+            assert(!seen.contains(i));
+        }
     }
 }
-/// Every input key's index has a retained group head, including duplicate runs.
+
+/// An unseen index at `q` has no earlier hit: `q` is its first hitter.
 #[verifier::spinoff_prover]
-pub(crate) proof fn lemma_selected_covers(keys: Seq<(usize, usize)>, n: int, q: int)
-    requires 0 <= q < n <= keys.len(),
-    ensures exists|r: int| 0 <= r < n && (#[trigger] keys[r]).0 == keys[q].0
-        && group_positions(keys, n).contains(keys[r].1)
-        && (r == 0 || keys[r - 1].0 != keys[r].0),
-    decreases n,
+pub(crate) proof fn lemma_dedupe_fresh<T, I: IndexLike>(pool: Seq<(T, I)>, start: int, q: int, seen: Set<I>)
+    requires 0 <= start <= q < pool.len(), seen_prefix::<T, I>(pool, start, q, seen),
+        !seen.contains(pool[q].1),
+    ensures crate::vec::first_hitter::<T, I>(pool, start, q, pool[q].1.as_nat()),
 {
-    broadcast use vstd::seq_lib::lemma_seq_contains_after_push;
-    if q < n - 1 {
-        lemma_selected_covers(keys, n - 1, q);
-        let r = choose|r: int| 0 <= r < n - 1 && keys[r].0 == keys[q].0
-            && group_positions(keys, n - 1).contains(keys[r].1)
-            && (r == 0 || keys[r - 1].0 != keys[r].0);
-        assert(group_positions(keys, n).contains(keys[r].1));
-    } else if n == 1 || keys[n - 2].0 != keys[n - 1].0 {
-        assert(group_positions(keys, n).contains(keys[q].1));
-    } else {
-        lemma_selected_covers(keys, n - 1, n - 2);
-        let r = choose|r: int| 0 <= r < n - 1 && keys[r].0 == keys[n - 2].0
-            && group_positions(keys, n - 1).contains(keys[r].1)
-            && (r == 0 || keys[r - 1].0 != keys[r].0);
-        assert(group_positions(keys, n).contains(keys[r].1));
+    assert forall|p: int| start <= p < q implies
+        (#[trigger] pool[p]).1.as_nat() != pool[q].1.as_nat() by {
+        if pool[p].1.as_nat() == pool[q].1.as_nat() {
+            I::lemma_as_nat_injective(pool[p].1, pool[q].1);
+            assert(seen.contains(pool[q].1));
+        }
+    }
+}
+
+/// A seen index at `q` was hit earlier: `q` is not its first hitter.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_dedupe_dup<T, I: IndexLike>(pool: Seq<(T, I)>, start: int, q: int, seen: Set<I>)
+    requires 0 <= start <= q < pool.len(), seen_prefix::<T, I>(pool, start, q, seen),
+        seen.contains(pool[q].1),
+    ensures !crate::vec::first_hitter::<T, I>(pool, start, q, pool[q].1.as_nat()),
+{
+    let p = choose|p: int| start <= p < q && (#[trigger] pool[p]).1 == pool[q].1;
+    assert(pool[p].1.as_nat() == pool[q].1.as_nat());
+}
+
+/// Retaining a first hitter preserves uniqueness and the dedupe contract.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_dedupe_push<T, I: IndexLike>(
+    pool: Seq<(T, I)>, start: int, q: int, pre: Seq<(T, I)>, lo: int,
+)
+    requires 0 <= start <= q < pool.len(), 0 <= lo <= pre.len(),
+        crate::vec::stratum_unique::<T, I>(pre, lo, pre.len() as int),
+        dedupe_prefix::<T, I>(pool, start, q, pre, lo),
+        crate::vec::first_hitter::<T, I>(pool, start, q, pool[q].1.as_nat()),
+    ensures
+        crate::vec::stratum_unique::<T, I>(pre.push(pool[q]), lo, pre.len() as int + 1),
+        dedupe_prefix::<T, I>(pool, start, q + 1, pre.push(pool[q]), lo),
+{
+    let out = pre.push(pool[q]);
+    let n = pre.len() as int;
+    assert forall|k: int| lo <= k < n implies
+        (#[trigger] out[k]).1.as_nat() != pool[q].1.as_nat() by {
+        let p = choose|p: int| start <= p < q && (#[trigger] pre[k]) == pool[p]
+            && crate::vec::first_hitter::<T, I>(pool, start, p, pool[p].1.as_nat());
+        assert(pool[p].1.as_nat() != pool[q].1.as_nat());
+    }
+    assert forall|a: int, b: int| lo <= a < n + 1 && lo <= b < n + 1 && a != b
+        implies (#[trigger] out[a]).1.as_nat() != (#[trigger] out[b]).1.as_nat() by {
+        if a < n && b < n {
+            assert(out[a] == pre[a]);
+            assert(out[b] == pre[b]);
+        }
+    }
+    assert forall|k: int| lo <= k < n + 1 implies exists|p: int| start <= p < q + 1
+        && (#[trigger] out[k]) == pool[p]
+        && crate::vec::first_hitter::<T, I>(pool, start, p, pool[p].1.as_nat()) by {
+        if k < n {
+            let p = choose|p: int| start <= p < q && (#[trigger] pre[k]) == pool[p]
+                && crate::vec::first_hitter::<T, I>(pool, start, p, pool[p].1.as_nat());
+            assert(out[k] == pool[p]);
+        } else {
+            assert(out[k] == pool[q]);
+        }
+    }
+    assert forall|p: int| start <= p < q + 1
+        && crate::vec::first_hitter::<T, I>(pool, start, p, (#[trigger] pool[p]).1.as_nat())
+        implies exists|k: int| lo <= k < n + 1 && (#[trigger] out[k]) == pool[p] by {
+        if p < q {
+            let k = choose|k: int| lo <= k < n && (#[trigger] pre[k]) == pool[p];
+            assert(out[k] == pool[p]);
+        } else {
+            assert(out[n] == pool[p]);
+        }
+    }
+}
+
+/// Skipping a duplicate preserves the dedupe contract.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_dedupe_skip<T, I: IndexLike>(
+    pool: Seq<(T, I)>, start: int, q: int, out: Seq<(T, I)>, lo: int,
+)
+    requires 0 <= start <= q < pool.len(), dedupe_prefix::<T, I>(pool, start, q, out, lo),
+        !crate::vec::first_hitter::<T, I>(pool, start, q, pool[q].1.as_nat()),
+    ensures dedupe_prefix::<T, I>(pool, start, q + 1, out, lo),
+{
+    assert forall|k: int| lo <= k < out.len() implies exists|p: int| start <= p < q + 1
+        && (#[trigger] out[k]) == pool[p]
+        && crate::vec::first_hitter::<T, I>(pool, start, p, pool[p].1.as_nat()) by {
+        let p = choose|p: int| start <= p < q && (#[trigger] out[k]) == pool[p]
+            && crate::vec::first_hitter::<T, I>(pool, start, p, pool[p].1.as_nat());
+    }
+    assert forall|p: int| start <= p < q + 1
+        && crate::vec::first_hitter::<T, I>(pool, start, p, (#[trigger] pool[p]).1.as_nat())
+        implies exists|k: int| lo <= k < out.len() && (#[trigger] out[k]) == pool[p] by {
+        assert(p < q);
+    }
+}
+
+/// Append the earliest capture of every index in `pool[start..end)` to `out`,
+/// in chronological order of first capture. One left-to-right pass with a
+/// membership test per entry; `seen` is cleared first and may be reused.
+#[verifier::spinoff_prover]
+pub(crate) fn dedupe_trail_range<T: Copy, I: IndexLike>(
+    pool: &std::vec::Vec<(T, I)>, start: usize, end: usize,
+    seen: &mut std::collections::HashSet<I, crate::hasher_spec::IndexHasher>,
+    out: &mut std::vec::Vec<(T, I)>,
+)
+    requires start <= end <= pool@.len(),
+        vstd::std_specs::hash::obeys_key_model::<I>(),
+    ensures
+        old(out)@.len() <= final(out)@.len() <= old(out)@.len() + (end - start),
+        final(out)@.subrange(0, old(out)@.len() as int) == old(out)@,
+        crate::vec::stratum_unique::<T, I>(final(out)@, old(out)@.len() as int, final(out)@.len() as int),
+        dedupe_prefix::<T, I>(pool@, start as int, end as int, final(out)@, old(out)@.len() as int),
+        forall|j: nat| #[trigger] crate::vec::range_saved_value::<T, I>(final(out)@,
+            old(out)@.len() as int, final(out)@.len() as int, j)
+            == crate::vec::range_saved_value::<T, I>(pool@, start as int, end as int, j),
+{
+    hide(dedupe_prefix);
+    hide(seen_prefix);
+    hide(crate::vec::stratum_unique);
+    hide(crate::vec::first_hitter);
+    broadcast use vstd::std_specs::hash::group_hash_axioms;
+    broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
+    let ghost base = out@;
+    let ghost lo = base.len() as int;
+    seen.clear();
+    proof {
+        assert(seen_prefix::<T, I>(pool@, start as int, start as int, seen@)) by {
+            reveal(seen_prefix);
+        }
+        assert(dedupe_prefix::<T, I>(pool@, start as int, start as int, out@, lo)) by {
+            reveal(dedupe_prefix);
+        }
+        assert(crate::vec::stratum_unique::<T, I>(out@, lo, out@.len() as int)) by {
+            reveal(crate::vec::stratum_unique);
+        }
+    }
+    let mut q = start;
+    while q < end
+        invariant
+            start <= q <= end <= pool@.len(),
+            vstd::std_specs::hash::obeys_key_model::<I>(),
+            vstd::std_specs::hash::builds_valid_hashers::<crate::hasher_spec::IndexHasher>(),
+            lo == base.len(), lo <= out@.len(), out@.len() <= lo + (q - start),
+            out@.subrange(0, lo) == base,
+            seen_prefix::<T, I>(pool@, start as int, q as int, seen@),
+            crate::vec::stratum_unique::<T, I>(out@, lo, out@.len() as int),
+            dedupe_prefix::<T, I>(pool@, start as int, q as int, out@, lo),
+        decreases end - q,
+    {
+        let entry = pool[q];
+        let index = entry.1;
+        let ghost pre_out = out@;
+        let ghost pre_seen = seen@;
+        let fresh = seen.insert(index);
+        proof { lemma_seen_step::<T, I>(pool@, start as int, q as int, pre_seen); }
+        if fresh {
+            proof { lemma_dedupe_fresh::<T, I>(pool@, start as int, q as int, pre_seen); }
+            out.push(entry);
+            proof {
+                lemma_dedupe_push::<T, I>(pool@, start as int, q as int, pre_out, lo);
+                assert(out@.subrange(0, lo) =~= base);
+            }
+        } else {
+            proof {
+                lemma_dedupe_dup::<T, I>(pool@, start as int, q as int, pre_seen);
+                lemma_dedupe_skip::<T, I>(pool@, start as int, q as int, out@, lo);
+            }
+        }
+        q += 1;
+    }
+    proof {
+        assert forall|j: nat| #[trigger] crate::vec::range_saved_value::<T, I>(out@, lo, out@.len() as int, j)
+            == crate::vec::range_saved_value::<T, I>(pool@, start as int, end as int, j) by {
+            lemma_dedupe_saved_value::<T, I>(pool@, start as int, end as int, out@, lo, j);
+        }
     }
 }
 } // verus!

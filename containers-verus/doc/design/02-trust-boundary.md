@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **74** (4 structs + 70 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
-| `literal-types` | **79** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **68** (3 structs + 65 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
+| `literal-types` | **73** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,8 +72,8 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current mixed-tier push/pop checkpoint has 74 default-build markers:
-4 opaque structs and 70 functions. The permanent groups below remain the
+boundary. The current Trail-dedupe checkpoint has 68 default-build markers:
+3 opaque structs and 65 functions. The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -166,6 +166,21 @@ The groups differ in kind, and the distinction is the point of this chapter:
 - **Group E is unverified glue**: `values_equal`, the debug-only ring walk,
   `ListHead::white_box_head`, and the ordinary-Rust delegation shims outside
   `verus!{}`.
+
+The Trail-dedupe checkpoint (2026-09-16) replaces the sort-based Trail
+first-capture selection with a left-to-right fold through a
+`HashSet<I, IndexHasher>` that writes each unique frame straight into the Hot
+pool. Checking that path removes six markers: `runtime_migrate_trail_count`,
+`runtime_migrate_trail`, `runtime_trail_shape`, `runtime_execute_trail_plan`,
+the closure-based `retained_closed_prefix` (now a checked tier-indexed
+function) and the opaque `ExRatio` registration (`Ratio` is now a Verus-native
+struct whose `accepts` is proved). This yields 68 default markers and 73 with
+`literal-types`. The membership set relies on vstd's shipped hash-table model:
+`obeys_key_model::<I>()` (vstd axioms for the primitive widths; three crate
+axioms for the id newtypes and one generated per `define_id*!` type, all over
+structural `raw` equality, §3.5 D-index) and the existing
+`axiom_index_hasher_builds_valid_hashers`. No sort contract is assumed on this
+path any more.
 
 ## 1. Group A: `ContainerId` (trusted by design), 3 items
 
@@ -709,8 +724,9 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **74 default-build `external_body`
-markers plus 1 default-build axiom**; execution-first three-tier Vec markers not
+The complete current source count is **68 default-build `external_body`
+markers plus 4 default-build axioms** (plus one generated `obeys_key_model`
+axiom per `define_id*!` id type in consumer crates); execution-first three-tier Vec markers not
 itemized here are enumerated in
 `doc/tasks/three-tier-frame-architecture-goal.md` §8. The `literal-types`
 additions are listed after the table.
@@ -794,7 +810,12 @@ requirement (2) by construction, violation regressions pin the
 exclusions), and BitsF64 (raw-bit injective, the long-term float key;
 CanonicalF64's fold is a pinned production-parity decision, see
 key-model-tcb.md §float-semantics). Future key types must go through
-`declare_key_model_assumption!` (justified + auto-fuzzed axioms). The permanent-boundary subset includes `ContainerId::eq`'s equality
+`declare_key_model_assumption!` (justified + auto-fuzzed axioms). Default build
+also carries the D-index `obeys_key_model` axioms for `DenseId31`,
+`DenseId63`, `DenseUsize` and each `define_id*!` id type (structural `raw`
+equality and hashing under the clean-id type invariant), consumed by
+`IndexLike::lemma_obeys_key_model` so Trail deduplication can key its
+membership set by the index type without widening. The permanent-boundary subset includes `ContainerId::eq`'s equality
 reflection, the two shrink helpers' data preservation,
 `data_capacity_bits`'s `capacity >= len`, `clone_key_exact`'s clone identity,
 and the five `bplus_layout` primitives' agreement with their checked std

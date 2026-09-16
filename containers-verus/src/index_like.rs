@@ -139,6 +139,16 @@ pub trait IndexLike: Sized + Copy + core::cmp::Ord + core::hash::Hash + core::fm
             a.lt_spec(b) == (a.as_nat() < b.as_nat()),
             a.le_spec(b) == (a.as_nat() <= b.as_nat());
 
+    /// The std hash-table key model holds for `Self`: `Hash` is deterministic
+    /// and `==` is value identity, so a `HashSet<Self, _>` follows `Set`
+    /// semantics (`vstd::std_specs::hash`). Trail deduplication keys its
+    /// membership set by the index type directly. Primitive widths discharge
+    /// this from vstd's shipped axioms; the crate's id newtypes state it as a
+    /// justified axiom over their structural `raw` equality (trust ledger
+    /// group D shape).
+    proof fn lemma_obeys_key_model()
+        ensures vstd::std_specs::hash::obeys_key_model::<Self>();
+
     // -- exec API ------------------------------------------------------------
 
     /// Exec: zero / minimum value.
@@ -386,6 +396,9 @@ pub fn checked_add_usize<I: IndexLike>(a: I, n: usize) -> (r: Option<I>)
 // ---------------------------------------------------------------------------
 
 impl IndexLike for u8 {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { 0x100 }
     open spec fn min_spec() -> Self { 0u8 }
@@ -420,6 +433,9 @@ impl IndexLike for u8 {
 }
 
 impl IndexLike for u16 {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { 0x10000 }
     open spec fn min_spec() -> Self { 0u16 }
@@ -453,6 +469,9 @@ impl IndexLike for u16 {
 }
 
 impl IndexLike for u32 {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { 0x1_0000_0000 }
     open spec fn min_spec() -> Self { 0u32 }
@@ -494,6 +513,9 @@ impl IndexLike for u32 {
 // 64-bit machines). We make it explicit here.
 #[cfg(target_pointer_width = "64")]
 impl IndexLike for u64 {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { 0x1_0000_0000_0000_0000 }
     open spec fn min_spec() -> Self { 0u64 }
@@ -537,6 +559,9 @@ impl IndexLike for u64 {
 }
 
 impl IndexLike for usize {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { usize::MAX as nat + 1 }
     open spec fn min_spec() -> Self { 0usize }
