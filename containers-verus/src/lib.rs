@@ -96,6 +96,7 @@ pub mod bplus_tree;
 pub mod canonical_keys;
 pub mod capture_bits;
 pub mod circular_list;
+mod cold_decode;
 mod cold_encode;
 #[allow(dead_code)]
 pub mod cold_stack;

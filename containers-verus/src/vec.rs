@@ -6522,14 +6522,9 @@ where
                         });
                     } else if let Some(frame) = self.cold_stack.pop() {
                         let start = self.trail_value_pool.len();
-                        for r in frame.runs_start..frame.runs_start + frame.runs_len {
-                            let run = self.cold_index_runs[r];
-                            for q in 0..run.len {
-                                if let Some(index) = I::try_from_usize(run.base.as_usize() + q) {
-                                    self.trail_value_pool.push((self.cold_value_pool[run.start + q], index));
-                                }
-                            }
-                        }
+                        crate::cold_decode::decode_into(&mut self.trail_value_pool,
+                            &self.cold_index_runs, &self.cold_value_pool, frame.runs_start,
+                            frame.runs_start + frame.runs_len, frame.saved_len);
                         let value_cut = self.cold_value_cut(frame.runs_start);
                         self.cold_index_runs.truncate(frame.runs_start);
                         self.cold_value_pool.truncate(value_cut);
@@ -6544,14 +6539,9 @@ where
                 if self.hot_stack.is_empty() {
                     let frame = self.cold_stack.pop().expect("nonempty unique history has a survivor");
                     let start = self.hot_value_pool.len();
-                    for r in frame.runs_start..frame.runs_start + frame.runs_len {
-                        let run = self.cold_index_runs[r];
-                        for q in 0..run.len {
-                            if let Some(index) = I::try_from_usize(run.base.as_usize() + q) {
-                                self.hot_value_pool.push((self.cold_value_pool[run.start + q], index));
-                            }
-                        }
-                    }
+                    crate::cold_decode::decode_into(&mut self.hot_value_pool,
+                        &self.cold_index_runs, &self.cold_value_pool, frame.runs_start,
+                        frame.runs_start + frame.runs_len, frame.saved_len);
                     let value_cut = self.cold_value_cut(frame.runs_start);
                     self.cold_index_runs.truncate(frame.runs_start);
                     self.cold_value_pool.truncate(value_cut);
@@ -9516,6 +9506,42 @@ where
         self.lemma_wf_named_parts();
         reveal(Vec::cold_repr_ok);
         reveal(Vec::frame_partition_ok);
+    }
+
+    /// Decoder premises come from the retained physical Cold representation,
+    /// without requiring writable ownership or rebuilt capture flags.
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_decode_layout(&self, f: int)
+        requires self.cold_repr_ok(), 0 <= f < self.cold_stack@.len(),
+        ensures crate::cold_decode::layout(self.cold_index_runs@, self.cold_value_pool@,
+            self.cold_stack@[f].runs_start as int,
+            (self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len) as int,
+            self.cold_stack@[f].saved_len.as_nat()),
+    {
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::cold_payload_ok);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_decoded_lookup(&self, f: int, entries: Seq<(T, I)>, j: nat)
+        requires self.cold_repr_ok(), 0 <= f < self.cold_stack@.len(),
+            crate::cold_decode::decoded(self.cold_index_runs@, self.cold_value_pool@,
+                self.cold_stack@[f].runs_start as int,
+                (self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len) as int,
+                if self.cold_stack@[f].runs_len > 0 {
+                    self.cold_index_runs@[self.cold_stack@[f].runs_start as int].start as int
+                } else { 0int }, entries),
+        ensures range_saved_value::<T, I>(entries, 0, entries.len() as int, j)
+            == self.frame_saved_value(f, j),
+    {
+        hide(Vec::cold_repr_ok);
+        self.lemma_cold_decode_layout(f);
+        let lo = self.cold_stack@[f].runs_start as int;
+        let hi = lo + self.cold_stack@[f].runs_len;
+        let vs = if lo < hi { self.cold_index_runs@[lo].start as int } else { 0int };
+        crate::cold_decode::decoded_lookup(self.cold_index_runs@, self.cold_value_pool@,
+            lo, hi, vs, entries, self.cold_stack@[f].saved_len.as_nat(), j);
+        self.lemma_cold_range_matches_frame(f, j);
     }
 
     /// Direct physical Cold replay refines the shared map for every buffer.

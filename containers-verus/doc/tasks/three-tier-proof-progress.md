@@ -932,3 +932,42 @@ milestone adds only erased proofs and contracts, with no executable statement
 changes. This remains concrete
 interface-discharge work; Cold promotion and the remaining all-tier/public and
 derived/parallel obligations are not complete.
+
+### Checked Cold decoder for both writable tiers
+
+`cold_decode::decode_into` now implements the existing nested run/cell traversal
+directly into the destination pair pool. Its contract proves exact saved-value
+lookup equality with the source runs for every index, strictly increasing
+destination indices, saved-domain bounds, and exact output length. A positional
+source/destination relation supplies coverage in both directions, including
+empty frames and gaps. Index conversion is proved successful; values use Copy.
+
+Both Cold branches in the existing survivor dispatcher call this helper: Hot
+for unique-capture stores, Trail for chronological stores. The helper adds no
+intermediate pair buffer, runtime map, persistent ghost field, or extra traversal.
+Both executable helper boundaries are marked inline(always). Performance has
+not been benchmarked; no speedup or slowdown claim is made.
+
+The local decoder's ten obligations and two Vec interpretation/representation
+bridge lemmas passed targeted verification. Narrow per-cell lemmas resolved the
+initial quantifier/resource failures without raising limits. Full default and
+literal-types verification each passed **2360 verified, 0 errors**; the
+conditional theorem passed 80 obligations. Feature tests passed 277 (10
+ignored), the 1024-case differential policy matrix passed four tests, and
+consumer tests passed 1267 (45 ignored). Formatting and whitespace checks passed.
+Trust remains 86 source markers and the differential oracle is unchanged.
+
+The surrounding `runtime_promote_survivor` remains trusted. Its Cold source
+truncation, destination header publication, older-frame preservation and final
+invariant composition still need concrete discharge. Replacing its inner loops
+with the checked decoder does not discharge that caller or reduce the trust
+count. Existing checked replay, retirement, Hot promotion and capture rebuilding
+remain intact.
+
+The promotion caller must establish that the selected destination pool is empty
+and that the original survivor header names valid source runs before it is
+popped. The retained Cold-prefix proof should use the existing layout accessors
+(which require only `repr_ok`) and preserve per-cell coverage/value facts without
+assuming an intermediate full `wf`. Header publication must re-establish the
+Cold/Hot/Trail frame partition for the store-selected destination before the
+existing capture-finalization theorem is applied.

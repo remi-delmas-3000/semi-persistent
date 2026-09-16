@@ -203,11 +203,21 @@ survivor movement and the complete
 production interface implementation remain outstanding. The conditional target
 verifies 80 obligations after adding the bounded-map accessor.
 
-1. Define the production derived frame-map view and prove the physical-to-common
-   interpretation bridge, preserving all existing fields and proofs.
-2. Connect the existing exact replay primitives and checked retirement/Hot
-   promotion/finalization to those interfaces.
-3. Discharge remaining capture/mutation/conversion/Cold-promotion and policy
+The Cold decoder now exports exact optional-lookup equality, strict index order,
+saved-domain bounds and complete source/destination coverage. Both destinations
+in the existing runtime survivor dispatcher call it. `lemma_cold_decode_layout`
+derives its premises from retained Cold representation; `lemma_cold_decoded_lookup`
+connects its output to the physical frame lookup. The dispatcher remains trusted:
+source truncation, destination publication and global invariant preservation are
+not discharged by the local decoding theorem. Full default and literal-types
+verification each passed 2360 obligations; feature, differential, consumer,
+formatting and whitespace gates passed. No trust markers were added or removed.
+
+1. Prove Cold survivor movement into both store-selected writable tiers,
+   preserving the complete shared map and older physical/canonical history.
+2. Complete the production interface instantiation using the checked physical
+   interpretation, replay, retirement, promotion and finalization contracts.
+3. Discharge remaining capture/mutation/conversion and policy
    implementations, rechecking conditional composition after any interface change.
 4. Finish derived/parallel public closure and the full trust/gate audit.
 
