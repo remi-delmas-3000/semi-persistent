@@ -407,3 +407,17 @@ history and active capture membership all compose through checked lemmas. No
 runtime or trusted-contract change supplies the matching predicate. Next prove
 that actual selection produces it, then remove the executor trust only after the
 producer/consumer chain verifies. Hot-to-Cold and policy closure remain separate.
+
+
+### Trail selection producer helpers
+
+Reuse `trail_select::build_keys` and `select_positions`: these checked functions
+now execute in ordinary migration (the builder also executes in adaptive shape
+analysis). Reuse `lemma_keyed_permutation`, `lemma_group_first`,
+`lemma_selected_first` and `lemma_selected_covers` for source correspondence,
+earliest capture and index coverage. Their sorting/permutation premises remain
+explicit obligations of the actual sort, not assumed library contracts.
+Selected payload uniqueness/map equality and adaptive dedup/reordering still
+need proof before these helpers supply `trail_plan_matches`. Preserve the
+existing sorting complexity; the existing quadratic insertion sort is not a
+runtime substitute for this path.

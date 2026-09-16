@@ -5881,13 +5881,7 @@ where
         first_captures: &mut std::vec::Vec<(T, I)>,
     ) -> (usize, usize) {
         let entries = &self.trail_value_pool[frame.start..frame.end];
-        scratch.clear();
-        scratch.extend(
-            entries
-                .iter()
-                .enumerate()
-                .map(|(position, (_, index))| (index.as_usize(), position)),
-        );
+        crate::trail_select::build_keys(entries, scratch);
         scratch.sort_unstable();
         scratch.dedup_by_key(|(index, _)| *index);
         scratch.sort_unstable_by_key(|(_, position)| *position);
@@ -6120,22 +6114,9 @@ where
         for f in 0..count {
             let frame = self.trail_stack[f];
             let entries = &self.trail_value_pool[frame.start..frame.end];
-            keyed.clear();
-            keyed.extend(
-                entries
-                    .iter()
-                    .enumerate()
-                    .map(|(position, (_, index))| (index.as_usize(), position)),
-            );
+            crate::trail_select::build_keys(entries, &mut keyed);
             keyed.sort_unstable();
-            selected.clear();
-            let mut previous: Option<usize> = None;
-            for &(index, position) in keyed.iter() {
-                if previous != Some(index) {
-                    selected.push(position);
-                    previous = Some(index);
-                }
-            }
+            crate::trail_select::select_positions(keyed.as_slice(), &mut selected);
             selected.sort_unstable();
 
             Self::append_selected_hot_frame_checked(

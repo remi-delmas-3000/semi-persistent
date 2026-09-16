@@ -1704,3 +1704,43 @@ were not repeated; the last runtime checkpoint recorded 277 passing feature test
 and four release policy tests. Final consumer/CI audits and measured benchmark
 parity remain required. The next producer obligation is actual first-capture
 selection proving `trail_plan_matches`, without quadratic fallback sorting.
+
+
+## Trail selection producer: checked key construction and group scan
+
+`trail_select.rs` now checks the executable `build_keys` shared by ordinary and
+adaptive Trail migration, and the ordinary `select_positions` group scan. The
+builder exports exact `(index, chronological position)` keys and complete source
+coverage. The scan exports its exact recursively defined result; this is a local
+mathematical sequence, not stored ghost history.
+
+Checked supporting lemmas establish that lexicographically sorted group heads
+are earliest source captures, every selected position has this property, every
+input index has a retained group head, and multiset-preserving permutations
+preserve key/source correspondence. Targeted verification reports **9 verified,
+zero errors** (`/tmp/sp-d21-trail-select5.log`). No trusted contract for sorting
+has been added: callers must still prove both sorting and permutation effects.
+
+Executable changes replace iterator key construction with one reserved linear
+loop and extract the existing ordinary group scan into a checked loop. The
+original sorting calls, buffers, selection order, destination assembly and replay
+batching remain. This is not a performance-parity claim; final benchmark acceptance
+remains open.
+
+Remaining producer work includes sorting with the existing performance profile,
+selected-index uniqueness and complete payload map equality, chronological
+reordering, adaptive in-place deduplication, and connecting these facts to
+`trail_plan_matches`. The surrounding migration/planner bodies remain trusted
+until their actual precondition suppliers and semantic effects verify. No Step 2
+or whole-goal completion is claimed by this producer checkpoint.
+
+Selection producer checkpoint evidence: full default and literal-types each
+**2466 verified, zero errors** (`/tmp/sp-d21-select-default.log`,
+`/tmp/sp-d21-select-literal.log`); conditional composition **80 verified, zero
+errors** (`/tmp/sp-d21-select-composition.log`); feature suite **277 passed, 10
+ignored** (`/tmp/sp-d21-select-tests.log`); release differential policy matrix
+with `PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-select-policy.log`). The
+first feature-suite run was interrupted by a session exit before `eclasses_behavior`
+reported and was rerun from scratch; the recorded log is the complete rerun.
+Formatting/whitespace pass, trust remains **74 default + 5 literal**, and legacy
+`containers/` is unchanged from `d191c4a`. Benchmark parity remains open.
