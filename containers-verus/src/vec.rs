@@ -8778,6 +8778,225 @@ where
         }
     }
 
+    /// Derived finite map over the physical saved-value lookup. Its complete
+    /// correspondence, including absence outside saved_len, is proved below.
+    pub open(crate) spec fn persistence_frame(&self, f: int) -> crate::persistence_model::Frame<T> {
+        crate::persistence_model::Frame {
+            saved_len: self.frame_saved_len(f),
+            saved: crate::persistence_model::bounded_saved_map(self.frame_saved_len(f),
+                |j: nat| self.frame_saved_value(f, j)),
+        }
+    }
+
+    pub open(crate) spec fn persistence_model(&self) -> crate::persistence_model::Model<T> {
+        crate::persistence_model::Model {
+            live: self.view(), snapshots: self.snapshots@,
+            frames: Seq::new(self.depth_spec(), |f: int| self.persistence_frame(f)),
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_persistence_saved_len(&self, f: int)
+        requires self.wf(), 0 <= f < self.depth_spec(),
+        ensures self.frame_saved_len(f) == self.snapshots@[f].len(),
+    {
+        self.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_persistence_physical_domain(&self, f: int, j: nat)
+        requires self.wf(), 0 <= f < self.depth_spec(),
+        ensures self.frame_saved_value(f, j) is Some ==> j < self.frame_saved_len(f),
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+        let cc = self.cold_stack@.len();
+        let hc = self.hot_stack@.len();
+        if self.frame_saved_value(f, j) is Some {
+            if f < cc {
+                reveal(Vec::cold_repr_ok);
+                reveal(Vec::cold_payload_ok);
+                let r = choose|r: int| self.cold_stack@[f].runs_start <= r
+                    < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len
+                    && (#[trigger] self.cold_index_runs@[r]).base.as_nat() <= j
+                    && j < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len;
+            } else if f < cc + hc {
+                let h = f - cc;
+                self.lemma_hot_repr_at(h);
+                let q = choose|q: int| self.phys_hot_start(h) <= q < self.phys_hot_end(h)
+                    && 0 <= q < self.hot_value_pool@.len()
+                    && (#[trigger] self.hot_value_pool@[q]).1.as_nat() == j;
+            } else {
+                reveal(Vec::trail_repr_ok);
+                let t = f - cc - hc;
+                let q = choose|q: int| self.trail_stack@[t].start <= q < self.phys_trail_end(t)
+                    && 0 <= q < self.trail_value_pool@.len()
+                    && (#[trigger] self.trail_value_pool@[q]).1.as_nat() == j;
+            }
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_persistence_lookup(&self, f: int, j: nat)
+        requires self.wf(), 0 <= f < self.depth_spec(),
+        ensures self.persistence_frame(f).saved.dom().contains(j) <==> self.frame_saved_value(f, j) is Some,
+            self.persistence_frame(f).saved.dom().contains(j) ==>
+                self.persistence_frame(f).saved[j] == self.frame_saved_value(f, j)->Some_0,
+    {
+        hide(Vec::wf);
+        self.lemma_persistence_physical_domain(f, j);
+        crate::persistence_model::bounded_saved_map_at(self.frame_saved_len(f),
+            |i: nat| self.frame_saved_value(f, i), j);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_persistence_frame(&self, f: int)
+        requires self.wf(), 0 <= f < self.depth_spec(),
+        ensures crate::persistence_model::frame_ok(self.persistence_frame(f),
+            self.snapshots@[f], self.layer_above_at(f)),
+    {
+        hide(Vec::wf);
+        self.lemma_persistence_saved_len(f);
+        let frame = self.persistence_frame(f);
+        assert forall|j: nat| #[trigger] frame.saved.dom().contains(j) implies j < frame.saved_len by {
+            crate::persistence_model::bounded_saved_map_at(self.frame_saved_len(f),
+                |i: nat| self.frame_saved_value(f, i), j);
+        }
+        assert forall|j: nat| j < frame.saved_len implies
+            if #[trigger] frame.saved.dom().contains(j) {
+                frame.saved[j] == self.snapshots@[f][j as int]
+            } else {
+                j < self.layer_above_at(f).len()
+                    && self.layer_above_at(f)[j as int] == self.snapshots@[f][j as int]
+            } by {
+            self.lemma_persistence_lookup(f, j);
+            self.lemma_frame_saved_value_contract(f, j as int);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_persistence_model(&self)
+        requires self.wf(),
+        ensures crate::persistence_model::snapshots_ok(self.persistence_model()),
+            self.persistence_model().live == self.view(),
+            self.persistence_model().snapshots == self.snapshots@,
+            self.persistence_model().frames.len() == self.depth_spec(),
+    {
+        hide(Vec::wf);
+        self.lemma_replay_partition();
+        let model = self.persistence_model();
+        assert forall|f: int| 0 <= f < model.frames.len() implies
+            #[trigger] crate::persistence_model::frame_ok(model.frames[f], model.snapshots[f],
+                crate::persistence_model::above(model, f)) by {
+            self.lemma_persistence_frame(f);
+            assert(crate::persistence_model::above(model, f) == self.layer_above_at(f));
+        }
+    }
+
+    /// The actual capture bridge for the active physical frame. In untracked
+    /// mode there is no logical history; an adapter must expose an empty tag set.
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_persistence_capture_at(&self, j: nat)
+        requires self.wf(), TRACK, j < self.view().len(),
+        ensures self.store.captured()[j as int] == (self.depth_spec() > 0
+            && self.persistence_frame(self.depth_spec() - 1).saved.dom().contains(j)),
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        if self.depth_spec() > 0 {
+            let f = self.depth_spec() - 1;
+            self.lemma_persistence_saved_len(f);
+            self.lemma_persistence_lookup(f, j);
+            if j >= self.active_saved_len.as_nat() {
+                self.lemma_persistence_physical_domain(f, j);
+            }
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_persistence_writable(&self)
+        requires self.wf(),
+        ensures
+            self.active_saved_len.as_nat() == if self.depth_spec() > 0 {
+                self.persistence_frame(self.depth_spec() - 1).saved_len
+            } else { 0nat },
+            self.store.unique_capture_spec() ==> self.trail_stack@.len() == 0
+                && (self.depth_spec() > 0 ==> self.hot_stack@.len() > 0),
+            !self.store.unique_capture_spec() && self.depth_spec() > 0 ==> self.trail_stack@.len() > 0,
+            !TRACK ==> self.depth_spec() == 0,
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::frame_partition_ok);
+        if self.depth_spec() > 0 { self.lemma_persistence_saved_len(self.depth_spec() - 1); }
+        else { I::lemma_min_as_nat(); }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_persistence_pair_frame(&self, trail: bool, f: int, buffer: Seq<T>)
+        requires self.wf(), 0 <= f < self.pair_tier_count(trail),
+        ensures overlay::<T, I>(buffer, self.pair_tier_pool(trail),
+            self.pair_tier_start(trail, f), self.pair_tier_end(trail, f))
+            == crate::persistence_model::apply(
+                self.persistence_frame(self.pair_tier_offset(trail) + f).saved, buffer),
+    {
+        hide(Vec::wf);
+        self.lemma_pair_tier_frame_layout(trail, f);
+        self.lemma_replay_partition();
+        let pool = self.pair_tier_pool(trail);
+        let lo = self.pair_tier_start(trail, f);
+        let hi = self.pair_tier_end(trail, f);
+        let out = overlay::<T, I>(buffer, pool, lo, hi);
+        let map = self.persistence_frame(self.pair_tier_offset(trail) + f).saved;
+        lemma_overlay_len::<T, I>(buffer, pool, lo, hi);
+        assert forall|j: int| 0 <= j < buffer.len() implies
+            #[trigger] out[j] == crate::persistence_model::apply(map, buffer)[j] by {
+            self.lemma_persistence_lookup(self.pair_tier_offset(trail) + f, j as nat);
+            lemma_overlay_saved_value::<T, I>(buffer, pool, lo, hi, j);
+        }
+        assert(out =~= crate::persistence_model::apply(map, buffer));
+    }
+
+    /// The physical concatenated range is exactly the shared model's newest-
+    /// to-oldest frame composition for every buffer, without layer premises.
+    #[verifier::spinoff_prover]
+    pub(crate) proof fn lemma_persistence_pair_suffix(&self, trail: bool, first: int, buffer: Seq<T>)
+        requires self.wf(), 0 <= first < self.pair_tier_count(trail),
+        ensures overlay::<T, I>(buffer, self.pair_tier_pool(trail),
+            self.pair_tier_start(trail, first), self.pair_tier_pool(trail).len() as int)
+            == crate::persistence_model::apply_range(self.persistence_model().frames,
+                self.pair_tier_offset(trail) + first,
+                (self.pair_tier_offset(trail) + self.pair_tier_count(trail)) as int, buffer),
+        decreases self.pair_tier_count(trail) - first,
+    {
+        hide(Vec::wf);
+        self.lemma_pair_tier_frame_layout(trail, first);
+        self.lemma_replay_partition();
+        let pool = self.pair_tier_pool(trail);
+        let lo = self.pair_tier_start(trail, first);
+        let mid = self.pair_tier_end(trail, first);
+        let hi = pool.len() as int;
+        let newer = overlay::<T, I>(buffer, pool, mid, hi);
+        let model = self.persistence_model();
+        let index = self.pair_tier_offset(trail) + first;
+        let end = (self.pair_tier_offset(trail) + self.pair_tier_count(trail)) as int;
+        assert(0 <= index < end <= model.frames.len());
+        if first + 1 < self.pair_tier_count(trail) {
+            self.lemma_persistence_pair_suffix(trail, first + 1, buffer);
+        } else { assert(newer == buffer); }
+        assert(newer == crate::persistence_model::apply_range(model.frames, index + 1, end, buffer));
+        assert(model.frames[index] == self.persistence_frame(index));
+        lemma_overlay_split::<T, I>(buffer, pool, lo, mid, hi);
+        self.lemma_persistence_pair_frame(trail, first, newer);
+        assert(crate::persistence_model::apply_range(model.frames, index, end, buffer)
+            == crate::persistence_model::apply(model.frames[index].saved, newer));
+    }
+
     /// Read-only coordinates for the two pair-encoded tiers. These are spec
     /// projections of existing pools/headers, not another history copy.
     pub open(crate) spec fn pair_tier_pool(&self, trail: bool) -> Seq<(T, I)> {
@@ -8943,6 +9162,63 @@ where
         }
     }
 
+    /// Checked physical batch contract used by the top-down interface. No
+    /// layer agreement is required; execution is still one pool replay.
+    #[inline(always)]
+    #[verifier::spinoff_prover]
+    fn replay_persistence_pair_checked(
+        store: &mut S, pool: &std::vec::Vec<(T, I)>, lo: usize, hi: usize,
+        Ghost(trail): Ghost<bool>, Ghost(first): Ghost<int>, Ghost(pre): Ghost<Self>,
+    )
+        requires
+            pre.wf(),
+            0 <= first < pre.pair_tier_count(trail),
+            pool@ == pre.pair_tier_pool(trail),
+            lo == pre.pair_tier_start(trail, first),
+            hi == pool@.len(),
+            old(store).wf(),
+            TRACK ==> forall|j: int| 0 <= j < old(store).captured().len()
+                && #[trigger] old(store).captured()[j]
+                ==> j < pre.store.captured().len() && pre.store.captured()[j],
+        ensures
+            final(store).wf(),
+            final(store).unique_capture_spec() == old(store).unique_capture_spec(),
+            final(store).needs_replayed_indices_spec() == old(store).needs_replayed_indices_spec(),
+            final(store).restore_entries_clear_capture_spec()
+                == old(store).restore_entries_clear_capture_spec(),
+            final(store).data().len() == old(store).data().len(),
+            final(store).data() == overlay::<T, I>(old(store).data(), pool@, lo as int, hi as int),
+            final(store).data() == crate::persistence_model::apply_range(pre.persistence_model().frames,
+                pre.pair_tier_offset(trail) + first,
+                (pre.pair_tier_offset(trail) + pre.pair_tier_count(trail)) as int, old(store).data()),
+            TRACK ==> forall|j: int| 0 <= j < final(store).captured().len()
+                && #[trigger] final(store).captured()[j]
+                ==> j < old(store).captured().len() && old(store).captured()[j],
+            TRACK && old(store).restore_entries_clear_capture_spec()
+                && trail == !pre.store.unique_capture_spec() ==>
+                forall|j: int| 0 <= j < final(store).captured().len() ==>
+                    !(#[trigger] final(store).captured()[j]),
+            TRACK && old(store).restore_entries_clear_capture_spec() ==>
+                forall|j: int| 0 <= j < final(store).captured().len()
+                    && #[trigger] final(store).captured()[j]
+                    ==> !captured_in_range::<T, I>(pool@, lo as int, hi as int, j as nat),
+    {
+        hide(Vec::wf);
+        proof { pre.lemma_pair_tier_frame_layout(trail, first); }
+        let ghost before = store.data();
+        replay_physical_range::<T, I, S, TRACK>(store, pool, lo, hi);
+        proof {
+            pre.lemma_persistence_pair_suffix(trail, first, before);
+            if TRACK && store.restore_entries_clear_capture_spec()
+                && trail == !pre.store.unique_capture_spec() {
+                pre.lemma_pair_tier_frame_layout(trail, first);
+                pre.lemma_ingress_suffix_capture(trail, first);
+                assert forall|j: int| 0 <= j < store.captured().len() implies
+                    !(#[trigger] store.captured()[j]) by {};
+            }
+        }
+    }
+
     /// Runtime batch with the snapshot-prefix result of the frame induction.
     /// Tier/first/pre are erased proof inputs; execution stays one pool replay.
     #[inline(always)]
@@ -8988,19 +9264,9 @@ where
                     ==> !captured_in_range::<T, I>(pool@, lo as int, hi as int, j as nat),
     {
         hide(Vec::wf);
-        proof { pre.lemma_pair_tier_frame_layout(trail, first); }
         let ghost before = store.data();
-        replay_physical_range::<T, I, S, TRACK>(store, pool, lo, hi);
-        proof {
-            pre.lemma_pair_tier_suffix(trail, first, before);
-            if TRACK && store.restore_entries_clear_capture_spec()
-                && trail == !pre.store.unique_capture_spec() {
-                pre.lemma_pair_tier_frame_layout(trail, first);
-                pre.lemma_ingress_suffix_capture(trail, first);
-                assert forall|j: int| 0 <= j < store.captured().len() implies
-                    !(#[trigger] store.captured()[j]) by {};
-            }
-        }
+        Self::replay_persistence_pair_checked(store, pool, lo, hi, Ghost(trail), Ghost(first), Ghost(pre));
+        proof { pre.lemma_pair_tier_suffix(trail, first, before); }
     }
 
     #[verifier::spinoff_prover]
@@ -9022,6 +9288,59 @@ where
         self.lemma_wf_named_parts();
         reveal(Vec::cold_repr_ok);
         reveal(Vec::frame_partition_ok);
+    }
+
+    /// Direct physical Cold replay refines the shared map for every buffer.
+    /// The snapshot-oriented wrapper below retains its existing contract.
+    #[inline(always)]
+    #[verifier::spinoff_prover]
+    fn replay_persistence_cold_checked(
+        store: &mut S, frame: crate::frame::ColdFrameHdr<I>,
+        runs: &std::vec::Vec<crate::frame::IndexRun<I>>, values: &std::vec::Vec<T>,
+        f: usize, Ghost(pre): Ghost<Self>,
+    )
+        requires
+            pre.wf(),
+            f < pre.cold_stack@.len(),
+            frame == pre.cold_stack@[f as int],
+            runs@ == pre.cold_index_runs@,
+            values@ == pre.cold_value_pool@,
+            old(store).wf(),
+        ensures
+            final(store).wf(),
+            final(store).unique_capture_spec() == old(store).unique_capture_spec(),
+            final(store).needs_replayed_indices_spec() == old(store).needs_replayed_indices_spec(),
+            final(store).restore_entries_clear_capture_spec()
+                == old(store).restore_entries_clear_capture_spec(),
+            final(store).captured() == old(store).captured(),
+            final(store).data().len() == old(store).data().len(),
+            final(store).data() == crate::persistence_model::apply(pre.persistence_frame(f as int).saved, old(store).data()),
+            forall|j: int| 0 <= j < final(store).data().len() ==>
+                #[trigger] final(store).data()[j] == match pre.frame_saved_value(f as int, j as nat) {
+                    Some(value) => value, None => old(store).data()[j],
+                },
+    {
+        hide(Vec::cold_payload_ok);
+        proof { pre.lemma_cold_frame_layout(f as int); }
+        let _ = runs.len();
+        let ghost before = store.data();
+        replay_cold_range::<T, I, S, TRACK>(
+            store, runs, values, frame.runs_start, frame.runs_start + frame.runs_len);
+        proof {
+            assert forall|j: int| 0 <= j < before.len() implies
+                #[trigger] store.data()[j] == match pre.frame_saved_value(f as int, j as nat) {
+                    Some(value) => value,
+                    None => before[j],
+                } by {
+                pre.lemma_cold_range_matches_frame(f as int, j as nat);
+            }
+            let map = pre.persistence_frame(f as int).saved;
+            assert forall|j: int| 0 <= j < before.len() implies
+                #[trigger] store.data()[j] == crate::persistence_model::apply(map, before)[j] by {
+                pre.lemma_persistence_lookup(f as int, j as nat);
+            }
+            assert(store.data() =~= crate::persistence_model::apply(map, before));
+        }
     }
 
     /// A real Cold frame step in the target-sized replay buffer. `pre` records
@@ -9058,20 +9377,9 @@ where
     {
         hide(Vec::cold_payload_ok);
         proof { pre.lemma_cold_frame_layout(f as int); }
-        let _ = runs.len();
         let ghost before = store.data();
-        replay_cold_range::<T, I, S, TRACK>(
-            store, runs, values, frame.runs_start, frame.runs_start + frame.runs_len);
-        proof {
-            assert forall|j: int| 0 <= j < before.len() implies
-                #[trigger] store.data()[j] == match pre.frame_saved_value(f as int, j as nat) {
-                    Some(value) => value,
-                    None => before[j],
-                } by {
-                pre.lemma_cold_range_matches_frame(f as int, j as nat);
-            }
-            pre.lemma_physical_frame_step(f as int, before, store.data());
-        }
+        Self::replay_persistence_cold_checked(store, frame, runs, values, f, Ghost(pre));
+        proof { pre.lemma_physical_frame_step(f as int, before, store.data()); }
     }
 
     /// Compose Cold frame steps without asking intermediate buffers to satisfy

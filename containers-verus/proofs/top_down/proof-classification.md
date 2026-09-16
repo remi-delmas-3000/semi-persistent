@@ -134,6 +134,20 @@ scheduled for deletion or replacement solely because a new model exists.
 
 ## Next concrete work
 
+The first concrete bridge now derives `persistence_frame` and
+`persistence_model` from actual physical storage and verifies bounded domains,
+exact lookup membership/value, snapshot meaning, writable ownership, and the
+active capture relation. Pair suffix composition and direct Cold replay export
+arbitrary-buffer shared-map application through checked executable helpers.
+The original snapshot-oriented wrappers retain their contracts and use those
+helpers; their existing reconstruction lemmas remain checked. The shared model
+is imported by production, while the provisional interface target stays isolated.
+
+This discharges the interpretation and replay bridge work in the first four
+rows above. Exact retained-map sequence, survivor-movement map equality and the
+complete production interface implementation remain outstanding. The conditional
+target now verifies 80 obligations after adding the bounded-map accessor.
+
 1. Define the production derived frame-map view and prove the physical-to-common
    interpretation bridge, preserving all existing fields and proofs.
 2. Connect the existing exact replay primitives and checked retirement/Hot

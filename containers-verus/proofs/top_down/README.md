@@ -2,7 +2,9 @@
 
 This target implements the workflow in
 [three-tier-top-down-proof-engineering.md](../../doc/tasks/three-tier-top-down-proof-engineering.md).
-It is **not imported by the production crate**. Its `Runtime`, `Mutations`, and
+The conditional orchestration and witness are **not imported by the production
+crate**. The shared `model.rs` is imported so concrete adapters use the same
+mathematical definitions. Its `Runtime`, `Mutations`, and
 `Policies` traits have only a mathematical consistency implementation in
 `witness.rs`. Their methods are explicit conditional premises for production,
 not trusted production wrappers. No `assume`, `admit`, or
@@ -16,9 +18,10 @@ The draft composition verifies with the project's pinned Verus:
 verus --crate-type lib containers-verus/proofs/top_down/composition.rs
 ```
 
-Result on 2026-09-15: **79 verified, 0 errors**, Verus
+Result on 2026-09-15: **80 verified, 0 errors**, Verus
 `0.2026.08.02.b677dd5`, Rust 1.97.1. The target needs only the bundled vstd and
-does not change Cargo's production build or its verification counts.
+has no runtime history fields. Production now verifies the shared mathematical
+model as well as its concrete adapters; those counts are reported separately.
 
 The first conditional-composition milestone is verified. The
 [interface review and proof classification](proof-classification.md) records

@@ -117,6 +117,11 @@ pub mod guard;
 pub mod hasher_spec;
 pub mod history;
 pub mod id_factory;
+// Shared mathematical model used by the conditional proof and concrete adapters.
+// This adds no fields or maintained history to any runtime container.
+#[allow(dead_code)]
+#[path = "../proofs/top_down/model.rs"]
+pub(crate) mod persistence_model;
 pub mod sync_group;
 #[macro_use]
 pub mod id_macros;

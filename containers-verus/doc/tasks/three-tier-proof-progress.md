@@ -866,3 +866,41 @@ Further leaf work is paused for the top-down conditional composition milestone
 in `three-tier-top-down-proof-engineering.md`. Existing proofs will be retained
 and classified against the required interfaces only after that composition
 works; the top theorem will not be weakened to fit existing helpers.
+
+
+### Physical storage refines the shared top-down model
+
+The conditional composition and classification checkpoint is `5477152`.
+The production crate now imports the same mathematical model used by the
+conditional proof. `persistence_frame` derives a finite map from each physical
+frame's saved-value lookup; `persistence_model` uses those maps alongside the
+existing live view and ghost snapshots. Neither is maintained storage.
+
+The physical-domain theorem proves every Some lookup is below the frame's
+saved length, including Cold runs. Thus the bounded finite-map construction
+cannot silently drop an out-of-domain payload. The lookup theorem preserves
+both membership and value. Existing captured-or-inherited lemmas then establish
+`snapshots_ok` for the actual Vec view. The capture and writable lemmas connect
+real ingress ownership, active saved length, and live capture flags to the same
+map interpretation. Untracked mode has no logical frames.
+
+Pair frame and suffix lemmas prove exact shared-map application for arbitrary
+buffers. `replay_persistence_pair_checked` performs the original single pool
+batch and exports this effect and the existing capture protocol. The old
+snapshot-oriented wrapper calls it and retains its complete contract. Likewise,
+`replay_persistence_cold_checked` performs direct run replay and proves the
+shared map's exact application; the old Cold frame wrapper retains its snapshot
+step contract. No replay loop or batching changes, extra runtime map lookups,
+assumptions, or trusted bodies were introduced.
+
+Targeted checks passed for the physical interpretation, capture/writable
+bridge, pair composition/execution, and Cold execution. The conditional target
+passes 80 obligations with the new finite-map accessor. Full default and
+literal-types production verification each passed **2340 verified, 0 errors**.
+Feature tests passed 277 tests (10 ignored), the 1024-case differential policy
+matrix passed all four tests, and e-graph/SAT consumer tests passed 1267 tests
+(45 ignored). Formatting and whitespace checks passed. Trust remains 86 source
+markers (81 default plus five literal registrations); the differential oracle
+is unchanged. This milestone does not yet instantiate every provisional
+interface or complete all-tier public closure. The derived-contract audit
+records the initial public wrapper gaps without changing their implementations.

@@ -18,6 +18,30 @@ pub struct Model<T> {
     pub frames: Seq<Frame<T>>,
 }
 
+/// Finite-map view of a bounded physical lookup. Adapters must separately
+/// establish that the physical lookup has no captures outside this domain.
+pub open spec fn bounded_saved_map<T>(len: nat, lookup: spec_fn(nat) -> Option<T>) -> Map<nat, T> {
+    let indices = Seq::new(len, |i: int| i as nat).to_set();
+    Map::new(indices.filter(|i: nat| lookup(i) is Some), |i: nat| lookup(i)->Some_0)
+}
+
+#[verifier::spinoff_prover]
+pub proof fn bounded_saved_map_at<T>(len: nat, lookup: spec_fn(nat) -> Option<T>, i: nat)
+    ensures bounded_saved_map(len, lookup).dom().contains(i) <==> i < len && lookup(i) is Some,
+        bounded_saved_map(len, lookup).dom().contains(i) ==>
+            bounded_saved_map(len, lookup)[i] == lookup(i)->Some_0,
+{
+    let indices = Seq::new(len, |j: int| j as nat);
+    indices.to_set_ensures();
+    if i < len {
+        assert(indices[i as int] == i);
+        assert(indices.to_set().contains(i));
+    } else if indices.to_set().contains(i) {
+        let j = choose|j: int| 0 <= j < indices.len() && indices[j] == i;
+        assert(indices[j] == j as nat);
+    }
+}
+
 pub open spec fn above<T>(s: Model<T>, f: int) -> Seq<T> {
     if f + 1 < s.frames.len() { s.snapshots[f + 1] } else { s.live }
 }
