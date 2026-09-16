@@ -7294,6 +7294,19 @@ where
                     end: old(self).trail_value_pool@.len() as usize,
                 })
             },
+            forall|trail: bool, f: int| 0 <= f < old(self).pair_tier_count(trail) ==> {
+                &&& final(self).pair_tier_offset(trail) == old(self).pair_tier_offset(trail)
+                &&& final(self).pair_tier_start(trail, f) == old(self).pair_tier_start(trail, f)
+                &&& #[trigger] final(self).pair_tier_end(trail, f) == old(self).pair_tier_end(trail, f)
+            },
+            final(self).pair_tier_count(!old(self).store.unique_capture_spec())
+                == old(self).pair_tier_count(!old(self).store.unique_capture_spec()) + 1,
+            final(self).pair_tier_start(!old(self).store.unique_capture_spec(),
+                old(self).pair_tier_count(!old(self).store.unique_capture_spec()) as int)
+                == final(self).pair_tier_pool(!old(self).store.unique_capture_spec()).len(),
+            final(self).pair_tier_end(!old(self).store.unique_capture_spec(),
+                old(self).pair_tier_count(!old(self).store.unique_capture_spec()) as int)
+                == final(self).pair_tier_pool(!old(self).store.unique_capture_spec()).len(),
     {
         if self.store.unique_capture() {
             let n = self.hot_stack.len();
@@ -7325,6 +7338,64 @@ where
         }
         self.active_saved_len = saved_len;
         proof { reveal(Vec::frame_partition_ok); }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_mark_cold_repr(&self, pre: Self)
+        requires pre.wf(),
+            self.view() == pre.view(),
+            self.snapshots@ == pre.snapshots@.push(pre.view()),
+            self.trail_frames@ == pre.trail_frames@.push(pre.full_trail@.len() as nat),
+            self.cold_stack@ == pre.cold_stack@,
+            self.cold_index_runs@ == pre.cold_index_runs@,
+            self.cold_value_pool@ == pre.cold_value_pool@,
+        ensures self.cold_repr_ok(),
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::cold_payload_ok);
+        reveal(Vec::frame_partition_ok);
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            #[trigger] self.cold_reconstructs(f) by {
+            assert(self.snapshots@[f] == pre.snapshots@[f]);
+            assert(self.layer_above_at(f) == pre.layer_above_at(f));
+            self.lemma_cold_reconstructs_frame_transfer(pre, f);
+        }
+    }
+
+    /// Existing pair frames retain their physical ranges when a mark opens.
+    /// Their former live layer becomes an equal snapshot; Hot uniqueness is
+    /// independent of that change of layer.
+    #[verifier::spinoff_prover]
+    proof fn lemma_mark_pair_frame(&self, pre: Self, trail: bool, f: int)
+        requires pre.wf(), 0 <= f < pre.pair_tier_count(trail),
+            self.view() == pre.view(),
+            self.snapshots@ == pre.snapshots@.push(pre.view()),
+            self.trail_frames@ == pre.trail_frames@.push(pre.full_trail@.len() as nat),
+            self.pair_tier_pool(trail) == pre.pair_tier_pool(trail),
+            self.pair_tier_offset(trail) == pre.pair_tier_offset(trail),
+            self.pair_tier_start(trail, f) == pre.pair_tier_start(trail, f),
+            self.pair_tier_end(trail, f) == pre.pair_tier_end(trail, f),
+        ensures
+            frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(trail) + f),
+                self.pair_tier_pool(trail), self.pair_tier_start(trail, f),
+                self.pair_tier_end(trail, f), self.snapshots@[self.pair_tier_offset(trail) + f],
+                self.snapshots@[self.pair_tier_offset(trail) + f].len()),
+            !trail ==> stratum_unique::<T, I>(self.pair_tier_pool(trail),
+                self.pair_tier_start(trail, f), self.pair_tier_end(trail, f)),
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        pre.lemma_pair_tier_frame_layout(trail, f);
+        assert(pre.snapshots@.len() == pre.trail_frames@.len()) by {
+            reveal(Vec::frame_partition_ok);
+        }
+        let k = pre.pair_tier_offset(trail) + f;
+        assert(self.layer_above_at(k) == pre.layer_above_at(k));
+        assert(self.snapshots@[k] == pre.snapshots@[k]);
+        if trail { reveal(Vec::trail_repr_ok); }
+        else { reveal(Vec::hot_repr_ok); }
     }
 
     /// Opening a frame appends one horizontal snapshot and one canonical
@@ -11525,15 +11596,15 @@ where
 
     /// Cold frames depend on their immediate newer layer, not necessarily
     /// the live vector. This also frames older Cold history across writes.
-    pub(crate) proof fn lemma_cold_reconstructs_layer_transfer(&self, other: Self, f: int)
+    pub(crate) proof fn lemma_cold_reconstructs_frame_transfer(&self, other: Self, f: int)
         requires
             other.cold_reconstructs(f),
             0 <= f < self.snapshots@.len(),
             self.cold_stack@ == other.cold_stack@,
             self.cold_index_runs@ == other.cold_index_runs@,
             self.cold_value_pool@ == other.cold_value_pool@,
-            self.snapshots@ == other.snapshots@,
-            self.trail_frames@ == other.trail_frames@,
+            0 <= f < other.snapshots@.len(),
+            self.snapshots@[f] == other.snapshots@[f],
             self.layer_above_at(f) == other.layer_above_at(f),
         ensures
             self.cold_reconstructs(f),
@@ -11563,6 +11634,22 @@ where
     }
 
 
+
+    pub(crate) proof fn lemma_cold_reconstructs_layer_transfer(&self, other: Self, f: int)
+        requires
+            other.cold_reconstructs(f),
+            0 <= f < self.snapshots@.len(),
+            self.cold_stack@ == other.cold_stack@,
+            self.cold_index_runs@ == other.cold_index_runs@,
+            self.cold_value_pool@ == other.cold_value_pool@,
+            self.snapshots@ == other.snapshots@,
+            self.trail_frames@ == other.trail_frames@,
+            self.layer_above_at(f) == other.layer_above_at(f),
+        ensures
+            self.cold_reconstructs(f),
+    {
+        self.lemma_cold_reconstructs_frame_transfer(other, f);
+    }
 
     /// Capacity-only and other framing operations use this instead of
     /// re-expanding the nested Cold quantifiers at each call site.

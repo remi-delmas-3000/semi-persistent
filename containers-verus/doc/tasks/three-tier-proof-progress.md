@@ -1350,3 +1350,41 @@ checks pass; the legacy `containers/` tree is unchanged from `d191c4a`. No trust
 marker or solver limit changed. Literal-types verification and broader policy/
 consumer gates remain due for the completed general opening milestone; final
 performance acceptance is still open.
+
+## Physical frame meaning across mark opening
+
+`open_mark_headers_checked` now additionally exports unchanged logical offsets,
+starts and effective ends for every old pair frame, plus the selected new frame's
+empty range and incremented tier count. These facts are checked against the
+actual indexed header updates, rather than assumed by a separate model.
+
+`lemma_mark_pair_frame` uses those coordinate facts to preserve an older Trail
+or Hot frame's reconstruction contract after snapshot append; Hot uniqueness is
+preserved as well. The prior top's layer changes from live contents to an equal
+snapshot, so the same proof handles both the top and older frames.
+
+`lemma_mark_cold_repr` preserves the entire Cold representation across mark.
+It uses the new `lemma_cold_reconstructs_frame_transfer`, which needs equality of
+only the relevant snapshot and immediately newer layer, plus unchanged physical
+Cold storage. The existing layer-transfer contract remains intact as a checked
+wrapper. No existing caller loses a guarantee and no runtime body changes in
+this checkpoint.
+
+Targeted validation: mark selection **17 verified, zero errors**
+(`/tmp/sp-d21-mark-ranges.log`); Cold selection **48 verified, zero errors**
+(`/tmp/sp-d21-mark-cold.log`). No trust or solver limit changes.
+
+Next: aggregate the old-frame lemmas and new empty-frame facts into Hot/Trail
+representation preservation, establish cleared-flag ingress and compatibility,
+and combine with canonical preservation into general wf. The trusted mark
+fallback and policy dependencies remain open; these lemmas alone do not complete
+mark or the production end-to-end theorem.
+
+Full checkpoint results: default and literal-types each **2419 verified, zero
+errors** (`/tmp/sp-d21-mark-physical-default.log`,
+`/tmp/sp-d21-mark-physical-literal.log`); conditional composition **80 verified,
+zero errors** (`/tmp/sp-d21-mark-physical-composition.log`). Formatting and
+whitespace checks pass, and `containers/` is unchanged from `d191c4a`. This
+checkpoint contains only proof/specification changes, so runtime regression tests
+were not repeated; the preceding structural checkpoint recorded 277 passing
+feature tests. Benchmark parity remains unmeasured and required.

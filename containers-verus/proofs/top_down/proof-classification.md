@@ -349,7 +349,13 @@ Next mark obligations:
   sequences, snapshot/boundary append and frame partition. Shared canonical mark
   lemmas transfer the former live layer to the equal new snapshot; the existing
   Hot mark proof now reuses them after their independent verification.
-- Prove physical representation preservation from these exact structural effects,
-  then compose cleared capture flags and canonical reconstruction into general wf.
+- Completed: the header helper exports unchanged old pair-frame coordinates;
+  `lemma_mark_pair_frame` preserves their reconstruction and Hot uniqueness.
+  `lemma_mark_cold_repr` preserves the full Cold representation across snapshot
+  append through a narrower per-frame transfer lemma. Existing transfer contracts
+  remain checked wrappers.
+- Aggregate old pair-frame preservation and new empty-frame facts into complete
+  Hot/Trail invariants, then compose cleared capture flags, compatibility and
+  canonical reconstruction into general wf.
 - Compose actual rollover and reclamation afterward. Mark remains incomplete
   until its policy dependencies and shared-model effects are discharged.
