@@ -6184,6 +6184,31 @@ where
         else { Self::trail_plan_prefix(plan, n - 1) + plan[n - 1]@ }
     }
 
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_plan_frame_range(plan: Seq<std::vec::Vec<(T, I)>>, n: int, f: int)
+        requires 0 <= f < n <= plan.len(),
+        ensures
+            Self::trail_plan_prefix(plan, f).len() <= Self::trail_plan_prefix(plan, f + 1).len()
+                <= Self::trail_plan_prefix(plan, n).len(),
+            Self::trail_plan_prefix(plan, n).subrange(
+                Self::trail_plan_prefix(plan, f).len() as int,
+                Self::trail_plan_prefix(plan, f + 1).len() as int) == plan[f]@,
+        decreases n - f,
+    {
+        reveal_with_fuel(Vec::trail_plan_prefix, 1);
+        if f + 1 < n {
+            Self::lemma_trail_plan_frame_range(plan, n - 1, f);
+            assert(Self::trail_plan_prefix(plan, n).subrange(
+                Self::trail_plan_prefix(plan, f).len() as int,
+                Self::trail_plan_prefix(plan, f + 1).len() as int) =~= plan[f]@);
+        } else {
+            assert(f + 1 == n);
+            assert(Self::trail_plan_prefix(plan, n).subrange(
+                Self::trail_plan_prefix(plan, f).len() as int,
+                Self::trail_plan_prefix(plan, f + 1).len() as int) =~= plan[f]@);
+        }
+    }
+
     /// Assemble accepted planner payloads in source-frame order. Retirement
     /// follows separately; this phase deliberately keeps the source unchanged.
     #[verifier::spinoff_prover]
@@ -6263,6 +6288,125 @@ where
         proof { reveal(Vec::trail_plan_prefix); }
     }
 
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_retirement_bounds(&self, count: nat)
+        requires self.wf(), count < self.trail_stack@.len(),
+        ensures self.trail_stack@[count as int].start <= self.trail_value_pool@.len(),
+            forall|f: int| count <= f < self.trail_stack@.len() ==>
+                self.trail_stack@[count as int].start <= (#[trigger] self.trail_stack@[f]).start
+                    && self.trail_stack@[count as int].start <= self.trail_stack@[f].end,
+    {
+        hide(Vec::wf);
+        self.lemma_pair_tier_frame_layout(true, count as int);
+        assert forall|f: int| count <= f < self.trail_stack@.len() implies
+            self.trail_stack@[count as int].start <= (#[trigger] self.trail_stack@[f]).start
+                && self.trail_stack@[count as int].start <= self.trail_stack@[f].end by {
+            self.lemma_pair_tier_start_order(true, count as int, f);
+            self.lemma_pair_tier_frame_layout(true, f);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_migration_partition(&self, pre: Self, count: nat)
+        requires pre.frame_partition_ok(), count <= pre.trail_stack@.len(),
+            self.snapshots@ == pre.snapshots@, self.trail_frames@ == pre.trail_frames@,
+            self.cold_stack@ == pre.cold_stack@,
+            self.hot_stack@.len() == pre.hot_stack@.len() + count,
+            self.trail_stack@.len() == pre.trail_stack@.len() - count,
+            self.hot_stack@.subrange(0, pre.hot_stack@.len() as int) == pre.hot_stack@,
+            forall|f: int| 0 <= f < count ==>
+                self.hot_stack@[pre.hot_stack@.len() + f].saved_len == (#[trigger] pre.trail_stack@[f]).saved_len,
+            forall|f: int| 0 <= f < self.trail_stack@.len() ==>
+                (#[trigger] self.trail_stack@[f]).saved_len == pre.trail_stack@[count + f].saved_len,
+        ensures self.frame_partition_ok(),
+    {
+        reveal(Vec::frame_partition_ok);
+        assert forall|f: int| 0 <= f < self.hot_stack@.len() implies
+            (#[trigger] self.hot_stack@[f]).saved_len.as_nat()
+                == self.snapshots@[self.cold_stack@.len() + f].len() by {
+            if f < pre.hot_stack@.len() { assert(self.hot_stack@[f] == pre.hot_stack@[f]); }
+            else { assert(self.hot_stack@[f].saved_len == pre.trail_stack@[f - pre.hot_stack@.len()].saved_len); }
+        }
+        assert forall|f: int| 0 <= f < self.trail_stack@.len() implies
+            (#[trigger] self.trail_stack@[f]).saved_len.as_nat()
+                == self.snapshots@[self.cold_stack@.len() + self.hot_stack@.len() + f].len() by {
+            assert(self.trail_stack@[f].saved_len == pre.trail_stack@[count + f].saved_len);
+        }
+    }
+
+    /// A closed Trail prefix moves to the end of Hot without changing logical
+    /// frame positions. Payload meaning is supplied separately by plan selection.
+    #[verifier::spinoff_prover]
+    fn execute_trail_plan_storage_checked(
+        &mut self, planned: &mut std::vec::Vec<std::vec::Vec<(T, I)>>,
+    )
+        requires old(self).wf(), old(planned)@.len() < old(self).trail_stack@.len(),
+        ensures
+            *final(self) == (Self { hot_stack: final(self).hot_stack,
+                hot_value_pool: final(self).hot_value_pool, trail_stack: final(self).trail_stack,
+                trail_value_pool: final(self).trail_value_pool, ..*old(self) }),
+            final(self).frame_partition_ok(),
+            final(self).hot_value_pool@ == old(self).hot_value_pool@
+                + Self::trail_plan_prefix(old(planned)@, old(planned)@.len() as int),
+            final(self).trail_value_pool@ == old(self).trail_value_pool@.subrange(
+                old(self).trail_stack@[old(planned)@.len() as int].start as int,
+                old(self).trail_value_pool@.len() as int),
+            final(self).hot_stack@.len() == old(self).hot_stack@.len() + old(planned)@.len(),
+            final(self).trail_stack@.len() == old(self).trail_stack@.len() - old(planned)@.len(),
+            final(self).hot_stack@.subrange(0, old(self).hot_stack@.len() as int) == old(self).hot_stack@,
+            final(planned)@.len() == old(planned)@.len(),
+            forall|f: int| 0 <= f < final(planned)@.len() ==>
+                (#[trigger] final(planned)@[f])@.len() == 0,
+            forall|f: int| 0 <= f < old(planned)@.len() ==> {
+                let h = #[trigger] final(self).hot_stack@[old(self).hot_stack@.len() + f];
+                &&& h.saved_len == old(self).trail_stack@[f].saved_len
+                &&& h.start == old(self).hot_value_pool@.len() + Self::trail_plan_prefix(old(planned)@, f).len()
+                &&& h.end == old(self).hot_value_pool@.len() + Self::trail_plan_prefix(old(planned)@, f + 1).len()
+            },
+            forall|f: int, j: nat| 0 <= f < old(planned)@.len() ==> {
+                let h = final(self).hot_stack@[old(self).hot_stack@.len() + f];
+                range_saved_value::<T, I>(final(self).hot_value_pool@, h.start as int, h.end as int, j)
+                    == #[trigger] range_saved_value::<T, I>(old(planned)@[f]@, 0, old(planned)@[f]@.len() as int, j)
+            },
+            forall|f: int| 0 <= f < final(self).trail_stack@.len() ==> {
+                let h = #[trigger] final(self).trail_stack@[f];
+                let old_h = old(self).trail_stack@[old(planned)@.len() + f];
+                let cut = old(self).trail_stack@[old(planned)@.len() as int].start;
+                &&& h.saved_len == old_h.saved_len
+                &&& h.start == old_h.start - cut
+                &&& h.end == old_h.end - cut
+            },
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::open_ingress_ok);
+
+        let ghost pre = *self;
+        let ghost plan = planned@;
+        let count = planned.len();
+        proof {
+            pre.lemma_wf_named_parts();
+            pre.lemma_trail_retirement_bounds(count as nat);
+        }
+        self.append_trail_plan_checked(planned);
+        self.retire_trail_prefix_checked(count);
+        proof {
+            self.lemma_trail_migration_partition(pre, count as nat);
+            assert forall|f: int, j: nat| 0 <= f < plan.len() implies {
+                let h = self.hot_stack@[pre.hot_stack@.len() + f];
+                range_saved_value::<T, I>(self.hot_value_pool@, h.start as int, h.end as int, j)
+                    == #[trigger] range_saved_value::<T, I>(plan[f]@, 0, plan[f]@.len() as int, j)
+            } by {
+                Self::lemma_trail_plan_frame_range(plan, count as int, f);
+                let h = self.hot_stack@[pre.hot_stack@.len() + f];
+                assert(self.hot_value_pool@.subrange(h.start as int, h.end as int) =~= plan[f]@);
+                lemma_range_saved_value_subrange::<T, I>(self.hot_value_pool@, h.start as int, h.end as int, j);
+            }
+        }
+    }
+
     /// Execute first-capture payloads retained by the adaptive planner without
     /// rescanning or resorting accepted Trail frames.
     #[verifier::external_body]
@@ -6275,8 +6419,7 @@ where
         }
         let closed = self.trail_stack.len().saturating_sub(1);
         assert!(count <= closed, "adaptive Trail plan must name a closed prefix");
-        self.append_trail_plan_checked(planned);
-        self.retire_trail_prefix_checked(count);
+        self.execute_trail_plan_storage_checked(planned);
     }
 
     /// Migrate an oldest closed trail prefix through first-capture dedupe.

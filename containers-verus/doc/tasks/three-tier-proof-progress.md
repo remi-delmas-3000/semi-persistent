@@ -1570,3 +1570,45 @@ verified, zero errors** (`/tmp/sp-d21-retire-pairs-default.log`,
 Formatting/whitespace checks pass, trust counts are unchanged, and legacy
 `containers/` remains unchanged from `d191c4a`. Full migration composition,
 consumer/final audits and measured benchmark parity remain open requirements.
+
+## Composed adaptive Trail storage transition
+
+`execute_trail_plan_storage_checked` now composes the actual accepted-plan
+assembly and source retirement. `runtime_execute_trail_plan` calls it after its
+existing closed-prefix guard. Given the general pre-invariant and a plan count
+strictly below the Trail frame count, the helper supplies every retirement bound
+from the pre-state's checked pair layout/start-order lemmas.
+
+The resulting contract states exact Hot concatenation, exact retained Trail
+suffix, exact destination and survivor headers, emptied temporary payloads,
+unchanged unrelated fields and restored global frame partition. Logical positions
+are preserved: moved Trail frames occupy the appended Hot positions, while the
+remaining Trail offset advances by precisely the removed count. Snapshots,
+canonical boundaries and store state stay unchanged.
+
+`lemma_trail_retirement_bounds` isolates the bound supplier;
+`lemma_trail_migration_partition` handles frame identity/counts/saved lengths.
+`lemma_trail_plan_frame_range` proves each payload occupies its exact range in
+concatenated plan prefixes. The executable composition exports full optional
+saved-value equality for every new Hot frame and its planned payload.
+
+The initial combined proof exceeded its resource limit. Narrow bound/partition
+lemmas and an explicit source-header trigger resolved the issue without changing
+contracts or limits. Targeted Trail selection: **15 verified, zero errors**
+(`/tmp/sp-d21-trail-compose-map2.log`). No runtime traversal or allocation was
+added by this composition, and no trust marker is removed yet.
+
+Still required: prove plan payloads equal the source frames' first-capture maps,
+prove uniqueness, and transfer Hot/Trail/Cold reconstruction and active flags to
+recover full wf. The present helper establishes the structural partition, not the
+full semantic migration theorem. Ordinary sorting/selection and rollover policy
+execution remain open, as do derived/group closure and final benchmark parity.
+
+Storage-composition checkpoint evidence: full default **2442 verified, zero
+errors** (`/tmp/sp-d21-trail-compose-default.log`); feature suite **277 passed,
+10 ignored** (`/tmp/sp-d21-trail-compose-features.log`); release differential
+policy matrix with `PROPTEST_CASES=1024` **4 passed**
+(`/tmp/sp-d21-trail-compose-policy.log`). Formatting/whitespace pass and legacy
+`containers/` is unchanged. Trust counts remain unchanged. Literal-types and
+consumer/final audit gates remain due for semantic migration closure, alongside
+required benchmark parity.

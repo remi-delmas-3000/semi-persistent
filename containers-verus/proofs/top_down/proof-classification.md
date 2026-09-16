@@ -385,3 +385,11 @@ rebasing. All four ordinary/adaptive migration paths call them. Reuse
 `lemma_range_saved_value_retire_prefix` to transfer full physical saved maps.
 Still discharge caller-supplied bounds, source/destination frame correspondence,
 final global invariants and configured/forced/adaptive policy execution.
+
+The adaptive Trail executor now calls `execute_trail_plan_storage_checked`, which
+composes actual publication and retirement, proves retirement bounds, restores
+the global frame partition, and exports exact moved/survivor header and pool
+relations. Every new Hot frame's saved-value map equals its planned payload.
+The remaining semantic precondition supplier is first-capture plan/source
+correspondence and uniqueness; reconstruction/ingress preservation must then
+establish full wf. The executor remains trusted until those proofs compose.
