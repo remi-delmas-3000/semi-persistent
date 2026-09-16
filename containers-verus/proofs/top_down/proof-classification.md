@@ -337,15 +337,16 @@ parity for that dispatch change remains part of the final benchmark gate.
 
 Next mark obligations:
 
-- `runtime_push_frame` and its trusted fallback currently omit TRACK from their
-  preconditions, although adding a frame cannot preserve `wf` for an untracked
-  Vec. Both concrete callers (`push_frame_with_options`, `push_frame`) already
-  require TRACK. Propagate that premise through the internal helpers, preserving
-  public guards and error behavior rather than weakening the invariant.
+- Completed: `runtime_push_frame` and its trusted fallback now require TRACK,
+  supplied by both existing callers. Public guards and error behavior are unchanged.
+- Completed: `prepare_mark_checked` and `prepare_mark_range_checked` prove the
+  borrowed active-range coverage required by the actual DiffStore method, all
+  live flags cleared, and exact non-store framing. Full default verification:
+  2413 verified, zero errors (`/tmp/sp-d21-mark-prepare-default.log`).
 - Replace the fallback's Hot-only explicit-Defer shortcut with a checked general
   opening operation. A unique ingress tier does not imply absence of Cold history.
-- Supply `prepare_mark` with a borrowed active pair range covering every set flag,
-  then prove sealing/opening with cleared flags, exact snapshot/boundary append,
+- Prove sealing/opening with the checked preparation's cleared flags,
+  exact snapshot/boundary append,
   and the old newest layer transferred from live to the equal new snapshot.
 - Compose actual rollover and reclamation afterward. Mark remains incomplete
   until its policy dependencies and shared-model effects are discharged.

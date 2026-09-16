@@ -1276,3 +1276,34 @@ prepare/seal/open using the borrowed active range and the transfer of the old
 live layer to the equal new snapshot. Replace the invalid Hot-only shortcut for
 unique stores with older Cold history. Policy and reclamation calls must compose
 after opening, and mark is not complete until those dependencies verify.
+
+## General mark preparation through DiffStore
+
+The internal `runtime_push_frame` and fallback now require TRACK, matching both
+existing public-facing callers. This corrects an omitted internal premise without
+changing public guards or runtime behavior.
+
+`prepare_mark_range_checked` translates active physical-range coverage into the
+borrowed-slice witness required by `DiffStore::prepare_mark`.
+`prepare_mark_checked` selects Hot or Trail from the store discipline, handles
+zero depth with clear flags, and proves exact framing of every field except the
+store. Store data and all three protocol predicates are preserved; all live
+capture flags are cleared. The fallback now calls this checked preparation
+instead of constructing an unchecked slice inline. No allocation or traversal is
+added. The intermediate contract intentionally does not claim container wf:
+opening the new empty frame must restore capture-map agreement.
+
+Selected verification: **2 verified, zero errors**
+(`/tmp/sp-d21-mark-prepare.log`). Full gate results are recorded below when
+available. This does not remove the fallback's trust marker: sealing, empty-frame
+opening, the invalid mixed-history Hot shortcut, and actual policy dependencies
+remain to be discharged. Existing specialized Hot proofs remain intact.
+
+Checkpoint validation: full default **2413 verified, zero errors**
+(`/tmp/sp-d21-mark-prepare-default.log`); feature regression tests completed
+successfully (`/tmp/sp-d21-mark-prepare-features.log`). Formatting and whitespace
+checks pass, and `containers/` remains unchanged from `d191c4a`. Trust markers
+are unchanged. Literal-types verification, differential policy tests and consumer
+checks will be rerun with the completed frame-opening milestone; their previous
+checkpoint results are not claimed as verification of this revision. Final
+benchmark parity remains open.

@@ -6997,6 +6997,7 @@ where
     #[verifier::external_body]
     fn runtime_push_frame_fallback<const APPLY_CONFIGURED: bool>(&mut self, options: MarkOptions)
         requires
+            TRACK,
             old(self).wf(),
             old(self).depth_spec() < u32::MAX,
             old(self).view().len() < I::max_nat(),
@@ -7021,18 +7022,7 @@ where
         // independent and still occurs only after the replacement frame opens.
         self.maybe_shrink(options.shrink);
         let saved_len = self.store.len();
-        let active: &[(T, I)] = if self.store.unique_capture() {
-            self.hot_stack
-                .last()
-                .map(|f| &self.hot_value_pool[f.start..self.hot_value_pool.len()])
-                .unwrap_or(&[])
-        } else {
-            self.trail_stack
-                .last()
-                .map(|f| &self.trail_value_pool[f.start..self.trail_value_pool.len()])
-                .unwrap_or(&[])
-        };
-        self.store.prepare_mark(saved_len, active);
+        self.prepare_mark_checked(saved_len);
         if self.store.unique_capture() {
             if let Some(frame) = self.hot_stack.last_mut() {
                 frame.end = self.hot_value_pool.len();
@@ -7088,6 +7078,7 @@ where
 
     fn runtime_push_frame<const APPLY_CONFIGURED: bool>(&mut self, options: MarkOptions)
         requires
+            TRACK,
             old(self).wf(),
             old(self).depth_spec() < u32::MAX,
             old(self).view().len() < I::max_nat(),
@@ -7144,6 +7135,90 @@ where
         reveal(Vec::frame_partition_ok);
         self.lemma_pair_tier_frame_layout(!self.store.unique_capture_spec(),
             self.pair_tier_count(!self.store.unique_capture_spec()) - 1);
+    }
+
+    #[inline(always)]
+    #[verifier::spinoff_prover]
+    fn prepare_mark_range_checked(
+        store: &mut S, pool: &std::vec::Vec<(T, I)>, lo: usize, hi: usize, saved_len: I,
+    )
+        requires
+            old(store).wf(), lo <= hi <= pool@.len(),
+            saved_len.as_nat() == old(store).data().len(),
+            TRACK ==> forall|j: int| 0 <= j < old(store).captured().len()
+                && #[trigger] old(store).captured()[j] ==>
+                captured_in_range::<T, I>(pool@, lo as int, hi as int, j as nat),
+        ensures
+            final(store).wf(),
+            final(store).data() == old(store).data(),
+            final(store).unique_capture_spec() == old(store).unique_capture_spec(),
+            final(store).needs_replayed_indices_spec() == old(store).needs_replayed_indices_spec(),
+            final(store).restore_entries_clear_capture_spec()
+                == old(store).restore_entries_clear_capture_spec(),
+            TRACK ==> forall|j: int| 0 <= j < final(store).captured().len() ==>
+                !(#[trigger] final(store).captured()[j]),
+    {
+        let entries = vstd::slice::slice_subrange(pool.as_slice(), lo, hi);
+        proof {
+            if TRACK {
+                assert forall|j: int| 0 <= j < store.captured().len()
+                    && #[trigger] store.captured()[j] implies
+                    exists|k: int| 0 <= k < entries@.len()
+                        && (#[trigger] entries@[k]).1.as_nat() == j as nat
+                by {
+                    let k = choose|k: int| lo <= k < hi && 0 <= k < pool@.len()
+                        && (#[trigger] pool@[k]).1.as_nat() == j as nat;
+                    assert(entries@[k - lo] == pool@[k]);
+                }
+            }
+        }
+        store.prepare_mark(saved_len, entries);
+        proof { store.lemma_wf_captured_len(); }
+    }
+
+    /// Clear capture state through the store-selected active range. Full
+    /// container well-formedness is restored only after the empty frame opens.
+    #[verifier::spinoff_prover]
+    fn prepare_mark_checked(&mut self, saved_len: I)
+        requires old(self).wf(), TRACK,
+            saved_len.as_nat() == old(self).view().len(),
+        ensures
+            *final(self) == (Self { store: final(self).store, ..*old(self) }),
+            final(self).store.wf(),
+            final(self).view() == old(self).view(),
+            final(self).store.unique_capture_spec() == old(self).store.unique_capture_spec(),
+            final(self).store.needs_replayed_indices_spec() == old(self).store.needs_replayed_indices_spec(),
+            final(self).store.restore_entries_clear_capture_spec()
+                == old(self).store.restore_entries_clear_capture_spec(),
+            forall|j: int| 0 <= j < final(self).store.captured().len() ==>
+                !(#[trigger] final(self).store.captured()[j]),
+    {
+        hide(Vec::wf);
+        proof { self.lemma_wf_named_parts(); }
+        if self.store.unique_capture() {
+            let n = self.hot_stack.len();
+            if n == 0 {
+                proof { reveal(Vec::open_ingress_ok); reveal(Vec::frame_partition_ok); }
+                self.store.prepare_mark(saved_len, &[]);
+            } else {
+                proof { self.lemma_replay_ingress(); }
+                let lo = self.hot_stack[n - 1].start;
+                let hi = self.hot_value_pool.len();
+                Self::prepare_mark_range_checked(&mut self.store, &self.hot_value_pool, lo, hi, saved_len);
+            }
+        } else {
+            let n = self.trail_stack.len();
+            if n == 0 {
+                proof { reveal(Vec::open_ingress_ok); reveal(Vec::frame_partition_ok); }
+                self.store.prepare_mark(saved_len, &[]);
+            } else {
+                proof { self.lemma_replay_ingress(); }
+                let lo = self.trail_stack[n - 1].start;
+                let hi = self.trail_value_pool.len();
+                Self::prepare_mark_range_checked(&mut self.store, &self.trail_value_pool, lo, hi, saved_len);
+            }
+        }
+        proof { self.store.lemma_wf_captured_len(); }
     }
 
     #[inline(always)]
