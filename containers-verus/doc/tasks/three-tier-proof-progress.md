@@ -823,3 +823,46 @@ all four tests. E-graph/SAT consumers passed 1267 tests (45 ignored), with zero
 failures. Formatting and whitespace checks passed. Trust remains 81 default
 markers plus five literal registrations. Existing runtime tests exercise Hot
 promotion, empty frame identity, and write/remigrate after promotion.
+
+
+### Checked Cold run formation and saved-domain bounds
+
+The Hot-promotion checkpoint is `cc9557e`. Cold promotion requires facts that
+were absent from `cold_repr_ok`: emitted runs are nonempty, and every decoded
+index lies below that frame's saved length. `cold_payload_ok` now states those
+facts without adding stored fields or assuming monotone saved lengths.
+
+The new internal `cold_encode` module checks the actual linear run-formation
+loop over sorted unique captures. Its contract preserves both physical pool
+prefixes, maps every appended value to its input entry, partitions the input
+into maximal consecutive runs, bounds each run by the saved length, and emits
+an empty header for an empty frame. The loop groups entries while using index
+differences to avoid overflowing a base-plus-length probe. Values use Copy,
+never a potentially different user-defined Clone.
+
+`append_cold_sorted_checked` appends the frame header and proves pooled layout,
+run disjointness, and saved-domain bounds. Configured and adaptive Hot migration
+both call it, replacing their duplicated unchecked run-building loops. Sorting,
+complete conversion/refinement, policy orchestration, and Cold promotion remain
+unfinished; this checkpoint does not claim those trusted callers are verified.
+
+Pointwise header/run accessors avoid repeated adjacency expansion during frame
+assembly. Targeted encoder, frame-layout, payload-bound, disjointness, and
+executable append checks pass at the default resource limit. Two runtime tests
+pass: prefixed pools with captures near the index limit and an empty frame,
+and Copy payloads whose Clone panics. Preservation checks required narrowing
+Cold layout/reclamation and capture-finalization proofs: finalization now
+requests just the writable top's bounds instead of unfolding every Hot frame.
+No resource limits were raised and no trusted markers were added.
+
+Full verification passed **2310 verified, 0 errors** in default (3m 48s) and
+`literal-types` (3m 37s) configurations. Feature tests passed 277 tests (10
+ignored), including all 31 three-tier runtime tests. The 1024-case release
+policy matrix passed all four tests; e-graph/SAT consumers passed 1267 tests
+(45 ignored). Formatting and whitespace checks passed. Trust remains 81
+default markers plus five literal registrations.
+
+Further leaf work is paused for the top-down conditional composition milestone
+in `three-tier-top-down-proof-engineering.md`. Existing proofs will be retained
+and classified against the required interfaces only after that composition
+works; the top theorem will not be weakened to fit existing helpers.

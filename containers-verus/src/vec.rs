@@ -2677,12 +2677,24 @@ where
         })
     }
 
+    /// Every stored Cold payload belongs to its frame's saved domain. Empty
+    /// logical frames have no runs; emitted runs themselves are nonempty.
+    pub closed spec fn cold_payload_ok(&self) -> bool {
+        forall|f: int, r: int| 0 <= f < self.cold_stack@.len()
+            && (#[trigger] self.cold_stack@[f]).runs_start <= r
+            < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len ==>
+            0 < (#[trigger] self.cold_index_runs@[r]).len
+                && self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len
+                    <= self.cold_stack@[f].saved_len.as_nat()
+    }
+
     /// Immutable Cold structural and semantic boundary. The existing pooled-run
     /// partition is preserved verbatim and strengthened with disjointness and
     /// the named per-frame reconstruction obligation. Hot-to-Cold refinement is
     /// not proved in H1.
     pub closed spec fn cold_repr_ok(&self) -> bool {
         &&& self.repr_ok()
+        &&& self.cold_payload_ok()
         &&& self.cold_runs_disjoint()
         &&& (forall|f: int| 0 <= f < self.cold_stack@.len() ==>
             #[trigger] self.cold_reconstructs(f))
@@ -4815,6 +4827,197 @@ where
         runs
     }
 
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_layout_basics(&self)
+        requires self.repr_ok(),
+        ensures self.cold_stack@.len() == 0 ==> self.cold_index_runs@.len() == 0,
+            self.cold_index_runs@.len() == 0 ==> self.cold_value_pool@.len() == 0,
+    {}
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_layout_header_at(&self, f: int)
+        requires self.repr_ok(), 0 <= f < self.cold_stack@.len(),
+        ensures self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len <= self.cold_index_runs@.len(),
+            f == 0 ==> self.cold_stack@[f].runs_start == 0,
+            f + 1 < self.cold_stack@.len() ==> self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len == self.cold_stack@[f + 1].runs_start,
+            f + 1 == self.cold_stack@.len() ==> self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len == self.cold_index_runs@.len(),
+    {}
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_layout_run_at(&self, r: int)
+        requires self.repr_ok(), 0 <= r < self.cold_index_runs@.len(),
+        ensures self.cold_index_runs@[r].start + self.cold_index_runs@[r].len <= self.cold_value_pool@.len(),
+            r == 0 ==> self.cold_index_runs@[r].start == 0,
+            r + 1 < self.cold_index_runs@.len() ==> self.cold_index_runs@[r].start + self.cold_index_runs@[r].len == self.cold_index_runs@[r + 1].start,
+            r + 1 == self.cold_index_runs@.len() ==> self.cold_index_runs@[r].start + self.cold_index_runs@[r].len == self.cold_value_pool@.len(),
+    {}
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_append_structure(&self, pre: Self, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>)
+        requires pre.repr_ok(), pre.cold_payload_ok(), pre.cold_runs_disjoint(),
+            self.cold_stack@ == pre.cold_stack@.push(cold),
+            self.cold_index_runs@.subrange(0, pre.cold_index_runs@.len() as int) == pre.cold_index_runs@,
+            self.cold_value_pool@.len() == pre.cold_value_pool@.len() + entries.len(),
+            cold.runs_start == pre.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                pre.cold_index_runs@.len() as int, pre.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+        ensures self.repr_ok(),
+    {
+        hide(crate::cold_encode::run_prefix);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_payload_ok);
+        hide(Vec::cold_runs_disjoint);
+        crate::cold_encode::lemma_run_prefix_layout(self.cold_index_runs@,
+            pre.cold_index_runs@.len() as int, pre.cold_value_pool@.len() as int,
+            entries, entries.len() as int, cold.saved_len.as_nat());
+        assert(self.cold_stack@.subrange(0, pre.cold_stack@.len() as int) =~= pre.cold_stack@);
+        pre.lemma_cold_layout_basics();
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies {
+            &&& (#[trigger] self.cold_stack@[f]).runs_start + self.cold_stack@[f].runs_len <= self.cold_index_runs@.len()
+            &&& (f == 0 ==> self.cold_stack@[f].runs_start == 0)
+            &&& (f + 1 < self.cold_stack@.len() ==> self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len == self.cold_stack@[f + 1].runs_start)
+            &&& (f + 1 == self.cold_stack@.len() ==> self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len == self.cold_index_runs@.len())
+        } by {
+            if f < pre.cold_stack@.len() { pre.lemma_cold_layout_header_at(f); }
+        }
+        assert forall|r: int| 0 <= r < self.cold_index_runs@.len() implies {
+            &&& (#[trigger] self.cold_index_runs@[r]).start + self.cold_index_runs@[r].len <= self.cold_value_pool@.len()
+            &&& (r == 0 ==> self.cold_index_runs@[r].start == 0)
+            &&& (r + 1 < self.cold_index_runs@.len() ==> self.cold_index_runs@[r].start + self.cold_index_runs@[r].len == self.cold_index_runs@[r + 1].start)
+            &&& (r + 1 == self.cold_index_runs@.len() ==> self.cold_index_runs@[r].start + self.cold_index_runs@[r].len == self.cold_value_pool@.len())
+        } by {
+            if r < pre.cold_index_runs@.len() { pre.lemma_cold_layout_run_at(r); }
+            else { crate::cold_encode::lemma_run_prefix_run_at(self.cold_index_runs@,
+                        pre.cold_index_runs@.len() as int, pre.cold_value_pool@.len() as int,
+                        entries, entries.len() as int, cold.saved_len.as_nat(), r); }
+        }
+        assert(self.repr_ok()) by { reveal(Vec::repr_ok); }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_append_payload(&self, pre: Self, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>)
+        requires pre.repr_ok(), pre.cold_payload_ok(), pre.cold_runs_disjoint(),
+            self.cold_stack@ == pre.cold_stack@.push(cold),
+            self.cold_index_runs@.subrange(0, pre.cold_index_runs@.len() as int) == pre.cold_index_runs@,
+            self.cold_value_pool@.len() == pre.cold_value_pool@.len() + entries.len(),
+            cold.runs_start == pre.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                pre.cold_index_runs@.len() as int, pre.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+        ensures self.cold_payload_ok(),
+    {
+        hide(crate::cold_encode::run_prefix);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_payload_ok);
+        hide(Vec::cold_runs_disjoint);
+        crate::cold_encode::lemma_run_prefix_layout(self.cold_index_runs@,
+            pre.cold_index_runs@.len() as int, pre.cold_value_pool@.len() as int,
+            entries, entries.len() as int, cold.saved_len.as_nat());
+        assert(self.cold_payload_ok()) by {
+            reveal(Vec::repr_ok);
+            reveal(Vec::cold_payload_ok);
+            assert forall|f: int, r: int| 0 <= f < self.cold_stack@.len()
+                && (#[trigger] self.cold_stack@[f]).runs_start <= r
+                    < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len implies
+                0 < (#[trigger] self.cold_index_runs@[r]).len
+                    && self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len
+                        <= self.cold_stack@[f].saved_len.as_nat()
+            by {
+                if f < pre.cold_stack@.len() {
+                    assert(r < pre.cold_index_runs@.len());
+                    assert(self.cold_index_runs@[r] == pre.cold_index_runs@[r]);
+                } else { crate::cold_encode::lemma_run_prefix_run_at(self.cold_index_runs@,
+                        pre.cold_index_runs@.len() as int, pre.cold_value_pool@.len() as int,
+                        entries, entries.len() as int, cold.saved_len.as_nat(), r); }
+            }
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_append_disjoint(&self, pre: Self, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>)
+        requires pre.repr_ok(), pre.cold_payload_ok(), pre.cold_runs_disjoint(),
+            self.cold_stack@ == pre.cold_stack@.push(cold),
+            self.cold_index_runs@.subrange(0, pre.cold_index_runs@.len() as int) == pre.cold_index_runs@,
+            self.cold_value_pool@.len() == pre.cold_value_pool@.len() + entries.len(),
+            cold.runs_start == pre.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                pre.cold_index_runs@.len() as int, pre.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+        ensures self.cold_runs_disjoint(),
+    {
+        hide(crate::cold_encode::run_prefix);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_payload_ok);
+        hide(Vec::cold_runs_disjoint);
+        crate::cold_encode::lemma_run_prefix_layout(self.cold_index_runs@,
+            pre.cold_index_runs@.len() as int, pre.cold_value_pool@.len() as int,
+            entries, entries.len() as int, cold.saved_len.as_nat());
+        assert(self.cold_runs_disjoint()) by {
+            reveal(Vec::repr_ok);
+            reveal(Vec::cold_runs_disjoint);
+            assert forall|f: int, r: int| 0 <= f < self.cold_stack@.len()
+                && (#[trigger] self.cold_stack@[f]).runs_start <= r
+                && r + 1 < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len implies
+                (#[trigger] self.cold_index_runs@[r]).base.as_nat() + self.cold_index_runs@[r].len
+                    <= self.cold_index_runs@[r + 1].base.as_nat()
+            by {
+                if f < pre.cold_stack@.len() {
+                    pre.lemma_cold_layout_header_at(f);
+                    assert(self.cold_index_runs@[r] == pre.cold_index_runs@[r]);
+                    assert(self.cold_index_runs@[r + 1] == pre.cold_index_runs@[r + 1]);
+                } else { crate::cold_encode::lemma_run_prefix_run_at(self.cold_index_runs@,
+                        pre.cold_index_runs@.len() as int, pre.cold_value_pool@.len() as int,
+                        entries, entries.len() as int, cold.saved_len.as_nat(), r); }
+            }
+        }
+    }
+
+    /// Append a complete bounded Cold frame. This checked construction is
+    /// shared by configured and adaptive migration; sorting is the caller's job.
+    #[verifier::spinoff_prover]
+    fn append_cold_sorted_checked(&mut self, entries: &[(T, I)], saved_len: I)
+        requires old(self).repr_ok(), old(self).cold_payload_ok(), old(self).cold_runs_disjoint(),
+            forall|a: int, b: int| 0 <= a < b < entries@.len() ==>
+                (#[trigger] entries@[a]).1.as_nat() < (#[trigger] entries@[b]).1.as_nat(),
+            forall|q: int| 0 <= q < entries@.len() ==>
+                (#[trigger] entries@[q]).1.as_nat() < saved_len.as_nat(),
+        ensures final(self).repr_ok(), final(self).cold_payload_ok(), final(self).cold_runs_disjoint(),
+            *final(self) == (Self { cold_stack: final(self).cold_stack,
+                cold_index_runs: final(self).cold_index_runs, cold_value_pool: final(self).cold_value_pool,
+                ..*old(self) }),
+            final(self).cold_stack@.len() == old(self).cold_stack@.len() + 1,
+            final(self).cold_stack@.subrange(0, old(self).cold_stack@.len() as int) == old(self).cold_stack@,
+            final(self).cold_index_runs@.subrange(0, old(self).cold_index_runs@.len() as int) == old(self).cold_index_runs@,
+            final(self).cold_value_pool@.subrange(0, old(self).cold_value_pool@.len() as int) == old(self).cold_value_pool@,
+            final(self).cold_value_pool@.len() == old(self).cold_value_pool@.len() + entries@.len(),
+            final(self).cold_stack@[old(self).cold_stack@.len() as int].saved_len == saved_len,
+            final(self).cold_stack@[old(self).cold_stack@.len() as int].runs_start == old(self).cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(final(self).cold_index_runs@,
+                old(self).cold_index_runs@.len() as int, old(self).cold_value_pool@.len() as int,
+                entries@, entries@.len() as int, saved_len.as_nat()),
+            forall|q: int| 0 <= q < entries@.len() ==>
+                #[trigger] final(self).cold_value_pool@[old(self).cold_value_pool@.len() + q] == entries@[q].0,
+    {
+        hide(crate::cold_encode::run_prefix);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_payload_ok);
+        hide(Vec::cold_runs_disjoint);
+        let ghost pre = *self;
+        let cold = crate::cold_encode::append_sorted(
+            &mut self.cold_index_runs, &mut self.cold_value_pool, entries, saved_len);
+        self.cold_stack.push(cold);
+        proof {
+            assert(self.cold_stack@.subrange(0, pre.cold_stack@.len() as int) =~= pre.cold_stack@);
+            self.lemma_cold_append_structure(pre, entries@, cold);
+            self.lemma_cold_append_payload(pre, entries@, cold);
+            self.lemma_cold_append_disjoint(pre, entries@, cold);
+        }
+    }
+
     /// Execute an exact oldest closed Hot prefix as direct-restorable runs.
     #[verifier::external_body]
     #[cold]
@@ -4834,35 +5037,7 @@ where
             let frame = self.hot_stack[f];
             let mut entries = self.hot_value_pool[frame.start..frame.end].to_vec();
             entries.sort_unstable_by_key(|(_, index)| index.as_usize());
-            let runs_start = self.cold_index_runs.len();
-            let mut runs_len = 0usize;
-            let mut current: Option<(I, usize, usize)> = None;
-            for (value, index) in entries {
-                match current {
-                    Some((base, value_start, len)) if base.as_usize() + len == index.as_usize() => {
-                        self.cold_value_pool.push(value);
-                        current = Some((base, value_start, len + 1));
-                    }
-                    _ => {
-                        if let Some((base, start, len)) = current.take() {
-                            self.cold_index_runs.push(crate::frame::IndexRun { base, start, len });
-                            runs_len += 1;
-                        }
-                        let start = self.cold_value_pool.len();
-                        self.cold_value_pool.push(value);
-                        current = Some((index, start, 1));
-                    }
-                }
-            }
-            if let Some((base, start, len)) = current.take() {
-                self.cold_index_runs.push(crate::frame::IndexRun { base, start, len });
-                runs_len += 1;
-            }
-            self.cold_stack.push(crate::frame::ColdFrameHdr {
-                saved_len: frame.saved_len,
-                runs_start,
-                runs_len,
-            });
+            self.append_cold_sorted_checked(entries.as_slice(), frame.saved_len);
         }
         let cut = if count < self.hot_stack.len() {
             self.hot_stack[count].start
@@ -4901,35 +5076,7 @@ where
 
         for (f, entries) in planned.iter().enumerate() {
             let frame = self.hot_stack[f];
-            let runs_start = self.cold_index_runs.len();
-            let mut runs_len = 0usize;
-            let mut current: Option<(I, usize, usize)> = None;
-            for &(value, index) in entries.iter() {
-                match current {
-                    Some((base, value_start, len)) if base.as_usize() + len == index.as_usize() => {
-                        self.cold_value_pool.push(value);
-                        current = Some((base, value_start, len + 1));
-                    }
-                    _ => {
-                        if let Some((base, start, len)) = current.take() {
-                            self.cold_index_runs.push(crate::frame::IndexRun { base, start, len });
-                            runs_len += 1;
-                        }
-                        let start = self.cold_value_pool.len();
-                        self.cold_value_pool.push(value);
-                        current = Some((index, start, 1));
-                    }
-                }
-            }
-            if let Some((base, start, len)) = current.take() {
-                self.cold_index_runs.push(crate::frame::IndexRun { base, start, len });
-                runs_len += 1;
-            }
-            self.cold_stack.push(crate::frame::ColdFrameHdr {
-                saved_len: frame.saved_len,
-                runs_start,
-                runs_len,
-            });
+            self.append_cold_sorted_checked(entries.as_slice(), frame.saved_len);
         }
         let cut = if count < self.hot_stack.len() {
             self.hot_stack[count].start
@@ -5919,7 +6066,12 @@ where
     proof fn lemma_survivor_history_transfer(&self, pre: Self)
         requires pre.wf_for_snap(), pre.hot_repr_ok(), pre.trail_repr_ok(), pre.cold_repr_ok(),
             pre.proof_compat_ok(), self.store.wf(), self.view() == pre.view(),
-            *self == (Self { store: self.store, active_saved_len: self.active_saved_len, ..pre }),
+            self.full_trail@ == pre.full_trail@, self.trail_frames@ == pre.trail_frames@,
+            self.snapshots@ == pre.snapshots@, self.diff_log@ == pre.diff_log@,
+            self.cold_stack@ == pre.cold_stack@, self.cold_index_runs@ == pre.cold_index_runs@,
+            self.cold_value_pool@ == pre.cold_value_pool@,
+            self.hot_stack@ == pre.hot_stack@, self.hot_value_pool@ == pre.hot_value_pool@,
+            self.trail_stack@ == pre.trail_stack@, self.trail_value_pool@ == pre.trail_value_pool@,
         ensures self.wf_for_snap(), self.hot_repr_ok(), self.trail_repr_ok(),
             self.cold_repr_ok(), self.proof_compat_ok(),
     {
@@ -5933,6 +6085,59 @@ where
         assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
             #[trigger] self.cold_reconstructs(f) by {
             self.lemma_cold_reconstructs_transfer(pre, f);
+        }
+    }
+
+    /// Only the surviving writable frame supplies capture bounds. Keep the
+    /// other frames' adjacency and reconstruction quantifiers out of finalization.
+    #[verifier::spinoff_prover]
+    proof fn lemma_survivor_top_bounds(&self)
+        requires self.frame_partition_ok(), self.hot_repr_ok(), self.trail_repr_ok(),
+            self.depth_spec() > 0,
+            self.store.unique_capture_spec() ==> self.trail_stack@.len() == 0
+                && self.hot_stack@.len() > 0,
+            !self.store.unique_capture_spec() ==> self.trail_stack@.len() > 0,
+        ensures
+            self.store.unique_capture_spec() ==> {
+                let top = self.hot_stack@[self.hot_stack@.len() - 1];
+                &&& top.start <= self.hot_value_pool@.len()
+                &&& top.saved_len.as_nat() == self.snapshots@[self.depth_spec() - 1].len()
+                &&& forall|q: int| top.start <= q < self.hot_value_pool@.len() ==>
+                    (#[trigger] self.hot_value_pool@[q]).1.as_nat() < top.saved_len.as_nat()
+            },
+            !self.store.unique_capture_spec() ==> {
+                let top = self.trail_stack@[self.trail_stack@.len() - 1];
+                &&& top.start <= self.trail_value_pool@.len()
+                &&& top.saved_len.as_nat() == self.snapshots@[self.depth_spec() - 1].len()
+                &&& forall|q: int| top.start <= q < self.trail_value_pool@.len() ==>
+                    (#[trigger] self.trail_value_pool@[q]).1.as_nat() < top.saved_len.as_nat()
+            },
+    {
+        hide(frame_inv_range);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        if self.store.unique_capture_spec() {
+            let top = self.hot_stack@[self.hot_stack@.len() - 1];
+            assert(top.start <= self.hot_value_pool@.len()
+                && top.saved_len.as_nat() == self.snapshots@[self.depth_spec() - 1].len()
+                && frame_inv_range::<T, I>(self.view(), self.hot_value_pool@,
+                    top.start as int, self.hot_value_pool@.len() as int,
+                    self.snapshots@[self.depth_spec() - 1], top.saved_len.as_nat())) by {
+                reveal(Vec::frame_partition_ok);
+                self.lemma_hot_repr_at(self.hot_stack@.len() - 1);
+            }
+            reveal(frame_inv_range);
+        } else {
+            let top = self.trail_stack@[self.trail_stack@.len() - 1];
+            assert(top.start <= self.trail_value_pool@.len()
+                && top.saved_len.as_nat() == self.snapshots@[self.depth_spec() - 1].len()
+                && frame_inv_range::<T, I>(self.view(), self.trail_value_pool@,
+                    top.start as int, self.trail_value_pool@.len() as int,
+                    self.snapshots@[self.depth_spec() - 1], top.saved_len.as_nat())) by {
+                reveal(Vec::frame_partition_ok);
+                reveal(Vec::trail_repr_ok);
+            }
+            reveal(frame_inv_range);
         }
     }
 
@@ -5956,20 +6161,23 @@ where
                 active_saved_len: final(self).active_saved_len, ..*old(self) }),
     {
         hide(Vec::wf);
+        hide(Vec::wf_for_snap);
         hide(Vec::cold_repr_ok);
+        hide(Vec::cold_payload_ok);
         hide(Vec::hot_repr_ok);
         hide(Vec::trail_repr_ok);
         let ghost pre = *self;
-        proof { reveal(Vec::frame_partition_ok); }
+        proof {
+            assert(pre.store.wf() && pre.frame_partition_ok()) by { reveal(Vec::wf_for_snap); }
+            pre.lemma_survivor_top_bounds();
+        }
         if self.store.unique_capture() {
             let n = self.hot_stack.len();
-            proof { reveal(Vec::hot_repr_ok); }
             let top = self.hot_stack[n - 1];
             self.active_saved_len = top.saved_len;
             Self::finish_restore_range_checked(&mut self.store, &self.hot_value_pool, top.start);
         } else {
             let n = self.trail_stack.len();
-            proof { reveal(Vec::trail_repr_ok); }
             let top = self.trail_stack[n - 1];
             self.active_saved_len = top.saved_len;
             Self::finish_restore_range_checked(&mut self.store, &self.trail_value_pool, top.start);
@@ -7236,6 +7444,24 @@ where
         }
     }
 
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_layout_parts(&self)
+        requires self.wf(),
+        ensures self.repr_ok(), self.cold_runs_disjoint(),
+    {
+        self.lemma_wf_named_parts();
+        reveal(Vec::cold_repr_ok);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_disjoint_at(&self, f: int, r: int)
+        requires self.cold_runs_disjoint(), 0 <= f < self.cold_stack@.len(),
+            self.cold_stack@[f].runs_start <= r,
+            r + 1 < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len,
+        ensures self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len
+            <= self.cold_index_runs@[r + 1].base.as_nat(),
+    {}
+
     /// The Cold cuts land on frame and run boundaries, retaining complete
     /// run slices and their complete payloads, including empty frames.
     #[verifier::spinoff_prover]
@@ -7253,29 +7479,49 @@ where
             forall|q: int| 0 <= q < self.cold_value_pool@.len() ==>
                 #[trigger] self.cold_value_pool@[q] == pre.cold_value_pool@[q],
     {
+        hide(Vec::cold_payload_ok);
         hide(Vec::wf);
-        pre.lemma_wf_named_parts();
-        reveal(Vec::cold_repr_ok);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_runs_disjoint);
+        pre.lemma_cold_layout_parts();
+        pre.lemma_cold_layout_basics();
         reveal(Vec::restored_history_prefix);
-        let kept = self.cold_stack@.len();
+        let kept = if target < pre.cold_stack@.len() { target } else { pre.cold_stack@.len() };
+        if kept < pre.cold_stack@.len() { pre.lemma_cold_layout_header_at(kept as int); }
         let runs = self.cold_index_runs@.len();
-        assert forall|f: int| 0 <= f < kept implies
-            (#[trigger] self.cold_stack@[f]).runs_start + self.cold_stack@[f].runs_len <= runs
-        by {
+        if runs < pre.cold_index_runs@.len() { pre.lemma_cold_layout_run_at(runs as int); }
+        assert forall|f: int| 0 <= f < kept implies {
+            &&& (#[trigger] self.cold_stack@[f]).runs_start + self.cold_stack@[f].runs_len <= runs
+            &&& (f == 0 ==> self.cold_stack@[f].runs_start == 0)
+            &&& (f + 1 < kept ==> self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len == self.cold_stack@[f + 1].runs_start)
+            &&& (f + 1 == kept ==> self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len == runs)
+        } by {
+            pre.lemma_cold_layout_header_at(f);
             if kept < pre.cold_stack@.len() {
                 pre.lemma_cold_frame_start_order(f + 1, kept as int);
             }
         }
-        assert forall|r: int| 0 <= r < runs implies
-            (#[trigger] self.cold_index_runs@[r]).start + self.cold_index_runs@[r].len
-                <= self.cold_value_pool@.len()
-        by {
+        assert forall|r: int| 0 <= r < runs implies {
+            &&& (#[trigger] self.cold_index_runs@[r]).start + self.cold_index_runs@[r].len <= self.cold_value_pool@.len()
+            &&& (r == 0 ==> self.cold_index_runs@[r].start == 0)
+            &&& (r + 1 < runs ==> self.cold_index_runs@[r].start + self.cold_index_runs@[r].len == self.cold_index_runs@[r + 1].start)
+            &&& (r + 1 == runs ==> self.cold_index_runs@[r].start + self.cold_index_runs@[r].len == self.cold_value_pool@.len())
+        } by {
+            pre.lemma_cold_layout_run_at(r);
             if runs < pre.cold_index_runs@.len() {
                 pre.lemma_cold_value_start_order(r + 1, runs as int);
             }
         }
-        assert(self.repr_ok());
-        assert(self.cold_runs_disjoint());
+        assert(self.repr_ok()) by { reveal(Vec::repr_ok); }
+        assert forall|f: int, r: int| 0 <= f < self.cold_stack@.len()
+            && (#[trigger] self.cold_stack@[f]).runs_start <= r
+            && r + 1 < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len implies
+            (#[trigger] self.cold_index_runs@[r]).base.as_nat() + self.cold_index_runs@[r].len
+                <= self.cold_index_runs@[r + 1].base.as_nat()
+        by {
+            pre.lemma_cold_disjoint_at(f, r);
+        }
+        assert(self.cold_runs_disjoint()) by { reveal(Vec::cold_runs_disjoint); }
     }
 
     #[verifier::spinoff_prover]
@@ -7552,6 +7798,12 @@ where
             final(self).snapshots@ == old(self).snapshots@,
             final(self).trail_frames@ == old(self).trail_frames@,
     {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::cold_repr_ok);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::open_ingress_ok);
         let ghost pre = *self;
         if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
             crate::parallel_store::shrink_vec_capacity(&mut self.cold_stack, 0, 1);
@@ -7560,16 +7812,10 @@ where
         }
         proof {
             pre.lemma_wf_named_parts();
-            self.lemma_wf_for_snap_transfer(pre);
-            reveal(Vec::hot_repr_ok);
-            reveal(Vec::trail_repr_ok);
-            reveal(Vec::cold_repr_ok);
-            reveal(Vec::open_ingress_ok);
-            reveal(Vec::proof_compat_ok);
-            assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
-                #[trigger] self.cold_reconstructs(f) by {
-                self.lemma_cold_reconstructs_transfer(pre, f);
-            }
+            assert(pre.store.wf()) by { reveal(Vec::wf_for_snap); }
+            self.lemma_survivor_history_transfer(pre);
+            self.lemma_open_ingress_transfer(pre);
+            reveal(Vec::wf);
         }
     }
 
@@ -8810,6 +9056,7 @@ where
                 && j < pre.snapshots@[f as int].len() ==>
                 #[trigger] final(store).data()[j] == pre.snapshots@[f as int][j],
     {
+        hide(Vec::cold_payload_ok);
         proof { pre.lemma_cold_frame_layout(f as int); }
         let _ = runs.len();
         let ghost before = store.data();
