@@ -1302,3 +1302,44 @@ fn unique_defer_restores_surviving_prefix_and_zero() {
         );
     }
 }
+
+#[test]
+fn hot_survivor_promotion_copies_values_without_calling_clone() {
+    #[derive(Copy, Debug, Default, PartialEq, Eq)]
+    struct CopyOnly(u32);
+
+    impl Clone for CopyOnly {
+        fn clone(&self) -> Self {
+            panic!("promotion must copy Copy values without calling Clone")
+        }
+    }
+
+    for populated in [false, true] {
+        let mut v = VecT::<CopyOnly, u32>::new_with_policy(TierPolicy::smt());
+        for i in 0..3 {
+            v.try_push(CopyOnly(i)).unwrap();
+        }
+        let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+        if populated {
+            v.set(0u32, CopyOnly(10));
+            v.set(1u32, CopyOnly(11));
+        }
+        let newer = v.try_mark(ShrinkPolicy::Never).unwrap();
+        v.flush_trail();
+        assert_eq!(
+            (v.tier_stats().hot_frames, v.tier_stats().trail_frames),
+            (1, 1)
+        );
+        v.try_restore(newer).unwrap();
+        assert_eq!(
+            (v.tier_stats().hot_frames, v.tier_stats().trail_frames),
+            (0, 1)
+        );
+        assert_eq!(v.get(0u32), CopyOnly(if populated { 10 } else { 0 }));
+        v.set(0u32, CopyOnly(20));
+        v.try_restore(root).unwrap();
+        for i in 0..3 {
+            assert_eq!(v.get(i), CopyOnly(i));
+        }
+    }
+}

@@ -785,3 +785,41 @@ checks passed. Trust remains 81 default markers plus five literal registrations.
 Existing differential tests deliberately
 restore through every populated tier for each backend and include shrink/grow
 histories; those cover the newly dispatched path and remaining promotion path.
+
+
+### Checked Hot-to-Trail survivor promotion
+
+The capture-rebuilding checkpoint is `f52541d`. Hot-to-Trail promotion now has
+an exact physical postcondition: the Hot prefix is retained, its newest frame's
+complete payload moves to a single Trail frame rebased to zero, and all other
+fields remain unchanged. The proof preserves the first hitter under rebasing,
+the retained Hot frame ranges, the logical frame partition, and all canonical
+and Cold contracts. Empty frames retain their header and snapshot identity.
+Header-offset ordering supplies bounds without any saved-length ordering.
+
+`promote_hot_survivor_checked` performs the move with one reserve and direct
+Copy writes into the retained Trail allocation. This eliminates the temporary
+vector and second copy. A regression with a custom Copy value whose Clone
+panics exposed a runtime issue with generic cloning: Rust 1.97 specializes slice
+extension on TrivialClone, not all Copy types. Direct copies handle both empty
+and populated frames without invoking Clone. The regression also writes after
+promotion and restores the older token. Batched Trail/Hot replay is unchanged;
+no new trusted specification is added.
+
+`restore_hot_promotion_checked` composes reconstruction, exact truncation,
+physical promotion, capture rebuilding, and reclamation. Runtime dispatch uses
+this path for Trail-discipline restores whose survivor is Hot. The trusted
+restore fallback now requires `target <= cold_stack.len()`: its remaining
+physical obligation is Cold-to-ingress decoding/promotion. Conversions and
+all-tier mutation closure also remain unfinished.
+
+Targeted rebasing, retained Hot range/invariant, complete logical promotion,
+executable copying, promotion readiness, and restore composition checks pass.
+Final full-package verification passed **2294 verified, 0 errors** in both
+default (5m 03s) and `literal-types` (5m 36s) configurations. The feature suite
+passed 275 tests (10 ignored), including all 31 three-tier runtime tests and
+the new Copy/Clone regression. The 1024-case release differential matrix passed
+all four tests. E-graph/SAT consumers passed 1267 tests (45 ignored), with zero
+failures. Formatting and whitespace checks passed. Trust remains 81 default
+markers plus five literal registrations. Existing runtime tests exercise Hot
+promotion, empty frame identity, and write/remigrate after promotion.
