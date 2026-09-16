@@ -405,6 +405,33 @@ pub trait NodeLayout: Sized {
             Self::keys_view(*final(n)) == Self::keys_view(*old(n)).push(w),
             Self::link_view(*final(n)) == Self::link_view(*old(n));
 
+    /// Fill an empty leaf with the index words of `keys[at .. at + take]` in
+    /// one pass (the bulk loader's leaf write): key-to-word conversion is fused
+    /// into the copy and `leaf_push`'s per-key precondition is checked once per
+    /// leaf. Also collects each key's `id_bound` fact (needs the exec key).
+    /// Total: an unverified caller with a malformed/non-empty leaf or an
+    /// out-of-range window is refused at runtime; the contract is conditional
+    /// on the same facts, which the verified loader establishes.
+    fn leaf_fill_keys<K: crate::opt::DenseId<Index = Self::Word>>(
+        n: &mut Self::Node,
+        keys: &[K],
+        at: usize,
+        take: usize,
+    )
+        ensures
+            (Self::node_wf(*old(n)) && Self::is_leaf_spec(*old(n))
+                && Self::count_spec(*old(n)) == 0 && take <= Self::leaf_cap_spec()
+                && at + take <= keys@.len()) ==> {
+                &&& Self::is_leaf_spec(*final(n))
+                &&& Self::node_wf(*final(n))
+                &&& Self::count_spec(*final(n)) == take
+                &&& Self::keys_view(*final(n)).len() == take
+                &&& forall|i: int| 0 <= i < take
+                    ==> (#[trigger] Self::keys_view(*final(n))[i]).as_nat() == keys@[at + i].id_nat()
+                &&& forall|i: int| 0 <= i < take ==> #[trigger] keys@[at + i].id_nat() < K::id_bound()
+                &&& Self::link_view(*final(n)) == Self::link_view(*old(n))
+            };
+
     /// The leaf-split median: `ceil(leaf_cap / 2) = (leaf_cap + 1) / 2`. The
     /// left half keeps `split_mid` keys, the right half gets `leaf_cap + 1 -
     /// split_mid` (production's `mid = LEAF_CAP.div_ceil(2)`).
@@ -951,6 +978,51 @@ macro_rules! gen_layout_u32 {
                 assert(Self::keys_view(*n) =~= Self::keys_view(old_n).push(w));
             }
 
+            #[inline(always)]
+            fn leaf_fill_keys<K: crate::opt::DenseId<Index = u32>>(
+                n: &mut $node,
+                keys: &[K],
+                at: usize,
+                take: usize,
+            ) {
+                if !(n.is_leaf && n.count == 0 && take <= $leaf_cap
+                    && at <= keys.len() && take <= keys.len() - at)
+                {
+                    crate::guard::refuse(
+                        "NodeLayout::leaf_fill_keys: malformed or non-empty leaf, or window out of range",
+                    );
+                }
+                let ghost old_n = *n;
+                let klen = keys.len();
+                let mut j: usize = 0;
+                while j < take
+                    invariant
+                        j <= take,
+                        take <= $leaf_cap,
+                        keys@.len() == klen,
+                        at + take <= keys@.len(),
+                        n.is_leaf == old_n.is_leaf,
+                        n.count == old_n.count,
+                        n.link == old_n.link,
+                        n._pad == old_n._pad,
+                        forall|i: int| 0 <= i < j
+                            ==> (#[trigger] n.data[i]).as_nat() == keys@[at + i].id_nat(),
+                        forall|i: int| 0 <= i < j ==> #[trigger] keys@[at + i].id_nat() < K::id_bound(),
+                    decreases take - j,
+                {
+                    let k: K = slice_get(keys, at + j);
+                    proof { k.lemma_id_nat_bounded(); }
+                    let w: u32 = k.to_index();
+                    arr_set(&mut n.data, j, w);
+                    j += 1;
+                }
+                n.count = take as u8;
+                assert forall|i: int| 0 <= i < take
+                    implies (#[trigger] Self::keys_view(*n)[i]).as_nat() == keys@[at + i].id_nat() by {
+                    assert(Self::keys_view(*n)[i] == n.data[i]);
+                }
+            }
+
             open spec fn split_mid_spec() -> nat { (($leaf_cap + 1) / 2) as nat }
             #[inline(always)]
             fn split_mid() -> (m: usize) { ($leaf_cap + 1) / 2 }
@@ -1414,6 +1486,51 @@ macro_rules! gen_layout_u64 {
                 arr_set(&mut n.data, cnt, w);
                 n.count = (cnt + 1) as u8;
                 assert(Self::keys_view(*n) =~= Self::keys_view(old_n).push(w));
+            }
+
+            #[inline(always)]
+            fn leaf_fill_keys<K: crate::opt::DenseId<Index = u64>>(
+                n: &mut $node,
+                keys: &[K],
+                at: usize,
+                take: usize,
+            ) {
+                if !(n.is_leaf && n.count == 0 && take <= $leaf_cap
+                    && at <= keys.len() && take <= keys.len() - at)
+                {
+                    crate::guard::refuse(
+                        "NodeLayout::leaf_fill_keys: malformed or non-empty leaf, or window out of range",
+                    );
+                }
+                let ghost old_n = *n;
+                let klen = keys.len();
+                let mut j: usize = 0;
+                while j < take
+                    invariant
+                        j <= take,
+                        take <= $leaf_cap,
+                        keys@.len() == klen,
+                        at + take <= keys@.len(),
+                        n.is_leaf == old_n.is_leaf,
+                        n.count == old_n.count,
+                        n.link == old_n.link,
+                        n._pad == old_n._pad,
+                        forall|i: int| 0 <= i < j
+                            ==> (#[trigger] n.data[i]).as_nat() == keys@[at + i].id_nat(),
+                        forall|i: int| 0 <= i < j ==> #[trigger] keys@[at + i].id_nat() < K::id_bound(),
+                    decreases take - j,
+                {
+                    let k: K = slice_get(keys, at + j);
+                    proof { k.lemma_id_nat_bounded(); }
+                    let w: u64 = k.to_index();
+                    arr_set(&mut n.data, j, w);
+                    j += 1;
+                }
+                n.count = take as u8;
+                assert forall|i: int| 0 <= i < take
+                    implies (#[trigger] Self::keys_view(*n)[i]).as_nat() == keys@[at + i].id_nat() by {
+                    assert(Self::keys_view(*n)[i] == n.data[i]);
+                }
             }
 
             open spec fn split_mid_spec() -> nat { (($leaf_cap + 1) / 2) as nat }

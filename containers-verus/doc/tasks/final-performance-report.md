@@ -12,11 +12,16 @@ Environment: Apple M4 Pro (14 cores), 48 GB, macOS 27.0, rustc/cargo 1.97.1
 (`8bab26f4f 2026-07-14`), release profile, `SEMPER_COMPRESS` and `SEMPER_DIFF`
 unset, no concurrent verifier or test load (the Verus/test gate battery is run
 to completion before the first timing command, and nothing else is started
-until the last one finishes). Benchmark sources
-(`containers-conformance/benches/*`, `containers-conformance/src`,
-`containers-conformance/Cargo.toml`) are byte-identical to checkpoint
-`d191c4a`, so both revisions run the same benchmark code and differ only in the
-verified crate.
+until the last one finishes). `three_tier_bench` — the only target used for
+the checkpoint comparison — and `containers-conformance/src` are byte-identical
+to checkpoint `d191c4a`, so both revisions run the same benchmark code there
+and differ only in the verified crate. Three same-binary targets were changed
+after the preliminary run at the user's direction (see "User-directed
+performance work"): `tracked_vec_bench` gained the 10M/100M groups,
+`eclasses_bench` lost a per-element `black_box` in its find loops, and
+`bplus_cursor_bitset_bench` gained split bulk-load/scan cases and seeks its
+cursors first; each change applies identically to the legacy and verified
+arms of the same binary.
 
 Targets and roles (rechecked on the final source; the inventory's
 classification stands):
@@ -171,6 +176,88 @@ Findings, per case class:
 1.01 on the rebuilt binary with no change to its code path; it is treated as a
 run-to-run layout/noise effect and re-evaluated in the final two-run
 protocol like every other case.
+
+## User-directed performance work (2026-09-16, after `2f99644`)
+
+The user asked for three things beyond the protocol: the size sweep extended
+to 10M and 100M elements, the e-class find sweep "cracked", and the B+ tree
+brought to parity. These change algorithms inside the verified crate (with the
+user's explicit direction) and benchmark code; every change is verified and
+gated like the proof work.
+
+**Size sweep (`tracked_vec_bench`, new `mark_churn_large` groups).** Marks per
+iteration scale down with `n` (20 at 10M, 2 at 100M); compare per-cycle times.
+At 10M both vectors are at parity: VecI 21.8 vs 21.9 µs per 20 cycles
+(1.00×), VecP 356.5 vs 356.8 µs (1.00×). At 100M with a 30 s window: VecP
+416 vs 422 µs per 2 cycles (1.01×), VecI 131 vs 150 µs with ±30 % intervals
+(page/TLB-dominated at 400 MB; inconclusive, no evidence of a gap). The
+per-cycle growth with size — VecP 34 ns → 6 µs → 17.8 µs → ~210 µs per
+mark+8 writes+restore from 1K to 100M — is identical in legacy and verified:
+VecP's mark clears its capture words (O(n/64), the ParallelStore design in
+both crates), VecI's growth is cache-miss cost on the random writes.
+
+**Find sweep.** The loop's machine code is byte-identical between the fast and
+slow builds, and clamping to efficiency cores slows both arms ~4×; the ×1.43
+was one process in a slow *placement* state (both arms are bimodal by
+~20 % across processes: legacy 212 ↔ 252 µs, verified 205 ↔ 265 µs). With
+the per-element `black_box` removed from the bench loop (it forced a
+store/reload of the accumulator every find), five processes give legacy
+252 / 217 / 215 / 220 / 252 µs and verified 220 / 205 / 253 / 203 / 265 µs:
+best-of-5 verified 203 µs vs legacy 215 µs (**1.06×**), medians 220 vs 220.
+The verified hop loop is 5 instructions with no per-hop bounds check; the
+source is at parity and needs no change. This case is reported best-of-N
+across processes with the distribution.
+
+**B+ tree.** The "then_scan" benchmarks were empty (the cursor starts at NIL;
+`seek_first()` was never called) so their whole time was the bulk load;
+split cases were added and both arms now seek first. Three source changes,
+all verified (`bplus` module 187/0, `bplus_layout` 323/0):
+
+| Case | before | legacy | verified now | speed vs legacy |
+|---|---|---|---|---|
+| `bplus/from_sorted_only` (bulk load, 16 384 keys) | 25.4 µs (0.53×) | 13.5 µs | 11.3 µs | **1.19×** |
+| `bplus/scan_only` (cursor over 16 384 keys) | 96.1 µs (0.60×) | 57.5 µs | 15.5 µs | **3.7×** |
+| `bplus/from_sorted_then_scan` | — | 76.9 µs | 31.4 µs | **2.4×** |
+| `bplus/cursor_seek` / `_branchless` | 0.98× / 1.16× | 995 µs / 1.01 ms | 975 µs / 900 µs | 1.02× / 1.13× |
+| `bplus/insert_shuffled` / `_branchless` | 0.89× / 0.95× | 1.834 ms / 1.816 ms | 1.770 ms / 1.661 ms | **1.04× / 1.09×** |
+
+1. `try_from_sorted` validated strict order in O(n) and then called the public
+   `from_sorted`, which validated again; it now goes to `bulk_load` directly.
+2. The cursor caches the leaf it stands on (`leaf` field, `cursor_ok =
+   cursor_wf && leaf_cached`), so `key`/`step` no longer copy a 256-byte node
+   out of the arena per key (legacy does, per key); one copy per leaf.
+3. Leaves are filled by a new total `NodeLayout::leaf_fill_keys` (key→word
+   conversion fused into the copy, one refusal check per leaf instead of a
+   `leaf_push` precondition per key), and the order checks in
+   `from_sorted`/`try_from_sorted` are branch-free reductions (vectorizable)
+   with a single refusal after the loop.
+
+4. `insert` recomputed `last_leaf` by descending from the root to the
+   rightmost leaf after every insert (`rightmost_leaf_of`); legacy updates it
+   only when the rightmost leaf splits. `insert_rec`/`insert_rec_leaf` now
+   return the fresh right leaf iff the subtree's rightmost leaf split
+   (`last_after`/`last_lift`; an internal node forwards its child's report
+   only for its last child), the root applies it, and three lemmas carry the
+   `last_leaf_id` argument per arm so `insert_rec` stays under the default
+   solver budget. The descent function is removed. Shuffled inserts went from
+   0.89× to 1.04× (branchless 1.09×).
+
+With these four changes every B+ tree case is at or above legacy speed.
+
+**Store flavours (VecI / VecP / VecT), from the `three_tier_v1` rows (same
+policy per row; multiplier = VecI-or-VecP time ÷ VecT time).** VecI vs VecP is
+a payload question: the inline store keeps the capture tag inside the element
+(`T` must be tagged — ids, small ints), the parallel store keeps capture words
+apart so `T` can be anything (`f64`, `bool`, `Option`), at the price of an
+O(n/64) capture-word clear per mark (identical in legacy). VecT appends every
+write blindly and dedupes at rollover: 1.8–2× faster than VecI/VecP on
+low-duplicate writes, ≈1× on high-duplicate writes, 1.1–1.5× on the
+SMT-backtracking, eqsat and e-class traces, but 0.1–0.2× on restores of
+duplicate-heavy open frames (every write is replayed). All three stay: none
+is redundant, all are verified under the same contracts. The dynamic store
+(`VecD`, an enum with per-operation dispatch) costs ~2.5× over the static
+types on the same workload (`dyn_inline` 76.8 µs vs `static_veci` 29.8 µs on
+the SMT trace); consumers with a fixed store kind should use the static type.
 
 ## Results
 

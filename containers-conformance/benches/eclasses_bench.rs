@@ -148,10 +148,13 @@ fn bench_find_sweep(c: &mut Criterion) {
     g.bench_function(BenchmarkId::new("retained", N), |b| {
         let (ec, ids) = merged_retained();
         b.iter(|| {
+            // Accumulate without a per-element `black_box`: that forced a
+            // store/reload of `acc` on every find, whose address aliasing
+            // with the arrays made the loop bimodal across processes.
             let mut acc = 0usize;
             for _ in 0..FIND_PASSES {
                 for &id in &ids {
-                    acc ^= black_box(retained::DenseId::to_usize(ec.find_const(id)));
+                    acc ^= retained::DenseId::to_usize(ec.find_const(id));
                 }
             }
             black_box(acc)
@@ -164,7 +167,7 @@ fn bench_find_sweep(c: &mut Criterion) {
             let mut acc = 0usize;
             for _ in 0..FIND_PASSES {
                 for &id in &ids {
-                    acc ^= black_box(verified::DenseId::to_usize(ec.find_const(id)));
+                    acc ^= verified::DenseId::to_usize(ec.find_const(id));
                 }
             }
             black_box(acc)

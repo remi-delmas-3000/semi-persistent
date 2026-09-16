@@ -20,7 +20,8 @@ containers`).
 | `328c512` | Derived restore contracts (ListArena, EClasses roots, SpMap, CircularList, UnionFind, BPlusTreeSet) and group member models/archives (`SyncMember`, `ForkHistory`) |
 | `9df28cb` | `pending_restore_indices` checked with an exact contract; `sequence_witness_checked` (production instantiation of the sequence theorem); interface inventory |
 | `09f00b0` | EClasses component contents (entries, reprs, uses, pool) through `restore`/`try_restore`; benchmark protocol frozen |
-| (final) | `try_mark_adaptive` marker removed; ledgers, CI trust constant and this report |
+| `2f99644` | `try_mark_adaptive` marker removed (trust 50 + 5); benchmark-attributed constant-factor fixes (pre-sized dedupe buffers, single-bound byte fold); ledgers, CI trust constant, this report and the performance investigation |
+| (last) | final two-run benchmark results appended to the performance report |
 
 ## 2. Per-container contract / verification matrix
 
@@ -39,7 +40,7 @@ snapshot at frame `k`.
 | `ListArena` | append/iterate exact over heads, nodes and model | `try_restore`: heads, nodes and model views `= S[k]` at one shared frame, three archive prefixes; `Err` unchanged | `white_box_head` (test accessor), `tracking_bytes`, `total_bytes` |
 | `UnionFind` | union/find exact over roots, parent and rank | `try_restore`: roots, parent and rank views `= S[k]`, roots and parent archive prefixes, parent and rank marks agree; `Err` unchanged | — |
 | `EClasses` | merge/find exact over roots; `min_width` preserved | `restore`/`try_restore` under full validity (which `try_restore` checks): roots, size, depth, roots archive prefix, and every component column and archive prefix (entries model and nodes, reprs dense/sparse/indices, uses model, minimum pool); `Err` unchanged | — |
-| `BPlusTreeSet` (+ cursors) | insert/bulk-load exact over the ghost tree; branchless search verified | `restore`: tree `= S[k]`, arena and tree archive prefixes | 5 bounds-elided array/slice primitives in `bplus_layout` |
+| `BPlusTreeSet` (+ cursors) | insert/bulk-load exact over the ghost tree (bulk load through the total `leaf_fill_keys`, order checks branch-free); branchless search verified; cursor `seek`/`seek_first`/`key`/`step` exact against the in-order model under `cursor_ok` (positioning plus the cached leaf) | `restore`: tree `= S[k]`, arena and tree archive prefixes | 5 bounds-elided array/slice primitives in `bplus_layout` |
 | `HintedArena` | set/push exact; `complete()` preserved | `restore`: view `= S[k]`, prefix; `Err` unchanged | — |
 | `ForkHistory` / `SyncMember` (group wrappers) | `mark`: every member model unchanged, one archived model per member | `restore`: every member model at the token's depth, archive prefix; rejection unchanged; `mark_parallel`/`restore_parallel` carry the same contracts over the rayon fan-out (trusted dispatch, ledger 3.6d) | `mark_parallel`, `restore_parallel`, `checksum` |
 | `History` (group token authority) | `mark`: `wf`, depth + 1 (requires depth `< u32::MAX`) | `restore_to`: `wf`, depth `= t` (requires a valid token below the depth) — both partial public functions, see §5 | — |

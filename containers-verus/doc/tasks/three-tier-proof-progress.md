@@ -2081,3 +2081,42 @@ consumers **1267 passed, 45 ignored** (`/tmp/sp-d21-final-consumers.log`);
 canary **2 passed** (`/tmp/sp-d21-final-canary.log`); partial-API audit at the
 unchanged baseline (73/33/40/0). Formatting, whitespace and the unchanged-legacy
 check passed; trust **50 default + 5 literal**, CI `EXPECTED_DEFAULT=50`.
+
+
+## 2026-09-16 — User-directed performance work: B+ tree, find sweep, size sweep
+
+At the user's direction (overriding "do not modify algorithms" for these
+items) the verified B+ tree was brought above legacy speed on every measured
+case: `try_from_sorted` no longer validates twice; the cursor caches the leaf
+it stands on (`cursor_ok = cursor_wf ∧ leaf_cached`); leaves are filled by the
+total `NodeLayout::leaf_fill_keys` with the key→word conversion fused in and
+one refusal per leaf; the order checks are branch-free reductions; and
+`insert` tracks the rightmost leaf incrementally (`insert_rec` returns the
+fresh right leaf iff the subtree's rightmost leaf split — `last_after`,
+`last_lift`, three per-arm lemmas) instead of descending from the root after
+every insert (`rightmost_leaf_of` removed). Bulk load 0.53× → 1.19×, scan
+0.60× → 3.7×, shuffled insert 0.89× → 1.04× against legacy
+(`doc/tasks/final-performance-report.md`). The e-class find sweep was shown
+to be at parity (per-process placement bimodality, not code) and the tracked
+vectors at parity at 10M/100M elements. Benchmarks: `tracked_vec_bench` gains
+10M/100M groups, `eclasses_bench` drops a per-element `black_box`,
+`bplus_cursor_bitset_bench` gains split bulk-load/scan cases and seeks its
+cursors first. No new trust; the partial-API count is unchanged.
+
+Targeted evidence: `bplus` module **189 verified**, `bplus_layout` **323
+verified**, zero errors (`/tmp/sp-d21-ll4.log`, `/tmp/sp-d21-total3.log`).
+
+Gate evidence (fresh, touched source before each Verus run): full default
+**2602 verified, zero errors** (`/tmp/sp-d21-final3-default.log`);
+literal-types **2602 verified, zero errors** (`/tmp/sp-d21-final3-literal.log`);
+conditional composition **80 verified, zero errors**
+(`/tmp/sp-d21-final3-composition.log`); `au-verus` **29 verified, zero errors**
+(`/tmp/sp-d21-final3-au.log`); feature suite **277 passed, 10 ignored**
+(`/tmp/sp-d21-final3-tests.log`); release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-final3-policy.log`); B+ tree,
+oracle and reference-e-graph property tests **31 passed**
+(`/tmp/sp-d21-final3-conformance.log`); e-graph/SAT consumers **1267 passed,
+45 ignored** (`/tmp/sp-d21-final3-consumers.log`); canary **2 passed**
+(`/tmp/sp-d21-final3-canary.log`); partial-API audit at the unchanged baseline
+(73/33/40/0). Formatting, whitespace and the unchanged-legacy check passed;
+trust **50 default + 5 literal**.
