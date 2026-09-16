@@ -177,7 +177,7 @@ scheduled for deletion or replacement solely because a new model exists.
 | Hot-only capture/set/push/pop/mark proofs | Reuse for their scope; adapt for general case | Retain their checked scope; derive shared-map effects and all-tier preservation rather than claiming Hot-only preconditions cover mixed histories |
 | Trusted all-tier mutation/mark fallbacks | Unproved implementation to discharge | Prove actual execution against capture/raw mutation/open-frame contracts; do not transfer trust into new wrappers |
 | Trusted Trail dedup/sort/migrations and configured/adaptive execution | Unproved implementation to discharge | Exact local map transforms, pool append, source-plan identity, retirement/rebasing and eligibility; compose through sequence theorem |
-| Trusted Cold survivor promotion / remaining restore fallback | Unproved implementation to discharge | Decode bounded runs preserving full map/domain, promote only survivor, then use checked finalization; remove trust only after complete path verifies |
+| Cold survivor promotion / former restore fallback | Discharged | Checked decoder, exact source prefixes, both destination representations, shared-map equality and finalization compose in `restore_cold_survivor_checked`; obsolete trusted dispatcher removed; full verification and regression gates passed |
 | Old specialized Hot-defer reconstruction proofs | Preserve | Useful verified specialization; no need to remove it to establish the all-tier theorem |
 | Derived/container and group/parallel paths | Pending concrete public audit | Retain original scope, review content/prefix/error contracts and fan-out trust after Vec adapters are checked |
 
@@ -192,34 +192,28 @@ The original snapshot-oriented wrappers retain their contracts and use those
 helpers; their existing reconstruction lemmas remain checked. The shared model
 is imported by production, while the provisional interface target stays isolated.
 
-This discharges the interpretation and replay bridge work in the first four
-rows above. The next concrete step exports exact retained-map sequence from
-checked truncation, unchanged shared model from Hot survivor promotion, and
-unchanged shared model from capture finalization. It reuses the physical-prefix
-and promotion proofs, with new complete lookup equality and rebasing lemmas.
-Full default and literal-types verification each passed 2348 obligations, with
-feature, differential, consumer, formatting and whitespace gates passing. Cold
-survivor movement and the complete
-production interface implementation remain outstanding. The conditional target
-verifies 80 obligations after adding the bounded-map accessor.
+Interpretation, replay, retirement, Hot promotion and capture finalization
+bridges are verified milestones. Cold decoding at `25ecbcf` passed full default
+and literal-types verification (2360 obligations), feature, differential and
+consumer gates. Its local theorem alone did not discharge promotion assembly.
 
-The Cold decoder now exports exact optional-lookup equality, strict index order,
-saved-domain bounds and complete source/destination coverage. Both destinations
-in the existing runtime survivor dispatcher call it. `lemma_cold_decode_layout`
-derives its premises from retained Cold representation; `lemma_cold_decoded_lookup`
-connects its output to the physical frame lookup. The dispatcher remains trusted:
-source truncation, destination publication and global invariant preservation are
-not discharged by the local decoding theorem. Full default and literal-types
-verification each passed 2360 obligations; feature, differential, consumer,
-formatting and whitespace gates passed. No trust markers were added or removed.
+The next step now checks that assembly: exact older Cold prefixes, unchanged
+canonical history, store-selected destination header and representation, full
+shared-map equality, and capture rebuilding. `restore_cold_survivor_checked`
+exports restored contents, depth, snapshot prefix and exact shared-frame prefix.
+All 45 selected Cold obligations passed together. The former trusted fallback
+and unused trusted survivor dispatcher are discharged/removed, reducing counts
+to 79 default plus five literal registrations. Full default and literal-types
+verification each passed 2373 obligations; feature, differential and consumer
+tests passed. The conditional target remains at 80 verified obligations. An
+additional partial-API CI audit reports the same 40 unlisted functions as the
+committed baseline; no entries were added by this change or to the allowlist.
 
-1. Prove Cold survivor movement into both store-selected writable tiers,
-   preserving the complete shared map and older physical/canonical history.
-2. Complete the production interface instantiation using the checked physical
+1. Complete the production interface instantiation using the checked physical
    interpretation, replay, retirement, promotion and finalization contracts.
-3. Discharge remaining capture/mutation/conversion and policy
-   implementations, rechecking conditional composition after any interface change.
-4. Finish derived/parallel public closure and the full trust/gate audit.
+2. Discharge remaining capture/mutation/conversion and policy implementations,
+   rechecking conditional composition after any interface change.
+3. Finish derived/parallel public closure and the full trust/gate audit.
 
 No existing proof is superseded until a concrete replacement verifies. No push
 to origin is authorized.

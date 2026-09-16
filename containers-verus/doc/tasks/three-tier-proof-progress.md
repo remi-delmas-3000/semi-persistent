@@ -971,3 +971,49 @@ popped. The retained Cold-prefix proof should use the existing layout accessors
 assuming an intermediate full `wf`. Header publication must re-establish the
 Cold/Hot/Trail frame partition for the store-selected destination before the
 existing capture-finalization theorem is applied.
+
+### Checked Cold promotion and complete Cold-survivor restore
+
+The decoder checkpoint is signed local commit `25ecbcf`. The subsequent work
+checks the complete promotion assembly for both DiffStore-selected destinations.
+`promote_cold_storage_checked` proves the exact Cold prefixes, unchanged store
+and canonical fields, decoded destination contents, and the new survivor header.
+`cold_survivor_promoted` records that intermediate effect without assuming full
+well-formedness. Partition, older Cold representation, destination representation
+and shared-map equality are then proved separately.
+
+The Cold prefix proofs were adapted to require physical representation rather
+than full `wf`. Their original restore contracts remain as checked wrappers.
+Saved-value transfer uses explicit header/run accessors to stay within existing
+resource limits. The decoded destination satisfies the original pair-frame
+invariant and uniqueness; no snapshot or map contract was weakened.
+
+`restore_cold_survivor_checked` now composes reconstruction, exact retirement,
+checked Cold promotion, capture finalization and reclamation. It retains the old
+public-facing contents/depth/snapshot-prefix effects and additionally exports
+the exact retained shared-frame prefix. Capacity reclamation now exports shared
+model and canonical-history preservation. The original specialized Hot proofs
+remain checked.
+
+All 45 selected Cold obligations and the shared-view framing lemma passed. Only
+then was the obsolete trusted `runtime_promote_survivor` removed. The former
+`runtime_restore_frame_fallback` is now the checked Cold restore function.
+This removes two markers: **79 default + 5 literal registrations**, with no new
+trusted body or axiom. CI and the trust ledger are updated together. Full default
+and literal-types verification each passed **2373 verified, 0 errors**; the
+conditional target passed 80 obligations. Feature tests passed 277 (10 ignored),
+the 1024-case differential matrix passed four tests, and consumer tests passed
+1267 (45 ignored). Formatting and whitespace checks passed. The differential
+oracle is unchanged.
+
+An additional CI partial-API audit fails with 73 public partial functions,
+33 allowlisted and 40 unlisted (zero unsafe-public functions). Running the
+same scanner against the committed `25ecbcf` source produced exactly the same
+output and exit status. This change adds no public partial API; the pre-existing
+allowlist discrepancy remains recorded rather than being hidden by expanding
+the allowlist. The trust-count CI check passes at 79 + 5.
+
+This closes the remaining trusted Cold restore implementation boundary. It does
+not discharge all-tier mutation/mark/rollover fallbacks, the complete production
+interface instantiation, or derived and parallel container closure. Those remain
+part of the active objective.
