@@ -1215,6 +1215,72 @@ pub open(crate) spec fn range_saved_value<T, I: IndexLike>(
     }
 }
 
+/// Equal physical ranges have equal earliest-capture maps, including absence.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_range_saved_value_local<T, I: IndexLike>(
+    a: Seq<(T, I)>, b: Seq<(T, I)>, lo: int, hi: int, j: nat,
+)
+    requires 0 <= lo <= hi <= a.len(), hi <= b.len(),
+        forall|q: int| lo <= q < hi ==> #[trigger] a[q] == b[q],
+    ensures range_saved_value::<T, I>(a, lo, hi, j)
+        == range_saved_value::<T, I>(b, lo, hi, j),
+{
+    if captured_in_range::<T, I>(a, lo, hi, j) {
+        let q = choose|q: int| lo <= q < hi && 0 <= q < a.len()
+            && (#[trigger] a[q]).1.as_nat() == j;
+        assert(b[q] == a[q]);
+        assert(captured_in_range::<T, I>(b, lo, hi, j));
+    }
+    if captured_in_range::<T, I>(b, lo, hi, j) {
+        let q = choose|q: int| lo <= q < hi && 0 <= q < b.len()
+            && (#[trigger] b[q]).1.as_nat() == j;
+        assert(a[q] == b[q]);
+        assert(captured_in_range::<T, I>(a, lo, hi, j));
+        lemma_lowest_hitter::<T, I>(a, lo, hi, j);
+        lemma_lowest_hitter::<T, I>(b, lo, hi, j);
+        let x = choose|q: int| lo <= q < hi && (#[trigger] a[q]).1.as_nat() == j
+            && first_hitter::<T, I>(a, lo, q, j);
+        let y = choose|q: int| lo <= q < hi && (#[trigger] b[q]).1.as_nat() == j
+            && first_hitter::<T, I>(b, lo, q, j);
+        assert(a[x] == b[x]);
+        assert(a[y] == b[y]);
+        assert(x == y);
+    }
+}
+
+/// Rebasing a physical range changes positions, not its first captured value.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_range_saved_value_subrange<T, I: IndexLike>(
+    a: Seq<(T, I)>, lo: int, hi: int, j: nat,
+)
+    requires 0 <= lo <= hi <= a.len(),
+    ensures range_saved_value::<T, I>(a, lo, hi, j)
+        == range_saved_value::<T, I>(a.subrange(lo, hi), 0, hi - lo, j),
+{
+    let b = a.subrange(lo, hi);
+    if captured_in_range::<T, I>(a, lo, hi, j) {
+        let q = choose|q: int| lo <= q < hi && 0 <= q < a.len()
+            && (#[trigger] a[q]).1.as_nat() == j;
+        assert(b[q - lo] == a[q]);
+        assert(captured_in_range::<T, I>(b, 0, hi - lo, j));
+    }
+    if captured_in_range::<T, I>(b, 0, hi - lo, j) {
+        let q = choose|q: int| 0 <= q < hi - lo && 0 <= q < b.len()
+            && (#[trigger] b[q]).1.as_nat() == j;
+        assert(a[q + lo] == b[q]);
+        assert(captured_in_range::<T, I>(a, lo, hi, j));
+        lemma_lowest_hitter::<T, I>(a, lo, hi, j);
+        lemma_lowest_hitter::<T, I>(b, 0, hi - lo, j);
+        let x = choose|q: int| lo <= q < hi && (#[trigger] a[q]).1.as_nat() == j
+            && first_hitter::<T, I>(a, lo, q, j);
+        let y = choose|q: int| 0 <= q < hi - lo && (#[trigger] b[q]).1.as_nat() == j
+            && first_hitter::<T, I>(b, 0, q, j);
+        assert(b[x - lo] == a[x]);
+        assert(a[y + lo] == b[y]);
+        assert(x == y + lo);
+    }
+}
+
 /// Re-express the existing per-cell invariant through the common optional
 /// saved-value interpretation; no new reconstruction assumption is introduced.
 #[verifier::spinoff_prover]
@@ -6157,6 +6223,7 @@ where
             forall|j: int| 0 <= j < old(self).store.captured().len() ==>
                 !(#[trigger] old(self).store.captured()[j]),
         ensures final(self).wf(), final(self).view() == old(self).view(),
+            final(self).persistence_model() == old(self).persistence_model(),
             *final(self) == (Self { store: final(self).store,
                 active_saved_len: final(self).active_saved_len, ..*old(self) }),
     {
@@ -6189,6 +6256,7 @@ where
             reveal(Vec::proof_compat_ok);
             reveal(Vec::wf);
             assert(self.wf());
+            self.lemma_persistence_store_framing(pre);
         }
     }
 
@@ -6308,12 +6376,76 @@ where
     }
 
     #[verifier::spinoff_prover]
+    proof fn lemma_persistence_hot_promotion_lookup(&self, pre: Self, f: int, j: nat)
+        requires pre.hot_repr_ok(), pre.frame_partition_ok(),
+            pre.trail_stack@.len() == 0, pre.hot_stack@.len() > 0,
+            pre.hot_stack@[pre.hot_stack@.len() - 1].end == pre.hot_value_pool@.len(),
+            self.hot_survivor_promoted(pre), 0 <= f < pre.depth_spec(),
+        ensures self.frame_saved_len(f) == pre.frame_saved_len(f),
+            self.frame_saved_value(f, j) == pre.frame_saved_value(f, j),
+    {
+        hide(Vec::hot_repr_ok);
+        reveal(Vec::hot_survivor_promoted);
+        reveal(Vec::frame_partition_ok);
+        let cc = pre.cold_stack@.len();
+        let n = pre.hot_stack@.len();
+        if f >= cc {
+            pre.lemma_hot_repr_at(n - 1);
+            let h = f - cc;
+            pre.lemma_hot_repr_at(h);
+            if h + 1 < n {
+                self.lemma_hot_promotion_retained_frame(pre, h);
+                assert forall|q: int| self.phys_hot_start(h) <= q < self.phys_hot_end(h) implies
+                    #[trigger] self.hot_value_pool@[q] == pre.hot_value_pool@[q] by {
+                    assert(0 <= q < self.hot_value_pool@.len());
+                }
+                lemma_range_saved_value_local::<T, I>(self.hot_value_pool@, pre.hot_value_pool@,
+                    self.phys_hot_start(h), self.phys_hot_end(h), j);
+            } else {
+                let top = pre.hot_stack@[n - 1];
+                lemma_range_saved_value_subrange::<T, I>(pre.hot_value_pool@,
+                    top.start as int, top.end as int, j);
+            }
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_persistence_hot_promotion(&self, pre: Self)
+        requires pre.hot_repr_ok(), pre.frame_partition_ok(),
+            pre.trail_stack@.len() == 0, pre.hot_stack@.len() > 0,
+            pre.hot_stack@[pre.hot_stack@.len() - 1].end == pre.hot_value_pool@.len(),
+            self.hot_survivor_promoted(pre),
+        ensures self.persistence_model() == pre.persistence_model(),
+    {
+        hide(Vec::hot_repr_ok);
+        reveal(Vec::hot_survivor_promoted);
+        reveal(Vec::frame_partition_ok);
+        assert forall|f: int| 0 <= f < pre.depth_spec() implies
+            #[trigger] self.persistence_frame(f) == pre.persistence_frame(f) by {
+            self.lemma_persistence_hot_promotion_lookup(pre, f, 0);
+            let a = self.persistence_frame(f).saved;
+            let b = pre.persistence_frame(f).saved;
+            assert forall|j: nat| #[trigger] a.dom().contains(j) == b.dom().contains(j)
+                && (a.dom().contains(j) ==> a[j] == b[j]) by {
+                self.lemma_persistence_hot_promotion_lookup(pre, f, j);
+                crate::persistence_model::bounded_saved_map_at(self.frame_saved_len(f),
+                    |i: nat| self.frame_saved_value(f, i), j);
+                crate::persistence_model::bounded_saved_map_at(pre.frame_saved_len(f),
+                    |i: nat| pre.frame_saved_value(f, i), j);
+            }
+            assert(a =~= b);
+        }
+        assert(self.persistence_model().frames =~= pre.persistence_model().frames);
+    }
+
+    #[verifier::spinoff_prover]
     fn promote_hot_survivor_checked(&mut self)
         requires old(self).wf_for_snap(), old(self).hot_repr_ok(), old(self).trail_repr_ok(),
             old(self).cold_repr_ok(), old(self).proof_compat_ok(),
             old(self).trail_stack@.len() == 0, old(self).hot_stack@.len() > 0,
             old(self).hot_stack@[old(self).hot_stack@.len() - 1].end == old(self).hot_value_pool@.len(),
         ensures final(self).hot_survivor_promoted(*old(self)),
+            final(self).persistence_model() == old(self).persistence_model(),
             final(self).wf_for_snap(), final(self).hot_repr_ok(), final(self).trail_repr_ok(),
             final(self).cold_repr_ok(), final(self).proof_compat_ok(),
             final(self).hot_stack@.len() > 0 ==>
@@ -6365,6 +6497,7 @@ where
             assert(self.trail_value_pool@ =~= pre.hot_value_pool@.subrange(frame.start as int, frame.end as int));
             assert(self.hot_survivor_promoted(pre));
             self.lemma_hot_survivor_promotion(pre);
+            self.lemma_persistence_hot_promotion(pre);
         }
     }
 
@@ -7640,6 +7773,73 @@ where
         }
     }
 
+    /// Retained physical prefixes preserve the complete lookup, even while
+    /// ingress ownership and capture flags have not yet been rebuilt.
+    #[verifier::spinoff_prover]
+    proof fn lemma_persistence_retained_lookup(&self, pre: Self, target: nat, f: int, j: nat)
+        requires pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target), 0 <= f < target,
+        ensures self.frame_saved_len(f) == pre.frame_saved_len(f),
+            self.frame_saved_value(f, j) == pre.frame_saved_value(f, j),
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        self.lemma_restored_prefix_partition(pre, target);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::restored_history_prefix);
+        let cc = self.cold_stack@.len();
+        let hc = self.hot_stack@.len();
+        if f < cc {
+            self.lemma_restored_cold_cell(pre, target, f, j);
+        } else {
+            let trail = f >= cc + hc;
+            let t = f - self.pair_tier_offset(trail);
+            self.lemma_restored_pair_layout(pre, target, trail, t);
+            lemma_range_saved_value_local::<T, I>(self.pair_tier_pool(trail),
+                pre.pair_tier_pool(trail), self.pair_tier_start(trail, t),
+                self.pair_tier_end(trail, t), j);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_persistence_retained_frame(&self, pre: Self, target: nat, f: int)
+        requires pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target), 0 <= f < target,
+        ensures self.persistence_frame(f) == pre.persistence_frame(f),
+    {
+        hide(Vec::wf);
+        self.lemma_persistence_retained_lookup(pre, target, f, 0);
+        let a = self.persistence_frame(f).saved;
+        let b = pre.persistence_frame(f).saved;
+        assert forall|j: nat| #[trigger] a.dom().contains(j) == b.dom().contains(j)
+            && (a.dom().contains(j) ==> a[j] == b[j]) by {
+            self.lemma_persistence_retained_lookup(pre, target, f, j);
+            crate::persistence_model::bounded_saved_map_at(self.frame_saved_len(f),
+                |i: nat| self.frame_saved_value(f, i), j);
+            crate::persistence_model::bounded_saved_map_at(pre.frame_saved_len(f),
+                |i: nat| pre.frame_saved_value(f, i), j);
+        }
+        assert(a =~= b);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_persistence_retired(&self, pre: Self, target: nat)
+        requires pre.wf(), target < pre.depth_spec(), self.restored_history_prefix(pre, target),
+        ensures self.persistence_model().frames == pre.persistence_model().frames.subrange(0, target as int),
+            self.persistence_model().snapshots == pre.persistence_model().snapshots.subrange(0, target as int),
+            self.depth_spec() == target,
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        self.lemma_restored_prefix_partition(pre, target);
+        reveal(Vec::restored_history_prefix);
+        assert forall|f: int| 0 <= f < target implies
+            #[trigger] self.persistence_model().frames[f] == pre.persistence_model().frames[f] by {
+            self.lemma_persistence_retained_frame(pre, target, f);
+        }
+        assert(self.persistence_model().frames =~= pre.persistence_model().frames.subrange(0, target as int));
+    }
+
     /// Retire physical suffixes and the matching canonical ghost history.
     /// Keep the reconstructed store unchanged; ingress promotion follows later.
     #[verifier::spinoff_prover]
@@ -7655,6 +7855,9 @@ where
             final(self).automatic_rollover_enabled == old(self).automatic_rollover_enabled,
             final(self).active_saved_len == old(self).active_saved_len,
             final(self).restored_history_prefix(pre, target as nat),
+            final(self).persistence_model().frames == pre.persistence_model().frames.subrange(0, target as int),
+            final(self).persistence_model().snapshots == pre.persistence_model().snapshots.subrange(0, target as int),
+            final(self).depth_spec() == target,
             final(self).wf_for_snap(),
             final(self).hot_repr_ok(), final(self).trail_repr_ok(),
             final(self).cold_repr_ok(),
@@ -7721,6 +7924,7 @@ where
             self.lemma_restored_pair_repr(pre, target as nat, true);
             self.lemma_restored_pair_repr(pre, target as nat, false);
             self.lemma_restored_cold_repr(pre, target as nat);
+            self.lemma_persistence_retired(pre, target as nat);
         }
     }
 
@@ -8793,6 +8997,30 @@ where
             live: self.view(), snapshots: self.snapshots@,
             frames: Seq::new(self.depth_spec(), |f: int| self.persistence_frame(f)),
         }
+    }
+
+    /// Store/tag repair cannot alter a frame meaning derived from history.
+    #[verifier::spinoff_prover]
+    proof fn lemma_persistence_store_framing(&self, pre: Self)
+        requires *self == (Self { store: self.store, active_saved_len: self.active_saved_len, ..pre }),
+            self.view() == pre.view(),
+        ensures self.persistence_model() == pre.persistence_model(),
+    {
+        assert forall|f: int| 0 <= f < self.depth_spec() implies
+            #[trigger] self.persistence_frame(f) == pre.persistence_frame(f) by {
+            let a = self.persistence_frame(f).saved;
+            let b = pre.persistence_frame(f).saved;
+            assert forall|j: nat| #[trigger] a.dom().contains(j) == b.dom().contains(j)
+                && (a.dom().contains(j) ==> a[j] == b[j]) by {
+                assert(self.frame_saved_value(f, j) == pre.frame_saved_value(f, j));
+                crate::persistence_model::bounded_saved_map_at(self.frame_saved_len(f),
+                    |i: nat| self.frame_saved_value(f, i), j);
+                crate::persistence_model::bounded_saved_map_at(pre.frame_saved_len(f),
+                    |i: nat| pre.frame_saved_value(f, i), j);
+            }
+            assert(a =~= b);
+        }
+        assert(self.persistence_model().frames =~= pre.persistence_model().frames);
     }
 
     #[verifier::spinoff_prover]

@@ -65,6 +65,55 @@ for `retired_prefix`. `hot_survivor_promoted` specifies the subsequent movement
 separately, which is correct: exact pre-state physical-prefix equality is not
 required after moving the survivor.
 
+### DiffStore implementation connection
+
+The writable tier comes from the `DiffStore` implementation's immutable capture
+discipline. `Vec` consults it for capture, mark, and survivor reopening. The
+rollover selector is a separate configuration input; its eligibility proof must
+respect that writable tier and protect the active frame.
+
+| Implementation | Writable tier | Reads replay indices for pre-clear | Replay clears named capture flags |
+|---|---|---|---|
+| `TrailStore` | Trail | No | No (capture flags are ghost state) |
+| `ParallelStore` | Hot | No (bitmap reset) | No |
+| `InlineStore` | Hot | Yes (sparse tag reset) | Yes |
+| `DynStore` | Selected variant's tier | Selected variant's protocol | Selected variant's protocol |
+
+`DiffStore` mutation contracts preserve all three protocol predicates. This is
+essential for `DynStore`: the proofs use an instance property that remains
+constant across operations, not a hard-coded generic type test.
+
+The concrete dependency chain is:
+
+- `capture` supplies the store-level append/no-op contract. The checked Hot
+  path consumes it; the current trusted Trail fallback instead appends directly
+  after `get`. Its concrete proof must establish the same `capture_first` map
+  effect, retaining physical duplicates and updating the existing ghost capture
+  view consistently. A trait contract cannot be credited to a bypassing caller.
+- `set_raw`, `push`, and `pop` supply exact live effects and flag framing.
+  `Vec` must preserve older maps and handle active-domain capture/regrowth.
+- `prepare_mark` clears capture state under its coverage premise. `Vec` seals
+  and opens the tier selected by the store, then applies legal rollover.
+- `resize_default`, `begin_restore`, `restore_overlay`, and `restore_run`
+  supply resize, clearing, batched pair replay, and direct Cold replay effects.
+  The checked shared-map replay bridge consumes these existing contracts.
+- `finish_restore` supplies capture membership for the reopened frame's entries.
+  The checked finalization and map-membership bridges connect it to `CaptureOK`.
+
+These methods have checked implementations in the four store modules and are
+included in full production verification. Capacity diagnostics/reclamation have
+separate recorded trust boundaries; this is not a claim that every store module
+is trust-free. Nor does checking these methods discharge the remaining all-tier
+`Vec` mutation, conversion, policy, and Cold reopening composition obligations.
+
+In particular, `runtime_set_fallback` and `runtime_capture` currently call
+Hot-only checked helpers under the weaker runtime test `unique_capture()`.
+Those helpers require `hot_defer_wf`, which is not supplied merely by a Hot
+writable tier with older Cold history. Their enclosing trusted bodies hide
+that composition obligation. Reuse the helpers' local arguments while proving
+general all-tier framing; do not claim the fallback is checked or strengthen
+its public preconditions to the Hot-only case.
+
 ### Public guards and payload capabilities
 
 The standalone Vec token predicate is `TRACK && frame_idx < depth && depth <
@@ -144,9 +193,15 @@ helpers; their existing reconstruction lemmas remain checked. The shared model
 is imported by production, while the provisional interface target stays isolated.
 
 This discharges the interpretation and replay bridge work in the first four
-rows above. Exact retained-map sequence, survivor-movement map equality and the
-complete production interface implementation remain outstanding. The conditional
-target now verifies 80 obligations after adding the bounded-map accessor.
+rows above. The next concrete step exports exact retained-map sequence from
+checked truncation, unchanged shared model from Hot survivor promotion, and
+unchanged shared model from capture finalization. It reuses the physical-prefix
+and promotion proofs, with new complete lookup equality and rebasing lemmas.
+Full default and literal-types verification each passed 2348 obligations, with
+feature, differential, consumer, formatting and whitespace gates passing. Cold
+survivor movement and the complete
+production interface implementation remain outstanding. The conditional target
+verifies 80 obligations after adding the bounded-map accessor.
 
 1. Define the production derived frame-map view and prove the physical-to-common
    interpretation bridge, preserving all existing fields and proofs.

@@ -904,3 +904,31 @@ markers (81 default plus five literal registrations); the differential oracle
 is unchanged. This milestone does not yet instantiate every provisional
 interface or complete all-tier public closure. The derived-contract audit
 records the initial public wrapper gaps without changing their implementations.
+
+### Exact shared-map retirement and Hot survivor reopening
+
+Physical range equality and subrange rebasing now preserve the complete
+earliest-capture lookup, including absence. Retained Cold cells use the existing
+coverage/value transfer theorem; retained Trail/Hot cells use the existing exact
+range bounds and the new local equality theorem. No intermediate `self.wf()`
+premise is needed. The resulting map theorem gives the exact shared frame
+sequence prefix and is exported by `truncate_restored_history_checked` alongside
+all its previous canonical and physical postconditions.
+
+Hot survivor promotion preserves the whole shared model. The newest frame's
+rebased Trail range has the same earliest-capture map as its original Hot range;
+older Hot ranges and all Cold storage retain their meanings. The checked
+promotion exports this equality. Capture finalization also exports unchanged
+shared model via a history framing lemma, while preserving its original full
+well-formedness and concrete field-framing contract.
+
+Targeted lookup, rebasing, retained-frame and Hot-promotion lemmas passed. Full
+default and literal-types verification each passed **2348 verified, 0 errors**;
+the conditional theorem still passes 80 obligations. Feature tests passed 277
+(10 ignored), the 1024-case differential policy matrix passed four tests, and
+consumer tests passed 1267 (45 ignored). Formatting and whitespace checks passed.
+Trust remains 86 source markers; the differential oracle is unchanged. This
+milestone adds only erased proofs and contracts, with no executable statement
+changes. This remains concrete
+interface-discharge work; Cold promotion and the remaining all-tier/public and
+derived/parallel obligations are not complete.
