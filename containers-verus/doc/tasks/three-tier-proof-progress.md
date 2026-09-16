@@ -1071,3 +1071,74 @@ trusted Vec fallback only calls `mark_captured` for unique stores. The general
 push proof must restore Trail's ghost membership when reentering a saved domain,
 without weakening the invariant or adding runtime flag overhead. This obligation
 is recorded in the proof classification alongside the existing capture gaps.
+
+### Checked all-tier physical capture through DiffStore
+
+Starting from signed checkpoint `96c90f9`, `runtime_capture` now verifies for
+both store-selected ingress disciplines under the general Vec invariant. The
+old trusted capture boundary is removed. Its contract exports exact physical
+append/no-op behavior, unchanged nonselected pool, capture-flag update, unchanged
+live contents, canonical event append and all three immutable store protocol
+predicates. Outside the active saved domain, the whole state is unchanged.
+
+`ingress_capture_effect` describes only the intermediate physical mutation.
+`lemma_ingress_capture_frame` handles a single Hot or Trail frame using the
+existing first-capture, duplicate and unchanged-range proofs. Separate Hot and
+Trail representation lemmas expose header triggers narrowly. Capture flags,
+Cold framing and canonical preservation compose to recover `wf`. The previous
+checkpoint's general canonical-append lemma then supplies the chronological
+event proof. A separate full-trail framing lemma proves that this ghost-only
+event leaves physical predicates unchanged.
+
+The physical frame and final flag arguments verified before integration.
+Resource failures were resolved by splitting tier/header obligations, hiding
+irrelevant reconstruction definitions and explicitly supplying store
+well-formedness where `wf_for_snap` was hidden. No solver limits were raised.
+The original specialized Hot capture proofs remain checked and intact.
+
+Both runtime branches now call `DiffStore::capture`. The Trail implementation
+continues to append duplicates unconditionally and maintains capture flags only
+in ghost code. Unique capture uses the same store primitive without invoking a
+Hot-only helper under a weaker premise. No persistent fields, maps, buffers or
+traversals were added. The call-path change has not been benchmarked; performance
+parity remains a required final gate.
+
+Evidence on this source revision:
+
+- Selected capture family: **23 verified, zero errors**
+  (`/tmp/sp-d21-ingress-runtime-final.log`); separate full-trail physical framing:
+  one verified, zero errors (`/tmp/sp-d21-ingress-framing2.log`).
+- Full default and literal-types verification: **2383 verified, zero errors**
+  each (`/tmp/sp-d21-ingress-default.log`, `/tmp/sp-d21-ingress-literal.log`).
+- Conditional composition: **80 verified, zero errors**
+  (`/tmp/sp-d21-ingress-conditional.log`).
+- Feature tests: **277 passed, 10 ignored**
+  (`/tmp/sp-d21-ingress-features.log`).
+- Release differential policy matrix with `PROPTEST_CASES=1024`: **4 passed**
+  (`/tmp/sp-d21-ingress-policy.log`).
+- E-graph/SAT-core consumers: **1267 passed, 45 ignored**
+  (`/tmp/sp-d21-ingress-consumers.log`).
+- Formatting, whitespace and trust-count checks passed. Trust is now
+  **77 default + 5 literal registrations**, with unchanged axiom counts and
+  synchronized CI/trust documentation. The legacy `containers/` tree is unchanged.
+
+Commands use the previous full-gate sequence: default and literal-types
+`cargo verus verify -p semi-persistent-containers-verus -- --time-expanded`,
+direct `verus --crate-type lib containers-verus/proofs/top_down/composition.rs`,
+`cargo test -p semi-persistent-containers-verus --features 'compat-all,literal-types'`,
+`PROPTEST_CASES=1024 cargo test -p containers-conformance --release --test three_tier_policy_matrix`,
+and `cargo test -p semi-persistent-egraph -p semi-persistent-satcore`.
+
+The additional partial-API audit still fails with 73 public partial functions,
+33 allowlisted and 40 unlisted, zero unsafe-public. Its output in
+`/tmp/sp-d21-ingress-partial-api.log` is byte-for-byte identical to the recorded
+baseline audit; no allowlist entries were added. This remains an open final-audit
+item, not a claim that all CI gates pass.
+
+Next: compose this checked capture with `set_raw` and the existing captured-cell
+and outside-saved-domain write lemmas for general mixed-tier set. Pop and
+regrowth still need their general preservation proofs, including Trail's ghost
+flag restoration on regrowth. Explicit shared-map `capture_first` equality is
+still required for the production interface. Mutation/mark, migration/policy,
+complete interface instantiation, derived/parallel closure and benchmark parity
+remain open; this checkpoint does not complete any of the four overall steps.

@@ -85,11 +85,12 @@ constant across operations, not a hard-coded generic type test.
 
 The concrete dependency chain is:
 
-- `capture` supplies the store-level append/no-op contract. The checked Hot
-  path consumes it; the current trusted Trail fallback instead appends directly
-  after `get`. Its concrete proof must establish the same `capture_first` map
-  effect, retaining physical duplicates and updating the existing ghost capture
-  view consistently. A trait contract cannot be credited to a bypassing caller.
+- `capture` supplies the store-level append/no-op contract. Both selected ingress
+  branches of the checked `runtime_capture`
+  now consume it. Its contract exports exact append/no-op effects, protocol
+  preservation, capture flags and the canonical chronological event. Trail keeps
+  physical duplicates. The shared-map `capture_first` interpretation remains an
+  adapter obligation; it is not inferred merely from snapshot reconstruction.
 - `set_raw`, `push`, and `pop` supply exact live effects and flag framing.
   `Vec` must preserve older maps and handle active-domain capture/regrowth.
 - `prepare_mark` clears capture state under its coverage premise. `Vec` seals
@@ -106,10 +107,10 @@ separate recorded trust boundaries; this is not a claim that every store module
 is trust-free. Nor does checking these methods discharge the remaining all-tier
 `Vec` mutation, conversion, policy, and Cold reopening composition obligations.
 
-In particular, `runtime_set_fallback` and `runtime_capture` currently call
-Hot-only checked helpers under the weaker runtime test `unique_capture()`.
-Those helpers require `hot_defer_wf`, which is not supplied merely by a Hot
-writable tier with older Cold history. Their enclosing trusted bodies hide
+In particular, `runtime_set_fallback` still calls
+a Hot-only checked helper under the weaker runtime test `unique_capture()`.
+That helper requires `hot_defer_wf`, which is not supplied merely by a Hot
+writable tier with older Cold history. Its enclosing trusted body hides
 that composition obligation. Reuse the helpers' local arguments while proving
 general all-tier framing; do not claim the fallback is checked or strengthen
 its public preconditions to the Hot-only case.
@@ -233,8 +234,8 @@ The `push_frame` wrapper also verifies directly against the existing
 Its redundant trust marker is removed. The all-tier mark fallback remains
 trusted, so this is wrapper discharge rather than complete mark discharge.
 
-The next capture work must establish the general physical pool effect and
-capture-membership relation for each store-selected ingress, then compose that
+At that checkpoint, the next capture work was to establish the general physical
+pool effect and capture-membership relation for each store-selected ingress, then compose that
 effect with the canonical lemma. The new canonical lemma alone does not prove
 the trusted `runtime_capture`, mutation or mark fallbacks.
 
@@ -246,3 +247,34 @@ restore its ghost membership too before claiming `open_ingress_ok`. The checked
 `TrailStore::mark_captured` body is ghost-only; any generic dispatch change must
 still be reviewed for runtime/codegen effects. Do not weaken Trail's capture
 membership invariant to conceal this missing preservation step.
+
+### Checked physical capture for both ingress disciplines
+
+`runtime_capture` is now checked against the general `wf` precondition for
+Trail-only, Hot-only and mixed histories. Both branches call the actual
+`DiffStore::capture` method. The contract exposes the exact selected-pool
+append/no-op, unchanged other pool, capture-flag update, immutable protocol
+predicates, live contents and canonical chronological event. Outside the saved
+domain, the whole state is unchanged. No new persistent field is introduced.
+
+`ingress_capture_effect` describes the intermediate physical effect. A common
+per-frame proof reuses the existing first-capture/duplicate lemmas. Separate
+Hot and Trail header proofs preserve each representation; flag preservation and
+Cold/canonical framing complete the invariant. Canonical append then uses the
+previous checkpoint's general lemma. Solver decomposition and explicit store
+well-formedness access resolved resource failures without increasing limits.
+
+The selected capture family passes 23 obligations; the separate physical framing
+lemma passes independently. Full verification/regression evidence is recorded in
+the progress log when complete. The runtime helper's trust marker is removed;
+the set/pop/push and mark fallbacks remain unproved. General set must now compose
+this checked capture with `set_raw` and frame-local captured/outside write lemmas,
+preserving older layers and canonical reconstruction. Shared-map `capture_first`
+equality remains an explicit production-interface obligation.
+
+Trail execution now enters its store capture method rather than directly calling
+`get` and appending in Vec. The method retains unconditional duplicate append
+and performs its flag update in ghost code. Unique capture calls the same store
+primitive without passing through the Hot-only proof helper. Existing specialized
+Hot helpers remain checked. There are no new maps, buffers or traversals, but
+performance parity still requires the final benchmark gate.

@@ -3911,20 +3911,355 @@ where
         }
     }
 
+    /// Physical effect of an in-domain capture, before the canonical ghost
+    /// event is appended. Only the selected pair pool and store flags change.
+    closed spec fn ingress_capture_effect(&self, pre: Self, index: I) -> bool {
+        let trail = !pre.store.unique_capture_spec();
+        let pool = pre.pair_tier_pool(trail);
+        &&& *self == Self { store: self.store, hot_value_pool: self.hot_value_pool,
+            trail_value_pool: self.trail_value_pool, ..pre }
+        &&& self.store.wf()
+        &&& self.view() == pre.view()
+        &&& self.store.unique_capture_spec() == pre.store.unique_capture_spec()
+        &&& self.store.needs_replayed_indices_spec() == pre.store.needs_replayed_indices_spec()
+        &&& self.store.restore_entries_clear_capture_spec()
+            == pre.store.restore_entries_clear_capture_spec()
+        &&& self.store.captured() == pre.store.captured().update(index.as_nat() as int, true)
+        &&& self.pair_tier_pool(!trail) == pre.pair_tier_pool(!trail)
+        &&& self.pair_tier_pool(trail) ==
+            if trail || !pre.store.captured()[index.as_nat() as int] {
+                pool.push((pre.view()[index.as_nat() as int], index))
+            } else { pool }
+    }
+
+    /// Frame-local capture proof shared by the Hot and Trail representations.
+    #[verifier::spinoff_prover]
+    proof fn lemma_ingress_capture_frame(&self, pre: Self, index: I, trail: bool, f: int)
+        requires pre.wf(), self.ingress_capture_effect(pre, index),
+            index.as_nat() < pre.view().len(), index.as_nat() < pre.active_saved_len.as_nat(),
+            0 <= f < pre.pair_tier_count(trail),
+        ensures
+            frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(trail) + f),
+                self.pair_tier_pool(trail), self.pair_tier_start(trail, f), self.pair_tier_end(trail, f),
+                self.snapshots@[self.pair_tier_offset(trail) + f],
+                self.snapshots@[self.pair_tier_offset(trail) + f].len()),
+            !trail ==> stratum_unique::<T, I>(self.pair_tier_pool(trail),
+                self.pair_tier_start(trail, f), self.pair_tier_end(trail, f)),
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        pre.lemma_pair_tier_frame_layout(trail, f);
+        reveal(Vec::ingress_capture_effect);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::frame_partition_ok);
+        if trail { reveal(Vec::trail_repr_ok); } else { reveal(Vec::hot_repr_ok); }
+        let a = pre.pair_tier_pool(trail);
+        let b = self.pair_tier_pool(trail);
+        let lo = pre.pair_tier_start(trail, f);
+        let hi = pre.pair_tier_end(trail, f);
+        let k = pre.pair_tier_offset(trail) + f;
+        let snap = pre.snapshots@[k];
+        assert(frame_inv_range::<T, I>(pre.layer_above_at(k), a, lo, hi, snap, snap.len()));
+        assert(self.layer_above_at(k) == pre.layer_above_at(k));
+        if b == a {
+        } else if f + 1 < pre.pair_tier_count(trail) {
+            assert(self.pair_tier_end(trail, f) == hi);
+            assert forall|q: int| lo <= q < hi implies #[trigger] a[q] == b[q] by {}
+            lemma_frame_inv_range_local::<T, I>(pre.layer_above_at(k), a, b, lo, hi, snap, snap.len());
+            if !trail { lemma_stratum_unique_local::<T, I>(a, b, lo, hi); }
+        } else {
+            assert(trail == !pre.store.unique_capture_spec());
+            assert(k == pre.depth_spec() - 1);
+            assert(pre.layer_above_at(k) == pre.view());
+            assert(hi == a.len() as int);
+            assert(b == a.push((pre.view()[index.as_nat() as int], index)));
+            assert(b.subrange(0, a.len() as int) =~= a);
+            let j = index.as_nat() as int;
+            if captured_in_range::<T, I>(a, lo, hi, j as nat) {
+                lemma_frame_inv_range_append_duplicate::<T, I>(pre.view(), a, b, lo, snap, snap.len(), j);
+            } else {
+                lemma_frame_inv_range_capture_append::<T, I>(pre.view(), a, b, lo, snap, snap.len(), j);
+            }
+            if !trail {
+                assert(!pre.store.captured()[j]);
+                assert(!captured_in_range::<T, I>(a, lo, hi, j as nat));
+                lemma_stratum_unique_append::<T, I>(a, b, lo, j as nat);
+            }
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_ingress_capture_hot_repr(&self, pre: Self, index: I)
+        requires pre.wf(), self.ingress_capture_effect(pre, index),
+            index.as_nat() < pre.view().len(), index.as_nat() < pre.active_saved_len.as_nat(),
+        ensures self.hot_repr_ok(),
+    {
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::ingress_capture_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        I::lemma_min_as_nat();
+        assert(pre.depth_spec() > 0);
+        reveal(Vec::hot_repr_ok);
+        let hs = self.hot_stack@;
+        let pool = self.hot_value_pool@;
+        assert forall|f: int| 0 <= f < hs.len() implies {
+            &&& (#[trigger] hs[f]).start <= hs[f].end
+            &&& hs[f].end <= pool.len()
+            &&& hs[f].start as int <= self.phys_hot_end(f)
+            &&& self.phys_hot_end(f) <= pool.len() as int
+            &&& (f + 1 < hs.len() ==> {
+                &&& hs[f].end == hs[f + 1].start
+                &&& self.phys_hot_end(f) == hs[f + 1].start as int
+            })
+            &&& (f + 1 == hs.len() ==> self.phys_hot_end(f) == pool.len() as int)
+            &&& self.pair_tier_offset(false) + f < self.snapshots@.len()
+            &&& frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(false) + f),
+                pool, hs[f].start as int, self.phys_hot_end(f),
+                self.snapshots@[self.pair_tier_offset(false) + f],
+                self.snapshots@[self.pair_tier_offset(false) + f].len())
+            &&& stratum_unique::<T, I>(pool, hs[f].start as int, self.phys_hot_end(f))
+        } by {
+            pre.lemma_pair_tier_frame_layout(false, f);
+            self.lemma_ingress_capture_frame(pre, index, false, f);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_ingress_capture_trail_repr(&self, pre: Self, index: I)
+        requires pre.wf(), self.ingress_capture_effect(pre, index),
+            index.as_nat() < pre.view().len(), index.as_nat() < pre.active_saved_len.as_nat(),
+        ensures self.trail_repr_ok(),
+    {
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::ingress_capture_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        I::lemma_min_as_nat();
+        assert(pre.depth_spec() > 0);
+        reveal(Vec::trail_repr_ok);
+        let hs = self.trail_stack@;
+        let pool = self.trail_value_pool@;
+        assert forall|f: int| 0 <= f < hs.len() implies {
+            &&& (#[trigger] hs[f]).start <= hs[f].end
+            &&& hs[f].end <= pool.len()
+            &&& hs[f].start as int <= self.phys_trail_end(f)
+            &&& self.phys_trail_end(f) <= pool.len() as int
+            &&& (f + 1 < hs.len() ==> {
+                &&& hs[f].end == hs[f + 1].start
+                &&& self.phys_trail_end(f) == hs[f + 1].start as int
+            })
+            &&& (f + 1 == hs.len() ==> self.phys_trail_end(f) == pool.len() as int)
+            &&& self.pair_tier_offset(true) + f < self.snapshots@.len()
+            &&& frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(true) + f),
+                pool, hs[f].start as int, self.phys_trail_end(f),
+                self.snapshots@[self.pair_tier_offset(true) + f],
+                self.snapshots@[self.pair_tier_offset(true) + f].len())
+
+        } by {
+            pre.lemma_pair_tier_frame_layout(true, f);
+            self.lemma_ingress_capture_frame(pre, index, true, f);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_ingress_capture_flags(&self, pre: Self, index: I)
+        requires pre.wf(), self.ingress_capture_effect(pre, index),
+            index.as_nat() < pre.view().len(), index.as_nat() < pre.active_saved_len.as_nat(),
+        ensures self.open_ingress_ok(),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::ingress_capture_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        I::lemma_min_as_nat();
+        let trail = !pre.store.unique_capture_spec();
+        let a = pre.pair_tier_pool(trail);
+        let b = self.pair_tier_pool(trail);
+        let lo = pre.pair_tier_start(trail, pre.pair_tier_count(trail) - 1);
+        let j = index.as_nat() as int;
+        assert(pre.depth_spec() > 0);
+        assert forall|q: int| 0 <= q < self.active_saved_len.as_nat() && q < self.view().len()
+            implies (#[trigger] self.store.captured()[q])
+                == captured_in_range::<T, I>(b, lo, b.len() as int, q as nat) by {
+            assert(pre.store.captured()[q]
+                == captured_in_range::<T, I>(a, lo, a.len() as int, q as nat));
+            if b != a {
+                assert(b.subrange(0, a.len() as int) =~= a);
+                if q == j {
+                    assert(b[a.len() as int].1.as_nat() == q as nat);
+                } else {
+                    lemma_captured_in_range_append_other::<T, I>(a, b, lo, q as nat, j as nat);
+                }
+            }
+        }
+        assert forall|q: int| 0 <= q < self.view().len() && #[trigger] self.store.captured()[q]
+            implies self.depth_spec() > 0 && q < self.active_saved_len.as_nat() by {
+            if q != j { assert(pre.store.captured()[q]); }
+        }
+        assert(self.open_ingress_ok());
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_ingress_capture_preserves(&self, pre: Self, index: I)
+        requires pre.wf(), self.ingress_capture_effect(pre, index),
+            index.as_nat() < pre.view().len(), index.as_nat() < pre.active_saved_len.as_nat(),
+        ensures self.wf(),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::ingress_capture_effect);
+        reveal(Vec::frame_partition_ok);
+        assert(self.frame_partition_ok());
+        self.lemma_canonical_history_repartition(pre);
+        self.lemma_ingress_capture_trail_repr(pre, index);
+        self.lemma_ingress_capture_hot_repr(pre, index);
+        self.lemma_ingress_capture_flags(pre, index);
+        reveal(Vec::cold_repr_ok);
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            #[trigger] self.cold_reconstructs(f) by {
+            self.lemma_cold_reconstructs_transfer(pre, f);
+        }
+        assert(self.cold_repr_ok());
+        reveal(Vec::proof_compat_ok);
+        assert(self.proof_compat_ok());
+        reveal(Vec::wf);
+    }
+
+    /// The chronological ghost event sequence is absent from physical tier,
+    /// ownership and capture predicates. Keep that framing separate from the
+    /// canonical reconstruction argument.
+    #[verifier::spinoff_prover]
+    proof fn lemma_full_trail_physical_framing(&self, physical: Self)
+        requires physical.wf(), *self == (Self { full_trail: self.full_trail, ..physical }),
+        ensures self.frame_partition_ok(), self.hot_repr_ok(), self.trail_repr_ok(),
+            self.cold_repr_ok(), self.open_ingress_ok(), self.proof_compat_ok(),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::cold_reconstructs);
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        physical.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::hot_repr_ok);
+        reveal(Vec::trail_repr_ok);
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::cold_payload_ok);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::proof_compat_ok);
+        assert forall|f: int| 0 <= f < self.depth_spec() implies
+            #[trigger] self.layer_above_at(f) == physical.layer_above_at(f) by {}
+        assert(self.frame_partition_ok());
+        assert(self.hot_repr_ok());
+        assert(self.trail_repr_ok());
+        assert(self.open_ingress_ok());
+        assert(self.proof_compat_ok());
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            #[trigger] self.cold_reconstructs(f) by {
+            self.lemma_cold_reconstructs_transfer(physical, f);
+        }
+    }
+
+    /// Appending a canonical event does not change any physical representation.
+    #[verifier::spinoff_prover]
+    proof fn lemma_ingress_capture_canonical_finish(&self, physical: Self, index: I)
+        requires physical.wf(), index.as_nat() < physical.view().len(),
+            index.as_nat() < physical.active_saved_len.as_nat(),
+            *self == (Self { full_trail: self.full_trail, ..physical }),
+            self.full_trail@ == physical.full_trail@.push((physical.view()[index.as_nat() as int], index)),
+        ensures self.wf(),
+    {
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_runs_disjoint);
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        physical.lemma_wf_named_parts();
+        self.lemma_full_trail_physical_framing(physical);
+        assert(self.store.wf()) by { reveal(Vec::wf_for_snap); }
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::frame_partition_ok);
+        I::lemma_min_as_nat();
+        assert(physical.depth_spec() > 0);
+        assert(index.as_nat() < physical.snapshots@[physical.depth_spec() - 1].len());
+        assert(self.view() == physical.view());
+        assert(self.snapshots@ == physical.snapshots@);
+        assert(self.trail_frames@ == physical.trail_frames@);
+        self.lemma_canonical_capture_append(physical, index);
+        assert(self.wf_for_snap());
+        reveal(Vec::wf);
+    }
+
     /// Capture according to the immutable protocol selected by `DiffStore`.
     /// Static stores constant-fold this branch; `DynStore` dispatches through
     /// its construction-time `StoreKind` variant.
     #[inline(always)]
-    #[verifier::external_body]
-    fn runtime_capture(&mut self, index: I) {
+    fn runtime_capture(&mut self, index: I)
+        requires old(self).wf(), index.as_nat() < old(self).view().len(),
+        ensures
+            final(self).wf(), final(self).view() == old(self).view(),
+            final(self).store.unique_capture_spec() == old(self).store.unique_capture_spec(),
+            final(self).store.needs_replayed_indices_spec() == old(self).store.needs_replayed_indices_spec(),
+            final(self).store.restore_entries_clear_capture_spec()
+                == old(self).store.restore_entries_clear_capture_spec(),
+            *final(self) == (Self { store: final(self).store,
+                hot_value_pool: final(self).hot_value_pool,
+                trail_value_pool: final(self).trail_value_pool,
+                full_trail: final(self).full_trail, ..*old(self) }),
+            index.as_nat() < old(self).active_saved_len.as_nat() ==>
+                final(self).store.captured()[index.as_nat() as int]
+                && final(self).full_trail@ == old(self).full_trail@.push((old(self).view()[index.as_nat() as int], index)),
+            index.as_nat() < old(self).active_saved_len.as_nat() ==> {
+                let trail = !old(self).store.unique_capture_spec();
+                let pool = old(self).pair_tier_pool(trail);
+                &&& final(self).store.captured()
+                    == old(self).store.captured().update(index.as_nat() as int, true)
+                &&& final(self).pair_tier_pool(!trail) == old(self).pair_tier_pool(!trail)
+                &&& final(self).pair_tier_pool(trail) ==
+                    if trail || !old(self).store.captured()[index.as_nat() as int] {
+                        pool.push((old(self).view()[index.as_nat() as int], index))
+                    } else { pool }
+            },
+            index.as_nat() >= old(self).active_saved_len.as_nat() ==> *final(self) == *old(self),
+    {
+        let ghost pre = *self;
         if !TRACK || index.as_usize() >= self.active_saved_len.as_usize() {
+            proof {
+                pre.lemma_wf_named_parts();
+                reveal(Vec::open_ingress_ok);
+                reveal(Vec::frame_partition_ok);
+                I::lemma_min_as_nat();
+            }
             return;
         }
         if self.store.unique_capture() {
-            self.hot_defer_capture_checked(index);
+            self.store.capture(index, self.active_saved_len, &mut self.hot_value_pool);
         } else {
-            let old_value = self.store.get(index);
-            self.trail_value_pool.push((old_value, index));
+            self.store.capture(index, self.active_saved_len, &mut self.trail_value_pool);
+        }
+        proof {
+            self.store.lemma_wf_captured_len();
+            pre.store.lemma_wf_captured_len();
+            assert(self.store.captured() =~= pre.store.captured().update(index.as_nat() as int, true));
+            reveal(Vec::ingress_capture_effect);
+            assert(self.ingress_capture_effect(pre, index));
+            self.lemma_ingress_capture_preserves(pre, index);
+            let physical = *self;
+            self.full_trail@ = self.full_trail@.push((pre.view()[index.as_nat() as int], index));
+            self.lemma_ingress_capture_canonical_finish(physical, index);
         }
     }
 
