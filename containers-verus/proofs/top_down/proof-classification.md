@@ -400,3 +400,10 @@ Trail storage helper now proves moved Hot reconstruction/uniqueness conditionall
 on `trail_plan_matches` (source first-capture map equality plus unique payloads).
 No caller is allowed to assume that predicate; sorting/selection must establish
 it. Untouched/surviving tier and capture-state preservation remain to compose.
+
+Trail storage execution now proves full wf under `trail_plan_matches`: existing
+Hot frames, moved Hot frames, rebased Trail survivors, unchanged Cold/canonical
+history and active capture membership all compose through checked lemmas. No
+runtime or trusted-contract change supplies the matching predicate. Next prove
+that actual selection produces it, then remove the executor trust only after the
+producer/consumer chain verifies. Hot-to-Cold and policy closure remain separate.

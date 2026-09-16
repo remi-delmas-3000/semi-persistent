@@ -1650,3 +1650,57 @@ Moved-frame semantic checkpoint: full default **2444 verified, zero errors**
 tests were not repeated; the preceding storage checkpoint recorded 277 passing
 feature tests and four passing release policy tests. Literal-types/final consumer
 and CI gates remain due with migration closure, and benchmark parity remains open.
+
+## Full Trail assembly/retirement preservation under the selection contract
+
+The checked `execute_trail_plan_storage_checked` now ensures full `wf` whenever
+its input plan satisfies `trail_plan_matches`. Its executable precondition is
+unchanged. The predicate remains a proof obligation of actual selection; it is
+not assumed, stored, or supplied by a new trusted wrapper. The existing adaptive
+executor remains trusted until that producer obligation is discharged.
+
+Concrete preservation now covers:
+
+- `trail_retained_effect`: exact survivor/unchanged-field facts exported by the
+  checked transition, including the sealed Hot boundary and zero-count case.
+- `lemma_trail_retained_frame` / `lemma_trail_retained_repr`: exact rebasing
+  preserves all surviving Trail reconstruction and layout, including active top.
+- `lemma_trail_old_hot_frame`: old Hot ranges, values and uniqueness survive
+  destination append; former last Hot headers are sealed while Trail is active.
+- `lemma_trail_retained_ingress`: store state/flags remain unchanged, and rebased
+  active physical membership is equivalent to the old membership.
+- `lemma_trail_fixed_history`: canonical reconstruction, Cold representation and
+  compatibility survive unchanged history with the restored frame partition.
+- `lemma_trail_hot_header` / `lemma_trail_hot_repr`: old/new header adjacency,
+  bounds, empty-prefix cases, all Hot reconstruction and uniqueness aggregate.
+- `lemma_trail_plan_contract_at` / `lemma_trail_moved_frame`: source frame meaning
+  transfers first into the matched planned payload and then into the exact new
+  Hot range; this separates source and destination quantifiers.
+- `lemma_wf_from_named_parts`: the original complete invariant is recovered,
+  with no weakened conjunct or additional semantic assumption.
+
+Proof decomposition resolved resource failures without increasing limits. The
+assembly loop now explicitly exports first-new-header and sealed-last-header
+facts. A pointwise header accessor avoids an expanding plan-prefix trigger;
+pointwise source/destination contracts and a checked uniqueness-subrange lemma
+keep map/uniqueness quantifiers narrow. Existing verified contracts are retained.
+Targeted Trail checks: **26 verified, zero errors**
+(`/tmp/sp-d21-trail-wf12.log`). This checkpoint changes proofs/contracts only;
+execution and trust counts remain unchanged.
+
+Remaining Step 2 work includes actual first-capture selection/sorting proving
+`trail_plan_matches`, Hot-to-Cold semantic assembly/retirement, legal policy
+selection/execution, and shared-model effect exports. Full producer-to-consumer
+closure is not claimed by this conditional preservation result. Derived/group
+scope and final benchmark parity remain required.
+
+Full preservation checkpoint evidence: default and literal-types each **2457
+verified, zero errors** (`/tmp/sp-d21-trail-wf-default.log`,
+`/tmp/sp-d21-trail-wf-literal.log`); conditional composition **80 verified, zero
+errors** (`/tmp/sp-d21-trail-wf-composition.log`). Formatting/whitespace pass and
+legacy `containers/` is unchanged. Trust remains **74 default + 5 literal**.
+Runtime execution is unchanged by this proof/specification checkpoint, so tests
+were not repeated; the last runtime checkpoint recorded 277 passing feature tests
+and four release policy tests. Final consumer/CI audits and measured benchmark
+parity remain required. The next producer obligation is actual first-capture
+selection proving `trail_plan_matches`, without quadratic fallback sorting.

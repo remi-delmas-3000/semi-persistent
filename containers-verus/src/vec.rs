@@ -1610,6 +1610,19 @@ pub(crate) proof fn lemma_stratum_unique_local<T, I: IndexLike>(
     }
 }
 
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_stratum_unique_subrange<T, I: IndexLike>(a: Seq<(T, I)>, lo: int, hi: int)
+    requires 0 <= lo <= hi <= a.len(),
+        stratum_unique::<T, I>(a.subrange(lo, hi), 0, hi - lo),
+    ensures stratum_unique::<T, I>(a, lo, hi),
+{
+    assert forall|x: int, y: int| lo <= x < hi && lo <= y < hi && x != y implies
+        (#[trigger] a[x]).1.as_nat() != (#[trigger] a[y]).1.as_nat() by {
+        assert(a.subrange(lo, hi)[x - lo] == a[x]);
+        assert(a.subrange(lo, hi)[y - lo] == a[y]);
+    }
+}
+
 /// `stratum_unique` for the top stratum extended by ONE appended entry whose
 /// index has no prior hit in the stratum: the unique discipline's wf clause
 /// survives a first-write capture append.
@@ -6256,6 +6269,10 @@ where
     fn append_trail_plan_checked(&mut self, planned: &mut std::vec::Vec<std::vec::Vec<(T, I)>>)
         requires old(planned)@.len() <= old(self).trail_stack@.len(),
         ensures
+            old(planned)@.len() > 0 ==> final(self).hot_stack@[old(self).hot_stack@.len() as int].start
+                == old(self).hot_value_pool@.len(),
+            old(planned)@.len() > 0 ==> final(self).hot_stack@[final(self).hot_stack@.len() - 1].end
+                == final(self).hot_value_pool@.len(),
             *final(self) == (Self { hot_stack: final(self).hot_stack,
                 hot_value_pool: final(self).hot_value_pool, ..*old(self) }),
             final(planned)@.len() == old(planned)@.len(),
@@ -6278,6 +6295,7 @@ where
         while f < planned.len()
             invariant
                 f <= planned@.len() == plan.len(),
+                f > 0 ==> self.hot_stack@[self.hot_stack@.len() - 1].end == self.hot_value_pool@.len(),
                 plan.len() <= pre.trail_stack@.len(),
                 *self == (Self { hot_stack: self.hot_stack, hot_value_pool: self.hot_value_pool, ..pre }),
                 forall|q: int| 0 <= q < f ==> (#[trigger] planned@[q])@.len() == 0,
@@ -6398,6 +6416,376 @@ where
         if trail { reveal(Vec::trail_repr_ok); } else { reveal(Vec::hot_repr_ok); }
     }
 
+    /// Exact survivor facts exported by checked assembly/retirement. This
+    /// predicate describes a transition; it is not persistent container state.
+    closed spec fn trail_retained_effect(&self, pre: Self, count: nat) -> bool {
+        &&& count < pre.trail_stack@.len()
+        &&& *self == (Self { hot_stack: self.hot_stack, hot_value_pool: self.hot_value_pool,
+            trail_stack: self.trail_stack, trail_value_pool: self.trail_value_pool, ..pre })
+        &&& self.hot_stack@.len() == pre.hot_stack@.len() + count
+        &&& self.hot_stack@.subrange(0, pre.hot_stack@.len() as int) == pre.hot_stack@
+        &&& pre.hot_value_pool@.len() <= self.hot_value_pool@.len()
+        &&& self.hot_value_pool@.subrange(0, pre.hot_value_pool@.len() as int) == pre.hot_value_pool@
+        &&& (count == 0 ==> self.hot_value_pool@ == pre.hot_value_pool@)
+        &&& (self.hot_stack@.len() > 0 ==>
+            self.hot_stack@[self.hot_stack@.len() - 1].end == self.hot_value_pool@.len())
+        &&& self.trail_stack@.len() == pre.trail_stack@.len() - count
+        &&& self.trail_value_pool@ == pre.trail_value_pool@.subrange(
+            pre.trail_stack@[count as int].start as int, pre.trail_value_pool@.len() as int)
+        &&& forall|f: int| 0 <= f < self.trail_stack@.len() ==> {
+            let h = #[trigger] self.trail_stack@[f];
+            let old_h = pre.trail_stack@[count + f];
+            let cut = pre.trail_stack@[count as int].start;
+            &&& h.saved_len == old_h.saved_len
+            &&& h.start == old_h.start - cut
+            &&& h.end == old_h.end - cut
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_retained_frame(&self, pre: Self, count: nat, f: int)
+        requires pre.wf(), self.trail_retained_effect(pre, count),
+            0 <= f < self.trail_stack@.len(),
+        ensures
+            frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(true) + f),
+                self.trail_value_pool@, self.trail_stack@[f].start as int, self.phys_trail_end(f),
+                self.snapshots@[self.pair_tier_offset(true) + f],
+                self.snapshots@[self.pair_tier_offset(true) + f].len()),
+    {
+        hide(Vec::wf);
+        reveal(Vec::trail_retained_effect);
+        pre.lemma_trail_retirement_bounds(count);
+        pre.lemma_pair_tier_frame_layout(true, count as int + f);
+        pre.lemma_pair_tier_contract(true, count as int + f);
+        let cut = pre.trail_stack@[count as int].start as int;
+        let lo = pre.trail_stack@[count + f].start as int;
+        let hi = pre.phys_trail_end(count as int + f);
+        assert(self.phys_trail_end(f) == hi - cut);
+        let k = pre.pair_tier_offset(true) + count + f;
+        assert(self.pair_tier_offset(true) + f == k);
+        assert forall|j: nat| #[trigger] range_saved_value::<T, I>(pre.trail_value_pool@, lo, hi, j)
+            == range_saved_value::<T, I>(self.trail_value_pool@, lo - cut, hi - cut, j) by {
+            lemma_range_saved_value_retire_prefix::<T, I>(pre.trail_value_pool@, cut, lo, hi, j);
+        }
+        lemma_frame_inv_range_same_saved_map::<T, I>(pre.layer_above_at(k),
+            pre.trail_value_pool@, lo, hi, self.trail_value_pool@, lo - cut, hi - cut,
+            pre.snapshots@[k], pre.snapshots@[k].len());
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_retained_repr(&self, pre: Self, count: nat)
+        requires pre.wf(), self.trail_retained_effect(pre, count),
+        ensures self.trail_repr_ok(),
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        pre.lemma_trail_retirement_bounds(count);
+        reveal(Vec::trail_retained_effect);
+        reveal(Vec::trail_repr_ok);
+        let ts = self.trail_stack@;
+        let pool = self.trail_value_pool@;
+        let offset = self.pair_tier_offset(true);
+        assert forall|f: int| 0 <= f < ts.len() implies {
+            &&& (#[trigger] ts[f]).start <= ts[f].end
+            &&& ts[f].end <= pool.len()
+            &&& ts[f].start as int <= self.phys_trail_end(f)
+            &&& self.phys_trail_end(f) <= pool.len() as int
+            &&& (f + 1 < ts.len() ==> {
+                &&& ts[f].end == ts[f + 1].start
+                &&& self.phys_trail_end(f) == ts[f + 1].start as int
+            })
+            &&& (f + 1 == ts.len() ==> self.phys_trail_end(f) == pool.len() as int)
+            &&& frame_inv_range::<T, I>(self.layer_above_at(offset + f), pool,
+                ts[f].start as int, self.phys_trail_end(f), self.snapshots@[offset + f],
+                self.snapshots@[offset + f].len())
+            &&& offset + f < self.snapshots@.len()
+        } by {
+            pre.lemma_pair_tier_frame_layout(true, count as int + f);
+            self.lemma_trail_retained_frame(pre, count, f);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_old_hot_frame(&self, pre: Self, count: nat, f: int)
+        requires pre.wf(), self.trail_retained_effect(pre, count),
+            0 <= f < pre.hot_stack@.len(),
+        ensures self.phys_frame_inv_range_holds(f),
+            stratum_unique::<T, I>(self.hot_value_pool@, self.phys_hot_start(f), self.phys_hot_end(f)),
+    {
+        hide(Vec::wf);
+        reveal(Vec::trail_retained_effect);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::hot_repr_ok);
+        assert(self.hot_stack@[f] == pre.hot_stack@[f]);
+        assert(self.phys_hot_end(f) == pre.phys_hot_end(f));
+        pre.lemma_pair_tier_frame_layout(false, f);
+        pre.lemma_pair_tier_contract(false, f);
+        let lo = pre.phys_hot_start(f);
+        let hi = pre.phys_hot_end(f);
+        assert forall|q: int| lo <= q < hi implies
+            #[trigger] self.hot_value_pool@[q] == pre.hot_value_pool@[q] by {
+            assert(self.hot_value_pool@.subrange(0, pre.hot_value_pool@.len() as int)[q]
+                == self.hot_value_pool@[q]);
+        }
+        assert forall|j: nat| #[trigger] range_saved_value::<T, I>(pre.hot_value_pool@, lo, hi, j)
+            == range_saved_value::<T, I>(self.hot_value_pool@, lo, hi, j) by {
+            lemma_range_saved_value_local::<T, I>(pre.hot_value_pool@, self.hot_value_pool@, lo, hi, j);
+        }
+        let k = pre.cold_stack@.len() + f;
+        lemma_frame_inv_range_same_saved_map::<T, I>(pre.layer_above_at(k), pre.hot_value_pool@, lo, hi,
+            self.hot_value_pool@, lo, hi, pre.snapshots@[k], pre.snapshots@[k].len());
+        lemma_stratum_unique_local::<T, I>(pre.hot_value_pool@, self.hot_value_pool@, lo, hi);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_retained_ingress(&self, pre: Self, count: nat)
+        requires pre.wf(), self.trail_retained_effect(pre, count),
+        ensures self.open_ingress_ok(),
+    {
+        hide(Vec::wf);
+        reveal(Vec::trail_retained_effect);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::open_ingress_ok);
+        let old_f = pre.trail_stack@.len() - 1;
+        let f = self.trail_stack@.len() - 1;
+        pre.lemma_trail_retirement_bounds(count);
+        pre.lemma_pair_tier_frame_layout(true, old_f);
+        let cut = pre.trail_stack@[count as int].start as int;
+        let lo = pre.trail_stack@[old_f].start as int;
+        assert(count + f == old_f);
+        assert forall|j: int| 0 <= j < self.active_saved_len.as_nat() && j < self.view().len() implies
+            (#[trigger] self.store.captured()[j]) == captured_in_range::<T, I>(self.trail_value_pool@,
+                self.trail_stack@[f].start as int, self.trail_value_pool@.len() as int, j as nat) by {
+            lemma_range_saved_value_retire_prefix::<T, I>(pre.trail_value_pool@,
+                cut, lo, pre.trail_value_pool@.len() as int, j as nat);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_assembly_sealed(&self, pre: Self, plan: Seq<std::vec::Vec<(T, I)>>)
+        requires pre.open_ingress_ok(), plan.len() < pre.trail_stack@.len(),
+            self.hot_value_pool@ == pre.hot_value_pool@ + Self::trail_plan_prefix(plan, plan.len() as int),
+            self.hot_stack@.len() == pre.hot_stack@.len() + plan.len(),
+            self.hot_stack@.subrange(0, pre.hot_stack@.len() as int) == pre.hot_stack@,
+            plan.len() > 0 ==> self.hot_stack@[self.hot_stack@.len() - 1].end == self.hot_value_pool@.len(),
+        ensures
+            plan.len() == 0 ==> self.hot_value_pool@ == pre.hot_value_pool@,
+            self.hot_stack@.len() > 0 ==>
+                self.hot_stack@[self.hot_stack@.len() - 1].end == self.hot_value_pool@.len(),
+    {
+        if plan.len() == 0 {
+            reveal(Vec::trail_plan_prefix);
+            reveal(Vec::open_ingress_ok);
+            assert(self.hot_stack@ =~= pre.hot_stack@);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_fixed_history(&self, pre: Self, count: nat)
+        requires pre.wf(), self.trail_retained_effect(pre, count), self.frame_partition_ok(),
+        ensures self.wf_for_snap(), self.cold_repr_ok(), self.proof_compat_ok(),
+    {
+        hide(Vec::wf);
+        reveal(Vec::trail_retained_effect);
+        pre.lemma_wf_named_parts();
+        assert(self.store.wf()) by { reveal(Vec::wf_for_snap); }
+        self.lemma_canonical_history_repartition(pre);
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::cold_payload_ok);
+        reveal(Vec::proof_compat_ok);
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            #[trigger] self.cold_reconstructs(f) by {
+            self.lemma_cold_reconstructs_transfer(pre, f);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_plan_header_at(&self, pre: Self, plan: Seq<std::vec::Vec<(T, I)>>, q: int)
+        requires 0 <= q < plan.len(),
+            forall|r: int| 0 <= r < plan.len() ==> {
+                let h = #[trigger] self.hot_stack@[pre.hot_stack@.len() + r];
+                &&& h.start == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, r).len()
+                &&& h.end == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, r + 1).len()
+            },
+        ensures self.hot_stack@[pre.hot_stack@.len() + q].start
+                == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q).len(),
+            self.hot_stack@[pre.hot_stack@.len() + q].end
+                == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q + 1).len(),
+    {}
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_hot_header(&self, pre: Self, plan: Seq<std::vec::Vec<(T, I)>>, f: int)
+        requires pre.wf(), self.trail_retained_effect(pre, plan.len()),
+            self.frame_partition_ok(),
+            plan.len() > 0 ==> self.hot_stack@[pre.hot_stack@.len() as int].start == pre.hot_value_pool@.len(),
+            self.hot_value_pool@ == pre.hot_value_pool@ + Self::trail_plan_prefix(plan, plan.len() as int),
+            forall|q: int| 0 <= q < plan.len() ==> {
+                let h = #[trigger] self.hot_stack@[pre.hot_stack@.len() + q];
+                &&& h.start == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q).len()
+                &&& h.end == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q + 1).len()
+            },
+            0 <= f < self.hot_stack@.len(),
+        ensures
+            self.hot_stack@[f].start <= self.hot_stack@[f].end <= self.hot_value_pool@.len(),
+            self.hot_stack@[f].start as int <= self.phys_hot_end(f) <= self.hot_value_pool@.len(),
+            f + 1 < self.hot_stack@.len() ==> self.hot_stack@[f].end == self.hot_stack@[f + 1].start,
+            f == 0 ==> self.hot_stack@[f].start == 0,
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::trail_retained_effect);
+        reveal(Vec::open_ingress_ok);
+        if f < pre.hot_stack@.len() {
+            pre.lemma_pair_tier_frame_layout(false, f);
+            assert(self.hot_stack@[f] == pre.hot_stack@[f]);
+            if f + 1 == pre.hot_stack@.len() && plan.len() > 0 {
+                reveal(Vec::trail_plan_prefix);
+                assert(self.hot_stack@[f + 1].start == pre.hot_value_pool@.len());
+            }
+        } else {
+            let q = f - pre.hot_stack@.len();
+            self.lemma_trail_plan_header_at(pre, plan, q);
+            Self::lemma_trail_plan_frame_range(plan, plan.len() as int, q);
+            assert(self.hot_stack@[f].start == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q).len());
+            assert(self.hot_stack@[f].end == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q + 1).len());
+            if f + 1 < self.hot_stack@.len() {
+                self.lemma_trail_plan_header_at(pre, plan, q + 1);
+                assert(self.hot_stack@[f + 1].start == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q + 1).len());
+            }
+            if f == 0 {
+                reveal(Vec::trail_plan_prefix);
+                reveal(Vec::hot_repr_ok);
+            }
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_hot_repr(&self, pre: Self, plan: Seq<std::vec::Vec<(T, I)>>)
+        requires pre.wf(), self.trail_retained_effect(pre, plan.len()),
+            self.frame_partition_ok(),
+            plan.len() > 0 ==> self.hot_stack@[pre.hot_stack@.len() as int].start == pre.hot_value_pool@.len(),
+            self.hot_value_pool@ == pre.hot_value_pool@ + Self::trail_plan_prefix(plan, plan.len() as int),
+            forall|q: int| 0 <= q < plan.len() ==> {
+                let h = #[trigger] self.hot_stack@[pre.hot_stack@.len() + q];
+                &&& h.start == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q).len()
+                &&& h.end == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q + 1).len()
+            },
+            forall|f: int| 0 <= f < self.hot_stack@.len() ==>
+                #[trigger] self.phys_frame_inv_range_holds(f)
+                && stratum_unique::<T, I>(self.hot_value_pool@, self.phys_hot_start(f), self.phys_hot_end(f)),
+        ensures self.hot_repr_ok(),
+    {
+        hide(Vec::wf);
+        hide(frame_inv_range);
+        reveal(Vec::trail_retained_effect);
+        assert(self.hot_stack@.len() == 0 ==> self.hot_value_pool@.len() == 0) by {
+            pre.lemma_wf_named_parts();
+            reveal(Vec::hot_repr_ok);
+        }
+        reveal(Vec::hot_repr_ok);
+        reveal(Vec::frame_partition_ok);
+        let hs = self.hot_stack@;
+        let pool = self.hot_value_pool@;
+        assert forall|f: int| 0 <= f < hs.len() implies {
+            &&& (#[trigger] hs[f]).start <= hs[f].end
+            &&& hs[f].end <= pool.len()
+            &&& hs[f].start as int <= self.phys_hot_end(f)
+            &&& self.phys_hot_end(f) <= pool.len() as int
+            &&& (f + 1 < hs.len() ==> {
+                &&& hs[f].end == hs[f + 1].start
+                &&& self.phys_hot_end(f) == hs[f + 1].start as int
+            })
+            &&& (f + 1 == hs.len() ==> self.phys_hot_end(f) == pool.len() as int)
+            &&& stratum_unique::<T, I>(pool, hs[f].start as int, self.phys_hot_end(f))
+            &&& self.phys_frame_inv_range_holds(f)
+            &&& self.cold_stack@.len() + f < self.snapshots@.len()
+        } by {
+            self.lemma_trail_hot_header(pre, plan, f);
+            assert(self.phys_frame_inv_range_holds(f));
+            assert(stratum_unique::<T, I>(pool, hs[f].start as int, self.phys_hot_end(f)));
+            assert(f + 1 < hs.len() ==> self.phys_hot_end(f) == hs[f + 1].start as int);
+            assert(self.cold_stack@.len() + f < self.snapshots@.len());
+
+        }
+        if self.hot_stack@.len() > 0 { self.lemma_trail_hot_header(pre, plan, 0); }
+    }
+
+    proof fn lemma_wf_from_named_parts(&self)
+        requires self.wf_for_snap(), self.hot_repr_ok(), self.trail_repr_ok(),
+            self.cold_repr_ok(), self.open_ingress_ok(), self.proof_compat_ok(),
+        ensures self.wf(),
+    { reveal(Vec::wf); }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_plan_contract_at(&self, plan: Seq<std::vec::Vec<(T, I)>>, f: int)
+        requires self.wf(), self.trail_plan_matches(plan), 0 <= f < plan.len(),
+        ensures
+            frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(true) + f),
+                plan[f]@, 0, plan[f]@.len() as int,
+                self.snapshots@[self.pair_tier_offset(true) + f],
+                self.snapshots@[self.pair_tier_offset(true) + f].len()),
+            stratum_unique::<T, I>(plan[f]@, 0, plan[f]@.len() as int),
+    {
+        hide(Vec::wf);
+        hide(range_saved_value);
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        reveal(Vec::trail_plan_matches);
+        self.lemma_pair_tier_frame_layout(true, f);
+        self.lemma_pair_tier_contract(true, f);
+        assert forall|j: nat| #[trigger] range_saved_value::<T, I>(self.trail_value_pool@,
+            self.trail_stack@[f].start as int, self.phys_trail_end(f), j)
+            == range_saved_value::<T, I>(plan[f]@, 0, plan[f]@.len() as int, j) by {
+            assert(range_saved_value::<T, I>(plan[f]@, 0, plan[f]@.len() as int, j)
+                == range_saved_value::<T, I>(self.trail_value_pool@,
+                    self.trail_stack@[f].start as int, self.phys_trail_end(f), j));
+        }
+        let k = self.pair_tier_offset(true) + f;
+        lemma_frame_inv_range_same_saved_map::<T, I>(self.layer_above_at(k), self.trail_value_pool@,
+            self.trail_stack@[f].start as int, self.phys_trail_end(f), plan[f]@, 0, plan[f]@.len() as int,
+            self.snapshots@[k], self.snapshots@[k].len());
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_trail_moved_frame(&self, pre: Self, plan: Seq<std::vec::Vec<(T, I)>>, i: int)
+        requires pre.hot_stack@.len() <= i < self.hot_stack@.len(), pre.wf(), pre.trail_plan_matches(plan), self.trail_retained_effect(pre, plan.len()),
+            self.frame_partition_ok(),
+            plan.len() > 0 ==> self.hot_stack@[pre.hot_stack@.len() as int].start == pre.hot_value_pool@.len(),
+            self.hot_value_pool@ == pre.hot_value_pool@ + Self::trail_plan_prefix(plan, plan.len() as int),
+            forall|f: int| 0 <= f < plan.len() ==> {
+                let h = #[trigger] self.hot_stack@[pre.hot_stack@.len() + f];
+                &&& h.start == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, f).len()
+                &&& h.end == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, f + 1).len()
+            },
+            forall|f: int, j: nat| 0 <= f < plan.len() ==> {
+                let h = self.hot_stack@[pre.hot_stack@.len() + f];
+                range_saved_value::<T, I>(self.hot_value_pool@, h.start as int, h.end as int, j)
+                    == #[trigger] range_saved_value::<T, I>(plan[f]@, 0, plan[f]@.len() as int, j)
+            },
+        ensures self.phys_frame_inv_range_holds(i),
+            stratum_unique::<T, I>(self.hot_value_pool@, self.phys_hot_start(i), self.phys_hot_end(i)),
+    {
+        hide(Vec::wf);
+        hide(frame_inv_range);
+        hide(range_saved_value);
+        hide(stratum_unique);
+        reveal(Vec::trail_retained_effect);
+        let f = i - pre.hot_stack@.len();
+        let h = self.hot_stack@[i];
+        self.lemma_trail_plan_header_at(pre, plan, f);
+        self.lemma_trail_hot_header(pre, plan, i);
+        Self::lemma_trail_plan_frame_range(plan, plan.len() as int, f);
+        assert(self.hot_value_pool@.subrange(h.start as int, h.end as int) =~= plan[f]@);
+        assert(self.phys_hot_end(i) == h.end);
+        pre.lemma_trail_plan_contract_at(plan, f);
+        let k = pre.pair_tier_offset(true) + f;
+        assert(self.layer_above_at(self.cold_stack@.len() + i) == pre.layer_above_at(k));
+        lemma_frame_inv_range_same_saved_map::<T, I>(pre.layer_above_at(k), plan[f]@, 0, plan[f]@.len() as int,
+            self.hot_value_pool@, h.start as int, h.end as int, pre.snapshots@[k], pre.snapshots@[k].len());
+        lemma_stratum_unique_subrange::<T, I>(self.hot_value_pool@, h.start as int, h.end as int);
+    }
+
     /// A closed Trail prefix moves to the end of Hot without changing logical
     /// frame positions. Payload meaning is supplied separately by plan selection.
     #[verifier::spinoff_prover]
@@ -6406,6 +6794,15 @@ where
     )
         requires old(self).wf(), old(planned)@.len() < old(self).trail_stack@.len(),
         ensures
+            old(self).trail_plan_matches(old(planned)@) ==> final(self).wf(),
+            final(self).open_ingress_ok(),
+            forall|f: int| 0 <= f < old(self).hot_stack@.len() ==> {
+                &&& #[trigger] final(self).phys_frame_inv_range_holds(f)
+                &&& stratum_unique::<T, I>(final(self).hot_value_pool@,
+                    final(self).phys_hot_start(f), final(self).phys_hot_end(f))
+            },
+            final(self).trail_retained_effect(*old(self), old(planned)@.len()),
+            final(self).trail_repr_ok(),
             old(self).trail_plan_matches(old(planned)@) ==>
                 forall|f: int| 0 <= f < old(planned)@.len() ==> {
                     &&& #[trigger] final(self).phys_frame_inv_range_holds(old(self).hot_stack@.len() + f)
@@ -6449,6 +6846,9 @@ where
             },
     {
         hide(Vec::wf);
+        hide(frame_inv_range);
+        hide(stratum_unique);
+
         hide(Vec::wf_for_snap);
         hide(Vec::hot_repr_ok);
         hide(Vec::trail_repr_ok);
@@ -6464,6 +6864,18 @@ where
         self.append_trail_plan_checked(planned);
         self.retire_trail_prefix_checked(count);
         proof {
+            self.lemma_trail_assembly_sealed(pre, plan);
+            assert(self.trail_retained_effect(pre, count as nat)) by {
+                reveal(Vec::trail_retained_effect);
+                assert(self.hot_value_pool@.subrange(0, pre.hot_value_pool@.len() as int) =~= pre.hot_value_pool@);
+            }
+            self.lemma_trail_retained_repr(pre, count as nat);
+            self.lemma_trail_retained_ingress(pre, count as nat);
+            assert forall|f: int| 0 <= f < pre.hot_stack@.len() implies {
+                &&& #[trigger] self.phys_frame_inv_range_holds(f)
+                &&& stratum_unique::<T, I>(self.hot_value_pool@, self.phys_hot_start(f), self.phys_hot_end(f))
+            } by { self.lemma_trail_old_hot_frame(pre, count as nat, f); }
+
             self.lemma_trail_migration_partition(pre, count as nat);
             assert forall|f: int, j: nat| 0 <= f < plan.len() implies {
                 let h = self.hot_stack@[pre.hot_stack@.len() + f];
@@ -6475,41 +6887,20 @@ where
                 assert(self.hot_value_pool@.subrange(h.start as int, h.end as int) =~= plan[f]@);
                 lemma_range_saved_value_subrange::<T, I>(self.hot_value_pool@, h.start as int, h.end as int, j);
             }
+            self.lemma_trail_fixed_history(pre, count as nat);
             if pre.trail_plan_matches(plan) {
-                reveal(Vec::trail_plan_matches);
-                assert forall|f: int| 0 <= f < plan.len() implies {
-                    &&& #[trigger] self.phys_frame_inv_range_holds(pre.hot_stack@.len() + f)
-                    &&& stratum_unique::<T, I>(self.hot_value_pool@,
-                        self.phys_hot_start(pre.hot_stack@.len() + f),
-                        self.phys_hot_end(pre.hot_stack@.len() + f))
-                } by {
-                    let i = pre.hot_stack@.len() + f;
-                    let h = self.hot_stack@[i];
-                    Self::lemma_trail_plan_frame_range(plan, count as int, f);
-                    assert(self.hot_value_pool@.subrange(h.start as int, h.end as int) =~= plan[f]@);
-                    assert(self.phys_hot_end(i) == h.end);
-                    pre.lemma_pair_tier_frame_layout(true, f);
-                    pre.lemma_pair_tier_contract(true, f);
-                    let k = pre.pair_tier_offset(true) + f;
-                    assert(self.layer_above_at(self.cold_stack@.len() + i) == pre.layer_above_at(k));
-                    assert forall|j: nat| #[trigger] range_saved_value::<T, I>(pre.trail_value_pool@,
-                        pre.trail_stack@[f].start as int, pre.phys_trail_end(f), j)
-                        == range_saved_value::<T, I>(self.hot_value_pool@, h.start as int, h.end as int, j) by {
-                        assert(range_saved_value::<T, I>(plan[f]@, 0, plan[f]@.len() as int, j)
-                            == range_saved_value::<T, I>(pre.trail_value_pool@,
-                                pre.trail_stack@[f].start as int, pre.phys_trail_end(f), j));
-                    }
-                    lemma_frame_inv_range_same_saved_map::<T, I>(pre.layer_above_at(k),
-                        pre.trail_value_pool@, pre.trail_stack@[f].start as int, pre.phys_trail_end(f),
-                        self.hot_value_pool@, h.start as int, h.end as int,
-                        pre.snapshots@[k], pre.snapshots@[k].len());
-                    assert(stratum_unique::<T, I>(plan[f]@, 0, plan[f]@.len() as int));
-                    assert forall|x: int, y: int| h.start <= x < h.end && h.start <= y < h.end && x != y implies
-                        (#[trigger] self.hot_value_pool@[x]).1.as_nat() != (#[trigger] self.hot_value_pool@[y]).1.as_nat() by {
-                        assert(self.hot_value_pool@[x] == plan[f]@[x - h.start]);
-                        assert(self.hot_value_pool@[y] == plan[f]@[y - h.start]);
-                    }
+                assert forall|i: int| pre.hot_stack@.len() <= i < self.hot_stack@.len() implies
+                    #[trigger] self.phys_frame_inv_range_holds(i)
+                    && stratum_unique::<T, I>(self.hot_value_pool@, self.phys_hot_start(i), self.phys_hot_end(i)) by {
+                    self.lemma_trail_moved_frame(pre, plan, i);
                 }
+                assert forall|f: int| 0 <= f < self.hot_stack@.len() implies
+                    #[trigger] self.phys_frame_inv_range_holds(f)
+                    && stratum_unique::<T, I>(self.hot_value_pool@, self.phys_hot_start(f), self.phys_hot_end(f)) by {
+                    assert(self.phys_frame_inv_range_holds(f));
+                }
+                self.lemma_trail_hot_repr(pre, plan);
+                self.lemma_wf_from_named_parts();
             }
         }
     }
