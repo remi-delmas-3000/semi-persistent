@@ -1482,3 +1482,49 @@ policy matrix with `PROPTEST_CASES=1024` **4 passed**
 reference is unchanged. Trust counts are unchanged. Literal-types verification,
 consumer tests and final audits remain due with completed migration; benchmark
 parity remains an open acceptance criterion.
+
+## Adaptive Trail plan assembly with owned bulk transfer
+
+The clone-specification gap in adaptive publication is resolved for this phase
+without new trust or stronger payload bounds. The sole caller already owned the
+accepted Trail payload vectors and dropped them immediately after execution.
+It now passes mutable ownership to the executor, which publishes payloads through
+checked `Vec::append` bulk moves. The planner's count/report is computed before
+consumption and no emptied payload is read afterward. Destination behavior and
+source-frame order are preserved; no intermediate buffer or per-cell replacement
+loop is introduced for adaptive payloads.
+
+`append_owned_hot_frame_checked` proves exact concatenation, emptied temporary
+payload, exact header/saved length and full optional saved-value equality. Its
+contract also exports executable length bounds obtained from actual Vec length
+calls; these justify header-offset casts in the multi-frame proof.
+
+`append_trail_plan_checked` checks the actual assembly loop. A local recursive
+`trail_plan_prefix` spec describes concatenation of accepted payloads without
+storing history. The loop proves exact destination contents, unchanged destination
+header prefix, exact appended header order/saved lengths/start/end offsets,
+consumed-empty payloads, and unchanged source/other Self fields. Early failed
+attempts isolated missing header-preservation instantiations and length bounds;
+explicit facts resolved them without raising solver limits.
+
+Targeted evidence: owned append **1 verified, zero errors**
+(`/tmp/sp-d21-migrate-owned-bounds2.log`); plan loop **2 verified, zero errors**
+(`/tmp/sp-d21-migrate-plan5.log`). The caller still must prove the plan matches
+source first captures and establish retirement/rebasing and final wf. Trust
+counts remain unchanged; no policy or migration closure is claimed yet.
+
+Next retirement implementation candidate: pinned vstd supplies exact overlapping
+`[T]::copy_within` semantics in `std_specs/slice.rs`, whereas `Vec::drain` is not
+specified there. For these Copy payloads and headers, a bulk prefix shift followed
+by truncation can preserve the current linear memory movement without repeated
+removal or new trust. Prove exact retained suffix and header rebasing, then connect
+the assembly and retirement phases. This candidate remains to be implemented and
+validated, including final performance gates.
+
+Owned assembly checkpoint evidence: full default **2432 verified, zero errors**
+(`/tmp/sp-d21-migrate-owned-default.log`); feature tests **277 passed, 10 ignored**
+(`/tmp/sp-d21-migrate-owned-features.log`); release differential policy matrix,
+`PROPTEST_CASES=1024`, **4 passed** (`/tmp/sp-d21-migrate-owned-policy.log`).
+Formatting/whitespace checks pass; legacy `containers/` is unchanged. Trust and
+axiom counts are unchanged. Literal-types verification, consumer/final audits and
+benchmark parity remain required with migration closure.

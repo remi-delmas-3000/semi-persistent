@@ -370,3 +370,10 @@ are in bounds and are precisely the first captures, then source retirement and
 representation preservation. The adaptive `extend_from_slice` path remains open:
 the pinned vstd specification exposes `cloned`, not generic payload equality;
 preserve the existing bulk copy and payload capabilities while resolving it.
+
+Adaptive publication now uses checked owned `Vec::append` through
+`append_owned_hot_frame_checked` and `append_trail_plan_checked`. This resolves
+the previously recorded clone-contract gap for payload assembly while retaining
+bulk transfer and generic Copy payloads. The loop proves exact pool concatenation,
+header ordering/offsets, unchanged source fields and emptied temporaries. Plan
+selection semantics and source retirement/global invariants remain pending.

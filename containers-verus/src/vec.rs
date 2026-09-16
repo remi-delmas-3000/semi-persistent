@@ -6006,28 +6006,139 @@ where
         headers.push(crate::frame::HotFrame { saved_len, start, end: pool.len() });
     }
 
+    /// Consume an owned planner payload with the standard bulk move. No clone
+    /// law is needed: the planner drops these temporary vectors after execution.
+    #[verifier::spinoff_prover]
+    fn append_owned_hot_frame_checked(
+        pool: &mut std::vec::Vec<(T, I)>, headers: &mut std::vec::Vec<crate::frame::HotFrame<I>>,
+        entries: &mut std::vec::Vec<(T, I)>, saved_len: I,
+    )
+        ensures
+            old(pool)@.len() <= usize::MAX,
+            final(pool)@.len() <= usize::MAX,
+            final(pool)@ == old(pool)@ + old(entries)@,
+            final(entries)@.len() == 0,
+            final(headers)@ == old(headers)@.push(crate::frame::HotFrame {
+                saved_len, start: old(pool)@.len() as usize, end: final(pool)@.len() as usize,
+            }),
+            forall|j: nat| #[trigger] range_saved_value::<T, I>(final(pool)@,
+                old(pool)@.len() as int, final(pool)@.len() as int, j)
+                == range_saved_value::<T, I>(old(entries)@, 0, old(entries)@.len() as int, j),
+    {
+        let start = pool.len();
+        let ghost payload = entries@;
+        pool.append(entries);
+        headers.push(crate::frame::HotFrame { saved_len, start, end: pool.len() });
+        proof {
+            assert(pool@.subrange(start as int, pool@.len() as int) =~= payload);
+            assert forall|j: nat| #[trigger] range_saved_value::<T, I>(pool@,
+                start as int, pool@.len() as int, j)
+                == range_saved_value::<T, I>(payload, 0, payload.len() as int, j) by {
+                lemma_range_saved_value_subrange::<T, I>(pool@, start as int, pool@.len() as int, j);
+            }
+        }
+    }
+
+    closed spec fn trail_plan_prefix(plan: Seq<std::vec::Vec<(T, I)>>, n: int) -> Seq<(T, I)>
+        recommends 0 <= n <= plan.len(),
+        decreases n,
+    {
+        if n <= 0 { Seq::empty() }
+        else { Self::trail_plan_prefix(plan, n - 1) + plan[n - 1]@ }
+    }
+
+    /// Assemble accepted planner payloads in source-frame order. Retirement
+    /// follows separately; this phase deliberately keeps the source unchanged.
+    #[verifier::spinoff_prover]
+    fn append_trail_plan_checked(&mut self, planned: &mut std::vec::Vec<std::vec::Vec<(T, I)>>)
+        requires old(planned)@.len() <= old(self).trail_stack@.len(),
+        ensures
+            *final(self) == (Self { hot_stack: final(self).hot_stack,
+                hot_value_pool: final(self).hot_value_pool, ..*old(self) }),
+            final(planned)@.len() == old(planned)@.len(),
+            forall|f: int| 0 <= f < final(planned)@.len() ==>
+                (#[trigger] final(planned)@[f])@.len() == 0,
+            final(self).hot_value_pool@ == old(self).hot_value_pool@
+                + Self::trail_plan_prefix(old(planned)@, old(planned)@.len() as int),
+            final(self).hot_stack@.len() == old(self).hot_stack@.len() + old(planned)@.len(),
+            final(self).hot_stack@.subrange(0, old(self).hot_stack@.len() as int) == old(self).hot_stack@,
+            forall|f: int| 0 <= f < old(planned)@.len() ==> {
+                let h = #[trigger] final(self).hot_stack@[old(self).hot_stack@.len() + f];
+                &&& h.saved_len == old(self).trail_stack@[f].saved_len
+                &&& h.start == old(self).hot_value_pool@.len() + Self::trail_plan_prefix(old(planned)@, f).len()
+                &&& h.end == old(self).hot_value_pool@.len() + Self::trail_plan_prefix(old(planned)@, f + 1).len()
+            },
+    {
+        let ghost pre = *self;
+        let ghost plan = planned@;
+        let mut f = 0usize;
+        while f < planned.len()
+            invariant
+                f <= planned@.len() == plan.len(),
+                plan.len() <= pre.trail_stack@.len(),
+                *self == (Self { hot_stack: self.hot_stack, hot_value_pool: self.hot_value_pool, ..pre }),
+                forall|q: int| 0 <= q < f ==> (#[trigger] planned@[q])@.len() == 0,
+                forall|q: int| f <= q < plan.len() ==> #[trigger] planned@[q] == plan[q],
+                self.hot_value_pool@ == pre.hot_value_pool@ + Self::trail_plan_prefix(plan, f as int),
+                self.hot_stack@.len() == pre.hot_stack@.len() + f,
+                self.hot_stack@.subrange(0, pre.hot_stack@.len() as int) == pre.hot_stack@,
+                forall|q: int| 0 <= q < f ==> {
+                    let h = #[trigger] self.hot_stack@[pre.hot_stack@.len() + q];
+                    &&& h.saved_len == pre.trail_stack@[q].saved_len
+                    &&& h.start == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q).len()
+                    &&& h.end == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q + 1).len()
+                },
+            decreases planned.len() - f,
+        {
+            proof {
+                assert(self.hot_value_pool@.len() == pre.hot_value_pool@.len()
+                    + Self::trail_plan_prefix(plan, f as int).len());
+            }
+            let ghost old_headers = self.hot_stack@;
+            let frame = self.trail_stack[f];
+            Self::append_owned_hot_frame_checked(
+                &mut self.hot_value_pool, &mut self.hot_stack, &mut planned[f], frame.saved_len);
+            proof {
+                reveal_with_fuel(Vec::trail_plan_prefix, 2);
+                assert forall|q: int| 0 <= q <= f implies {
+                    let h = #[trigger] self.hot_stack@[pre.hot_stack@.len() + q];
+                    &&& h.saved_len == pre.trail_stack@[q].saved_len
+                    &&& h.start == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q).len()
+                    &&& h.end == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q + 1).len()
+                } by {
+                    if q < f {
+                        assert(self.hot_stack@[pre.hot_stack@.len() + q]
+                            == old_headers[pre.hot_stack@.len() + q]);
+                    } else {
+                        assert(q == f);
+                        let h = self.hot_stack@[pre.hot_stack@.len() + q];
+                        assert(h.saved_len == pre.trail_stack@[q].saved_len);
+                        assert(h.start == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q).len());
+                        assert(h.end == pre.hot_value_pool@.len() + Self::trail_plan_prefix(plan, q).len() + plan[q]@.len());
+
+                        assert(Self::trail_plan_prefix(plan, q + 1)
+                            == Self::trail_plan_prefix(plan, q) + plan[q]@);
+                    }
+                }
+            }
+            f += 1;
+        }
+        proof { reveal(Vec::trail_plan_prefix); }
+    }
+
     /// Execute first-capture payloads retained by the adaptive planner without
     /// rescanning or resorting accepted Trail frames.
     #[verifier::external_body]
     #[cold]
     #[inline(never)]
-    fn runtime_execute_trail_plan(&mut self, planned: &[std::vec::Vec<(T, I)>]) {
+    fn runtime_execute_trail_plan(&mut self, planned: &mut std::vec::Vec<std::vec::Vec<(T, I)>>) {
         let count = planned.len();
         if count == 0 {
             return;
         }
         let closed = self.trail_stack.len().saturating_sub(1);
         assert!(count <= closed, "adaptive Trail plan must name a closed prefix");
-        for (f, entries) in planned.iter().enumerate() {
-            let frame = self.trail_stack[f];
-            let start = self.hot_value_pool.len();
-            self.hot_value_pool.extend_from_slice(entries);
-            self.hot_stack.push(crate::frame::HotFrame {
-                saved_len: frame.saved_len,
-                start,
-                end: self.hot_value_pool.len(),
-            });
-        }
+        self.append_trail_plan_checked(planned);
         let cut = self.trail_stack[count].start;
         self.trail_value_pool.drain(0..cut);
         self.trail_stack.drain(0..count);
@@ -6485,7 +6596,7 @@ where
             trail_count += 1;
         }
         report.migrated_trail_frames = trail_plan.len();
-        self.runtime_execute_trail_plan(&trail_plan);
+        self.runtime_execute_trail_plan(&mut trail_plan);
         drop(trail_plan);
 
         // Trail -> Hot is executed first. Recompute exact pressure before the
