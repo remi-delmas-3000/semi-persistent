@@ -1438,3 +1438,47 @@ Step 1 remains open for configured/forced mark's actual policy dependencies and
 shared-model interface closure. Next discharge closed-prefix Trail-to-Hot and
 Hot-to-Cold migration and assembly, then their policy selectors/execution. Derived
 and parallel closure, final consumer/CI audits and benchmark parity remain due.
+
+## Trail migration: exact selected-position publication
+
+`append_selected_hot_frame_checked` now implements the ordinary Trail migration's
+existing per-position payload copy and header append. The checked contract gives
+exact destination concatenation, exact header append (saved length and bounds),
+and full optional saved-value equality between the appended physical range and
+the selected payload for every index. Empty selections and nonempty destination
+prefixes are covered. Source pools, sorting and selected-position computation
+remain in the existing caller; this helper introduces no intermediate payload or
+new traversal. Indexed iteration replaces the original iterator loop over the
+same selected positions.
+
+Targeted result: **2 verified, zero errors**
+(`/tmp/sp-d21-migrate-selected-map.log`). The caller's selection-bounds premise
+still needs discharge together with earliest-capture selection, uniqueness,
+source retirement/rebasing, and the final global invariant. No migration or policy
+trust marker has been removed by this partial assembly proof.
+
+The adaptive bulk-copy path was inspected but remains unchanged. In the pinned
+vstd `std_specs/vec.rs`, `Vec::extend_from_slice` guarantees exact length/prefix
+but only `cloned(source, destination)` for appended cells. An attempted exact
+payload equality proof failed (`/tmp/sp-d21-migrate-hot-append.log`). Generic
+`T: Copy` alone does not expose the needed equality through that specification.
+No stronger payload bound, assumed clone identity, trusted wrapper, or slower
+replacement copy loop was introduced to conceal this gap. Resolve that library
+contract/implementation connection before claiming adaptive payload assembly.
+
+Follow-up ownership audit: `runtime_execute_trail_plan` has one caller in
+`runtime_apply_adaptive`; it records the frame count before execution and drops
+`trail_plan` immediately afterward. No payload is read after execution. This
+supports a concrete next step: consume each owned temporary frame through the
+already specified `Vec::append`, preserving bulk transfer and avoiding the weak
+clone contract. Validate that change and its performance before treating adaptive
+assembly as closed. This is an implementation option, not a proved result yet.
+
+Selected publication checkpoint validation: full default **2428 verified, zero
+errors** (`/tmp/sp-d21-migrate-append-default.log`); feature tests **277 passed,
+10 ignored** (`/tmp/sp-d21-migrate-append-features.log`); release differential
+policy matrix with `PROPTEST_CASES=1024` **4 passed**
+(`/tmp/sp-d21-migrate-append-policy.log`). Formatting/whitespace pass and the legacy
+reference is unchanged. Trust counts are unchanged. Literal-types verification,
+consumer tests and final audits remain due with completed migration; benchmark
+parity remains an open acceptance criterion.

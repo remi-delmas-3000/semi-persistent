@@ -360,3 +360,13 @@ Next mark obligations:
   `mark_defer_checked` composes shrinking and opening for explicit Defer marks.
 - Compose actual rollover and reclamation afterward. Mark remains incomplete
   until its policy dependencies and shared-model effects are discharged.
+
+### Concrete migration assembly checkpoint
+
+Reuse `append_selected_hot_frame_checked` for ordinary Trail-to-Hot publication:
+exact destination concatenation/header bounds and full saved-value map equality
+verify. Its actual caller now uses it. Still prove the caller's selected positions
+are in bounds and are precisely the first captures, then source retirement and
+representation preservation. The adaptive `extend_from_slice` path remains open:
+the pinned vstd specification exposes `cloned`, not generic payload equality;
+preserve the existing bulk copy and payload capabilities while resolving it.

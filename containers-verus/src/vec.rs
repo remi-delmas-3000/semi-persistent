@@ -5941,15 +5941,9 @@ where
             }
             selected.sort_unstable();
 
-            let start = self.hot_value_pool.len();
-            for &position in selected.iter() {
-                self.hot_value_pool.push(entries[position]);
-            }
-            self.hot_stack.push(crate::frame::HotFrame {
-                saved_len: frame.saved_len,
-                start,
-                end: self.hot_value_pool.len(),
-            });
+            Self::append_selected_hot_frame_checked(
+                &mut self.hot_value_pool, &mut self.hot_stack,
+                entries, selected.as_slice(), frame.saved_len);
         }
         let cut = self.trail_stack[count].start;
         self.trail_value_pool.drain(0..cut);
@@ -5958,6 +5952,58 @@ where
             frame.start -= cut;
             frame.end -= cut;
         }
+    }
+
+    /// Append the selected chronological positions without changing the
+    /// existing per-position copy loop or constructing an intermediate payload.
+    #[verifier::spinoff_prover]
+    fn append_selected_hot_frame_checked(
+        pool: &mut std::vec::Vec<(T, I)>, headers: &mut std::vec::Vec<crate::frame::HotFrame<I>>,
+        entries: &[(T, I)], selected: &[usize], saved_len: I,
+    )
+        requires forall|q: int| 0 <= q < selected@.len() ==>
+            (#[trigger] selected@[q]) < entries@.len(),
+        ensures
+            final(pool)@ == old(pool)@ + selected@.map_values(|p: usize| entries@[p as int]),
+            forall|j: nat| #[trigger] range_saved_value::<T, I>(final(pool)@,
+                old(pool)@.len() as int, final(pool)@.len() as int, j)
+                == range_saved_value::<T, I>(selected@.map_values(|p: usize| entries@[p as int]),
+                    0, selected@.len() as int, j),
+            final(headers)@ == old(headers)@.push(crate::frame::HotFrame {
+                saved_len, start: old(pool)@.len() as usize, end: final(pool)@.len() as usize,
+            }),
+    {
+        let start = pool.len();
+        let mut q = 0usize;
+        while q < selected.len()
+            invariant
+                q <= selected@.len(),
+                start == old(pool)@.len(),
+                headers@ == old(headers)@,
+                forall|k: int| 0 <= k < selected@.len() ==>
+                    (#[trigger] selected@[k]) < entries@.len(),
+                pool@ == old(pool)@ + selected@.subrange(0, q as int)
+                    .map_values(|p: usize| entries@[p as int]),
+            decreases selected.len() - q,
+        {
+            pool.push(entries[selected[q]]);
+            q += 1;
+            proof {
+                assert(selected@.subrange(0, q as int).map_values(|p: usize| entries@[p as int])
+                    =~= selected@.subrange(0, q as int - 1).map_values(|p: usize| entries@[p as int])
+                        .push(entries@[selected@[q as int - 1] as int]));
+            }
+        }
+        proof {
+            let payload = selected@.map_values(|p: usize| entries@[p as int]);
+            assert(pool@.subrange(start as int, pool@.len() as int) =~= payload);
+            assert forall|j: nat| #[trigger] range_saved_value::<T, I>(pool@,
+                start as int, pool@.len() as int, j)
+                == range_saved_value::<T, I>(payload, 0, payload.len() as int, j) by {
+                lemma_range_saved_value_subrange::<T, I>(pool@, start as int, pool@.len() as int, j);
+            }
+        }
+        headers.push(crate::frame::HotFrame { saved_len, start, end: pool.len() });
     }
 
     /// Execute first-capture payloads retained by the adaptive planner without
