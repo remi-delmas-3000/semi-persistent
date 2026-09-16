@@ -111,8 +111,10 @@ The former trusted `runtime_set_fallback` used a Hot-only helper under the weake
 runtime test `unique_capture()`. That gap is now discharged: the checked body
 calls general `runtime_capture`, then `set_raw`, and proves pair, canonical,
 Cold and capture-state preservation. Existing specialized Hot proofs remain.
-Pop, push/regrowth and mark still need their general implementation proofs;
-the capture/set results do not discharge those callers.
+Push/regrowth and pop now also have checked general implementations. The
+regrowth path restores capture membership for both store disciplines. Mark
+still needs its general implementation proof; none of these mutation results
+discharges the policy or complete shared-model adapter obligations.
 
 ### Public guards and payload capabilities
 
@@ -175,7 +177,7 @@ scheduled for deletion or replacement solely because a new model exists.
 | Capacity-only reclamation proofs | Reuse | Instantiate unchanged relevant sequences, protocol and canonical projection |
 | `cold_encode::append_sorted`, `append_cold_sorted_checked` | Adapt | Existing run/input mapping and prefix contracts are useful; expose complete map equality, including absence and source coverage, in the local/pool interface |
 | Hot-only capture/set/push/pop/mark proofs | Reuse for their scope; adapt for general case | Retain their checked scope; derive shared-map effects and all-tier preservation rather than claiming Hot-only preconditions cover mixed histories |
-| Trusted all-tier mutation/mark fallbacks | Unproved implementation to discharge | Prove actual execution against capture/raw mutation/open-frame contracts; do not transfer trust into new wrappers |
+| All-tier mutation/mark fallbacks | Mutation bodies discharged; mark pending | Capture/set/push/pop now preserve the general invariant through actual store methods. Mark/open-frame execution and shared-model operation effects still need concrete discharge; no trust was transferred into new wrappers |
 | Trusted Trail dedup/sort/migrations and configured/adaptive execution | Unproved implementation to discharge | Exact local map transforms, pool append, source-plan identity, retirement/rebasing and eligibility; compose through sequence theorem |
 | Cold survivor promotion / former restore fallback | Discharged | Checked decoder, exact source prefixes, both destination representations, shared-map equality and finalization compose in `restore_cold_survivor_checked`; obsolete trusted dispatcher removed; full verification and regression gates passed |
 | Old specialized Hot-defer reconstruction proofs | Preserve | Useful verified specialization; no need to remove it to establish the all-tier theorem |
@@ -238,7 +240,8 @@ pool effect and capture-membership relation for each store-selected ingress, the
 effect with the canonical lemma. The new canonical lemma alone does not prove
 the trusted `runtime_capture`, mutation or mark fallbacks.
 
-The regrowth audit also exposes a concrete ghost-state obligation:
+The regrowth audit at that checkpoint exposed a concrete ghost-state obligation
+(now discharged by the push/pop checkpoint below):
 `TrailStore::push` appends a clear ghost capture flag, whereas
 `runtime_push_fallback` calls `mark_captured` only for unique stores. Regrowth
 below the saved length already has a physical capture, so the Trail branch must
@@ -309,3 +312,40 @@ when regrowing into the active saved domain for Trail as well as Hot, while
 retaining dead-flag behavior in untracked stores. Pop requires checked capture
 before contraction. Mark, migration and the production shared-map interface
 remain separate obligations.
+
+### Checked mixed-tier push/regrowth and pop
+
+`runtime_push_fallback` and `runtime_pop_fallback` now have checked bodies.
+Push preserves every history field and grows live contents by one cell. The
+existing grow-layer lemma preserves each physical and canonical frame. The
+reentered-cell lemma proves that a saved-domain index absent from the old live
+layer must already be captured. Regrowth restores that membership through the
+existing `mark_captured` hook for both disciplines; Trail's hook is ghost-only.
+Untracked flags retain their existing dead-state contract.
+
+Pop captures a disappearing saved-domain cell through the checked general
+capture helper, then consumes `DiffStore::pop`. The last-cell contraction lemma
+preserves physical and canonical reconstruction, and the newer-layer transfer
+preserves older Cold history. Empty pop returns without mutation. Saved-domain
+index conversion is proved successful from the existing active-length bound.
+
+Selected push and pop families verify 18 and 12 obligations respectively.
+Full-gate evidence is recorded in the progress log when complete. Neither
+implementation adds a persistent history, buffer or traversal. The push runtime
+guard no longer restricts membership restoration to unique stores; performance
+parity for that dispatch change remains part of the final benchmark gate.
+
+Next mark obligations:
+
+- `runtime_push_frame` and its trusted fallback currently omit TRACK from their
+  preconditions, although adding a frame cannot preserve `wf` for an untracked
+  Vec. Both concrete callers (`push_frame_with_options`, `push_frame`) already
+  require TRACK. Propagate that premise through the internal helpers, preserving
+  public guards and error behavior rather than weakening the invariant.
+- Replace the fallback's Hot-only explicit-Defer shortcut with a checked general
+  opening operation. A unique ingress tier does not imply absence of Cold history.
+- Supply `prepare_mark` with a borrowed active pair range covering every set flag,
+  then prove sealing/opening with cleared flags, exact snapshot/boundary append,
+  and the old newest layer transferred from live to the equal new snapshot.
+- Compose actual rollover and reclamation afterward. Mark remains incomplete
+  until its policy dependencies and shared-model effects are discharged.

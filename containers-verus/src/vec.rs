@@ -4474,8 +4474,264 @@ where
         }
     }
 
+    /// Push preserves all history and restores membership when a removed
+    /// saved-domain column reenters live storage. Untracked flags remain dead.
+    closed spec fn push_effect(&self, pre: Self, value: T) -> bool {
+        &&& *self == Self { store: self.store, ..pre }
+        &&& self.store.wf()
+        &&& self.view() == pre.view().push(value)
+        &&& (TRACK ==> self.store.captured() == pre.store.captured().push(
+            pre.view().len() < pre.active_saved_len.as_nat()))
+        &&& self.store.unique_capture_spec() == pre.store.unique_capture_spec()
+        &&& self.store.needs_replayed_indices_spec() == pre.store.needs_replayed_indices_spec()
+        &&& self.store.restore_entries_clear_capture_spec()
+            == pre.store.restore_entries_clear_capture_spec()
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_push_pair_frame(&self, pre: Self, value: T, trail: bool, f: int)
+        requires pre.wf(), self.push_effect(pre, value),
+            0 <= f < pre.pair_tier_count(trail),
+        ensures frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(trail) + f),
+            self.pair_tier_pool(trail), self.pair_tier_start(trail, f), self.pair_tier_end(trail, f),
+            self.snapshots@[self.pair_tier_offset(trail) + f],
+            self.snapshots@[self.pair_tier_offset(trail) + f].len()),
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        pre.lemma_pair_tier_frame_layout(trail, f);
+        reveal(Vec::push_effect);
+        if trail { reveal(Vec::trail_repr_ok); } else { reveal(Vec::hot_repr_ok); }
+        let k = pre.pair_tier_offset(trail) + f;
+        let pool = pre.pair_tier_pool(trail);
+        let lo = pre.pair_tier_start(trail, f);
+        let hi = pre.pair_tier_end(trail, f);
+        let snap = pre.snapshots@[k];
+        assert(frame_inv_range::<T, I>(pre.layer_above_at(k), pool, lo, hi, snap, snap.len()));
+        if k + 1 < pre.depth_spec() {
+            assert(self.layer_above_at(k) == pre.layer_above_at(k));
+        } else {
+            lemma_frame_inv_range_grow_layer::<T, I>(pre.view(), self.view(), pool,
+                lo, hi, snap, snap.len());
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_push_canonical_frame(&self, pre: Self, value: T, k: int)
+        requires pre.wf(), self.push_effect(pre, value), 0 <= k < pre.depth_spec(),
+        ensures frame_inv_range::<T, I>(self.layer_above_at(k), self.full_trail@,
+            self.g_start(k), self.g_end(k), self.snapshots@[k], self.snapshots@[k].len()),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(frame_inv_range);
+        reveal(Vec::push_effect);
+        pre.lemma_canonical_frame_at(k);
+        assert(self.g_start(k) == pre.g_start(k));
+        assert(self.g_end(k) == pre.g_end(k));
+        if k + 1 < pre.depth_spec() {
+            assert(self.layer_above_at(k) == pre.layer_above_at(k));
+        } else {
+            assert(pre.layer_above_at(k) == pre.view());
+            assert(self.layer_above_at(k) == self.view());
+            lemma_frame_inv_range_grow_layer::<T, I>(pre.view(), self.view(), pre.full_trail@,
+                pre.g_start(k), pre.g_end(k), pre.snapshots@[k], pre.snapshots@[k].len());
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_push_hot_repr(&self, pre: Self, value: T)
+        requires pre.wf(), self.push_effect(pre, value),
+        ensures self.hot_repr_ok(),
+    {
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::push_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::hot_repr_ok);
+        let hs = self.hot_stack@;
+        let pool = self.hot_value_pool@;
+        assert forall|f: int| 0 <= f < hs.len() implies {
+            &&& (#[trigger] hs[f]).start <= hs[f].end
+            &&& hs[f].end <= pool.len()
+            &&& hs[f].start as int <= self.phys_hot_end(f)
+            &&& self.phys_hot_end(f) <= pool.len() as int
+            &&& (f + 1 < hs.len() ==> {
+                &&& hs[f].end == hs[f + 1].start
+                &&& self.phys_hot_end(f) == hs[f + 1].start as int
+            })
+            &&& (f + 1 == hs.len() ==> self.phys_hot_end(f) == pool.len() as int)
+            &&& self.pair_tier_offset(false) + f < self.snapshots@.len()
+            &&& frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(false) + f),
+                pool, hs[f].start as int, self.phys_hot_end(f),
+                self.snapshots@[self.pair_tier_offset(false) + f],
+                self.snapshots@[self.pair_tier_offset(false) + f].len())
+            &&& stratum_unique::<T, I>(pool, hs[f].start as int, self.phys_hot_end(f))
+        } by {
+            pre.lemma_pair_tier_frame_layout(false, f);
+            self.lemma_push_pair_frame(pre, value, false, f);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_push_trail_repr(&self, pre: Self, value: T)
+        requires pre.wf(), self.push_effect(pre, value),
+        ensures self.trail_repr_ok(),
+    {
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::push_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::trail_repr_ok);
+        let hs = self.trail_stack@;
+        let pool = self.trail_value_pool@;
+        assert forall|f: int| 0 <= f < hs.len() implies {
+            &&& (#[trigger] hs[f]).start <= hs[f].end
+            &&& hs[f].end <= pool.len()
+            &&& hs[f].start as int <= self.phys_trail_end(f)
+            &&& self.phys_trail_end(f) <= pool.len() as int
+            &&& (f + 1 < hs.len() ==> {
+                &&& hs[f].end == hs[f + 1].start
+                &&& self.phys_trail_end(f) == hs[f + 1].start as int
+            })
+            &&& (f + 1 == hs.len() ==> self.phys_trail_end(f) == pool.len() as int)
+            &&& self.pair_tier_offset(true) + f < self.snapshots@.len()
+            &&& frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(true) + f),
+                pool, hs[f].start as int, self.phys_trail_end(f),
+                self.snapshots@[self.pair_tier_offset(true) + f],
+                self.snapshots@[self.pair_tier_offset(true) + f].len())
+
+        } by {
+            pre.lemma_pair_tier_frame_layout(true, f);
+            self.lemma_push_pair_frame(pre, value, true, f);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_push_canonical(&self, pre: Self, value: T)
+        requires pre.wf(), self.push_effect(pre, value),
+        ensures self.wf_for_snap(),
+    {
+        hide(Vec::wf);
+        hide(frame_inv_range);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::push_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::wf_for_snap);
+        assert forall|k: int| 0 <= k < self.depth_spec() implies
+            #[trigger] frame_inv_range::<T, I>(self.layer_above_at(k), self.full_trail@,
+                self.g_start(k), self.g_end(k), self.snapshots@[k], self.snapshots@[k].len()) by {
+            self.lemma_push_canonical_frame(pre, value, k);
+        }
+    }
+
+    /// A saved-domain cell absent from live storage cannot be inherited: the
+    /// selected ingress frame must already contain its saved value.
+    #[verifier::spinoff_prover]
+    proof fn lemma_push_reentered_capture(&self)
+        requires self.wf(), self.view().len() < self.active_saved_len.as_nat(),
+        ensures self.depth_spec() > 0,
+            captured_in_range::<T, I>(self.pair_tier_pool(!self.store.unique_capture_spec()),
+                self.pair_tier_start(!self.store.unique_capture_spec(),
+                    self.pair_tier_count(!self.store.unique_capture_spec()) - 1),
+                self.pair_tier_pool(!self.store.unique_capture_spec()).len() as int, self.view().len()),
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::frame_partition_ok);
+        I::lemma_min_as_nat();
+        assert(self.depth_spec() > 0);
+        let trail = !self.store.unique_capture_spec();
+        let f = self.pair_tier_count(trail) - 1;
+        self.lemma_pair_tier_frame_layout(trail, f);
+        if trail { reveal(Vec::trail_repr_ok); } else { reveal(Vec::hot_repr_ok); }
+        let k = self.depth_spec() - 1;
+        assert(self.pair_tier_offset(trail) + f == k);
+        let pool = self.pair_tier_pool(trail);
+        let lo = self.pair_tier_start(trail, f);
+        lemma_frame_inv_arm_at::<T, I>(self.view(), pool, lo, pool.len() as int,
+            self.snapshots@[k], self.snapshots@[k].len(), self.view().len() as int);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_push_flags(&self, pre: Self, value: T)
+        requires pre.wf(), self.push_effect(pre, value),
+        ensures self.open_ingress_ok(),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::push_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        self.store.lemma_wf_captured_len();
+        if pre.view().len() < pre.active_saved_len.as_nat() {
+            pre.lemma_push_reentered_capture();
+        }
+        let trail = !pre.store.unique_capture_spec();
+        let pool = pre.pair_tier_pool(trail);
+        let lo = pre.pair_tier_start(trail, pre.pair_tier_count(trail) - 1);
+        assert forall|q: int| self.depth_spec() > 0 && 0 <= q < self.active_saved_len.as_nat()
+            && q < self.view().len() implies
+            (#[trigger] self.store.captured()[q])
+                == captured_in_range::<T, I>(pool, lo, pool.len() as int, q as nat) by {
+            if q < pre.view().len() {
+                assert(self.store.captured()[q] == pre.store.captured()[q]);
+            } else {
+                assert(q == pre.view().len() as int);
+                assert(pre.view().len() < pre.active_saved_len.as_nat());
+            }
+        }
+        assert forall|q: int| TRACK && 0 <= q < self.view().len() && #[trigger] self.store.captured()[q]
+            implies self.depth_spec() > 0 && q < self.active_saved_len.as_nat() by {
+            if q < pre.view().len() {
+                assert(pre.store.captured()[q]);
+            } else {
+                assert(q == pre.view().len() as int);
+                assert(pre.view().len() < pre.active_saved_len.as_nat());
+            }
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_push_preserves(&self, pre: Self, value: T)
+        requires pre.wf(), self.push_effect(pre, value),
+        ensures self.wf(),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::cold_reconstructs);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::push_effect);
+        self.lemma_push_canonical(pre, value);
+        self.lemma_push_hot_repr(pre, value);
+        self.lemma_push_trail_repr(pre, value);
+        self.lemma_push_flags(pre, value);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::cold_payload_ok);
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            #[trigger] self.cold_reconstructs(f) by {
+            assert(f + 1 < pre.depth_spec());
+            self.lemma_cold_reconstructs_layer_transfer(pre, f);
+        }
+        assert(self.cold_repr_ok());
+        reveal(Vec::proof_compat_ok);
+        reveal(Vec::wf);
+    }
+
+    #[verifier::spinoff_prover]
     #[inline(always)]
-    #[verifier::external_body]
     fn runtime_push_fallback(&mut self, value: T)
         requires
             old(self).wf(),
@@ -4485,14 +4741,33 @@ where
             final(self).wf(),
             final(self).view() == old(self).view().push(value),
             final(self).snapshots_view() == old(self).snapshots_view(),
+            *final(self) == (Self { store: final(self).store, ..*old(self) }),
+            final(self).store.unique_capture_spec() == old(self).store.unique_capture_spec(),
+            final(self).store.needs_replayed_indices_spec() == old(self).store.needs_replayed_indices_spec(),
+            final(self).store.restore_entries_clear_capture_spec()
+                == old(self).store.restore_entries_clear_capture_spec(),
     {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        let ghost pre = *self;
+        proof {
+            assert(self.store.wf()) by { reveal(Vec::wf); reveal(Vec::wf_for_snap); }
+            self.store.lemma_wf_captured_len();
+        }
         let old_len = self.store.len();
         self.store.push(value);
         if TRACK
             && old_len.as_usize() < self.active_saved_len.as_usize()
-            && self.store.unique_capture()
         {
             self.store.mark_captured(old_len);
+        }
+        proof {
+            self.store.lemma_wf_captured_len();
+            assert(TRACK ==> self.store.captured() =~= pre.store.captured().push(
+                pre.view().len() < pre.active_saved_len.as_nat()));
+            reveal(Vec::push_effect);
+            assert(self.push_effect(pre, value));
+            self.lemma_push_preserves(pre, value);
         }
     }
 
@@ -4691,8 +4966,225 @@ where
         r
     }
 
+    closed spec fn pop_effect(&self, pre: Self) -> bool {
+        &&& *self == Self { store: self.store, ..pre }
+        &&& self.store.wf()
+        &&& self.view() == pre.view().drop_last()
+        &&& (TRACK ==> self.store.captured() == pre.store.captured().drop_last())
+        &&& self.store.unique_capture_spec() == pre.store.unique_capture_spec()
+        &&& self.store.needs_replayed_indices_spec() == pre.store.needs_replayed_indices_spec()
+        &&& self.store.restore_entries_clear_capture_spec()
+            == pre.store.restore_entries_clear_capture_spec()
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_pop_pair_frame(&self, pre: Self, trail: bool, f: int)
+        requires pre.wf(), self.pop_effect(pre), pre.view().len() > 0,
+            pre.view().len() - 1 < pre.active_saved_len.as_nat() ==>
+                pre.store.captured()[pre.view().len() - 1],
+            0 <= f < pre.pair_tier_count(trail),
+        ensures frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(trail) + f),
+            self.pair_tier_pool(trail), self.pair_tier_start(trail, f), self.pair_tier_end(trail, f),
+            self.snapshots@[self.pair_tier_offset(trail) + f],
+            self.snapshots@[self.pair_tier_offset(trail) + f].len()),
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        pre.lemma_pair_tier_frame_layout(trail, f);
+        reveal(Vec::pop_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        if trail { reveal(Vec::trail_repr_ok); } else { reveal(Vec::hot_repr_ok); }
+        let k = pre.pair_tier_offset(trail) + f;
+        let pool = pre.pair_tier_pool(trail);
+        let lo = pre.pair_tier_start(trail, f);
+        let hi = pre.pair_tier_end(trail, f);
+        let snap = pre.snapshots@[k];
+        assert(frame_inv_range::<T, I>(pre.layer_above_at(k), pool, lo, hi, snap, snap.len()));
+        if k + 1 < pre.depth_spec() {
+            assert(self.layer_above_at(k) == pre.layer_above_at(k));
+        } else {
+            assert(k == pre.depth_spec() - 1);
+            assert(trail == !pre.store.unique_capture_spec());
+            assert(f == pre.pair_tier_count(trail) - 1);
+            assert(pre.active_saved_len.as_nat() == snap.len());
+            if self.view().len() < snap.len() {
+                assert(captured_in_range::<T, I>(pool, lo, hi, self.view().len()));
+            }
+            lemma_frame_inv_range_pop_last::<T, I>(pre.view(), self.view(), pool, lo, hi, snap, snap.len());
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_pop_canonical_frame(&self, pre: Self, k: int)
+        requires pre.wf(), self.pop_effect(pre), pre.view().len() > 0,
+            pre.view().len() - 1 < pre.active_saved_len.as_nat() ==>
+                captured_in_range::<T, I>(pre.full_trail@, pre.g_start(pre.depth_spec() - 1),
+                    pre.full_trail@.len() as int, (pre.view().len() - 1) as nat),
+            0 <= k < pre.depth_spec(),
+        ensures frame_inv_range::<T, I>(self.layer_above_at(k), self.full_trail@,
+            self.g_start(k), self.g_end(k), self.snapshots@[k], self.snapshots@[k].len()),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(frame_inv_range);
+        reveal(Vec::pop_effect);
+        pre.lemma_canonical_frame_at(k);
+        assert(self.g_start(k) == pre.g_start(k));
+        assert(self.g_end(k) == pre.g_end(k));
+        if k + 1 < pre.depth_spec() {
+            assert(self.layer_above_at(k) == pre.layer_above_at(k));
+        } else {
+            assert(k == pre.depth_spec() - 1);
+            assert(pre.g_end(k) == pre.full_trail@.len() as int);
+            assert(pre.layer_above_at(k) == pre.view());
+            assert(self.layer_above_at(k) == self.view());
+            lemma_frame_inv_range_pop_last::<T, I>(pre.view(), self.view(), pre.full_trail@,
+                pre.g_start(k), pre.g_end(k), pre.snapshots@[k], pre.snapshots@[k].len());
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_pop_hot_repr(&self, pre: Self)
+        requires pre.wf(), self.pop_effect(pre),
+            pre.view().len() > 0,
+            ((pre.view().len() - 1) as nat) < pre.active_saved_len.as_nat() ==> pre.store.captured()[pre.view().len() - 1],
+        ensures self.hot_repr_ok(),
+    {
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::pop_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::hot_repr_ok);
+        let hs = self.hot_stack@;
+        let pool = self.hot_value_pool@;
+        assert forall|f: int| 0 <= f < hs.len() implies {
+            &&& (#[trigger] hs[f]).start <= hs[f].end
+            &&& hs[f].end <= pool.len()
+            &&& hs[f].start as int <= self.phys_hot_end(f)
+            &&& self.phys_hot_end(f) <= pool.len() as int
+            &&& (f + 1 < hs.len() ==> {
+                &&& hs[f].end == hs[f + 1].start
+                &&& self.phys_hot_end(f) == hs[f + 1].start as int
+            })
+            &&& (f + 1 == hs.len() ==> self.phys_hot_end(f) == pool.len() as int)
+            &&& self.pair_tier_offset(false) + f < self.snapshots@.len()
+            &&& frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(false) + f),
+                pool, hs[f].start as int, self.phys_hot_end(f),
+                self.snapshots@[self.pair_tier_offset(false) + f],
+                self.snapshots@[self.pair_tier_offset(false) + f].len())
+            &&& stratum_unique::<T, I>(pool, hs[f].start as int, self.phys_hot_end(f))
+        } by {
+            pre.lemma_pair_tier_frame_layout(false, f);
+            self.lemma_pop_pair_frame(pre, false, f);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_pop_trail_repr(&self, pre: Self)
+        requires pre.wf(), self.pop_effect(pre),
+            pre.view().len() > 0,
+            ((pre.view().len() - 1) as nat) < pre.active_saved_len.as_nat() ==> pre.store.captured()[pre.view().len() - 1],
+        ensures self.trail_repr_ok(),
+    {
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::pop_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::trail_repr_ok);
+        let hs = self.trail_stack@;
+        let pool = self.trail_value_pool@;
+        assert forall|f: int| 0 <= f < hs.len() implies {
+            &&& (#[trigger] hs[f]).start <= hs[f].end
+            &&& hs[f].end <= pool.len()
+            &&& hs[f].start as int <= self.phys_trail_end(f)
+            &&& self.phys_trail_end(f) <= pool.len() as int
+            &&& (f + 1 < hs.len() ==> {
+                &&& hs[f].end == hs[f + 1].start
+                &&& self.phys_trail_end(f) == hs[f + 1].start as int
+            })
+            &&& (f + 1 == hs.len() ==> self.phys_trail_end(f) == pool.len() as int)
+            &&& self.pair_tier_offset(true) + f < self.snapshots@.len()
+            &&& frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(true) + f),
+                pool, hs[f].start as int, self.phys_trail_end(f),
+                self.snapshots@[self.pair_tier_offset(true) + f],
+                self.snapshots@[self.pair_tier_offset(true) + f].len())
+
+        } by {
+            pre.lemma_pair_tier_frame_layout(true, f);
+            self.lemma_pop_pair_frame(pre, true, f);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_pop_canonical(&self, pre: Self)
+        requires pre.wf(), self.pop_effect(pre),
+            pre.view().len() > 0,
+            ((pre.view().len() - 1) as nat) < pre.active_saved_len.as_nat() ==>
+                captured_in_range::<T, I>(pre.full_trail@, pre.g_start(pre.depth_spec() - 1),
+                    pre.full_trail@.len() as int, ((pre.view().len() - 1) as nat)),
+        ensures self.wf_for_snap(),
+    {
+        hide(Vec::wf);
+        hide(frame_inv_range);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::pop_effect);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::wf_for_snap);
+        assert forall|k: int| 0 <= k < self.depth_spec() implies
+            #[trigger] frame_inv_range::<T, I>(self.layer_above_at(k), self.full_trail@,
+                self.g_start(k), self.g_end(k), self.snapshots@[k], self.snapshots@[k].len()) by {
+            self.lemma_pop_canonical_frame(pre, k);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_pop_preserves(&self, pre: Self)
+        requires pre.wf(), self.pop_effect(pre),
+            pre.view().len() > 0,
+            ((pre.view().len() - 1) as nat) < pre.active_saved_len.as_nat() ==>
+                pre.store.captured()[pre.view().len() - 1]
+                && captured_in_range::<T, I>(pre.full_trail@, pre.g_start(pre.depth_spec() - 1),
+                    pre.full_trail@.len() as int, ((pre.view().len() - 1) as nat)),
+        ensures self.wf(),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::cold_reconstructs);
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::pop_effect);
+        self.lemma_pop_canonical(pre);
+        self.lemma_pop_hot_repr(pre);
+        self.lemma_pop_trail_repr(pre);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+        self.store.lemma_wf_captured_len();
+        assert(self.open_ingress_ok());
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::cold_payload_ok);
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            #[trigger] self.cold_reconstructs(f) by {
+            assert(f + 1 < pre.depth_spec());
+            assert(self.layer_above_at(f) == pre.layer_above_at(f));
+            self.lemma_cold_reconstructs_layer_transfer(pre, f);
+        }
+        assert(self.cold_repr_ok());
+        reveal(Vec::proof_compat_ok);
+        reveal(Vec::wf);
+    }
+
+    #[verifier::spinoff_prover]
     #[inline(always)]
-    #[verifier::external_body]
     fn runtime_pop_fallback(&mut self) -> (r: Option<T>)
         requires
             old(self).wf(),
@@ -4709,6 +5201,18 @@ where
                 &&& final(self).view() == old(self).view().drop_last()
             },
     {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        let ghost pre = *self;
+        proof {
+            assert(self.store.wf()) by { reveal(Vec::wf); reveal(Vec::wf_for_snap); }
+            assert(!TRACK ==> self.active_saved_len.as_nat() == 0) by {
+                pre.lemma_wf_named_parts();
+                reveal(Vec::open_ingress_ok);
+                reveal(Vec::frame_partition_ok);
+                I::lemma_min_as_nat();
+            }
+        }
         let len = self.store.raw_len();
         if len == 0 {
             return None;
@@ -4716,9 +5220,30 @@ where
         if TRACK && len - 1 < self.active_saved_len.as_usize() {
             if let Some(index) = I::try_from_usize(len - 1) {
                 self.runtime_capture(index);
+                proof {
+                    pre.lemma_capture_domain(index);
+                    let q = pre.full_trail@.len() as int;
+                    assert(self.full_trail@[q].1.as_nat() == (len - 1) as nat);
+                    assert(captured_in_range::<T, I>(self.full_trail@,
+                        self.g_start(self.depth_spec() - 1), self.full_trail@.len() as int,
+                        (len - 1) as nat));
+                }
+            } else {
+                proof {
+                    self.active_saved_len.lemma_as_nat_bounded();
+                    assert(false);
+                }
             }
         }
-        self.store.pop()
+        let ghost captured = *self;
+        proof { assert(self.store.wf()) by { reveal(Vec::wf); reveal(Vec::wf_for_snap); } }
+        let r = self.store.pop();
+        proof {
+            reveal(Vec::pop_effect);
+            assert(self.pop_effect(captured));
+            self.lemma_pop_preserves(captured);
+        }
+        r
     }
 
     #[inline(always)]
@@ -4954,14 +5479,39 @@ where
         }
     }
 
+    #[verifier::spinoff_prover]
+    proof fn lemma_canonical_frame_contract_at(&self, k: int)
+        requires self.wf_for_snap(), 0 <= k < self.depth_spec(),
+        ensures self.frame_inv_range_holds(k),
+    {
+        hide(frame_inv_range);
+        reveal(Vec::wf_for_snap);
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_canonical_frame_length_at(&self, k: int)
+        requires self.frame_partition_ok(), self.open_ingress_ok(), 0 <= k < self.depth_spec(),
+        ensures k < self.snapshots@.len(),
+            k + 1 == self.depth_spec() ==> self.active_saved_len.as_nat() == self.snapshots@[k].len(),
+    {
+        hide(captured_in_range);
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::open_ingress_ok);
+    }
+
     /// Pointwise access avoids unfolding every canonical stratum at a write.
+    #[verifier::spinoff_prover]
     proof fn lemma_canonical_frame_at(&self, k: int)
         requires self.wf(), 0 <= k < self.depth_spec(),
         ensures self.frame_inv_range_holds(k), k < self.snapshots@.len(),
             k + 1 == self.depth_spec() ==> self.active_saved_len.as_nat() == self.snapshots@[k].len(),
     {
-        reveal(Vec::frame_partition_ok);
-        reveal(Vec::open_ingress_ok);
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(frame_inv_range);
+        self.lemma_wf_named_parts();
+        self.lemma_canonical_frame_contract_at(k);
+        self.lemma_canonical_frame_length_at(k);
     }
 
     #[verifier::spinoff_prover]

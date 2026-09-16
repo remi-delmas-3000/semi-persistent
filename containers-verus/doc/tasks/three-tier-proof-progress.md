@@ -1207,3 +1207,72 @@ and the new Cold-layer transfer; preserve capture membership on saved-domain
 regrowth for Trail as well as Hot. Mark, migration/policy, full shared-map
 interface instantiation and derived/parallel closure remain open. None of the
 four overall completion steps is declared complete by this checkpoint.
+
+### Checked all-tier push/regrowth and pop
+
+Starting from signed checkpoint `f994e18`, both remaining mutation fallback
+bodies now verify: `runtime_push_fallback` and `runtime_pop_fallback`. Capture,
+set, push/regrowth and pop therefore have checked general implementations in
+addition to the retained Hot specializations. Mark/open-frame and policy
+execution still require discharge, and the shared-model adapter remains incomplete.
+
+Push preserves every history field, appends exactly one live value and preserves
+all three store protocol predicates. Existing grow-layer lemmas preserve pair
+and canonical reconstruction. `lemma_push_reentered_capture` proves that a
+saved-domain column absent from the old live layer must already be captured.
+Regrowth restores capture membership through `mark_captured` for both Hot and
+Trail disciplines. This discharges the previously recorded Trail ghost-flag gap.
+The Trail hook changes only ghost state; no runtime tag or persistent history
+is added. The generic execution guard no longer tests unique capture before
+calling that existing hook. Its performance remains subject to the final gate.
+
+Pop captures a disappearing saved-domain value through checked `runtime_capture`
+before calling the actual store pop method. The existing last-cell contraction
+lemma preserves pair and canonical reconstruction. Older Cold layers are framed
+through the newer-layer transfer lemma. Empty pop returns without mutation;
+saved-domain index conversion is proved successful from the active-length bound.
+Untracked flag behavior retains the original store contract. Neither operation
+adds a buffer, map or traversal, and no public contract is weakened.
+
+The first full verifier attempt exposed a resource failure in the existing
+canonical-frame accessor (2408 verified, one error). The accessor was decomposed
+into frame-contract and saved-length accessors; its original contract remains
+unchanged. All three then verified independently. The final full runs below
+passed with no increased resource limits, new trust or new axioms.
+
+Final evidence:
+
+- Selected push family: **18 verified, zero errors**
+  (`/tmp/sp-d21-push-runtime.log`).
+- Selected pop family: **12 verified, zero errors**
+  (`/tmp/sp-d21-pop-runtime.log`).
+- Decomposed canonical accessors: **3 verified, zero errors**
+  (`/tmp/sp-d21-push-pop-accessor2.log`).
+- Full default and literal-types verification: **2411 verified, zero errors**
+  each (`/tmp/sp-d21-push-pop-final-default.log`,
+  `/tmp/sp-d21-push-pop-final-literal.log`).
+- Conditional composition: **80 verified, zero errors**
+  (`/tmp/sp-d21-push-pop-final-conditional.log`).
+- Feature tests: **277 passed, 10 ignored**
+  (`/tmp/sp-d21-push-pop-final-features.log`).
+- Release differential policy matrix, `PROPTEST_CASES=1024`: **4 passed**
+  (`/tmp/sp-d21-push-pop-final-policy.log`).
+- E-graph/SAT-core consumers: **1267 passed, 45 ignored**
+  (`/tmp/sp-d21-push-pop-final-consumers.log`).
+- Formatting, whitespace and trust-count checks passed. The commands are the
+  same full gate sequence recorded for the capture checkpoint. `containers/`
+  is unchanged both in the worktree and relative to baseline `d191c4a`.
+
+Two trust markers are removed: **74 default + 5 literal registrations**, with
+unchanged axioms and synchronized CI/trust documentation. The additional
+partial-API audit still reports the same 73 public partial functions, 33 allowed,
+40 unlisted and zero unsafe-public; its output is identical to the set checkpoint
+(`/tmp/sp-d21-push-pop-partial-api.log`). That audit and benchmark parity remain open.
+
+Next is general mark opening. The caller audit found an omitted TRACK premise
+in the internal mark dispatcher/fallback; both actual callers already require
+TRACK. Propagate that premise internally, preserve public guards, and prove
+prepare/seal/open using the borrowed active range and the transfer of the old
+live layer to the equal new snapshot. Replace the invalid Hot-only shortcut for
+unique stores with older Cold history. Policy and reclamation calls must compose
+after opening, and mark is not complete until those dependencies verify.
