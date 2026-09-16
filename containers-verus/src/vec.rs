@@ -5827,6 +5827,114 @@ where
         }
     }
 
+    /// Rebuild flags from the retained writable physical frame over the entire
+    /// live buffer. The frame's saved length may exceed the current length.
+    #[verifier::spinoff_prover]
+    fn finish_restore_range_checked(store: &mut S, pool: &std::vec::Vec<(T, I)>, lo: usize)
+        requires old(store).wf(), lo <= pool@.len(), TRACK,
+            forall|j: int| 0 <= j < old(store).captured().len() ==>
+                !(#[trigger] old(store).captured()[j]),
+        ensures final(store).wf(), final(store).data() == old(store).data(),
+            final(store).unique_capture_spec() == old(store).unique_capture_spec(),
+            final(store).needs_replayed_indices_spec() == old(store).needs_replayed_indices_spec(),
+            final(store).restore_entries_clear_capture_spec() == old(store).restore_entries_clear_capture_spec(),
+            forall|j: int| 0 <= j < final(store).captured().len() ==>
+                #[trigger] final(store).captured()[j] == captured_in_range::<T, I>(
+                    pool@, lo as int, pool@.len() as int, j as nat),
+    {
+        let hi = pool.len();
+        let entries = vstd::slice::slice_subrange(pool.as_slice(), lo, hi);
+        let live_len = store.len();
+        store.finish_restore(entries, live_len);
+        proof {
+            store.lemma_wf_captured_len();
+            assert forall|j: int| 0 <= j < store.captured().len() implies
+                #[trigger] store.captured()[j] == captured_in_range::<T, I>(
+                    pool@, lo as int, pool@.len() as int, j as nat)
+            by {
+                if store.captured()[j] {
+                    let q = choose|q: int| 0 <= q < entries@.len()
+                        && (#[trigger] entries@[q]).1.as_nat() == j;
+                    assert(pool@[lo + q] == entries@[q]);
+                } else if captured_in_range::<T, I>(pool@, lo as int, hi as int, j as nat) {
+                    let q = choose|q: int| lo <= q < hi && 0 <= q < pool@.len()
+                        && (#[trigger] pool@[q]).1.as_nat() == j;
+                    assert(entries@[q - lo] == pool@[q]);
+                }
+            }
+        }
+    }
+
+    /// Capture flags and the cached active length do not affect frame meaning.
+    #[verifier::spinoff_prover]
+    proof fn lemma_survivor_history_transfer(&self, pre: Self)
+        requires pre.wf_for_snap(), pre.hot_repr_ok(), pre.trail_repr_ok(), pre.cold_repr_ok(),
+            pre.proof_compat_ok(), self.store.wf(), self.view() == pre.view(),
+            *self == (Self { store: self.store, active_saved_len: self.active_saved_len, ..pre }),
+        ensures self.wf_for_snap(), self.hot_repr_ok(), self.trail_repr_ok(),
+            self.cold_repr_ok(), self.proof_compat_ok(),
+    {
+        assert forall|f: int| 0 <= f < self.depth_spec() implies
+            #[trigger] self.layer_above_at(f) == pre.layer_above_at(f) by {};
+        self.lemma_wf_for_snap_transfer(pre);
+        reveal(Vec::hot_repr_ok);
+        reveal(Vec::trail_repr_ok);
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::proof_compat_ok);
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            #[trigger] self.cold_reconstructs(f) by {
+            self.lemma_cold_reconstructs_transfer(pre, f);
+        }
+    }
+
+    /// Finish restore once the surviving top occupies its writable tier.
+    /// Promotion is responsible only for establishing these physical premises.
+    #[verifier::spinoff_prover]
+    fn finish_survivor_checked(&mut self)
+        requires TRACK, old(self).wf_for_snap(),
+            old(self).hot_repr_ok(), old(self).trail_repr_ok(), old(self).cold_repr_ok(),
+            old(self).proof_compat_ok(), old(self).depth_spec() > 0,
+            old(self).store.unique_capture_spec() ==> old(self).trail_stack@.len() == 0
+                && old(self).hot_stack@.len() > 0,
+            !old(self).store.unique_capture_spec() ==> old(self).trail_stack@.len() > 0
+                && (old(self).hot_stack@.len() > 0 ==>
+                    old(self).hot_stack@[old(self).hot_stack@.len() - 1].end
+                        == old(self).hot_value_pool@.len()),
+            forall|j: int| 0 <= j < old(self).store.captured().len() ==>
+                !(#[trigger] old(self).store.captured()[j]),
+        ensures final(self).wf(), final(self).view() == old(self).view(),
+            *final(self) == (Self { store: final(self).store,
+                active_saved_len: final(self).active_saved_len, ..*old(self) }),
+    {
+        hide(Vec::wf);
+        hide(Vec::cold_repr_ok);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        let ghost pre = *self;
+        proof { reveal(Vec::frame_partition_ok); }
+        if self.store.unique_capture() {
+            let n = self.hot_stack.len();
+            proof { reveal(Vec::hot_repr_ok); }
+            let top = self.hot_stack[n - 1];
+            self.active_saved_len = top.saved_len;
+            Self::finish_restore_range_checked(&mut self.store, &self.hot_value_pool, top.start);
+        } else {
+            let n = self.trail_stack.len();
+            proof { reveal(Vec::trail_repr_ok); }
+            let top = self.trail_stack[n - 1];
+            self.active_saved_len = top.saved_len;
+            Self::finish_restore_range_checked(&mut self.store, &self.trail_value_pool, top.start);
+        }
+        proof {
+            self.lemma_survivor_history_transfer(pre);
+            self.store.lemma_wf_captured_len();
+            reveal(Vec::open_ingress_ok);
+            reveal(Vec::proof_compat_ok);
+            reveal(Vec::wf);
+            assert(self.wf());
+        }
+    }
+
     #[verifier::external_body]
     fn runtime_promote_survivor(&mut self) {
         if self.depth_exec() == 0 {
@@ -5866,12 +5974,6 @@ where
                         });
                     }
                 }
-                let top = *self.trail_stack.last().expect("nonempty history has an ingress frame");
-                self.active_saved_len = top.saved_len;
-                self.store.finish_restore(
-                    &self.trail_value_pool[top.start..self.trail_value_pool.len()],
-                    self.store.len(),
-                );
             } else {
                 if self.hot_stack.is_empty() {
                     let frame = self.cold_stack.pop().expect("nonempty unique history has a survivor");
@@ -5893,13 +5995,8 @@ where
                         end: self.hot_value_pool.len(),
                     });
                 }
-                let top = *self.hot_stack.last().expect("nonempty history has an ingress frame");
-                self.active_saved_len = top.saved_len;
-                self.store.finish_restore(
-                    &self.hot_value_pool[top.start..self.hot_value_pool.len()],
-                    self.store.len(),
-                );
             }
+        self.finish_survivor_checked();
     }
 
     /// Verified Hot-only restore to the oldest token coordinate. Replaying the
@@ -7223,8 +7320,67 @@ where
         proof { self.lemma_empty_history_wf(); }
     }
 
-    /// Mixed-tier restore remains a later proof milestone. Only states outside
-    /// the checked all-Hot scope may reach this existing trusted fallback.
+    #[verifier::spinoff_prover]
+    fn reclaim_cold_checked(&mut self)
+        requires old(self).wf(),
+        ensures final(self).wf(), final(self).store == old(self).store,
+            final(self).snapshots@ == old(self).snapshots@,
+            final(self).trail_frames@ == old(self).trail_frames@,
+    {
+        let ghost pre = *self;
+        if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_stack, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_index_runs, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_value_pool, 0, 1);
+        }
+        proof {
+            pre.lemma_wf_named_parts();
+            self.lemma_wf_for_snap_transfer(pre);
+            reveal(Vec::hot_repr_ok);
+            reveal(Vec::trail_repr_ok);
+            reveal(Vec::cold_repr_ok);
+            reveal(Vec::open_ingress_ok);
+            reveal(Vec::proof_compat_ok);
+            assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+                #[trigger] self.cold_reconstructs(f) by {
+                self.lemma_cold_reconstructs_transfer(pre, f);
+            }
+        }
+    }
+
+    /// Restore while the surviving top remains in the selected writable tier.
+    /// This also covers mixed histories with older immutable Cold/Hot frames.
+    #[verifier::spinoff_prover]
+    fn restore_retained_ingress_checked(&mut self, target: usize)
+    where T: core::default::Default,
+        requires old(self).wf(), TRACK, target < old(self).depth_spec(),
+            old(self).store.unique_capture_spec() ==> target > old(self).cold_stack@.len(),
+            !old(self).store.unique_capture_spec() ==>
+                target > old(self).cold_stack@.len() + old(self).hot_stack@.len(),
+        ensures final(self).wf(), final(self).view() == old(self).snapshots@[target as int],
+            final(self).depth_spec() == target,
+            final(self).snapshots@ == old(self).snapshots@.subrange(0, target as int),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::cold_repr_ok);
+        let ghost pre = *self;
+        proof { pre.lemma_replay_partition(); pre.lemma_replay_ingress(); }
+        self.reconstruct_target_checked(target);
+        self.truncate_restored_history_checked(target, Ghost(pre));
+        proof {
+            reveal(Vec::restored_history_prefix);
+            reveal(Vec::proof_compat_ok);
+        }
+        self.finish_survivor_checked();
+        self.reclaim_cold_checked();
+    }
+
+    /// Remaining restore boundary for survivors that must move into the
+    /// writable tier. Reconstruction, retirement, and finalization are checked;
+    /// the physical promotion between them remains to be verified.
     #[verifier::external_body]
     fn runtime_restore_frame_fallback(&mut self, target: usize)
     where
@@ -7286,6 +7442,20 @@ where
         }
     }
 
+    fn restore_keeps_ingress_exec(&self, target: usize) -> (keeps: bool)
+        requires self.wf(),
+        ensures keeps == if self.store.unique_capture_spec() {
+            target > self.cold_stack@.len()
+        } else { target > self.cold_stack@.len() + self.hot_stack@.len() },
+    {
+        proof { self.lemma_replay_partition(); }
+        if self.store.unique_capture() {
+            target > self.cold_stack.len()
+        } else {
+            target > self.cold_stack.len() + self.hot_stack.len()
+        }
+    }
+
     #[verifier::spinoff_prover]
     fn runtime_restore_frame(&mut self, target: usize)
     where
@@ -7314,6 +7484,8 @@ where
             self.hot_defer_restore_reclaim_checked();
         } else if target == 0 {
             self.restore_zero_all_tiers_checked();
+        } else if self.restore_keeps_ingress_exec(target) {
+            self.restore_retained_ingress_checked(target);
         } else {
             self.runtime_restore_frame_fallback(target);
         }

@@ -753,3 +753,35 @@ Formatting and whitespace checks passed; trust remains 81 default markers
 plus five literal-type registrations.
 Survivor promotion/capture rebuilding, conversions, and the remaining public
 mixed-tier paths are still unfinished.
+
+
+### Capture rebuilding and retained-ingress restore
+
+The Cold-prefix checkpoint is `29c2928`. `finish_restore_range_checked` now
+proves that flags across the whole live buffer equal membership in the retained
+physical frame. It passes the current live length to the store protocol, so
+saved lengths may still zigzag or exceed the restored live length.
+`finish_survivor_checked` sets the surviving saved length and proves the full
+container invariant once the survivor occupies the selected writable tier.
+A separate transfer proof preserves all frame contracts through these flag and
+cached-length changes. The existing promotion runtime now calls this checked
+finalizer; its frame-moving operations remain trusted.
+
+`restore_retained_ingress_checked` composes reconstruction, all-tier truncation,
+flag rebuilding, and checked capacity reclamation. Runtime dispatch selects it
+when the target leaves a frame in the selected writable tier, including mixed
+histories with older immutable Cold/Hot frames. This removes those executions
+from the trusted restore fallback. Cases needing Hot-to-Trail or Cold-to-ingress
+survivor movement still require promotion proofs. No trust markers or fields
+are added, and Trail/Hot replay remains batched.
+
+Targeted range finalization, history transfer, survivor finalization, capacity
+reclamation, and retained-ingress composition checks passed. Full default
+verification passed **2284 verified, 0 errors** (5m 00s); `literal-types` also
+passed **2284 verified, 0 errors** (4m 55s). The feature suite passed, and the
+1024-case differential policy matrix passed all four tests. E-graph/SAT consumers
+passed 1267 tests (45 ignored), with zero failures. Formatting and whitespace
+checks passed. Trust remains 81 default markers plus five literal registrations.
+Existing differential tests deliberately
+restore through every populated tier for each backend and include shrink/grow
+histories; those cover the newly dispatched path and remaining promotion path.
