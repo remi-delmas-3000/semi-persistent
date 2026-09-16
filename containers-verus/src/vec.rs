@@ -6113,61 +6113,79 @@ where
         logical
     }
 
-    #[verifier::external_body]
-    fn runtime_closed_history_bytes(&self) -> usize {
-        fn bytes(count: usize, width: usize) -> usize {
-            count
-                .checked_mul(width)
-                .expect("logical closed-history byte count overflow")
+    fn closed_history_mul(count: usize, width: usize) -> (r: usize)
+        ensures r == count * width,
+    {
+        match count.checked_mul(width) {
+            Some(v) => v,
+            None => crate::guard::refuse("logical closed-history byte count overflow"),
         }
-        fn add(left: usize, right: usize) -> usize {
-            left.checked_add(right)
-                .expect("logical closed-history byte count overflow")
-        }
+    }
 
+    fn closed_history_add(left: usize, right: usize) -> (r: usize)
+        ensures r == left + right,
+    {
+        match left.checked_add(right) {
+            Some(v) => v,
+            None => crate::guard::refuse("logical closed-history byte count overflow"),
+        }
+    }
+
+    /// Logical occupancy of closed history: headers plus payload lengths of
+    /// the closed Trail/Hot frames and all Cold storage, times their sizes.
+    #[verifier::spinoff_prover]
+    fn runtime_closed_history_bytes(&self) -> usize
+        requires self.wf(),
+    {
+        hide(Vec::wf);
         let trail_closed = self.trail_stack.len().saturating_sub(1);
-        let trail_entries = self.trail_stack[..trail_closed]
-            .iter()
-            .fold(0usize, |total, frame| {
-                total
-                    .checked_add(frame.end - frame.start)
-                    .expect("logical closed-history entry count overflow")
-            });
+        let mut trail_entries = 0usize;
+        let mut f = 0usize;
+        while f < trail_closed
+            invariant f <= trail_closed, trail_closed <= self.trail_stack@.len(), self.wf(),
+            decreases trail_closed - f,
+        {
+            let n = self.pair_frame_entries(true, f);
+            trail_entries = match trail_entries.checked_add(n) {
+                Some(v) => v,
+                None => crate::guard::refuse("logical closed-history entry count overflow"),
+            };
+            f += 1;
+        }
         let hot_closed = if self.store.unique_capture() {
             self.hot_stack.len().saturating_sub(1)
         } else {
             self.hot_stack.len()
         };
-        let hot_entries = self.hot_stack[..hot_closed]
-            .iter()
-            .fold(0usize, |total, frame| {
-                total
-                    .checked_add(frame.end - frame.start)
-                    .expect("logical closed-history entry count overflow")
-            });
-
-        let trail = add(
-            bytes(trail_closed, core::mem::size_of::<crate::frame::TrailFrame<I>>()),
-            bytes(trail_entries, core::mem::size_of::<(T, I)>()),
+        let mut hot_entries = 0usize;
+        let mut g = 0usize;
+        while g < hot_closed
+            invariant g <= hot_closed, hot_closed <= self.hot_stack@.len(), self.wf(),
+            decreases hot_closed - g,
+        {
+            let n = self.pair_frame_entries(false, g);
+            hot_entries = match hot_entries.checked_add(n) {
+                Some(v) => v,
+                None => crate::guard::refuse("logical closed-history entry count overflow"),
+            };
+            g += 1;
+        }
+        let trail = Self::closed_history_add(
+            Self::closed_history_mul(trail_closed, core::mem::size_of::<crate::frame::TrailFrame<I>>()),
+            Self::closed_history_mul(trail_entries, core::mem::size_of::<(T, I)>()),
         );
-        let hot = add(
-            bytes(hot_closed, core::mem::size_of::<crate::frame::HotFrame<I>>()),
-            bytes(hot_entries, core::mem::size_of::<(T, I)>()),
+        let hot = Self::closed_history_add(
+            Self::closed_history_mul(hot_closed, core::mem::size_of::<crate::frame::HotFrame<I>>()),
+            Self::closed_history_mul(hot_entries, core::mem::size_of::<(T, I)>()),
         );
-        let cold = add(
-            bytes(
-                self.cold_stack.len(),
-                core::mem::size_of::<crate::frame::ColdFrameHdr<I>>(),
+        let cold = Self::closed_history_add(
+            Self::closed_history_mul(self.cold_stack.len(), core::mem::size_of::<crate::frame::ColdFrameHdr<I>>()),
+            Self::closed_history_add(
+                Self::closed_history_mul(self.cold_value_pool.len(), core::mem::size_of::<T>()),
+                Self::closed_history_mul(self.cold_index_runs.len(), core::mem::size_of::<crate::frame::IndexRun<I>>()),
             ),
-            add(
-                bytes(self.cold_value_pool.len(), core::mem::size_of::<T>()),
-                bytes(
-                    self.cold_index_runs.len(),
-                    core::mem::size_of::<crate::frame::IndexRun<I>>(),
-                ),
-            ),
         );
-        add(add(trail, hot), cold)
+        Self::closed_history_add(Self::closed_history_add(trail, hot), cold)
     }
 
     /// Retire a Copy prefix using the same bulk overlapping shift as drain,
@@ -9329,33 +9347,69 @@ where
         logical
     }
 
-    #[verifier::external_body]
-    #[cold]
-    #[inline(never)]
-    fn runtime_reclaim_adaptive_tier_capacities(&mut self) {
-        if !matches!(
-            self.tier_policy.cold_reclaim,
-            crate::tier_policy::ReclaimPolicy::ShrinkToFit
-        ) {
-            return;
-        }
-        self.trail_value_pool.shrink_to_fit();
-        self.trail_stack.shrink_to_fit();
-        self.hot_value_pool.shrink_to_fit();
-        self.hot_stack.shrink_to_fit();
-        self.cold_value_pool.shrink_to_fit();
-        self.cold_index_runs.shrink_to_fit();
-        self.cold_stack.shrink_to_fit();
+    /// Only the seven physical tier vectors differ from `pre`: live contents,
+    /// snapshots, canonical history, the store and the policy are untouched.
+    pub open(crate) spec fn tiers_only_changed(&self, pre: Self) -> bool {
+        *self == (Self { cold_stack: self.cold_stack, cold_index_runs: self.cold_index_runs,
+            cold_value_pool: self.cold_value_pool, hot_stack: self.hot_stack,
+            hot_value_pool: self.hot_value_pool, trail_stack: self.trail_stack,
+            trail_value_pool: self.trail_value_pool, ..pre })
     }
 
-    #[verifier::external_body]
+    /// All-tier capacity reclamation after an adaptive pass (`ShrinkToFit`
+    /// only). Capacity only: every view, the store and the history are unchanged.
+    #[verifier::spinoff_prover]
+    #[cold]
+    #[inline(never)]
+    fn runtime_reclaim_adaptive_tier_capacities(&mut self)
+        requires old(self).wf(),
+        ensures final(self).wf(), final(self).tiers_only_changed(*old(self)),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::cold_repr_ok);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::open_ingress_ok);
+        let ghost pre = *self;
+        if matches!(self.tier_policy.cold_reclaim, crate::tier_policy::ReclaimPolicy::ShrinkToFit) {
+            crate::parallel_store::shrink_vec_capacity(&mut self.trail_value_pool, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.trail_stack, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.hot_value_pool, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.hot_stack, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_value_pool, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_index_runs, 0, 1);
+            crate::parallel_store::shrink_vec_capacity(&mut self.cold_stack, 0, 1);
+        }
+        proof {
+            pre.lemma_wf_named_parts();
+            assert(pre.store.wf()) by { reveal(Vec::wf_for_snap); }
+            self.lemma_survivor_history_transfer(pre);
+            self.lemma_persistence_views_framing(pre);
+            self.lemma_open_ingress_transfer(pre);
+            reveal(Vec::wf);
+        }
+    }
+
+    /// One deterministic explicit-budget Trail -> Hot -> Cold pass over closed
+    /// history; the writable frame and its store protocol are never touched.
+    #[verifier::spinoff_prover]
     #[cold]
     #[inline(never)]
     fn runtime_apply_adaptive(
         &mut self,
         input: crate::tier_policy::AdaptiveInput,
-    ) -> crate::tier_policy::AdaptiveReport {
-        let mut report = crate::tier_policy::AdaptiveReport::default();
+    ) -> (report: crate::tier_policy::AdaptiveReport)
+        requires old(self).wf(),
+        ensures final(self).wf(), final(self).tiers_only_changed(*old(self)),
+    {
+        hide(Vec::wf);
+        let mut report = crate::tier_policy::AdaptiveReport {
+            inspected_frames: 0, migrated_frames: 0, inspected_trail_frames: 0,
+            migrated_trail_frames: 0, inspected_hot_frames: 0, migrated_hot_frames: 0,
+            writes: 0, uniques: 0, runs: 0, logical_bytes_before: 0, logical_bytes_after: 0,
+            budget_unmet_bytes: 0,
+        };
         let mut logical = self.runtime_closed_history_bytes();
         report.logical_bytes_before = logical;
         if logical <= input.max_closed_history_bytes {
@@ -9371,10 +9425,16 @@ where
         logical = self.runtime_closed_history_bytes();
         logical = self.adaptive_hot_stage_checked(&input, &mut report, logical, preexisting_hot_frames);
 
-        report.inspected_frames = report.inspected_trail_frames + report.inspected_hot_frames;
-        report.migrated_frames = report.migrated_trail_frames + report.migrated_hot_frames;
+        report.inspected_frames = match report.inspected_trail_frames.checked_add(report.inspected_hot_frames) {
+            Some(v) => v,
+            None => crate::guard::refuse("adaptive frame count overflow"),
+        };
+        report.migrated_frames = match report.migrated_trail_frames.checked_add(report.migrated_hot_frames) {
+            Some(v) => v,
+            None => crate::guard::refuse("adaptive frame count overflow"),
+        };
         if report.migrated_frames != 0 {
-            // Reclaim only after both plans finish so a Trail -> Hot -> Cold
+            // Reclaim only after both stages finish so a Trail -> Hot -> Cold
             // cascade does not shrink and immediately regrow intermediate pools.
             self.runtime_reclaim_adaptive_tier_capacities();
         }
@@ -9388,7 +9448,6 @@ where
     /// Apply one deterministic explicit-budget Trail -> Hot -> Cold pass to
     /// closed history. The writable ingress frame and its immutable
     /// [`DiffStore`] protocol are never changed.
-    #[verifier::external_body]
     #[cold]
     #[inline(never)]
     pub fn apply_adaptive(
@@ -9405,47 +9464,71 @@ where
         self.runtime_apply_adaptive(input)
     }
 
-    #[verifier::external_body]
     #[cold]
     #[inline(never)]
-    fn runtime_apply_tier_policy(&mut self) {
+    fn runtime_apply_tier_policy(&mut self)
+        requires old(self).wf(),
+        ensures final(self).wf(), final(self).tiers_only_changed(*old(self)),
+    {
         self.runtime_migrate_trail(false);
         self.runtime_migrate_hot(false);
     }
 
     /// Enforce both configured limits immediately. The open ingress frame is
     /// excluded even when a limit is zero.
-    #[verifier::external_body]
-    pub fn apply_tier_policy(&mut self) {
+    pub fn apply_tier_policy(&mut self)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            final(self).depth_spec() == old(self).depth_spec(),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+    {
         self.runtime_apply_tier_policy();
     }
 
     /// Explicitly dedupe every closed chronological frame.
-    #[verifier::external_body]
-    pub fn flush_trail(&mut self) {
+    pub fn flush_trail(&mut self)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            final(self).depth_spec() == old(self).depth_spec(),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+    {
         self.runtime_migrate_trail(true);
     }
 
     /// Explicitly run-compress every closed unique frame.
-    #[verifier::external_body]
-    pub fn compress_hot(&mut self) {
+    pub fn compress_hot(&mut self)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            final(self).depth_spec() == old(self).depth_spec(),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+    {
         self.runtime_migrate_hot(true);
     }
 
+    /// Automatic rollover after a mark: the legacy Hot-buffer batch when it is
+    /// due, otherwise the configured tier limits unless both are `Unbounded`.
     #[inline(always)]
-    #[verifier::external_body]
-    fn runtime_apply_configured_rollover(&mut self) {
-        let legacy_batch_due = self
-            .hot_buffer
-            .map(|keep| {
+    fn runtime_apply_configured_rollover(&mut self)
+        requires old(self).wf(),
+        ensures final(self).wf(), final(self).tiers_only_changed(*old(self)),
+    {
+        let legacy_batch_due = match self.hot_buffer {
+            Some(keep) => {
                 let closed = if self.store.unique_capture() {
                     self.hot_stack.len().saturating_sub(1)
                 } else {
                     self.trail_stack.len().saturating_sub(1)
                 };
                 closed > keep
-            })
-            .unwrap_or(false);
+            }
+            None => false,
+        };
         if legacy_batch_due {
             if !self.store.unique_capture() {
                 self.runtime_migrate_trail(true);
@@ -9469,8 +9552,11 @@ where
         }
     }
 
-    #[verifier::external_body]
-    fn runtime_rollover_on_mark(&mut self, rollover: crate::tier_policy::RolloverPolicy) {
+    /// Explicit rollover requested by a mark.
+    fn runtime_rollover_on_mark(&mut self, rollover: crate::tier_policy::RolloverPolicy)
+        requires old(self).wf(),
+        ensures final(self).wf(), final(self).tiers_only_changed(*old(self)),
+    {
         match rollover {
             crate::tier_policy::RolloverPolicy::Defer => {}
             crate::tier_policy::RolloverPolicy::ApplyConfigured => {
@@ -9856,7 +9942,6 @@ where
         self.mark_reclaim_checked(shrink);
     }
 
-    #[verifier::external_body]
     fn runtime_push_frame_fallback<const APPLY_CONFIGURED: bool>(&mut self, options: MarkOptions)
         requires
             TRACK,

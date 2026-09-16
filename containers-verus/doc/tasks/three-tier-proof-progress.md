@@ -1886,3 +1886,45 @@ e-graph/SAT consumers **1267 passed, 45 ignored**
 (`/tmp/sp-d21-hotcold-canary.log`). Formatting, whitespace, the key-model axiom
 discipline grep and the unchanged-legacy check passed; the CI trust constant
 moves to 64. Benchmark parity remains an open acceptance criterion.
+
+
+## 2026-09-16 — Checked rollover dispatch
+
+The whole dispatch layer above the migrations is now checked, with no new
+trusted item. `runtime_closed_history_bytes` folds closed Trail/Hot frame
+entries through `pair_frame_entries` and combines header/payload sizes with
+`checked_*` arithmetic, refusing on overflow exactly where the external body
+`expect`ed. `runtime_reclaim_adaptive_tier_capacities` is the seven-pool
+`shrink_vec_capacity` composition with the existing view-transfer lemmas, so its
+former contract-free trust row is retired. `runtime_apply_adaptive` builds a zero
+report literal (the derived `Default`), runs the two checked stages with the
+original recompute between them, combines counts with checked adds, reclaims
+when anything migrated and reports the budget shortfall; the public
+`apply_adaptive` keeps its contract. `runtime_apply_tier_policy`,
+`runtime_apply_configured_rollover` (the `hot_buffer` closure became a `match`),
+`runtime_rollover_on_mark` and the `ApplyConfigured`/`ForceClosed` mark path
+`runtime_push_frame_fallback` are checked compositions; `apply_tier_policy`,
+`flush_trail` and `compress_hot` gain the standard `wf` contracts and are listed
+in the partial-API allowlist. The shared postcondition `tiers_only_changed`
+states that only the seven physical tier vectors move.
+
+Targeted evidence: **17 verified, zero errors** across
+`/tmp/sp-d21-policy1-*.log`. Trust: **53 default + 5 literal** markers (eleven
+removed), default axioms unchanged at 4. Gate evidence follows.
+
+Policy-dispatch checkpoint evidence (fresh, touched source before each Verus
+run): full default **2576 verified, zero errors** (`/tmp/sp-d21-policy-default.log`);
+literal-types **2576 verified, zero errors** (`/tmp/sp-d21-policy-literal.log`);
+conditional composition **80 verified, zero errors**
+(`/tmp/sp-d21-policy-composition.log`); `au-verus` **29 verified, zero errors**
+(`/tmp/sp-d21-policy-au.log`); feature suite **277 passed, 10 ignored**
+(`/tmp/sp-d21-policy-tests.log`); release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-policy-policy.log`); e-graph/SAT
+consumers **1267 passed, 45 ignored** (`/tmp/sp-d21-policy-consumers.log`); canary
+**2 passed** (`/tmp/sp-d21-policy-canary.log`). The partial-API audit reports the
+unchanged baseline discrepancy (73 public partial functions, 33 allowed, 40
+unlisted, zero unsafe-public; `/tmp/sp-d21-policy-partial-api2.log`); the four
+`wf`-only public wrappers are not partial by its rule and stay unlisted.
+Formatting, whitespace, the key-model axiom discipline grep and the
+unchanged-legacy check passed; the CI trust constant moves to 53. Benchmark
+parity remains an open acceptance criterion.

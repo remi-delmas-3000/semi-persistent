@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **64** (3 structs + 61 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
-| `literal-types` | **69** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **53** (3 structs + 50 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
+| `literal-types` | **58** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,8 +72,8 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current Hot-to-Cold checkpoint has 64 default-build markers:
-3 opaque structs and 61 functions. The permanent groups below remain the
+boundary. The current policy-dispatch checkpoint has 53 default-build markers:
+3 opaque structs and 50 functions. The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -195,6 +195,20 @@ nothing outside the slice touched). Checking the migration removes five markers
 with the same contract instead of the former verified insertion sort, whose
 quadratic worst case was a runtime hazard; the contract of that function is
 unchanged.
+
+The policy-dispatch checkpoint (2026-09-16) checks the whole rollover dispatch
+above the migrations: `runtime_closed_history_bytes` (checked arithmetic with
+`guard::refuse` on overflow), `runtime_reclaim_adaptive_tier_capacities` (now a
+checked `shrink_vec_capacity` composition, so its former contract-free row 10a is
+retired), `runtime_apply_adaptive` and the public `apply_adaptive`,
+`runtime_apply_tier_policy` and the public `apply_tier_policy`, `flush_trail`,
+`compress_hot`, `runtime_apply_configured_rollover`, `runtime_rollover_on_mark`
+and the `ApplyConfigured`/`ForceClosed` mark path `runtime_push_frame_fallback`.
+Eleven markers are removed with no new trusted item, for 53 default markers and
+58 with `literal-types`. The remaining `Vec` markers are the byte reporters and
+diagnostics (`diff_log_len`, `tracking_bytes`, `total_bytes`,
+`pending_restore_indices`, `log_heap_bytes`, `log_shrink_capacity`) and the
+transparent policy-type registrations.
 
 ## 1. Group A: `ContainerId` (trusted by design), 3 items
 
@@ -738,7 +752,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **64 default-build `external_body`
+The complete current source count is **53 default-build `external_body`
 markers plus 4 default-build axioms** (plus one generated `obeys_key_model`
 axiom per `define_id*!` id type in consumer crates); execution-first three-tier Vec markers not
 itemized here are enumerated in
@@ -758,7 +772,6 @@ additions are listed after the table.
 | 9 | `InlineStore::heap_bytes` | B | same | partially |
 | 10 | `shrink_vec_capacity` | B | `Vec::capacity`/`shrink_to` unmodeled; contract = element sequence unchanged (std-documented) | when vstd specs capacity ops |
 | 10b | `std_sort::sort_pairs_by_index` | B | std `<[T]>::sort_unstable_by_key` is unmodeled by vstd; contract = documented behaviour (permutation of the slice in non-decreasing key order, nothing else touched); consumed by Hot-to-Cold migration and `diff_compress::sort_frame_by_index` | when vstd specs slice sorting |
-| 10a | `Vec::runtime_reclaim_adaptive_tier_capacities` | B | all-seven-pool `shrink_to_fit` is unmodeled; no `ensures`, and its only caller is the external adaptive runtime body | when vstd specs capacity ops |
 | 11 | `shrink_aov_capacity` | B | same (AppendOnlyVec variant formula) | same |
 | 11a | `ListArena::tracking_bytes` | B | capacity + `size_of` unmodeled; no `ensures`; forwards to the two inner vecs | partially |
 | 11b | `ListArena::total_bytes` | B | same | partially |
@@ -801,12 +814,11 @@ Plus the Group E ordinary-Rust delegation shims tabulated in §3.5.
 
 **Bottom line (permanent grouped subset).** Default build: 3 trusted-by-design `ContainerId` items
 (permanent; equality reflection trusted, global freshness not proved, and
-finite distinctness behavior runtime-fuzzed), 12 capacity-introspection items
+finite distinctness behavior runtime-fuzzed), 11 capacity-introspection items
 (8 spec-free byte reporters
 (production-formula parity; `tracking_bytes` differential-tested exactly,
 store reporters formula-level only), 2 contract-carrying shrink
-helpers, 1 contract-free adaptive all-tier shrink helper, and
-`data_capacity_bits`), 5 bounds-elided array/slice primitives
+helpers, and `data_capacity_bits`), 5 bounds-elided array/slice primitives
 (§2d: each contract restates a documented std behavior, fuzzed and
 property-tested against the checked form), 2 runtime-trap primitives (`check_precondition`, load-bearing,
 body is a one-line panic; `refuse`, diverging and contract-free), 1 key-model projection (`clone_key_exact`, no

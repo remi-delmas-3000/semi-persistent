@@ -449,3 +449,19 @@ query below the default resource limit. `runtime_migrate_hot_count`,
 `runtime_migrate_hot` (including the `TierLimit::Adaptive` run-count loop over
 `count_index_runs`) and `adaptive_hot_stage_checked` are checked loops over
 these primitives; rejected frames stay in Hot, sorted.
+
+
+### Rollover dispatch
+
+Every rollover entry point is now a checked composition of the checked
+migrations: `runtime_apply_tier_policy` (`apply_tier_policy`),
+`runtime_apply_configured_rollover` (legacy Hot-buffer batch or configured
+limits), `runtime_rollover_on_mark` (Defer / ApplyConfigured / ForceClosed),
+`runtime_push_frame_fallback` (open the new frame, then roll over, then reclaim),
+`flush_trail`, `compress_hot`, and `runtime_apply_adaptive` (`apply_adaptive`)
+with checked byte accounting and all-tier reclamation. The shared postcondition
+`tiers_only_changed(pre)` states that only the seven physical tier vectors move:
+live contents, snapshots, canonical history, store and policy are untouched,
+which is the Step 2 rollover-composition invariant in concrete form. Policy
+legality (eligible source frames, active frame excluded) is enforced by the
+primitives' preconditions rather than assumed.

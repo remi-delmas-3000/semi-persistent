@@ -81,16 +81,24 @@ uses the std contract too. Trust: 64 default + 5 literal (CI
 - `sort_frame_by_index` still returns a sorted copy (its `(&Vec) -> Vec` API);
   `ColdStack::seal_runs` callers could sort their own buffer in place.
 
+## Policy-dispatch checkpoint (2026-09-16)
+
+All rollover dispatch is checked: `runtime_closed_history_bytes`,
+`runtime_reclaim_adaptive_tier_capacities`, `runtime_apply_adaptive` /
+`apply_adaptive`, `runtime_apply_tier_policy` / `apply_tier_policy`,
+`flush_trail`, `compress_hot`, `runtime_apply_configured_rollover`,
+`runtime_rollover_on_mark`, `runtime_push_frame_fallback`. Trust: 53 default +
+5 literal (CI `EXPECTED_DEFAULT=53`); the four public wrappers are listed in
+`partial-api-allowlist.txt`. The remaining `vec.rs` markers are byte
+reporters/diagnostics and transparent type registrations.
+
 ## Next actions
 
-1. Make `runtime_apply_adaptive` fully checked (`runtime_closed_history_bytes`
-   with `checked_*` + `guard::refuse`, `runtime_reclaim_adaptive_tier_capacities`
-   via `shrink_vec_capacity`), then `runtime_apply_tier_policy`,
-   `runtime_apply_configured_rollover`, `runtime_rollover_on_mark`,
-   `runtime_push_frame_fallback` and the public wrappers `apply_tier_policy`,
-   `flush_trail`, `compress_hot`, `apply_adaptive`.
-2. Derived containers and the parallel/group scope, final audits, and the
-   benchmark protocol.
+1. Step 3: instantiate the end-to-end sequence theorem on the production public
+   dispatch (`proofs/top_down/composition.rs` provisional interfaces).
+2. Derived containers and the parallel/group scope
+   (`proofs/top_down/derived-contract-audit.md`), final audits (partial-API,
+   trust ledger), and the benchmark protocol.
 
 ## Existing proof architecture to reuse
 
