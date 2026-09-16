@@ -713,6 +713,12 @@ way there.
 
 ### 3.6d. Parallel mark and restore (contract-carrying), 2 items
 
+*2026-09-16: both contracts now mirror the sequential `ForkHistory::mark` /
+`restore` exactly, including every member's model and archive effect. The only
+trusted step is rayon's promise to apply the per-member closure to each member
+exactly once; each member's effect is its own checked `SyncMember` contract and
+the borrows are disjoint by construction.*
+
 `mark_parallel` (sync_group.rs), `restore_parallel` (sync_group.rs).
 
 The campaign's real trust growth, and the only markers it adds whose

@@ -1928,3 +1928,43 @@ unlisted, zero unsafe-public; `/tmp/sp-d21-policy-partial-api2.log`); the four
 Formatting, whitespace, the key-model axiom discipline grep and the
 unchanged-legacy check passed; the CI trust constant moves to 53. Benchmark
 parity remains an open acceptance criterion.
+
+
+## 2026-09-16 — Derived restore contracts and group member effects
+
+The derived wrappers now export the effects their inner checked restores
+already establish. `ListArena::try_restore` exports heads/nodes/model views at
+the mark and all three archive prefixes; `EClasses::restore`/`try_restore`
+export roots, size, depth and the roots archive prefix (the wrapper's check is
+exactly full validity); `SpMap::restore`/`try_restore` export depth and the log
+archive prefix; `UnionFind::try_restore` exports parent/rank views and the
+parent archive prefix; `BPlusTreeSet::restore` exports both retained archive
+prefixes. Every fallible wrapper now states `r is Err ==> state unchanged`.
+
+`SyncMember` gains an object-safe `model`/`archive` pair (index-projected, so
+`Box<dyn SyncMember>` stays usable) with a `tracked &self` archive-depth
+obligation; the `Vec` member discharges them from `seal_frame`/`restore_frame`
+by sequence extensionality. `ForkHistory::mark` exports unchanged member models
+and one archived model per member; `restore` exports every member's model at the
+token's depth and the archive prefix; rejected requests leave the group
+unchanged. The parallel variants carry the same contracts over the documented
+rayon boundary (trust ledger 3.6d). No runtime change and no new trust.
+
+Targeted evidence: `list` 1, `eclasses` 3, `map` 2, `circular_list` 1,
+`union_find` 1, `bplus` 1 and `sync_group` **17 verified, zero errors**
+(`/tmp/sp-d21-derived*-*.log`). Trust remains **53 default + 5 literal**. Gate
+evidence follows.
+
+Derived-contract checkpoint evidence (fresh, touched source before each Verus
+run): full default **2577 verified, zero errors** (`/tmp/sp-d21-derived-default.log`);
+literal-types **2577 verified, zero errors** (`/tmp/sp-d21-derived-literal.log`);
+conditional composition **80 verified, zero errors**
+(`/tmp/sp-d21-derived-composition.log`); `au-verus` **29 verified, zero errors**
+(`/tmp/sp-d21-derived-au.log`); feature suite **277 passed, 10 ignored**
+(`/tmp/sp-d21-derived-tests.log`); release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-derived-policy.log`); e-graph/SAT
+consumers **1267 passed, 45 ignored** (`/tmp/sp-d21-derived-consumers.log`);
+canary **2 passed** (`/tmp/sp-d21-derived-canary.log`); partial-API audit at the
+unchanged baseline (73/33/40/0). Formatting, whitespace and the unchanged-legacy
+check passed; trust remains 53 default + 5 literal. The Step 3 dependency map is
+`proofs/top_down/interface-inventory.md`.

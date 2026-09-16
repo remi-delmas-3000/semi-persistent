@@ -29,3 +29,21 @@ Do not weaken component token checks or accepted error behavior to strengthen
 postconditions. Preserve verified work, and remove a superseded proof only after
 its replacement verifies. All required runtime, differential and consumer gates
 remain required for concrete changes.
+
+
+## Update 2026-09-16 — derived contracts forwarded
+
+| Path | Now exported |
+|---|---|
+| `ListArena::try_restore` | Success: heads/nodes/model views at the mark and all three archive prefixes (same frame for both components); failure: state unchanged |
+| `EClasses::restore` / `try_restore` | Success (full validity, which the wrapper's check is): roots view and size at the mark, depth, roots archive prefix; failure: state unchanged; `min_width` preserved |
+| `SpMap::restore` / `try_restore` | Success: log contents at the mark, depth and log archive prefix; failure: state unchanged |
+| `CircularList::try_restore` | Failure: state unchanged (success effects were already complete) |
+| `UnionFind::try_restore` | Success: roots/parent/rank views at the mark, roots and parent archive prefixes, same-mark agreement; failure: state unchanged |
+| `BPlusTreeSet::restore` | Retained arena and ghost-tree archive prefixes at the token's frame |
+| `SyncMember` / `ForkHistory::mark`, `restore` | Trait gains an object-safe `model`/`archive` pair with an archive-depth obligation; the `Vec` member proves them from `seal_frame`/`restore_frame`. Group mark exports unchanged member models and one archived model per member; group restore exports every member's model at the token's depth and the archive prefix; rejected requests leave the group unchanged |
+| `ForkHistory::mark_parallel`, `restore_parallel` | Same contracts as the sequential paths. The bodies remain the documented rayon fan-out boundary (trust ledger 3.6d): per-member effects come from the members' checked contracts and disjoint `&mut` borrows; the trusted step is that rayon applies the closure to every member exactly once |
+
+Remaining from the initial table: `EClasses` component contents beyond roots
+(entries, reprs, uses, pool) are established inside `restore` but not yet
+exported; `SparseSet`, `AppendOnlyVec` were already complete.

@@ -8400,7 +8400,7 @@ where
 
     /// Partition counts of a well-formed container.
     #[verifier::spinoff_prover]
-    proof fn lemma_partition_counts(&self)
+    pub(crate) proof fn lemma_partition_counts(&self)
         requires self.wf(),
         ensures self.snapshots@.len() == self.trail_frames@.len(),
             self.cold_stack@.len() + self.hot_stack@.len() + self.trail_stack@.len() == self.snapshots@.len(),

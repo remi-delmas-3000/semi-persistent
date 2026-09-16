@@ -3136,6 +3136,9 @@ where
                         token.frame_idx_spec() as int]
                 &&& final(self).n_spec() == old(self).roots_archive_view()[
                         token.frame_idx_spec() as int].len()
+                &&& final(self).depth_spec() == token.frame_idx_spec()
+                &&& final(self).roots_archive_view()
+                    == old(self).roots_archive_view().subrange(0, token.frame_idx_spec() as int)
             },
     {
         if !(self.entries.is_valid_token(&token.entries)
@@ -3403,8 +3406,17 @@ where
         requires old(self).wf(),
         ensures
             final(self).wf(),
-            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken
-                && final(self).roots_view() == old(self).roots_view(),
+            final(self).min_width_spec() == old(self).min_width_spec(),
+            r is Ok ==> ({
+                let f = token.frame_idx_spec() as int;
+                &&& old(self).is_restorable_full_spec(token)
+                &&& final(self).roots_view() == old(self).roots_archive_view()[f]
+                &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
+                &&& final(self).depth_spec() == token.frame_idx_spec()
+                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f)
+            }),
+            r is Err ==> *final(self) == *old(self),
+            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
     {
         if self.entries.is_valid_token(&token.entries)
             && self.reprs.is_valid_token(&token.reprs)

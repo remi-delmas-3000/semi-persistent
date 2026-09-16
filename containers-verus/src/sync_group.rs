@@ -39,6 +39,18 @@ pub trait SyncMember: Send {
     /// frame stack and view have headroom). Impl-defined; probed at runtime.
     spec fn can_seal(&self) -> bool;
 
+    /// Abstract live contents, index-projected so the trait stays object-safe.
+    spec fn model(&self) -> Seq<nat>;
+
+    /// One archived model per frame, oldest first.
+    spec fn archive(&self) -> Seq<Seq<nat>>;
+
+    /// The archive has exactly one entry per frame. (`tracked &self` keeps the
+    /// trait dyn-compatible; callers hold exec member references.)
+    proof fn lemma_archive_depth(tracked &self)
+        requires self.wf(),
+        ensures self.archive().len() == self.depth_spec();
+
     fn can_seal_now(&self) -> (b: bool)
         requires self.wf(),
         ensures b == self.can_seal();
@@ -54,7 +66,9 @@ pub trait SyncMember: Send {
         ensures
             final(self).wf(),
             final(self).depth_spec() == old(self).depth_spec() + 1,
-            final(self).can_seal() ==> final(self).depth_spec() < u32::MAX as nat;
+            final(self).can_seal() ==> final(self).depth_spec() < u32::MAX as nat,
+            final(self).model() == old(self).model(),
+            final(self).archive() == old(self).archive().push(old(self).model());
 
     /// Reconstruct this member to its own snapshot at `depth`, applying frames
     /// directly to the live column (`restore_to`; memcpy where contiguous).
@@ -65,7 +79,9 @@ pub trait SyncMember: Send {
             (depth as nat) < old(self).depth_spec(),
         ensures
             final(self).wf(),
-            final(self).depth_spec() == depth as nat;
+            final(self).depth_spec() == depth as nat,
+            final(self).model() == old(self).archive()[depth as int],
+            final(self).archive() == old(self).archive().subrange(0, depth as int);
 
     /// Diagnostic heap footprint (for the shared-vs-per-member measurement).
     fn heap_bytes(&self) -> usize
@@ -89,7 +105,8 @@ pub trait SyncMember: Send {
         ensures
             final(self).wf(),
             final(self).depth_spec() == old(self).depth_spec(),
-            final(self).can_seal() == old(self).can_seal();
+            final(self).can_seal() == old(self).can_seal(),
+            final(self).archive() == old(self).archive();
 }
 
 /// Every tracked `Vec` whose element type is itself index-like (ids: the
@@ -120,6 +137,18 @@ where
         &&& crate::vec::Vec::view(self).len() < I::max_nat()
     }
 
+    open spec fn model(&self) -> Seq<nat> {
+        crate::vec::Vec::view(self).map_values(|x: T| x.as_nat())
+    }
+
+    open spec fn archive(&self) -> Seq<Seq<nat>> {
+        crate::vec::Vec::snapshots_view(self).map_values(|s: Seq<T>| s.map_values(|x: T| x.as_nat()))
+    }
+
+    proof fn lemma_archive_depth(tracked &self) {
+        crate::vec::Vec::lemma_partition_counts(self);
+    }
+
     fn can_seal_now(&self) -> (b: bool) {
         let m = <I as crate::index_like::IndexLike>::max();
         proof {
@@ -136,10 +165,16 @@ where
 
     fn seal_frame(&mut self, shrink: ShrinkPolicy) {
         let _ = crate::vec::Vec::seal_frame(self, shrink);
+        proof {
+            assert(self.archive() =~= old(self).archive().push(old(self).model()));
+        }
     }
 
     fn restore_frame(&mut self, depth: usize) {
         crate::vec::Vec::restore_frame(self, depth);
+        proof {
+            assert(self.archive() =~= old(self).archive().subrange(0, depth as int));
+        }
     }
 
     fn heap_bytes(&self) -> usize {
@@ -249,8 +284,13 @@ impl ForkHistory {
                 &&& final(self).depth_spec() == old(self).depth_spec() + 1
                 &&& r->Some_0.depth_spec() == old(self).depth_spec()
                 &&& final(self).history.valid_spec(r->Some_0)
+                &&& forall|k: int| 0 <= k < old(self).members@.len() ==> {
+                    &&& (#[trigger] final(self).members@[k]).model() == old(self).members@[k].model()
+                    &&& final(self).members@[k].archive()
+                        == old(self).members@[k].archive().push(old(self).members@[k].model())
+                }
             },
-            r is None ==> final(self).depth_spec() == old(self).depth_spec(),
+            r is None ==> *final(self) == *old(self),
     {
         // Probe every member's headroom before touching anything.
         let n = self.members.len();
@@ -292,6 +332,13 @@ impl ForkHistory {
                 forall|k: int| 0 <= k < n ==> (#[trigger] self.members@[k]).wf(),
                 forall|k: int| 0 <= k < j
                     ==> (#[trigger] self.members@[k]).depth_spec() == target,
+                forall|k: int| 0 <= k < j ==> {
+                    &&& (#[trigger] self.members@[k]).model() == old(self).members@[k].model()
+                    &&& self.members@[k].archive()
+                        == old(self).members@[k].archive().push(old(self).members@[k].model())
+                },
+                forall|k: int| j <= k < n
+                    ==> #[trigger] self.members@[k] == old(self).members@[k],
                 forall|k: int| j <= k < n
                     ==> (#[trigger] self.members@[k]).depth_spec() == target - 1,
                 forall|k: int| j <= k < n
@@ -314,7 +361,13 @@ impl ForkHistory {
             final(self).wf(),
             final(self).members@.len() == old(self).members@.len(),
             r ==> final(self).depth_spec() == t.depth_spec(),
-            !r ==> final(self).depth_spec() == old(self).depth_spec(),
+            r ==> forall|k: int| 0 <= k < old(self).members@.len() ==> {
+                &&& (#[trigger] final(self).members@[k]).model()
+                    == old(self).members@[k].archive()[t.depth_spec() as int]
+                &&& final(self).members@[k].archive()
+                    == old(self).members@[k].archive().subrange(0, t.depth_spec() as int)
+            },
+            !r ==> *final(self) == *old(self),
     {
         if !self.history.is_valid(t) {
             return false;
@@ -338,6 +391,14 @@ impl ForkHistory {
                 forall|k: int| 0 <= k < n ==> (#[trigger] self.members@[k]).wf(),
                 forall|k: int| 0 <= k < j
                     ==> (#[trigger] self.members@[k]).depth_spec() == t.depth as nat,
+                forall|k: int| 0 <= k < j ==> {
+                    &&& (#[trigger] self.members@[k]).model()
+                        == old(self).members@[k].archive()[t.depth as int]
+                    &&& self.members@[k].archive()
+                        == old(self).members@[k].archive().subrange(0, t.depth as int)
+                },
+                forall|k: int| j <= k < n
+                    ==> #[trigger] self.members@[k] == old(self).members@[k],
                 forall|k: int| j <= k < n
                     ==> (#[trigger] self.members@[k]).depth_spec() == self.history.depth_spec(),
             decreases n - j,
@@ -371,8 +432,13 @@ impl ForkHistory {
                 &&& final(self).depth_spec() == old(self).depth_spec() + 1
                 &&& r->Some_0.depth_spec() == old(self).depth_spec()
                 &&& final(self).history.valid_spec(r->Some_0)
+                &&& forall|k: int| 0 <= k < old(self).members@.len() ==> {
+                    &&& (#[trigger] final(self).members@[k]).model() == old(self).members@[k].model()
+                    &&& final(self).members@[k].archive()
+                        == old(self).members@[k].archive().push(old(self).members@[k].model())
+                }
             },
-            r is None ==> final(self).depth_spec() == old(self).depth_spec(),
+            r is None ==> *final(self) == *old(self),
     {
         if self.members.len() < PAR_MEMBER_MIN {
             return self.mark(shrink);
@@ -409,7 +475,13 @@ impl ForkHistory {
             final(self).wf(),
             final(self).members@.len() == old(self).members@.len(),
             r ==> final(self).depth_spec() == t.depth_spec(),
-            !r ==> final(self).depth_spec() == old(self).depth_spec(),
+            r ==> forall|k: int| 0 <= k < old(self).members@.len() ==> {
+                &&& (#[trigger] final(self).members@[k]).model()
+                    == old(self).members@[k].archive()[t.depth_spec() as int]
+                &&& final(self).members@[k].archive()
+                    == old(self).members@[k].archive().subrange(0, t.depth_spec() as int)
+            },
+            !r ==> *final(self) == *old(self),
     {
         if self.members.len() < PAR_MEMBER_MIN {
             return self.restore(t);

@@ -1640,11 +1640,16 @@ where
         requires old(self).wf(),
         ensures
             final(self).wf(),
-            r is Ok ==> final(self).roots_view()
-                == old(self).roots_snapshots_view()[token.parent_frame_idx_spec() as int]
-                && final(self).roots_snapshots_view() == old(self).roots_snapshots_view()
-                    .subrange(0, token.parent_frame_idx_spec() as int),
-            r is Err ==> final(self).roots_view() == old(self).roots_view(),
+            r is Ok ==> ({
+                let f = token.parent_frame_idx_spec() as int;
+                &&& token.parent_frame_idx_spec() == token.rank_frame_idx_spec()
+                &&& final(self).roots_view() == old(self).roots_snapshots_view()[f]
+                &&& final(self).parent_view() == old(self).parent_snapshots_view()[f]
+                &&& final(self).rank_view() == old(self).rank_snapshots_view()[f]
+                &&& final(self).roots_snapshots_view() == old(self).roots_snapshots_view().subrange(0, f)
+                &&& final(self).parent_snapshots_view() == old(self).parent_snapshots_view().subrange(0, f)
+            }),
+            r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
     {
         if self.is_valid_token(&token)

@@ -1048,8 +1048,7 @@ where T: Sized + Copy + core::default::Default + Send {
                 && final(self).model_snapshots_view()
                     == old(self).model_snapshots_view()
                         .subrange(0, token.frame_idx_spec() as int),
-            r is Err ==> final(self).model_view() == old(self).model_view()
-                && final(self).next_seq() == old(self).next_seq(),
+            r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
     {
         if self.is_valid_token(&token) {

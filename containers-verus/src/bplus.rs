@@ -10419,6 +10419,11 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             final(self).arena() == old(self).arena_snapshots_view()[token.frame_idx_spec() as int],
             final(self).model() == crate::bplus_tree::tree_keys(
                 old(self).tree_snapshots_spec()[token.frame_idx_spec() as int]),
+            // Retained archives: both columns are cut to the token's frame.
+            final(self).arena_snapshots_view()
+                == old(self).arena_snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            final(self).tree_snapshots_spec()
+                == old(self).tree_snapshots_spec().subrange(0, token.frame_idx_spec() as int),
         {
         // Total-with-documented-panic: is_valid_token answers exactly "would
         // restore succeed now"; a stale/foreign token refuses here.

@@ -488,9 +488,11 @@ where
         ensures
             final(self).wf(),
             r is Ok ==> final(self).log_view()
-                == old(self).log_snapshots_view()[token.frame_idx_spec() as int],
-            r is Err ==> final(self).log_view() == old(self).log_view()
-                && final(self).index_view() == old(self).index_view(),
+                == old(self).log_snapshots_view()[token.frame_idx_spec() as int]
+                && final(self).depth_spec() == token.frame_idx_spec()
+                && final(self).log_snapshots_view()
+                    == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
     {
         if self.is_valid_token(&token) {
@@ -523,6 +525,9 @@ where
         ensures
             final(self).wf(),
             final(self).log_view() == old(self).log_snapshots_view()[token.frame_idx_spec() as int],
+            final(self).depth_spec() == token.frame_idx_spec(),
+            final(self).log_snapshots_view()
+                == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int),
     {
         self.log.restore(token.inner);
         self.rebuild_index();

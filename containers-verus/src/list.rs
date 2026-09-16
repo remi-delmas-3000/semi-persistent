@@ -2057,7 +2057,17 @@ where
         requires old(self).wf(),
         ensures
             final(self).wf(),
-            r is Err ==> final(self).model_view() == old(self).model_view(),
+            r is Ok ==> ({
+                let f = token.heads_frame_idx_spec() as int;
+                &&& token.heads_frame_idx_spec() == token.nodes_frame_idx_spec()
+                &&& final(self).heads_view() == old(self).heads_snapshots_view()[f]
+                &&& final(self).nodes_view() == old(self).nodes_snapshots_view()[f]
+                &&& final(self).model_view() == old(self).model_snapshots_view()[f]
+                &&& final(self).heads_snapshots_view() == old(self).heads_snapshots_view().subrange(0, f)
+                &&& final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view().subrange(0, f)
+                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f)
+            }),
+            r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
     {
         if self.is_valid_token(&token)
