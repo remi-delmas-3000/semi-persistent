@@ -393,3 +393,10 @@ relations. Every new Hot frame's saved-value map equals its planned payload.
 The remaining semantic precondition supplier is first-capture plan/source
 correspondence and uniqueness; reconstruction/ingress preservation must then
 establish full wf. The executor remains trusted until those proofs compose.
+
+Use `lemma_frame_inv_range_same_saved_map` for encoding-independent physical
+frame-contract transfer, including destination saved-domain bounds. The actual
+Trail storage helper now proves moved Hot reconstruction/uniqueness conditionally
+on `trail_plan_matches` (source first-capture map equality plus unique payloads).
+No caller is allowed to assume that predicate; sorting/selection must establish
+it. Untouched/surviving tier and capture-state preservation remain to compose.

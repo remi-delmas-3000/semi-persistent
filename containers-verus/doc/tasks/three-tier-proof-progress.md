@@ -1612,3 +1612,41 @@ policy matrix with `PROPTEST_CASES=1024` **4 passed**
 `containers/` is unchanged. Trust counts remain unchanged. Literal-types and
 consumer/final audit gates remain due for semantic migration closure, alongside
 required benchmark parity.
+
+## Source-map meaning for moved Trail frames
+
+`lemma_frame_inv_range_same_saved_map` proves full frame-contract transfer between
+physical ranges with identical optional saved-value maps. It proves destination
+capture-domain bounds as well as captured-or-inherited reconstruction; absence
+outside the saved domain is essential, so equal reconstructed contents alone are
+not substituted for map equality.
+
+`trail_plan_matches` names the remaining selection contract: each planned payload
+is index-unique and its full optional saved map equals the corresponding original
+Trail range. This is a local specification, not stored history or an assumed
+fact. `lemma_pair_tier_contract` provides a narrow accessor for the source frame's
+existing physical contract.
+
+The actual `execute_trail_plan_storage_checked` now conditionally exports
+reconstruction and uniqueness of every moved Hot frame when the source plan
+matches. Its executable precondition is unchanged; the semantic guarantee is
+proved inside the checked body from the explicit matching condition. The exact
+assembly/range proof supplies destination map identity, the new transfer lemma
+supplies reconstruction/domain bounds, and per-frame payload uniqueness supplies
+Hot uniqueness. An explicit uniqueness accessor resolved the initial quantifier
+instantiation failure without increasing resource limits.
+
+Targeted shared map-transfer proof **1 verified, zero errors**
+(`/tmp/sp-d21-frame-map-transfer.log`); Trail selection **15 verified, zero errors**
+(`/tmp/sp-d21-trail-semantics2.log`). This checkpoint changes only proofs/contracts,
+not runtime execution or trust counts. Still prove the selection code establishes
+`trail_plan_matches`, transfer untouched/surviving representations and ingress to
+full wf, and close policy/production composition. Conditional moved-frame facts
+are not claimed as complete semantic migration.
+
+Moved-frame semantic checkpoint: full default **2444 verified, zero errors**
+(`/tmp/sp-d21-trail-semantics-default.log`). Formatting/whitespace pass and legacy
+`containers/` is unchanged. This is a proof/specification-only change, so runtime
+tests were not repeated; the preceding storage checkpoint recorded 277 passing
+feature tests and four passing release policy tests. Literal-types/final consumer
+and CI gates remain due with migration closure, and benchmark parity remains open.

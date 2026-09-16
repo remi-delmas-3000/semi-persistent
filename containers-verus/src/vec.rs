@@ -1460,6 +1460,47 @@ pub(crate) proof fn lemma_frame_inv_arm_at<T, I: IndexLike>(
 {
 }
 
+/// Physical encodings with the same optional saved values obey the same
+/// captured-or-inherited contract. Equality includes absence outside the saved
+/// domain, so the destination cannot introduce an out-of-domain capture.
+#[verifier::spinoff_prover]
+pub(crate) proof fn lemma_frame_inv_range_same_saved_map<T, I: IndexLike>(
+    above: Seq<T>, a: Seq<(T, I)>, alo: int, ahi: int,
+    b: Seq<(T, I)>, blo: int, bhi: int, snap: Seq<T>, saved_len: nat,
+)
+    requires 0 <= alo <= ahi <= a.len(), 0 <= blo <= bhi <= b.len(),
+        frame_inv_range::<T, I>(above, a, alo, ahi, snap, saved_len),
+        forall|j: nat| #[trigger] range_saved_value::<T, I>(a, alo, ahi, j)
+            == range_saved_value::<T, I>(b, blo, bhi, j),
+    ensures frame_inv_range::<T, I>(above, b, blo, bhi, snap, saved_len),
+{
+    assert forall|q: int| blo <= q < bhi implies
+        (#[trigger] b[q]).1.as_nat() < saved_len by {
+        let j = b[q].1.as_nat();
+        assert(captured_in_range::<T, I>(b, blo, bhi, j));
+        assert(range_saved_value::<T, I>(a, alo, ahi, j)
+            == range_saved_value::<T, I>(b, blo, bhi, j));
+        assert(captured_in_range::<T, I>(a, alo, ahi, j));
+        let p = choose|p: int| alo <= p < ahi && 0 <= p < a.len()
+            && (#[trigger] a[p]).1.as_nat() == j;
+    }
+    assert forall|j: int| 0 <= j < saved_len as int implies
+        #[trigger] frame_cell_inv::<T, I>(above, b, blo, bhi, snap, j) by {
+        lemma_frame_inv_arm_at::<T, I>(above, a, alo, ahi, snap, saved_len, j);
+        lemma_range_saved_value_contract::<T, I>(above, a, alo, ahi, snap, j);
+        assert(range_saved_value::<T, I>(a, alo, ahi, j as nat)
+            == range_saved_value::<T, I>(b, blo, bhi, j as nat));
+        if captured_in_range::<T, I>(b, blo, bhi, j as nat) {
+            lemma_lowest_hitter::<T, I>(b, blo, bhi, j as nat);
+            let q = choose|q: int| blo <= q < bhi
+                && (#[trigger] b[q]).1.as_nat() == j as nat
+                && first_hitter::<T, I>(b, blo, q, j as nat);
+            assert(range_saved_value::<T, I>(b, blo, bhi, j as nat) == Some(b[q].0));
+            assert(b[q].0 == snap[j]);
+        }
+    }
+}
+
 /// Extend the layer above a frame without changing the frame's saved domain.
 /// In the 2D proof grid this adds live columns on the right: captured columns
 /// ignore the live row, while every uncaptured column was already in bounds of
@@ -6334,6 +6375,29 @@ where
         }
     }
 
+    closed spec fn trail_plan_matches(&self, plan: Seq<std::vec::Vec<(T, I)>>) -> bool {
+        &&& plan.len() <= self.trail_stack@.len()
+        &&& forall|f: int| 0 <= f < plan.len() ==>
+            #[trigger] stratum_unique::<T, I>(plan[f]@, 0, plan[f]@.len() as int)
+        &&& forall|f: int, j: nat| 0 <= f < plan.len() ==>
+            #[trigger] range_saved_value::<T, I>(plan[f]@, 0, plan[f]@.len() as int, j)
+                == range_saved_value::<T, I>(self.trail_value_pool@,
+                    self.trail_stack@[f].start as int, self.phys_trail_end(f), j)
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_pair_tier_contract(&self, trail: bool, f: int)
+        requires self.wf(), 0 <= f < self.pair_tier_count(trail),
+        ensures frame_inv_range::<T, I>(self.layer_above_at(self.pair_tier_offset(trail) + f),
+            self.pair_tier_pool(trail), self.pair_tier_start(trail, f), self.pair_tier_end(trail, f),
+            self.snapshots@[self.pair_tier_offset(trail) + f],
+            self.snapshots@[self.pair_tier_offset(trail) + f].len()),
+    {
+        hide(Vec::wf);
+        self.lemma_wf_named_parts();
+        if trail { reveal(Vec::trail_repr_ok); } else { reveal(Vec::hot_repr_ok); }
+    }
+
     /// A closed Trail prefix moves to the end of Hot without changing logical
     /// frame positions. Payload meaning is supplied separately by plan selection.
     #[verifier::spinoff_prover]
@@ -6342,6 +6406,13 @@ where
     )
         requires old(self).wf(), old(planned)@.len() < old(self).trail_stack@.len(),
         ensures
+            old(self).trail_plan_matches(old(planned)@) ==>
+                forall|f: int| 0 <= f < old(planned)@.len() ==> {
+                    &&& #[trigger] final(self).phys_frame_inv_range_holds(old(self).hot_stack@.len() + f)
+                    &&& stratum_unique::<T, I>(final(self).hot_value_pool@,
+                        final(self).phys_hot_start(old(self).hot_stack@.len() + f),
+                        final(self).phys_hot_end(old(self).hot_stack@.len() + f))
+                },
             *final(self) == (Self { hot_stack: final(self).hot_stack,
                 hot_value_pool: final(self).hot_value_pool, trail_stack: final(self).trail_stack,
                 trail_value_pool: final(self).trail_value_pool, ..*old(self) }),
@@ -6403,6 +6474,42 @@ where
                 let h = self.hot_stack@[pre.hot_stack@.len() + f];
                 assert(self.hot_value_pool@.subrange(h.start as int, h.end as int) =~= plan[f]@);
                 lemma_range_saved_value_subrange::<T, I>(self.hot_value_pool@, h.start as int, h.end as int, j);
+            }
+            if pre.trail_plan_matches(plan) {
+                reveal(Vec::trail_plan_matches);
+                assert forall|f: int| 0 <= f < plan.len() implies {
+                    &&& #[trigger] self.phys_frame_inv_range_holds(pre.hot_stack@.len() + f)
+                    &&& stratum_unique::<T, I>(self.hot_value_pool@,
+                        self.phys_hot_start(pre.hot_stack@.len() + f),
+                        self.phys_hot_end(pre.hot_stack@.len() + f))
+                } by {
+                    let i = pre.hot_stack@.len() + f;
+                    let h = self.hot_stack@[i];
+                    Self::lemma_trail_plan_frame_range(plan, count as int, f);
+                    assert(self.hot_value_pool@.subrange(h.start as int, h.end as int) =~= plan[f]@);
+                    assert(self.phys_hot_end(i) == h.end);
+                    pre.lemma_pair_tier_frame_layout(true, f);
+                    pre.lemma_pair_tier_contract(true, f);
+                    let k = pre.pair_tier_offset(true) + f;
+                    assert(self.layer_above_at(self.cold_stack@.len() + i) == pre.layer_above_at(k));
+                    assert forall|j: nat| #[trigger] range_saved_value::<T, I>(pre.trail_value_pool@,
+                        pre.trail_stack@[f].start as int, pre.phys_trail_end(f), j)
+                        == range_saved_value::<T, I>(self.hot_value_pool@, h.start as int, h.end as int, j) by {
+                        assert(range_saved_value::<T, I>(plan[f]@, 0, plan[f]@.len() as int, j)
+                            == range_saved_value::<T, I>(pre.trail_value_pool@,
+                                pre.trail_stack@[f].start as int, pre.phys_trail_end(f), j));
+                    }
+                    lemma_frame_inv_range_same_saved_map::<T, I>(pre.layer_above_at(k),
+                        pre.trail_value_pool@, pre.trail_stack@[f].start as int, pre.phys_trail_end(f),
+                        self.hot_value_pool@, h.start as int, h.end as int,
+                        pre.snapshots@[k], pre.snapshots@[k].len());
+                    assert(stratum_unique::<T, I>(plan[f]@, 0, plan[f]@.len() as int));
+                    assert forall|x: int, y: int| h.start <= x < h.end && h.start <= y < h.end && x != y implies
+                        (#[trigger] self.hot_value_pool@[x]).1.as_nat() != (#[trigger] self.hot_value_pool@[y]).1.as_nat() by {
+                        assert(self.hot_value_pool@[x] == plan[f]@[x - h.start]);
+                        assert(self.hot_value_pool@[y] == plan[f]@[y - h.start]);
+                    }
+                }
             }
         }
     }
