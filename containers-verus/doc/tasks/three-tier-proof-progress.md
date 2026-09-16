@@ -1142,3 +1142,68 @@ flag restoration on regrowth. Explicit shared-map `capture_first` equality is
 still required for the production interface. Mutation/mark, migration/policy,
 complete interface instantiation, derived/parallel closure and benchmark parity
 remain open; this checkpoint does not complete any of the four overall steps.
+
+### Checked mixed-tier set through capture and raw write
+
+Starting from signed checkpoint `122a5b7`, `runtime_set_fallback` now verifies
+against its original contract. Both ingress disciplines compose the checked
+general capture path with `DiffStore::set_raw`. The former unique-store branch
+no longer calls a Hot-only helper under a weaker mixed-history premise. The
+specialized Hot set proof and its existing fast-path dispatch remain checked.
+
+`raw_set_effect` specifies the exact live update, field framing and immutable
+store protocols. Capture-flag equality is TRACK-conditional, matching the
+existing DiffStore contract: untracked inline writes are not required to retain
+irrelevant tag bits. This preserves supported untracked behavior without adding
+flag preservation overhead or weakening any public persistence contract.
+
+The frame proof reuses existing captured-cell and outside-saved-domain write
+lemmas. Separate Hot/Trail representation proofs retain all headers, pools and
+uniqueness. Pointwise canonical access supplies the newest saved length and
+frame contract; older canonical layers are unchanged. A narrow capture-domain
+accessor supplies the appended canonical event's range bounds to the executable
+wrapper. The final composition recovers all of `wf`, including ingress and Cold
+reconstruction. Resource failures were resolved by narrow accessors, explicit
+coordinate equalities and local invariant exposure, without increased limits.
+
+`lemma_cold_reconstructs_layer_transfer` adapts the existing Cold framing proof
+to require equality of the immediate newer layer rather than the whole live
+vector. Older Cold frames therefore survive writes above them. The original
+whole-live-equality contract is retained as a checked wrapper; no verified caller
+loses its old guarantees.
+
+Evidence on the final source for this checkpoint:
+
+- Selected set family: **18 verified, zero errors**
+  (`/tmp/sp-d21-set-runtime5.log`). Cold layer transfer and its existing wrappers
+  passed three selected obligations (`/tmp/sp-d21-set-cold-layer.log`).
+- Full default and literal-types: **2393 verified, zero errors** each
+  (`/tmp/sp-d21-set-default.log`, `/tmp/sp-d21-set-literal.log`).
+- Conditional composition: **80 verified, zero errors**
+  (`/tmp/sp-d21-set-conditional.log`).
+- Feature tests: **277 passed, 10 ignored** (`/tmp/sp-d21-set-features.log`).
+- Release differential policy matrix with `PROPTEST_CASES=1024`: **4 passed**
+  (`/tmp/sp-d21-set-policy.log`).
+- E-graph/SAT-core consumers: **1267 passed, 45 ignored**
+  (`/tmp/sp-d21-set-consumers.log`).
+- Formatting, whitespace and source trust-count checks passed. The legacy
+  `containers/` tree is unchanged. The gate commands are the same full sequence
+  recorded for the preceding capture checkpoint.
+
+The set fallback's trust marker is removed. Counts are **76 default + 5 literal
+registrations**, with unchanged axioms and synchronized CI/trust documentation.
+The partial-API audit remains at 73 public partial functions, 33 allowlisted,
+40 unlisted and zero unsafe-public; its output is identical to the preceding
+checkpoint (`/tmp/sp-d21-set-partial-api.log`). That final-audit issue remains open.
+
+The new [performance inventory](conformance-performance-inventory.md) reviews all
+13 registered Criterion targets. It distinguishes matched legacy comparisons
+from tier-specific controls and local algorithm experiments, and records the
+parallel-group coverage gap. No timing measurements or parity claim accompany
+the inventory; the final benchmark gate remains required.
+
+Next: general push/regrowth and pop preservation. Reuse grow/shrink frame lemmas
+and the new Cold-layer transfer; preserve capture membership on saved-domain
+regrowth for Trail as well as Hot. Mark, migration/policy, full shared-map
+interface instantiation and derived/parallel closure remain open. None of the
+four overall completion steps is declared complete by this checkpoint.

@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **77** (4 structs + 73 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
-| `literal-types` | **82** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **76** (4 structs + 72 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
+| `literal-types` | **81** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,8 +72,8 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current physical-capture checkpoint has 77 default-build markers:
-4 opaque structs and 73 functions. The permanent groups below remain the
+boundary. The current mixed-tier set checkpoint has 76 default-build markers:
+4 opaque structs and 72 functions. The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -123,6 +123,11 @@ The physical-capture checkpoint checks `runtime_capture` for both ingress
 disciplines, using actual DiffStore capture methods and preserving canonical
 history. Its marker is removed: **77 default + 5 literal**. General set, pop,
 push/regrowth and mark composition remain separate obligations.
+The following set checkpoint checks `runtime_set_fallback` by composing capture
+with the actual `set_raw` method. Pair, Cold and canonical preservation are
+proved for mixed histories; untracked flag behavior retains its original
+contract. Counts become **76 default + 5 literal**. Pop, push/regrowth and mark
+remain separate implementation obligations.
 No new trusted body was introduced. The
 three-segment accessor, H1 extractor, Cold/ingress transfer lemmas, and
 `maybe_shrink` pass targeted verification; a clean full Vec-module query reports
@@ -699,7 +704,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **77 default-build `external_body`
+The complete current source count is **76 default-build `external_body`
 markers plus 1 default-build axiom**; execution-first three-tier Vec markers not
 itemized here are enumerated in
 `doc/tasks/three-tier-frame-architecture-goal.md` §8. The `literal-types`

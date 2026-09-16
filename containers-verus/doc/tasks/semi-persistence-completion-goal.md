@@ -224,6 +224,10 @@ signed local commit identifying the verified result.
 
 ### Final performance validation protocol
 
+Use [conformance-performance-inventory.md](conformance-performance-inventory.md)
+as the initial target inventory, and recheck it against the final source. Its
+coverage review does not replace measurement or establish parity.
+
 1. Inventory all Criterion targets in `containers-conformance/Cargo.toml` and run
    the applicable legacy-versus-verified comparisons. Include tracked-vector,
    retained-container, nested-mark, eager-write, EClasses and parallel-frame

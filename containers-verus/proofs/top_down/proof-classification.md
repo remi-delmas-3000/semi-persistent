@@ -107,13 +107,12 @@ separate recorded trust boundaries; this is not a claim that every store module
 is trust-free. Nor does checking these methods discharge the remaining all-tier
 `Vec` mutation, conversion, policy, and Cold reopening composition obligations.
 
-In particular, `runtime_set_fallback` still calls
-a Hot-only checked helper under the weaker runtime test `unique_capture()`.
-That helper requires `hot_defer_wf`, which is not supplied merely by a Hot
-writable tier with older Cold history. Its enclosing trusted body hides
-that composition obligation. Reuse the helpers' local arguments while proving
-general all-tier framing; do not claim the fallback is checked or strengthen
-its public preconditions to the Hot-only case.
+The former trusted `runtime_set_fallback` used a Hot-only helper under the weaker
+runtime test `unique_capture()`. That gap is now discharged: the checked body
+calls general `runtime_capture`, then `set_raw`, and proves pair, canonical,
+Cold and capture-state preservation. Existing specialized Hot proofs remain.
+Pop, push/regrowth and mark still need their general implementation proofs;
+the capture/set results do not discharge those callers.
 
 ### Public guards and payload capabilities
 
@@ -278,3 +277,35 @@ and performs its flag update in ghost code. Unique capture calls the same store
 primitive without passing through the Hot-only proof helper. Existing specialized
 Hot helpers remain checked. There are no new maps, buffers or traversals, but
 performance parity still requires the final benchmark gate.
+
+### Checked mixed-tier set composition
+
+The next checkpoint discharges `runtime_set_fallback` against its original
+public-facing contract. It calls the checked general capture helper followed by
+the actual `DiffStore::set_raw`. `raw_set_effect` describes exact live update,
+unchanged container fields and immutable store protocols. Flag preservation is
+TRACK-conditional, matching the existing store contract; no tag preservation
+work is added for untracked writes.
+
+`lemma_raw_set_pair_frame` reuses the captured-cell and outside-domain write
+lemmas. Separate Hot and Trail representation proofs preserve headers, pools
+and uniqueness. Canonical proof access is pointwise: the newest frame uses the
+same write lemmas and all older layers are unchanged. The common invariant
+composition also retains capture ownership and Cold reconstruction.
+
+`lemma_cold_reconstructs_layer_transfer` generalizes the existing transfer proof
+to equality of the immediate newer layer. This frames older Cold history even
+when live data changes. The original whole-live-equality contract remains a
+checked wrapper, so existing callers retain their guarantees.
+
+Selected set-family verification passes 18 obligations, including the actual
+runtime wrapper. Full-gate evidence belongs in the progress log once completed.
+One trust marker is removed; no public contract or solver limit is weakened.
+The original specialized Hot set helper remains checked and available.
+
+Next, the push/regrowth proof can reuse the existing grow-layer lemma for both
+physical pair frames and canonical history. It must restore capture membership
+when regrowing into the active saved domain for Trail as well as Hot, while
+retaining dead-flag behavior in untracked stores. Pop requires checked capture
+before contraction. Mark, migration and the production shared-map interface
+remain separate obligations.
