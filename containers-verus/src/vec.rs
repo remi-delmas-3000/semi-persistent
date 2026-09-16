@@ -2500,10 +2500,9 @@ where
         // Ghost stratum boundaries are monotone in the ghost trail.
         &&& (forall|k: int| #![trigger tf[k]] 0 <= k && k + 1 < tf.len() ==>
                 tf[k] <= tf[k + 1])
-        // THE restore-correctness statement, once, against the ghost trail
-        // (proof architecture: every physical representation relates to
-        // full_trail by an abstraction theorem; reconstruction only ever
-        // reads the ghost). frame_inv_range is Seq-level and unchanged.
+        // Canonical chronological frame contracts. Runtime reconstruction
+        // reads physical pools; their per-tier contracts independently supply
+        // the shared captured-or-inherited frame meaning.
         &&& (forall|k: int| 0 <= k < tf.len() ==>
                 #[trigger] frame_inv_range::<T, I>(
                     self.layer_above_at(k),
@@ -6892,6 +6891,187 @@ where
         }
     }
 
+    /// Physical offsets are monotone even when frame saved lengths zigzag.
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_frame_start_order(&self, a: int, b: int)
+        requires self.repr_ok(), 0 <= a <= b < self.cold_stack@.len(),
+        ensures self.cold_stack@[a].runs_start <= self.cold_stack@[b].runs_start,
+        decreases b - a,
+    {
+        if a < b {
+            self.lemma_cold_frame_start_order(a + 1, b);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_cold_value_start_order(&self, a: int, b: int)
+        requires self.repr_ok(), 0 <= a <= b < self.cold_index_runs@.len(),
+        ensures self.cold_index_runs@[a].start <= self.cold_index_runs@[b].start,
+        decreases b - a,
+    {
+        if a < b {
+            self.lemma_cold_value_start_order(a + 1, b);
+        }
+    }
+
+    /// The Cold cuts land on frame and run boundaries, retaining complete
+    /// run slices and their complete payloads, including empty frames.
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_cold_layout(&self, pre: Self, target: nat)
+        requires pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target),
+        ensures self.repr_ok(), self.cold_runs_disjoint(),
+            self.cold_stack@.len() <= pre.cold_stack@.len(),
+            self.cold_index_runs@.len() <= pre.cold_index_runs@.len(),
+            self.cold_value_pool@.len() <= pre.cold_value_pool@.len(),
+            forall|f: int| 0 <= f < self.cold_stack@.len() ==>
+                #[trigger] self.cold_stack@[f] == pre.cold_stack@[f],
+            forall|r: int| 0 <= r < self.cold_index_runs@.len() ==>
+                #[trigger] self.cold_index_runs@[r] == pre.cold_index_runs@[r],
+            forall|q: int| 0 <= q < self.cold_value_pool@.len() ==>
+                #[trigger] self.cold_value_pool@[q] == pre.cold_value_pool@[q],
+    {
+        hide(Vec::wf);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::restored_history_prefix);
+        let kept = self.cold_stack@.len();
+        let runs = self.cold_index_runs@.len();
+        assert forall|f: int| 0 <= f < kept implies
+            (#[trigger] self.cold_stack@[f]).runs_start + self.cold_stack@[f].runs_len <= runs
+        by {
+            if kept < pre.cold_stack@.len() {
+                pre.lemma_cold_frame_start_order(f + 1, kept as int);
+            }
+        }
+        assert forall|r: int| 0 <= r < runs implies
+            (#[trigger] self.cold_index_runs@[r]).start + self.cold_index_runs@[r].len
+                <= self.cold_value_pool@.len()
+        by {
+            if runs < pre.cold_index_runs@.len() {
+                pre.lemma_cold_value_start_order(r + 1, runs as int);
+            }
+        }
+        assert(self.repr_ok());
+        assert(self.cold_runs_disjoint());
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_cold_coverage(&self, pre: Self, target: nat, f: int, j: nat)
+        requires pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target),
+            0 <= f < self.cold_stack@.len(),
+        ensures self.cold_covered(f, j) == pre.cold_covered(f, j),
+    {
+        hide(Vec::wf);
+        hide(Vec::cold_value);
+        hide(Vec::restored_history_prefix);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::wf_for_snap);
+        self.lemma_restored_cold_layout(pre, target);
+        let lo = self.cold_stack@[f].runs_start as int;
+        let hi = lo + self.cold_stack@[f].runs_len;
+        assert forall|r: int| lo <= r < hi implies
+            #[trigger] self.cold_index_runs@[r] == pre.cold_index_runs@[r] by {};
+        if self.cold_covered(f, j) {
+            let r = choose|r: int|
+                self.cold_stack@[f].runs_start <= r
+                    < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len
+                && (#[trigger] self.cold_index_runs@[r]).base.as_nat() <= j
+                && j < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len;
+            assert(pre.cold_index_runs@[r] == self.cold_index_runs@[r]);
+            assert(pre.cold_covered(f, j));
+        }
+        if pre.cold_covered(f, j) {
+            let r = choose|r: int|
+                pre.cold_stack@[f].runs_start <= r
+                    < pre.cold_stack@[f].runs_start + pre.cold_stack@[f].runs_len
+                && (#[trigger] pre.cold_index_runs@[r]).base.as_nat() <= j
+                && j < pre.cold_index_runs@[r].base.as_nat() + pre.cold_index_runs@[r].len;
+            assert(self.cold_index_runs@[r] == pre.cold_index_runs@[r]);
+            assert(self.cold_covered(f, j));
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_cold_cell(&self, pre: Self, target: nat, f: int, j: nat)
+        requires pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target),
+            0 <= f < self.cold_stack@.len(),
+        ensures self.cold_covered(f, j) == pre.cold_covered(f, j),
+            self.cold_covered(f, j) ==> self.cold_value(f, j) == pre.cold_value(f, j),
+    {
+        hide(Vec::wf);
+        hide(Vec::cold_value);
+        hide(Vec::restored_history_prefix);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::wf_for_snap);
+        self.lemma_restored_cold_layout(pre, target);
+        let lo = self.cold_stack@[f].runs_start as int;
+        let hi = lo + self.cold_stack@[f].runs_len;
+        self.lemma_restored_cold_coverage(pre, target, f, j);
+        if self.cold_covered(f, j) {
+            let a = choose|r: int|
+                self.cold_stack@[f].runs_start <= r
+                    < self.cold_stack@[f].runs_start + self.cold_stack@[f].runs_len
+                && (#[trigger] self.cold_index_runs@[r]).base.as_nat() <= j
+                && j < self.cold_index_runs@[r].base.as_nat() + self.cold_index_runs@[r].len;
+            let b = choose|r: int|
+                pre.cold_stack@[f].runs_start <= r
+                    < pre.cold_stack@[f].runs_start + pre.cold_stack@[f].runs_len
+                && (#[trigger] pre.cold_index_runs@[r]).base.as_nat() <= j
+                && j < pre.cold_index_runs@[r].base.as_nat() + pre.cold_index_runs@[r].len;
+            if a < b {
+                lemma_cold_run_order::<I>(self.cold_index_runs@, lo, hi, a, b);
+            } else if b < a {
+                lemma_cold_run_order::<I>(self.cold_index_runs@, lo, hi, b, a);
+            }
+            assert(a == b);
+            reveal(Vec::cold_value);
+            let q = self.cold_index_runs@[a].start as int
+                + (j - self.cold_index_runs@[a].base.as_nat()) as int;
+            assert(0 <= q < self.cold_value_pool@.len());
+            assert(self.cold_value_pool@[q] == pre.cold_value_pool@[q]);
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_restored_cold_repr(&self, pre: Self, target: nat)
+        requires pre.wf(), target < pre.depth_spec(),
+            self.restored_history_prefix(pre, target),
+            self.view() == pre.snapshots@[target as int],
+        ensures self.cold_repr_ok(),
+    {
+        hide(Vec::wf);
+        hide(Vec::restored_history_prefix);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::wf_for_snap);
+        self.lemma_restored_cold_layout(pre, target);
+        pre.lemma_wf_named_parts();
+        self.lemma_restored_prefix_partition(pre, target);
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::frame_partition_ok);
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            #[trigger] self.cold_reconstructs(f)
+        by {
+            self.lemma_restored_layer_at(pre, target, f);
+            assert forall|j: int| 0 <= j < self.g_saved_len(f) implies
+                if #[trigger] self.cold_covered(f, j as nat) {
+                    self.cold_value(f, j as nat) == self.snapshots@[f][j]
+                } else {
+                    j < self.layer_above_at(f).len()
+                        && self.snapshots@[f][j] == self.layer_above_at(f)[j]
+                }
+            by {
+                self.lemma_restored_cold_cell(pre, target, f, j as nat);
+                pre.lemma_cold_reconstructs_at(f, j);
+            }
+        }
+    }
+
     /// Retire physical suffixes and the matching canonical ghost history.
     /// Keep the reconstructed store unchanged; ingress promotion follows later.
     #[verifier::spinoff_prover]
@@ -6909,6 +7089,7 @@ where
             final(self).restored_history_prefix(pre, target as nat),
             final(self).wf_for_snap(),
             final(self).hot_repr_ok(), final(self).trail_repr_ok(),
+            final(self).cold_repr_ok(),
     {
         hide(Vec::wf);
         proof {
@@ -6971,6 +7152,7 @@ where
             self.lemma_restored_prefix_canonical(pre, target);
             self.lemma_restored_pair_repr(pre, target as nat, true);
             self.lemma_restored_pair_repr(pre, target as nat, false);
+            self.lemma_restored_cold_repr(pre, target as nat);
         }
     }
 
@@ -6990,6 +7172,28 @@ where
         reveal(Vec::restored_history_prefix);
     }
 
+    /// Close the empty-history invariant without exposing the retired pre-state.
+    #[verifier::spinoff_prover]
+    proof fn lemma_empty_history_wf(&self)
+        requires self.wf_for_snap(), self.store.wf(),
+            self.snapshots@.len() == 0, self.trail_frames@.len() == 0,
+            self.cold_stack@.len() == 0, self.cold_index_runs@.len() == 0,
+            self.cold_value_pool@.len() == 0,
+            self.hot_stack@.len() == 0, self.hot_value_pool@.len() == 0,
+            self.trail_stack@.len() == 0, self.trail_value_pool@.len() == 0,
+            self.diff_log@.len() == 0, self.active_saved_len == I::min_spec(),
+            TRACK ==> forall|j: int| 0 <= j < self.store.captured().len() ==>
+                !(#[trigger] self.store.captured()[j]),
+        ensures self.wf(),
+    {
+        self.store.lemma_wf_captured_len();
+        reveal(Vec::hot_repr_ok);
+        reveal(Vec::trail_repr_ok);
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::proof_compat_ok);
+    }
+
     /// Complete zero-target restore for every tier layout and store protocol.
     /// No survivor is promoted; the exact empty prefix closes the invariant.
     #[verifier::spinoff_prover]
@@ -7002,6 +7206,10 @@ where
             final(self).depth_spec() == 0,
             final(self).snapshots@ == old(self).snapshots@.subrange(0, 0),
     {
+        hide(Vec::wf);
+        hide(Vec::cold_repr_ok);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
         let ghost pre = *self;
         self.reconstruct_target_checked(0);
         self.truncate_restored_history_checked(0, Ghost(pre));
@@ -7012,16 +7220,7 @@ where
             crate::parallel_store::shrink_vec_capacity(&mut self.cold_index_runs, 0, 1);
             crate::parallel_store::shrink_vec_capacity(&mut self.cold_value_pool, 0, 1);
         }
-        proof {
-            self.store.lemma_wf_captured_len();
-            reveal(Vec::frame_partition_ok);
-            reveal(Vec::hot_repr_ok);
-            reveal(Vec::trail_repr_ok);
-            reveal(Vec::cold_repr_ok);
-            reveal(Vec::open_ingress_ok);
-            reveal(Vec::proof_compat_ok);
-            assert(self.wf());
-        }
+        proof { self.lemma_empty_history_wf(); }
     }
 
     /// Mixed-tier restore remains a later proof milestone. Only states outside
@@ -8367,9 +8566,9 @@ where
 
     /// COLD reconstruction (D5's third equivalence), pointwise and IndexLike-only
     /// (no from_nat): each cold frame reconstructs its snapshot - a covered cell
-    /// takes its run's value, an uncovered cell keeps the layer above. This is
-    /// what restore's re-materialized diff_log stratum inherits (its entries have
-    /// .1.as_nat() == c via try_from_usize), so frame_inv_range follows.
+    /// takes its run's value, an uncovered cell keeps the layer above. Physical
+    /// replay consumes this contract through frame_saved_value; retained Cold
+    /// frames preserve it through unchanged runs, snapshots, and newer layers.
     pub open(crate) spec fn cold_reconstructs(&self, f: int) -> bool {
         forall|c: int| #![trigger self.cold_covered(f, c as nat)]
             0 <= c < self.g_saved_len(f) as int ==>

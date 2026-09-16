@@ -725,3 +725,31 @@ Fresh full-package verification passed in both configurations: **2271 verified,
 with `PROPTEST_CASES=1024` passed. E-graph/SAT consumers passed 1267 tests
 (45 ignored), with zero failures. Formatting and whitespace checks passed.
 Trust remains 81 default markers plus five literal-type registrations.
+
+
+### Retained Cold representation after truncation
+
+The retained pair-tier checkpoint is `6fc2c44`. The checked truncation helper
+now also establishes `cold_repr_ok`, so it exports all three physical tier
+invariants alongside exact physical/canonical prefixes and `wf_for_snap`.
+
+Frame/run offset monotonicity proves each cut retains complete Cold run slices
+and payload ranges. These offset facts do not assume monotone saved lengths.
+Explicit covering-run witnesses transfer coverage in both directions; pairwise
+run separation makes the selected covering run unique and transfers its value
+through the retained payload prefix. The unchanged snapshot/newer-layer lemma
+then transfers each retained frame's reconstruction contract, including the
+new top and empty frames. No fields, runtime work, or trust markers are added.
+
+Targeted Cold layout, coverage, value, and representation checks pass at the
+default resource limit. A full run exposed a resource-limit regression in the
+zero-target caller; factoring its final empty-history invariant check into a
+small proof resolved the targeted check without increasing limits. Fresh full
+verification passed **2278 verified, 0 errors** in both default (4m 54s) and
+`literal-types` (4m 53s) configurations. The feature suite passed; the release
+differential policy matrix passed all four tests with `PROPTEST_CASES=1024`.
+E-graph/SAT consumers passed 1267 tests (45 ignored), with zero failures.
+Formatting and whitespace checks passed; trust remains 81 default markers
+plus five literal-type registrations.
+Survivor promotion/capture rebuilding, conversions, and the remaining public
+mixed-tier paths are still unfinished.
