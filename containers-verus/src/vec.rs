@@ -6827,74 +6827,9 @@ where
             }
             assert(self.hot_defer_wf());
 
-            // Canonical mark is one horizontal snapshot plus one vertical
-            // delimiter at the unchanged end of `full_trail`. The prior top's
-            // layer becomes that equal snapshot; the new top range is empty.
+            // Reuse the tier-independent canonical opening theorem.
             pre.lemma_wf_named_parts();
-            let old_depth = pre.trail_frames@.len();
-            assert(self.full_trail@ == pre.full_trail@);
-            assert(self.diff_log@ == pre.diff_log@);
-            assert(self.trail_frames@ == pre.trail_frames@.push(
-                pre.full_trail@.len() as nat));
-            assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
-                #[trigger] frame_inv_range::<T, I>(
-                    self.layer_above_at(k), self.full_trail@,
-                    self.g_start(k), self.g_end(k), self.snapshots@[k],
-                    self.snapshots@[k].len()) by {
-                if k < old_depth {
-                    assert(pre.frame_inv_range_holds(k));
-                    assert(self.g_start(k) == pre.g_start(k));
-                    if k + 1 < old_depth {
-                        assert(self.layer_above_at(k) == pre.layer_above_at(k));
-                        assert(self.g_end(k) == pre.g_end(k));
-                    } else {
-                        assert(k + 1 == old_depth);
-                        assert(pre.layer_above_at(k) == pre.view());
-                        assert(self.layer_above_at(k) == self.snapshots@[k + 1]);
-                        assert(self.snapshots@[k + 1] == pre.view());
-                        assert(self.g_end(k) == pre.full_trail@.len() as int);
-                        assert(pre.g_end(k) == pre.full_trail@.len() as int);
-                    }
-                } else {
-                    assert(k == old_depth);
-                    assert(self.g_start(k) == self.full_trail@.len() as int);
-                    assert(self.g_end(k) == self.full_trail@.len() as int);
-                    assert(self.layer_above_at(k) == self.view());
-                    assert(self.snapshots@[k] == pre.view());
-                    assert forall|j: int| 0 <= j < self.snapshots@[k].len() implies
-                        #[trigger] frame_cell_inv::<T, I>(
-                            self.view(), self.full_trail@, self.g_start(k),
-                            self.g_end(k), self.snapshots@[k], j) by {}
-                }
-            }
-
-            reveal(Vec::wf_for_snap);
-            assert(self.store.wf());
-            assert(self.frame_partition_ok());
-            assert(self.snapshots@.len() == self.trail_frames@.len());
-            assert(self.trail_frames@.len() < usize::MAX);
-            assert(self.trail_frames@.len() > 0);
-            assert(self.trail_frames@[0] == 0) by {
-                if old_depth == 0 {
-                    assert(self.trail_frames@[0] == pre.full_trail@.len());
-                    assert(pre.full_trail@.len() == 0);
-                } else {
-                    assert(self.trail_frames@[0] == pre.trail_frames@[0]);
-                }
-            }
-            assert(self.trail_frames@[(self.trail_frames@.len() - 1) as int]
-                <= self.full_trail@.len());
-            assert forall|k: int|
-                0 <= k && k + 1 < self.trail_frames@.len() implies
-                    #[trigger] self.trail_frames@[k] <= self.trail_frames@[k + 1] by {
-                if k + 1 < old_depth {
-                    pre.lemma_diff_start_monotone(k, k + 1);
-                } else {
-                    assert(k + 1 == old_depth);
-                    pre.lemma_diff_start_le_n(k);
-                }
-            }
-            assert(self.wf_for_snap());
+            self.lemma_canonical_mark(pre);
             reveal(Vec::proof_compat_ok);
             assert(self.proof_compat_ok());
             self.lemma_hot_defer_snap_implies_wf();
@@ -7023,33 +6958,7 @@ where
         self.maybe_shrink(options.shrink);
         let saved_len = self.store.len();
         self.prepare_mark_checked(saved_len);
-        if self.store.unique_capture() {
-            if let Some(frame) = self.hot_stack.last_mut() {
-                frame.end = self.hot_value_pool.len();
-            }
-            let start = self.hot_value_pool.len();
-            self.hot_stack.push(crate::frame::HotFrame {
-                saved_len,
-                start,
-                end: start,
-            });
-        } else {
-            if let Some(frame) = self.trail_stack.last_mut() {
-                frame.end = self.trail_value_pool.len();
-            }
-            let start = self.trail_value_pool.len();
-            self.trail_stack.push(crate::frame::TrailFrame {
-                saved_len,
-                start,
-                end: start,
-            });
-        }
-        let ghost old_view = self.view();
-        proof {
-            self.snapshots = Ghost(self.snapshots@.push(old_view));
-            self.trail_frames@ = self.trail_frames@.push(self.full_trail@.len() as nat);
-        }
-        self.active_saved_len = saved_len;
+        self.open_mark_headers_checked(saved_len);
         // Rollover is deliberately after the new frame opens. Migration
         // helpers therefore see only closed oldest prefixes and cannot change
         // depth, token coordinates, snapshots, or the writable frame.
@@ -7334,6 +7243,149 @@ where
                         && (#[trigger] pool@[q]).1.as_nat() == j;
                     assert(entries@[q - lo] == pool@[q]);
                 }
+            }
+        }
+    }
+
+    /// Seal the selected writable header and append the new empty frame.
+    /// Capture preparation has already happened; reconstruction is composed
+    /// separately from this exact structural transition.
+    #[verifier::spinoff_prover]
+    fn open_mark_headers_checked(&mut self, saved_len: I)
+        requires TRACK, old(self).frame_partition_ok(),
+            old(self).store.unique_capture_spec() ==> old(self).trail_stack@.len() == 0,
+            saved_len.as_nat() == old(self).view().len(),
+        ensures
+            *final(self) == (Self {
+                hot_stack: final(self).hot_stack, trail_stack: final(self).trail_stack,
+                snapshots: final(self).snapshots, trail_frames: final(self).trail_frames,
+                active_saved_len: saved_len, ..*old(self)
+            }),
+            final(self).frame_partition_ok(),
+            final(self).snapshots@ == old(self).snapshots@.push(old(self).view()),
+            final(self).trail_frames@ == old(self).trail_frames@.push(old(self).full_trail@.len() as nat),
+            old(self).store.unique_capture_spec() ==> {
+                &&& final(self).trail_stack@ == old(self).trail_stack@
+                &&& final(self).hot_stack@ == (if old(self).hot_stack@.len() == 0 {
+                    old(self).hot_stack@
+                } else {
+                    old(self).hot_stack@.update(old(self).hot_stack@.len() - 1,
+                        crate::frame::HotFrame {
+                            end: old(self).hot_value_pool@.len() as usize,
+                            ..old(self).hot_stack@[old(self).hot_stack@.len() - 1]
+                        })
+                }).push(crate::frame::HotFrame {
+                    saved_len, start: old(self).hot_value_pool@.len() as usize,
+                    end: old(self).hot_value_pool@.len() as usize,
+                })
+            },
+            !old(self).store.unique_capture_spec() ==> {
+                &&& final(self).hot_stack@ == old(self).hot_stack@
+                &&& final(self).trail_stack@ == (if old(self).trail_stack@.len() == 0 {
+                    old(self).trail_stack@
+                } else {
+                    old(self).trail_stack@.update(old(self).trail_stack@.len() - 1,
+                        crate::frame::TrailFrame {
+                            end: old(self).trail_value_pool@.len() as usize,
+                            ..old(self).trail_stack@[old(self).trail_stack@.len() - 1]
+                        })
+                }).push(crate::frame::TrailFrame {
+                    saved_len, start: old(self).trail_value_pool@.len() as usize,
+                    end: old(self).trail_value_pool@.len() as usize,
+                })
+            },
+    {
+        if self.store.unique_capture() {
+            let n = self.hot_stack.len();
+            if n > 0 {
+                self.hot_stack[n - 1].end = self.hot_value_pool.len();
+            }
+            let start = self.hot_value_pool.len();
+            self.hot_stack.push(crate::frame::HotFrame {
+                saved_len,
+                start,
+                end: start,
+            });
+        } else {
+            let n = self.trail_stack.len();
+            if n > 0 {
+                self.trail_stack[n - 1].end = self.trail_value_pool.len();
+            }
+            let start = self.trail_value_pool.len();
+            self.trail_stack.push(crate::frame::TrailFrame {
+                saved_len,
+                start,
+                end: start,
+            });
+        }
+        let ghost old_view = self.view();
+        proof {
+            self.snapshots = Ghost(self.snapshots@.push(old_view));
+            self.trail_frames@ = self.trail_frames@.push(self.full_trail@.len() as nat);
+        }
+        self.active_saved_len = saved_len;
+        proof { reveal(Vec::frame_partition_ok); }
+    }
+
+    /// Opening a frame appends one horizontal snapshot and one canonical
+    /// boundary. The former top inherits from the equal snapshot, so its
+    /// reconstruction contract is unchanged across every physical tier.
+    #[verifier::spinoff_prover]
+    proof fn lemma_canonical_mark_frame(&self, pre: Self, k: int)
+        requires pre.wf_for_snap(),
+            self.view() == pre.view(),
+            self.snapshots@ == pre.snapshots@.push(pre.view()),
+            self.trail_frames@ == pre.trail_frames@.push(pre.full_trail@.len() as nat),
+            self.full_trail@ == pre.full_trail@,
+            0 <= k < self.snapshots@.len(),
+        ensures self.frame_inv_range_holds(k),
+    {
+        hide(Vec::wf_for_snap);
+        assert(pre.snapshots@.len() == pre.trail_frames@.len()) by {
+            reveal(Vec::wf_for_snap);
+        }
+        let n = pre.snapshots@.len();
+        if k < n {
+            pre.lemma_canonical_frame_contract_at(k);
+            assert(self.snapshots@[k] == pre.snapshots@[k]);
+            assert(self.g_start(k) == pre.g_start(k)) by { reveal(Vec::wf_for_snap); }
+            assert(self.g_end(k) == pre.g_end(k)) by { reveal(Vec::wf_for_snap); }
+            assert(self.layer_above_at(k) == pre.layer_above_at(k));
+        } else {
+            assert(k == n);
+            assert(self.g_start(k) == self.full_trail@.len()) by { reveal(Vec::wf_for_snap); }
+            assert(self.g_end(k) == self.full_trail@.len()) by { reveal(Vec::wf_for_snap); }
+            assert(self.snapshots@[k] == self.view());
+            assert forall|j: int| 0 <= j < self.snapshots@[k].len() implies
+                #[trigger] frame_cell_inv::<T, I>(self.layer_above_at(k),
+                    self.full_trail@, self.g_start(k), self.g_end(k),
+                    self.snapshots@[k], j) by {}
+        }
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_canonical_mark(&self, pre: Self)
+        requires pre.wf_for_snap(), TRACK,
+            pre.depth_spec() < u32::MAX,
+            self.store.wf(), self.frame_partition_ok(),
+            self.view() == pre.view(),
+            self.snapshots@ == pre.snapshots@.push(pre.view()),
+            self.trail_frames@ == pre.trail_frames@.push(pre.full_trail@.len() as nat),
+            self.full_trail@ == pre.full_trail@,
+        ensures self.wf_for_snap(),
+    {
+        hide(frame_inv_range);
+        assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
+            #[trigger] frame_inv_range::<T, I>(self.layer_above_at(k), self.full_trail@,
+                self.g_start(k), self.g_end(k), self.snapshots@[k], self.snapshots@[k].len())
+        by {
+            self.lemma_canonical_mark_frame(pre, k);
+        }
+        reveal(Vec::wf_for_snap);
+        assert forall|k: int| 0 <= k && k + 1 < self.trail_frames@.len() implies
+            #[trigger] self.trail_frames@[k] <= self.trail_frames@[k + 1] by {
+            if k + 1 == pre.trail_frames@.len() {
+                assert(pre.trail_frames@[k] <= pre.full_trail@.len());
             }
         }
     }

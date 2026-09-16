@@ -345,8 +345,11 @@ Next mark obligations:
   2413 verified, zero errors (`/tmp/sp-d21-mark-prepare-default.log`).
 - Replace the fallback's Hot-only explicit-Defer shortcut with a checked general
   opening operation. A unique ingress tier does not imply absence of Cold history.
-- Prove sealing/opening with the checked preparation's cleared flags,
-  exact snapshot/boundary append,
-  and the old newest layer transferred from live to the equal new snapshot.
+- Completed: `open_mark_headers_checked` proves exact sealing/opening header
+  sequences, snapshot/boundary append and frame partition. Shared canonical mark
+  lemmas transfer the former live layer to the equal new snapshot; the existing
+  Hot mark proof now reuses them after their independent verification.
+- Prove physical representation preservation from these exact structural effects,
+  then compose cleared capture flags and canonical reconstruction into general wf.
 - Compose actual rollover and reclamation afterward. Mark remains incomplete
   until its policy dependencies and shared-model effects are discharged.

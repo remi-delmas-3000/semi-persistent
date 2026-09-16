@@ -1307,3 +1307,46 @@ are unchanged. Literal-types verification, differential policy tests and consume
 checks will be rerun with the completed frame-opening milestone; their previous
 checkpoint results are not claimed as verification of this revision. Final
 benchmark parity remains open.
+
+## Mark structural transition and canonical reconstruction
+
+The actual fallback now uses checked `open_mark_headers_checked` after checked
+preparation. The helper seals only the selected newest pair header, appends an
+empty header to the DiffStore-selected tier, appends the snapshot and canonical
+boundary, and updates the active saved length. Its contract states the exact
+header sequences (old last header updated, then one header pushed), exact
+snapshot/boundary appends, unchanged unrelated fields, and the final frame
+partition. Indexed header updates replace equivalent `last_mut` sugar; no new
+traversal, buffer, or runtime history is introduced.
+
+`lemma_canonical_mark_frame` and `lemma_canonical_mark` prove reconstruction
+across snapshot/boundary append independently of physical tier placement. They
+require the canonical pre-invariant and the post-partition, not an all-Hot model.
+After these replacements verified, the existing `hot_defer_mark_checked` was
+changed to call the shared canonical theorem instead of duplicating the proof.
+The specialized function retains its full contract and verifies with the reuse.
+
+Targeted evidence:
+
+- Canonical helpers: **2 verified, zero errors**
+  (`/tmp/sp-d21-mark-canonical2.log`). The initial attempt exposed a missing
+  snapshot-count/boundary-count equality; explicitly accessing that existing
+  canonical fact resolved the failure without increasing solver limits.
+- Existing Hot mark with shared proof: **1 verified, zero errors**
+  (`/tmp/sp-d21-mark-canonical-reuse.log`).
+- Actual header-opening helper: **1 verified, zero errors**
+  (`/tmp/sp-d21-mark-headers.log`).
+
+Still required: use the exact header transition to preserve physical Hot/Trail
+ranges, uniqueness, Cold reconstruction, and empty active capture membership;
+compose with canonical preservation to obtain general wf. Then replace the
+invalid mixed-history Hot shortcut and discharge rollover/reclamation calls.
+The fallback remains trusted, and this checkpoint does not close Step 1 or 2.
+
+Structural checkpoint full evidence: default **2416 verified, zero errors**
+(`/tmp/sp-d21-mark-structure-default.log`); feature regression suite **277 passed,
+10 ignored** (`/tmp/sp-d21-mark-structure-features.log`). Formatting and whitespace
+checks pass; the legacy `containers/` tree is unchanged from `d191c4a`. No trust
+marker or solver limit changed. Literal-types verification and broader policy/
+consumer gates remain due for the completed general opening milestone; final
+performance acceptance is still open.
