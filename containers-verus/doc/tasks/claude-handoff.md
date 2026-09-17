@@ -112,21 +112,27 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
 
 ## Next actions (goal extended by the user on 2026-09-16, evening)
 
-1. Finish the protocol report for `f304bc7` (two-run tables, step-3 reruns of
-   inconclusive cases, verdicts), docs-only signed commit, worktree cleanup.
-2. Caching / destination-passing work (from the allocation tour), in order:
-   the Trail→Hot dedupe `HashSet` owned by the `Vec` (scratch field, taken
-   out and put back around a migration pass, named in `tiers_only_changed`);
-   the `SpMap` index keyed by log position instead of cloned keys (removes
-   the per-key clone on every restore; index-agreement invariant to re-prove);
-   `diff_compress::sort_frame_by_index` sorted in place for the cold-stack
-   callers; `HintedArena::note_hint` via `core::mem::swap` instead of a bucket
-   copy.
-3. Store policy for every composite (`scratchpad/store_policy_design.md`):
-   `TaggedFamily`/`PlainFamily` traits with `HotFirst` (today's choices) and
-   `TrailFirst`; parameter `P = HotFirst` on `UnionFind` first, then
-   `SparseSet` (sparse/indices), `CircularList`, `ListArena`, `BPlusTreeSet`,
-   `EClasses`. Module re-verification and consumer suites per step.
+1. Done (`45fc132`): the protocol report for `f304bc7`.
+2. Caching / destination-passing work (from the allocation tour). Done: the
+   Trail→Hot dedupe `HashSet` owned by the `Vec` (`987a964`); the `SpMap`
+   restore unwinding its index over the discarded suffix through a
+   previous-occurrence column instead of rebuilding from the survivors
+   (`54563da`; the fingerprint-bucket variant was dropped because vstd
+   specifies no `hash_one`, so it would have added trust). Settled by
+   inspection, no change: `diff_compress::sort_frame_by_index`'s copy is
+   reached only from the cold-stack sealing paths (`seal_runs`,
+   `seal_runs_dict`), whose sole caller is
+   `containers-conformance/tests/cold_stack_differential.rs`, and from the
+   legacy compression cadence (`compress_frame`, `CompressionMode` other
+   than `None`) that production does not enable; no production path pays the
+   copy. Remaining, low value: `HintedArena::note_hint` via
+   `core::mem::swap` instead of a bucket copy (no consumer today; vstd now
+   specifies `core::mem::swap` and `&mut vec[i]`, so it is feasible).
+3. Done: store policy for every composite (`doc/design/18-store-policy.md`):
+   `TaggedFamily`/`PlainFamily` with `HotFirst` (the default, today's
+   choices) and `TrailFirst`; `P = HotFirst` on `UnionFind`, `SparseSet`,
+   `CircularList`, `ListArena`, `BPlusTreeSet`, `EClasses`, plus
+   `DiffStore::lemma_wf_data_len` for the abstract store's length bound.
 4. E-graph: an `EGraphConfig` associated store for the caches; remove the four
    `VecD` sites and the `env_diff_store_kind` lever (≈2.5× dispatch cost).
    Guidance from the traces: Hot-first (VecI/VecP) for equality saturation,

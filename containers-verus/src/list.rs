@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Arena-backed intrusive singly-linked lists with semi-persistence (verified).
 //!
-//! `ListArena` owns two arenas, each a verified `Vec` over `InlineStore`:
+//! `ListArena` owns two arenas, each a verified `Vec` whose store the policy
+//! parameter `P` chooses (`crate::store_policy`; the default `HotFirst` gives
+//! `InlineStore`):
 //!   - `heads[L]`  — per-list head pointer (+ tail index for O(1) append);
 //!   - `nodes[k]`  — `{ payload, next }`, the intrusive node cells.
 //! This is the *parent use-list* of the e-graph (production: `list.rs`'s
@@ -30,9 +32,10 @@
 //! at most as long as the arena, and relinking one list frames the others.
 //!
 //! ## Storage layout (production parity)
-//! - Both columns are `InlineStore`, as production's are: the capture flag is
-//!   stolen from a niche in the element's own `Tagged` repr, so there is no side
-//!   bit-vector on either side. This needs `ListNode`/`ListHead` to BE `Tagged`,
+//! - Under the default policy both columns are `InlineStore`, as production's
+//!   are: the capture flag is stolen from a niche in the element's own `Tagged`
+//!   repr, so there is no side bit-vector on either side. This needs
+//!   `ListNode`/`ListHead` to BE `Tagged`,
 //!   which they are (impls below, mirroring `containers/src/list.rs:52-138`):
 //!   a node delegates the tag to its payload, a header steals it from the tail
 //!   word. The payload bound is therefore `T: Tagged` — satisfied at the real
@@ -57,8 +60,8 @@ use vstd::prelude::*;
 
 use crate::diff_store::DiffStore;
 use crate::index_like::IndexLike;
-use crate::inline_store::InlineStore;
 use crate::opt::DenseId;
+use crate::store_policy::{HotFirst, TaggedFamily};
 use crate::tagged::Tagged;
 use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
 
@@ -536,21 +539,24 @@ impl ListArenaToken {
     }
 }
 
-/// Typed-id list arena (production parity: `ListArena<T, L, N, TRACK>` with
+/// Typed-id list arena (production parity: `ListArena<T, L, N, TRACK, P>` with
 /// `L` the list-handle id type and `N` the node id type). The verified CORE
 /// operates on `usize` rows (the ghost model and every proof below); `L`/`N`
 /// type the API boundary, with conversions through the verified `DenseId`
 /// axioms (`id_nat` injective + bounded). `N` bounds node allocation
 /// (production's `VecI<_, N::Index>` capacity); nodes are otherwise internal
 /// — the iterator yields payloads by value, as production's does.
-pub struct ListArena<T, L, N, const TRACK: bool>
+pub struct ListArena<T, L, N, const TRACK: bool, P = HotFirst>
 where
     T: Sized + Copy + core::default::Default + Tagged,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
+    P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
 {
-    pub(crate) heads: SpVec<ListHead<N>, L::Index, InlineStore<ListHead<N>, L::Index>, TRACK>,
-    pub(crate) nodes: SpVec<ListNode<T, N>, N::Index, InlineStore<ListNode<T, N>, N::Index>, TRACK>,
+    pub(crate) heads: SpVec<ListHead<N>, L::Index,
+        <P as TaggedFamily<ListHead<N>, L::Index, TRACK>>::Store, TRACK>,
+    pub(crate) nodes: SpVec<ListNode<T, N>, N::Index,
+        <P as TaggedFamily<ListNode<T, N>, N::Index, TRACK>>::Store, TRACK>,
     pub(crate) _l: core::marker::PhantomData<L>,
     pub(crate) _n: core::marker::PhantomData<N>,
     /// Ghost model: `model@[l]` is the in-order node indices of list `l`.
@@ -562,11 +568,12 @@ where
     pub(crate) model_snapshots: Ghost<Seq<Seq<Seq<usize>>>>,
 }
 
-impl<T, L, N, const TRACK: bool> ListArena<T, L, N, TRACK>
+impl<T, L, N, const TRACK: bool, P> ListArena<T, L, N, TRACK, P>
 where
     T: Sized + Copy + core::default::Default + Tagged,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
+    P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
 {
     // -- index-width bridge --------------------------------------------------
     //
@@ -580,8 +587,8 @@ where
     //
     // The conversion is TOTAL, not fallible, which is what keeps it out of the
     // proof body: a row index that is `< view().len()` is `< Index::max_nat()`
-    // by the store's own `wf` (`InlineStore::wf_spec` carries
-    // `data@.len() < I::max_nat()`), so `try_from_usize` cannot be `None` at
+    // by the store's own `wf` (every store pins `data().len() < I::max_nat()`;
+    // `DiffStore::lemma_wf_data_len`), so `try_from_usize` cannot be `None` at
     // any in-bounds index. Each wrapper discharges that once and hands the core
     // a plain index; no call site needs its own bound.
 
@@ -764,6 +771,7 @@ where
             i < self.heads_view().len(),
         ensures i < <L::Index as crate::index_like::IndexLike>::max_nat(),
     {
+        self.heads.store.lemma_wf_data_len();
     }
 
     /// Same for `nodes` / `N::Index`.
@@ -773,6 +781,7 @@ where
             i < self.nodes_view().len(),
         ensures i < <N::Index as crate::index_like::IndexLike>::max_nat(),
     {
+        self.nodes.store.lemma_wf_data_len();
     }
 
     /// The node arena's *population* — not just any row in it — is representable in
@@ -784,13 +793,14 @@ where
     /// `dst.len + src.len` are both in range as a consequence of `wf` — no caller has
     /// to state it, and there is nothing left for a caller to state it *wrongly*.
     ///
-    /// Empty body: the bound is literally `InlineStore::wf_spec`'s first conjunct
-    /// (`data@.len() < I::max_nat()`), and `nodes_view()` is that data mapped through
-    /// `value_of`, which preserves length.
+    /// The bound is the store's own `wf` (every store pins
+    /// `data().len() < I::max_nat()`), reached through the `DiffStore` lemma
+    /// since the column's store is chosen by the policy parameter.
     pub(crate) proof fn lemma_nodes_len_fits(&self)
         requires self.nodes.wf(),
         ensures self.nodes_view().len() < <N::Index as crate::index_like::IndexLike>::max_nat(),
     {
+        self.nodes.store.lemma_wf_data_len();
     }
 
     pub open(crate) spec fn nodes_view(&self) -> Seq<ListNode<T, N>> {
@@ -1067,10 +1077,10 @@ where
             a.model_snapshots_view().len() == 0,
     {
         let a = ListArena {
-            heads:
-                SpVec::<ListHead<N>, L::Index, InlineStore<ListHead<N>, L::Index>, TRACK>::new(),
-            nodes:
-                SpVec::<ListNode<T, N>, N::Index, InlineStore<ListNode<T, N>, N::Index>, TRACK>::new(),
+            heads: SpVec::with_store(
+                <P as TaggedFamily<ListHead<N>, L::Index, TRACK>>::empty()),
+            nodes: SpVec::with_store(
+                <P as TaggedFamily<ListNode<T, N>, N::Index, TRACK>>::empty()),
             _l: core::marker::PhantomData,
             _n: core::marker::PhantomData,
             model: Ghost(Seq::empty()),
@@ -1862,6 +1872,11 @@ where
             token.heads_frame_idx_spec() == final(self).heads_snapshots_view().len() - 1,
             token.nodes_frame_idx_spec() == final(self).nodes_snapshots_view().len() - 1,
     {
+        // Column lengths fit their index words (store `wf`, via its lemma).
+        proof {
+            self.heads.store.lemma_wf_data_len();
+            self.nodes.store.lemma_wf_data_len();
+        }
         let heads = self.heads.mark(shrink);
         let nodes = self.nodes.mark(shrink);
         // Archive the live model alongside the vec snapshots: the
@@ -1916,7 +1931,7 @@ where
             final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view(),
             final(self).model_snapshots_view() == old(self).model_snapshots_view(),
     {
-        let n = self.heads.store.data.len();
+        let n = self.heads.store.raw_len();
         if n < usize::MAX - 1
             && L::try_new(n).is_some()
             && (L::bit_stealing() || L::try_new(n + 1).is_some())
@@ -1953,10 +1968,10 @@ where
             final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view(),
             final(self).model_snapshots_view() == old(self).model_snapshots_view(),
     {
-        if !(l.to_usize() < self.heads.store.data.len()) {
+        if !(l.to_usize() < self.heads.store.raw_len()) {
             return Err(crate::error::ContainerError::IndexOutOfBounds);
         }
-        let n = self.nodes.store.data.len();
+        let n = self.nodes.store.raw_len();
         if n < usize::MAX - 1
             && N::try_new(n).is_some()
             && (N::bit_stealing() || N::try_new(n + 1).is_some())
@@ -1994,10 +2009,10 @@ where
             final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view(),
             final(self).model_snapshots_view() == old(self).model_snapshots_view(),
     {
-        if !(l.to_usize() < self.heads.store.data.len()) {
+        if !(l.to_usize() < self.heads.store.raw_len()) {
             return Err(crate::error::ContainerError::IndexOutOfBounds);
         }
-        let n = self.nodes.store.data.len();
+        let n = self.nodes.store.raw_len();
         if n < usize::MAX - 1
             && N::try_new(n).is_some()
             && (N::bit_stealing() || N::try_new(n + 1).is_some())
@@ -2037,8 +2052,8 @@ where
         if !TRACK {
             return Err(crate::error::ContainerError::Untracked);
         }
-        let hn = self.heads.store.data.len();
-        let nn = self.nodes.store.data.len();
+        let hn = self.heads.store.raw_len();
+        let nn = self.nodes.store.raw_len();
         if !(hn < usize::MAX && nn < usize::MAX) {
             return Err(crate::error::ContainerError::CapacityExhausted);
         }
@@ -2202,6 +2217,11 @@ where
             final(self).heads_depth_spec() == old(self).heads_depth_spec() + 1,
             final(self).heads_depth_spec() == final(self).nodes_depth_spec(),
     {
+        // Column lengths fit their index words (store `wf`, via its lemma).
+        proof {
+            self.heads.store.lemma_wf_data_len();
+            self.nodes.store.lemma_wf_data_len();
+        }
         self.heads.push_frame(shrink);
         self.nodes.push_frame(shrink);
         self.model_snapshots = Ghost(self.model_snapshots@.push(self.model@));
@@ -2454,7 +2474,7 @@ where
     {
         proof { l.lemma_as_nat_is_id_nat(); }  // prod-parity
         // Total-with-documented-panic: explicit handle-bound branch.
-        if !(l.as_usize() < self.heads.store.data.len()) {
+        if !(l.as_usize() < self.heads.store.raw_len()) {
             crate::guard::refuse("ListArena::len: list handle out of range");
         }
         self.len_raw(l.as_usize())
@@ -2466,7 +2486,7 @@ where
     {
         proof { l.lemma_as_nat_is_id_nat(); }  // prod-parity
         // Total-with-documented-panic: explicit handle-bound branch.
-        if !(l.as_usize() < self.heads.store.data.len()) {
+        if !(l.as_usize() < self.heads.store.raw_len()) {
             crate::guard::refuse("ListArena::is_empty: list handle out of range");
         }
         self.is_empty_raw(l.as_usize())
@@ -2548,7 +2568,7 @@ where
         // Total-with-documented-panic: handle bounds and the same-handle case
         // are explicit branches (the same-handle splice would corrupt the
         // list; formerly a check_precondition on an erased requires).
-        let hn = self.heads.store.data.len();
+        let hn = self.heads.store.raw_len();
         if !(du < hn && su < hn) {
             crate::guard::refuse("ListArena::splice: list handle out of range");
         }
@@ -2560,7 +2580,7 @@ where
 
     /// Iterate list `l` in order, yielding payloads by value (production
     /// `ListIter` parity).
-    pub fn iter(&self, l: L) -> (it: ListIter<'_, T, L, N, TRACK>)
+    pub fn iter(&self, l: L) -> (it: ListIter<'_, T, L, N, TRACK, P>)
         requires self.wf(),
         ensures l.id_nat() < self.model_view().len() ==> ({
             &&& it.arena_ref() == self
@@ -2571,7 +2591,7 @@ where
     {
         proof { l.lemma_as_nat_is_id_nat(); }  // prod-parity
         // Total-with-documented-panic: handle-bound branch.
-        if !(l.as_usize() < self.heads.store.data.len()) {
+        if !(l.as_usize() < self.heads.store.raw_len()) {
             crate::guard::refuse("ListArena::iter: list handle out of range");
         }
         let lu = l.as_usize();
@@ -2595,13 +2615,14 @@ where
 /// node, step the cursor along the verified `next` cache (which `wf`'s
 /// `cache_ok` ties to the model). The invariant `cursor_ok` is exactly
 /// "`cur` names `model[list][pos]` (or `pos == len` and the cursor is exhausted)".
-pub struct ListIter<'a, T, L, N, const TRACK: bool>
+pub struct ListIter<'a, T, L, N, const TRACK: bool, P = HotFirst>
 where
     T: Sized + Copy + core::default::Default + Tagged,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
+    P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
 {
-    pub(crate) arena: &'a ListArena<T, L, N, TRACK>,
+    pub(crate) arena: &'a ListArena<T, L, N, TRACK, P>,
     /// The raw list row; read only by spec code (plain builds erase it).
     #[allow(dead_code)]
     pub(crate) list: usize,
@@ -2611,15 +2632,16 @@ where
     pub(crate) cur: NodeRef,
 }
 
-impl<'a, T, L, N, const TRACK: bool> ListIter<'a, T, L, N, TRACK>
+impl<'a, T, L, N, const TRACK: bool, P> ListIter<'a, T, L, N, TRACK, P>
 where
     T: Sized + Copy + core::default::Default + Tagged,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
+    P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
 {
     /// The arena this iterator walks (spec counterpart; fields are `pub(crate)` —
     /// privacy closeout).
-    pub open(crate) spec fn arena_ref(&self) -> &'a ListArena<T, L, N, TRACK> {
+    pub open(crate) spec fn arena_ref(&self) -> &'a ListArena<T, L, N, TRACK, P> {
         self.arena
     }
 
@@ -2671,7 +2693,7 @@ where
             }),
     {
         // Total-with-documented-panic: stale-handle branch.
-        if !(self.list < self.arena.heads.store.data.len()) {
+        if !(self.list < self.arena.heads.store.raw_len()) {
             crate::guard::refuse("ListIter::next: list handle out of range");
         }
         let ghost m = self.arena.model_view()[self.list as int];
@@ -2909,8 +2931,8 @@ pub(crate) proof fn lemma_insert_fresh_disjoint(
 
 /// Cache-consistency of a single node's `next` after `splice`. Only `dst`'s old
 /// tail node was relinked (to `src`'s head); all others are unchanged.
-pub(crate) proof fn splice_cache_node<T, L, N, const TRACK: bool>(
-    pre: ListArena<T, L, N, TRACK>, post: &ListArena<T, L, N, TRACK>,
+pub(crate) proof fn splice_cache_node<T, L, N, const TRACK: bool, P>(
+    pre: ListArena<T, L, N, TRACK, P>, post: &ListArena<T, L, N, TRACK, P>,
     dst: int, src: int, dtail: usize, shead: NodeRef,
     dst_empty: bool, src_empty: bool, l2: int, p: int,
 )
@@ -2918,6 +2940,7 @@ pub(crate) proof fn splice_cache_node<T, L, N, const TRACK: bool>(
         T: Sized + Copy + core::default::Default + Tagged,
         L: DenseId,
         N: DenseId + Tagged + core::default::Default,
+        P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
     requires
         pre.wf(),
         0 <= dst < pre.model_view().len(),
@@ -3034,17 +3057,23 @@ impl<T, N: DenseId + Tagged + core::default::Default> ListNode<T, N> {
     }
 }
 
-impl<T, L, N, const TRACK: bool> ListArena<T, L, N, TRACK>
+impl<T, L, N, const TRACK: bool, P> ListArena<T, L, N, TRACK, P>
 where
     T: Sized + Copy + core::default::Default + Tagged,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
+    P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
 {
     /// Read-only heads-column access for white-box tests.
     #[doc(hidden)]
     pub fn white_box_heads(
         &self,
-    ) -> &SpVec<ListHead<N>, L::Index, InlineStore<ListHead<N>, L::Index>, TRACK> {
+    ) -> &SpVec<
+        ListHead<N>,
+        L::Index,
+        <P as TaggedFamily<ListHead<N>, L::Index, TRACK>>::Store,
+        TRACK,
+    > {
         &self.heads
     }
 
@@ -3052,7 +3081,12 @@ where
     #[doc(hidden)]
     pub fn white_box_nodes(
         &self,
-    ) -> &SpVec<ListNode<T, N>, N::Index, InlineStore<ListNode<T, N>, N::Index>, TRACK> {
+    ) -> &SpVec<
+        ListNode<T, N>,
+        N::Index,
+        <P as TaggedFamily<ListNode<T, N>, N::Index, TRACK>>::Store,
+        TRACK,
+    > {
         &self.nodes
     }
 }
@@ -3062,11 +3096,12 @@ where
 // 1-line delegation to the verified inherent `next`.
 // ---------------------------------------------------------------------------
 
-impl<'a, T, L, N, const TRACK: bool> Iterator for ListIter<'a, T, L, N, TRACK>
+impl<'a, T, L, N, const TRACK: bool, P> Iterator for ListIter<'a, T, L, N, TRACK, P>
 where
     T: Sized + Copy + core::default::Default + Tagged,
     L: crate::opt::DenseId,
     N: crate::opt::DenseId + crate::tagged::Tagged + core::default::Default,
+    P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
 {
     type Item = T;
 
@@ -3077,11 +3112,12 @@ where
 }
 
 // Production-surface parity (production ships Default).
-impl<T, L, N, const TRACK: bool> Default for ListArena<T, L, N, TRACK>
+impl<T, L, N, const TRACK: bool, P> Default for ListArena<T, L, N, TRACK, P>
 where
     T: Sized + Copy + core::default::Default + Tagged,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
+    P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
 {
     fn default() -> Self {
         Self::new()

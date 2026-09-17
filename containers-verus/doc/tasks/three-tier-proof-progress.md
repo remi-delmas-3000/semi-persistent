@@ -2215,3 +2215,54 @@ formatting, whitespace and the unchanged-legacy check passed; trust **50
 default + 5 literal**. Benchmarks: `doc/tasks/final-performance-report.md`,
 "Extended goal 1(b)".
 
+
+## 2026-09-16 — Store policy for every composite (extended goal, item 2)
+
+Every composite now takes a policy type parameter `P` that chooses the store
+of each of its tracked columns, defaulting to `HotFirst` (the stores the
+composites hardcoded before), so nothing observable changes unless a consumer
+names the policy. `crate::store_policy` holds two plain traits — no generic
+associated types, no specialization — chosen by the column's element type:
+`TaggedFamily<T, I, TRACK>` for a `Tagged` element (where `HotFirst` gives
+`InlineStore`) and `PlainFamily<T, I, TRACK>` for any `Copy` element (where
+`HotFirst` gives `ParallelStore`); `TrailFirst` gives `TrailStore` for both.
+Each family has an associated `Store: DiffStore<T, I, TRACK>` and a verified
+`empty()` (ensures `wf` and an empty `data()`), and every composite builds its
+columns through `Vec::with_store(P::empty())`. Parameterized, in order:
+`UnionFind<T, J, TRACK, PROOFS, P>` (parent, rank, and the two proof
+columns), `SparseSet<T, Idx, S, TRACK, VC, P>` (sparse and indices; `dense`
+already took `S`), `CircularList<T, N, TRACK, P>`, `ListArena<T, L, N, TRACK, P>`,
+`BPlusTreeSet<K, L, S, TRACK, P>`, and `EClasses<T, K, L, N, J, TRACK, PROOFS, P>`,
+which threads `P` into its four composites and its min-monomial pool (a
+plain-family column). Consumers that name these types with the old argument
+lists are unchanged (the default supplies `P`).
+
+Two things the concrete stores had been supplying for free had to be stated
+once for the abstract store. The frame-pushing `Vec` entry points require the
+column's length to fit its index word, which the composites had been reading
+off `InlineStore`'s open `wf`; `DiffStore` gains the universal lemma
+`lemma_wf_data_len` (`wf ==> data().len() < I::max_nat()`, discharged by each
+of the four stores from its own `wf`), and the composites call it before
+`push_frame`/`seal_frame` and inside the arena's row-fits lemmas. And the
+arenas' total-operation guards read the store's `data` field directly; they
+now go through the trait's `raw_len()`. The proofs themselves needed no other
+change: they were already stated over the `Vec` contract.
+
+No new trust; the partial-API count is unchanged.
+
+Targeted evidence (fresh compile before each module): `store_policy` **4 verified**, `diff_store` **6**, `inline_store` **32**, `parallel_store` **30**, `trail_store` **28**, `dyn_store` **28**, `union_find` **32**, `sparse_set` **31**, `list` **78**, `circular_list` **46**, `bplus` **187**, `eclasses` **62**, all zero errors (`scratchpad/policy_verify6.log`, `policy_verify7.log`).
+
+Gate evidence (fresh, `/tmp/sp-d21-2-*.log`, run on the tree that becomes
+this commit): full default **2622 verified, zero errors** (eight more
+functions than the 1(b) commit: the family `empty` constructors and the
+store lemma); literal-types **2622 verified, zero errors**; conditional
+composition **80 verified**; `au-verus` **29 verified**; feature suite **277
+passed, 10 ignored**; release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed**; B+ tree, oracle and reference-e-graph
+property tests **31 passed**; e-graph/SAT consumers **1267 passed, 45
+ignored** (the consumers name the composites with their old argument lists
+and compile unchanged); canary **2 passed**; partial-API audit at the
+unchanged baseline (73/33/40/0); formatting, whitespace and the
+unchanged-legacy check passed; trust **50 default + 5 literal**. Design:
+`doc/design/18-store-policy.md`. Benchmarks:
+`doc/tasks/final-performance-report.md`, "Extended goal 2".

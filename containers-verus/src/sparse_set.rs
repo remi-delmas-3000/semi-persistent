@@ -3,8 +3,12 @@
 //! Semi-persistent sparse set with stable IDs, composed from three verified
 //! `Vec`s:
 //!   - `dense`:   packed values `[0, n)`, no gaps   (`Vec<T, Idx, S>`)
-//!   - `sparse`:  id → position                      (`Vec<Idx, Idx, Inline>`)
-//!   - `indices`: position → id                      (`Vec<Idx, Idx, Inline>`)
+//!   - `sparse`:  id → position                      (`Vec<Idx, Idx, P::Store>`)
+//!   - `indices`: position → id                      (`Vec<Idx, Idx, P::Store>`)
+//!
+//! The two index columns take their store from the policy parameter `P`
+//! (`crate::store_policy`; the default `HotFirst` gives `InlineStore`, as
+//! before). The proofs use only the `Vec` contract, so every policy fits.
 //!
 //! ## The real invariant (`wf`)
 //! Let `cap = sparse.len() = indices.len()`, `n = dense.len() <= cap`.
@@ -34,7 +38,7 @@ use vstd::prelude::*;
 
 use crate::diff_store::DiffStore;
 use crate::index_like::IndexLike;
-use crate::inline_store::InlineStore;
+use crate::store_policy::{HotFirst, TaggedFamily};
 use crate::tagged::Tagged;
 use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
 
@@ -63,23 +67,25 @@ impl SparseSetToken {
 }
 
 /// Semi-persistent sparse set with stable IDs.
-pub struct SparseSet<T, Idx, S, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression>
+pub struct SparseSet<T, Idx, S, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression, P = HotFirst>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
     S: DiffStore<T, Idx, TRACK>,
     VC: crate::value_compressor::ValueCompressor<T>,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     pub(crate) dense: SpVec<T, Idx, S, TRACK, VC>,
-    pub(crate) sparse: SpVec<Idx, Idx, InlineStore<Idx, Idx>, TRACK>,
-    pub(crate) indices: SpVec<Idx, Idx, InlineStore<Idx, Idx>, TRACK>,
+    pub(crate) sparse: SpVec<Idx, Idx, <P as TaggedFamily<Idx, Idx, TRACK>>::Store, TRACK>,
+    pub(crate) indices: SpVec<Idx, Idx, <P as TaggedFamily<Idx, Idx, TRACK>>::Store, TRACK>,
 }
 
-impl<T, Idx, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> SparseSet<T, Idx, S, TRACK, VC>
+impl<T, Idx, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>, P> SparseSet<T, Idx, S, TRACK, VC, P>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
     S: DiffStore<T, Idx, TRACK>,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     /// The packed values currently in the set, in dense order.
     pub open(crate) spec fn dense_view(&self) -> Seq<T> {
@@ -1364,11 +1370,12 @@ fn values_equal<T: PartialEq>(a: &T, b: &T) -> bool {
 // empty `wf` (the permutation invariant is vacuous at cap == n == 0).
 // ---------------------------------------------------------------------------
 
-impl<T, Idx, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> SparseSet<T, Idx, S, TRACK, VC>
+impl<T, Idx, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>, P> SparseSet<T, Idx, S, TRACK, VC, P>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
     S: DiffStore<T, Idx, TRACK>,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     /// Empty sparse set over a caller-supplied (empty, well-formed) dense
     /// store. Production `with_store` parity.
@@ -1386,8 +1393,8 @@ where
     {
         let s = SparseSet {
             dense: SpVec::with_store(store),
-            sparse: SpVec::<Idx, Idx, InlineStore<Idx, Idx>, TRACK>::new(),
-            indices: SpVec::<Idx, Idx, InlineStore<Idx, Idx>, TRACK>::new(),
+            sparse: SpVec::with_store(<P as TaggedFamily<Idx, Idx, TRACK>>::empty()),
+            indices: SpVec::with_store(<P as TaggedFamily<Idx, Idx, TRACK>>::empty()),
         };
         proof {
             // Empty everything: every wf clause quantifies over [0, 0).
@@ -1398,10 +1405,11 @@ where
     }
 }
 
-impl<T, Idx, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> SparseSet<T, Idx, crate::parallel_store::ParallelStore<T, Idx>, TRACK, VC>
+impl<T, Idx, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>, P> SparseSet<T, Idx, crate::parallel_store::ParallelStore<T, Idx>, TRACK, VC, P>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     /// Empty sparse set over a `ParallelStore` (any `T: Copy`; production
     /// `SparseSet::new` parity).
@@ -1412,10 +1420,11 @@ where
     }
 }
 
-impl<T, Idx, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>> SparseSet<T, Idx, crate::inline_store::InlineStore<T, Idx>, TRACK, VC>
+impl<T, Idx, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>, P> SparseSet<T, Idx, crate::inline_store::InlineStore<T, Idx>, TRACK, VC, P>
 where
     T: Tagged + Sized + Copy,
     Idx: IndexLike + Tagged,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     /// Empty sparse set over an `InlineStore` (`T: Tagged`; production
     /// `SparseSet::new_inline` parity).
@@ -1444,11 +1453,19 @@ impl core::fmt::Debug for SparseSetToken {
 }
 
 // Production-surface parity (production ships Default on this variant).
-impl<T, Idx, const TRACK: bool> Default
-    for SparseSet<T, Idx, crate::parallel_store::ParallelStore<T, Idx>, TRACK>
+impl<T, Idx, const TRACK: bool, P> Default
+    for SparseSet<
+        T,
+        Idx,
+        crate::parallel_store::ParallelStore<T, Idx>,
+        TRACK,
+        crate::value_compressor::NoValueCompression,
+        P,
+    >
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     fn default() -> Self {
         Self::new()

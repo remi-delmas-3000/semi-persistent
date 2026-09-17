@@ -62,6 +62,14 @@ where
         requires self.wf(),
         ensures self.captured().len() == self.data().len();
 
+    /// Universal consequence of `wf`: the element count fits the index word,
+    /// so every position is representable in `I`. Each backend's `wf` pins
+    /// it; a composite over an abstract store reaches it through this lemma
+    /// (the frame-pushing `Vec` entry points require it).
+    proof fn lemma_wf_data_len(&self)
+        requires self.wf(),
+        ensures self.data().len() < I::max_nat();
+
     // -- raw read / write API ------------------------------------------------
 
     fn is_empty(&self) -> (b: bool)

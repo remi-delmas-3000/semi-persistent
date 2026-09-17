@@ -311,6 +311,51 @@ of the chain column is the 3–4 % on the String and composite interning cases
 (one `Option<usize>` push per insert next to a key clone and a hash insert);
 both stay inside τ.
 
+## Extended goal 2: store policy for every composite (after `54563da`)
+
+Every composite now takes a policy type parameter that chooses its columns'
+stores, defaulting to the stores it hardcoded before (`HotFirst`), so the
+generated code is expected to be identical: constructors already went through
+`Vec::with_store` with the same store, and the only executable change is the
+arenas' total-operation guards reading the store's length through the
+inlined `raw_len()` instead of the concrete `data` field. The composite
+benchmarks (`eclasses_bench`, `retained_containers_bench`,
+`bplus_cursor_bitset_bench`; runs `policy_A`/`policy_B` on the item-2 tree)
+were evaluated against the previous baselines: `runA`/`runB` for the
+composite groups (their code is unchanged since `f304bc7`) and
+`runA_1b`/`runB_1b` for the map groups.
+
+Frozen-rule verdicts: paired (verified vs legacy, 26 cases) 23 pass, 2
+inconclusive, 1 regression; checkpoint (verified now vs `f304bc7`, 42
+non-map cases) 39 pass, 2 inconclusive, 1 regression; checkpoint vs the 1(b)
+run (10 map cases) 10 pass. The three flagged cases were rerun at
+`--sample-size 100 --warm-up-time 3 --measurement-time 10`, twice on the
+item-2 tree and twice on a worktree of `54563da` with the same bench source
+(`policy_rerun`/`policy_rerun2` vs `prev_rerun`/`prev_rerun2`):
+
+| Case | `54563da` (two reruns) | Item 2 (two reruns) | Ratio | Status |
+|---|---|---|---|---|
+| `class_ring/splice_untracked/legacy` | 5.774 µs / 5.774 µs | 5.776 µs / 5.779 µs | 1.000 / 1.001 | pass |
+| `class_ring/splice_untracked/verified` | 6.332 µs / 6.339 µs | 6.320 µs / 6.368 µs | 0.998 / 1.005 | pass |
+| `eclasses/find_sweep/retained/4096` | 250.2 µs / 252.4 µs | 252.3 µs / 214.8 µs | 1.008 / 0.851 | pass |
+| `eclasses/find_sweep/verified/4096` | 202.8 µs / 273.5 µs | 202.9 µs / 252.0 µs | 1.000 / 0.921 | pass |
+
+So the store policy is neutral: the previous commit's binaries reproduce
+every flagged number. Two observations belong to the record rather than to
+this change. `class_ring/splice_untracked` is now 1.10× slower than legacy
+paired in the same binary on BOTH trees (legacy 5.77 µs, verified 6.33 µs),
+where the `f304bc7` protocol measured 0.945 (legacy 7.70 µs, verified 7.28
+µs): neither arm's source changed (the legacy crate is the untouched
+oracle; the untracked ring path is the same code), the bench binary did (the
+map cases were added), and the legacy arm gained 25 % from that layout
+change against 13 % for the verified arm. It joins `aov/log` (1.07 here) as
+an open legacy gap attributed to code placement, not to an algorithmic
+difference. `eclasses/find_sweep/4096` keeps its per-process placement
+bimodality on both arms (203 µs and 252–274 µs modes), exactly as
+investigated for `f304bc7`. `vec/mark_set_restore/legacy` moved 1.10/1.16
+against its `f304bc7` measurement (an oracle arm, unchanged code) and is
+listed as machine drift.
+
 ## Results (revision `f304bc7`, runs A and B on 2026-09-16 17:05–18:45, reruns 18:50–19:10)
 
 Bench binaries: `/tmp/sp-d21-bench-binaries-f304bc7.md5`; driver log

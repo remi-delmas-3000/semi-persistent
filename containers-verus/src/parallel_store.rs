@@ -81,11 +81,14 @@ where
 
     proof fn lemma_wf_captured_len(&self) {}
 
+    proof fn lemma_wf_data_len(&self) {}
+
     #[inline(always)]
     fn is_empty(&self) -> bool {
         self.data.len() == 0
     }
 
+    #[inline(always)]
     fn raw_len(&self) -> (n: usize) {
         self.data.len()
     }

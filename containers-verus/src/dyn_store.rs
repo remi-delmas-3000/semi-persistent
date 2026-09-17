@@ -105,6 +105,17 @@ where
         }
     }
 
+    proof fn lemma_wf_data_len(&self) {
+        match self {
+            DynStore::Inline(s) =>
+                <InlineStore<T, I> as DiffStore<T, I, TRACK>>::lemma_wf_data_len(s),
+            DynStore::Parallel(s) =>
+                <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::lemma_wf_data_len(s),
+            DynStore::Trail(s) =>
+                <TrailStore<T, I> as DiffStore<T, I, TRACK>>::lemma_wf_data_len(s),
+        }
+    }
+
     open spec fn unique_capture_spec(&self) -> bool {
         !(self is Trail)
     }
@@ -149,6 +160,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn raw_len(&self) -> (n: usize) {
         match self {
             DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::raw_len(s),

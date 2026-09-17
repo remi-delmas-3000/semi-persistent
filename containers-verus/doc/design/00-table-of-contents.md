@@ -85,6 +85,10 @@ listing's order.
     proof model for non-monotone saved lengths, Trail duplicate columns, Hot
     unique captures, Cold runs, cross-tier replay, and the inductive lemmas
     suggested by horizontal, vertical, and representation changes.
+18. **[Store Policy for the Composite Containers](18-store-policy.md)**: the
+    policy type parameter every composite takes, the two column families it is
+    consulted through, `HotFirst` (the default) versus `TrailFirst`, and the
+    two facts the abstract store made explicit in the proofs.
 
 ## The class layer
 

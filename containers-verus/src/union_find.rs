@@ -3,8 +3,11 @@
 //! Verified union-find over two semi-persistent columns. It establishes the
 //! acyclic-root invariant consumed by `eclasses.rs`.
 //!
-//! `parent` and `rank` are verified `Vec`s over `InlineStore`, production's
-//! `VecI` columns (`egraph/src/union_find.rs`). The abstract state is a ghost
+//! `parent` and `rank` are verified `Vec`s whose store the policy parameter
+//! `P` chooses (`crate::store_policy`; the default `HotFirst` gives
+//! `InlineStore`, production's `VecI` columns, `egraph/src/union_find.rs`).
+//! The proofs use only the `Vec` contract, so they hold for every policy.
+//! The abstract state is a ghost
 //! root map `roots@: Seq<usize>` — each element's canonical representative —
 //! plus a ghost measure `dist@: Seq<nat>`, the element's path length to its
 //! root. The physical parent column is a cache of `roots@`, tied to it by
@@ -50,9 +53,10 @@
 
 use vstd::prelude::*;
 
+use crate::diff_store::DiffStore;
 use crate::index_like::IndexLike;
-use crate::inline_store::InlineStore;
 use crate::opt::DenseId;
+use crate::store_policy::{HotFirst, TaggedFamily};
 use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
 
 verus! {
@@ -190,19 +194,23 @@ pub open(crate) spec fn uf_proof_archive_agrees<T: DenseId, J: crate::tagged::Ta
 
 /// Verified union-find (production parity: `UnionFind<T, J, TRACK, PROOFS>`
 /// with the dual fast/proof forests under `PROOFS`).
-pub struct UnionFind<T: DenseId, J, const TRACK: bool = true, const PROOFS: bool = false>
+pub struct UnionFind<T: DenseId, J, const TRACK: bool = true, const PROOFS: bool = false, P = HotFirst>
 where
     J: crate::tagged::Tagged + Copy + core::default::Default,
+    P: TaggedFamily<T, T::Index, TRACK> + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>,
 {
-    pub(crate) parent: SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK,
+    pub(crate) parent: SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK,
         crate::value_compressor::ValueDictC>,
-    pub(crate) rank: SpVec<u8, T::Index, InlineStore<u8, T::Index>, TRACK,
+    pub(crate) rank: SpVec<u8, T::Index, <P as TaggedFamily<u8, T::Index, TRACK>>::Store, TRACK,
         crate::value_compressor::ValueDictC>,
     /// Proof forest: per-node ORIGINAL-edge parent, never compressed
     /// (`Some` iff `PROOFS`). Production's `parent_proof`.
-    pub(crate) parent_proof: Option<SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>>,
+    pub(crate) parent_proof: Option<SpVec<T, T::Index,
+        <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>>,
     /// Per-node justification of the proof edge (`Some` iff `PROOFS`).
-    pub(crate) justification: Option<SpVec<J, T::Index, InlineStore<J, T::Index>, TRACK>>,
+    pub(crate) justification: Option<SpVec<J, T::Index,
+        <P as TaggedFamily<J, T::Index, TRACK>>::Store, TRACK>>,
     /// Ghost root map: `roots@[i]` is `i`'s canonical representative.
     pub(crate) roots: Ghost<Seq<usize>>,
     /// Ghost path-length measure (0 at roots, strictly decreasing toward them).
@@ -212,9 +220,11 @@ where
     pub(crate) dist_snapshots: Ghost<Seq<Seq<nat>>>,
 }
 
-impl<T: DenseId, J, const TRACK: bool, const PROOFS: bool> UnionFind<T, J, TRACK, PROOFS>
+impl<T: DenseId, J, const TRACK: bool, const PROOFS: bool, P> UnionFind<T, J, TRACK, PROOFS, P>
 where
     J: crate::tagged::Tagged + Copy + core::default::Default,
+    P: TaggedFamily<T, T::Index, TRACK> + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>,
 {
     pub open(crate) spec fn parent_view(&self) -> Seq<T> {
         self.parent.view()
@@ -321,15 +331,15 @@ where
             u.parent_snapshots_view().len() == 0,
     {
         let u = UnionFind {
-            parent: SpVec::<T, T::Index, InlineStore<T, T::Index>, TRACK, crate::value_compressor::ValueDictC>::new(),
-            rank: SpVec::<u8, T::Index, InlineStore<u8, T::Index>, TRACK, crate::value_compressor::ValueDictC>::new(),
+            parent: SpVec::with_store(<P as TaggedFamily<T, T::Index, TRACK>>::empty()),
+            rank: SpVec::with_store(<P as TaggedFamily<u8, T::Index, TRACK>>::empty()),
             parent_proof: if PROOFS {
-                Some(SpVec::<T, T::Index, InlineStore<T, T::Index>, TRACK>::new())
+                Some(SpVec::with_store(<P as TaggedFamily<T, T::Index, TRACK>>::empty()))
             } else {
                 None
             },
             justification: if PROOFS {
-                Some(SpVec::<J, T::Index, InlineStore<J, T::Index>, TRACK>::new())
+                Some(SpVec::with_store(<P as TaggedFamily<J, T::Index, TRACK>>::empty()))
             } else {
                 None
             },
@@ -1144,6 +1154,12 @@ where
     {
         // Seal-based marks: the id-typed columns get the full per-frame mode set
         // (dictionary and delta included) instead of the copy-only path.
+        proof {
+            // The columns' element counts fit the index word (the store's `wf`
+            // pins them; with the store abstract, reached through its lemma).
+            self.parent.store.lemma_wf_data_len();
+            self.rank.store.lemma_wf_data_len();
+        }
         let parent_tok = self.parent.seal_frame(shrink);
         let rank_tok = self.rank.seal_frame(shrink);
         // proof columns (production parity): marked through their total
@@ -1267,6 +1283,15 @@ where
             final(self).parent_snapshots_view()
                 == old(self).parent_snapshots_view().push(old(self).parent_view()),
     {
+        proof {
+            // Element counts fit the index word (store `wf`, via its lemma).
+            self.parent.store.lemma_wf_data_len();
+            self.rank.store.lemma_wf_data_len();
+            if PROOFS {
+                self.parent_proof->Some_0.store.lemma_wf_data_len();
+                self.justification->Some_0.store.lemma_wf_data_len();
+            }
+        }
         self.parent.push_frame(shrink);
         self.rank.push_frame(shrink);
         if let Some(pp) = &mut self.parent_proof { pp.push_frame(shrink) }
@@ -1725,15 +1750,20 @@ impl<T: DenseId, J: Copy> ProofBuf<T, J> {
     }
 }
 
-impl<T: DenseId, J, const TRACK: bool, const PROOFS: bool> UnionFind<T, J, TRACK, PROOFS>
+impl<T: DenseId, J, const TRACK: bool, const PROOFS: bool, P> UnionFind<T, J, TRACK, PROOFS, P>
 where
     J: crate::tagged::Tagged + Copy + core::default::Default,
+    P: TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>,
 {
     /// Read-only proof-parent column for batch proof indexing.
     ///
     /// `None` when `PROOFS = false`. A successful justified union or restore
     /// invalidates any index derived from this forest.
-    pub fn proof_parent(&self) -> Option<&SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>> {
+    pub fn proof_parent(
+        &self,
+    ) -> Option<&SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>> {
         self.parent_proof.as_ref()
     }
 
@@ -1774,8 +1804,8 @@ where
     /// Reverse the parent_proof path from `x` to its root, making `x` the
     /// new root (production's algorithm verbatim).
     fn reroot_proof(
-        pp: &mut SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>,
-        j: &mut SpVec<J, T::Index, InlineStore<J, T::Index>, TRACK>,
+        pp: &mut SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>,
+        j: &mut SpVec<J, T::Index, <P as TaggedFamily<J, T::Index, TRACK>>::Store, TRACK>,
         x: T,
     ) {
         let mut path = vec![x];
@@ -1881,7 +1911,7 @@ where
     }
 
     fn walk_to_root(
-        pp: &SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>,
+        pp: &SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>,
         x: T,
         path: &mut Vec<T>,
     ) {

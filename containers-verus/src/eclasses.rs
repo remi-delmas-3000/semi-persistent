@@ -42,12 +42,12 @@
 use vstd::prelude::*;
 
 use crate::circular_list::{CircularList, CircularListNode, CircularListToken};
+use crate::diff_store::DiffStore;
 use crate::index_like::IndexLike;
-use crate::inline_store::InlineStore;
-use crate::list::{ListArena, ListArenaToken, ListNode};
+use crate::list::{ListArena, ListArenaToken, ListHead, ListNode};
 use crate::opt::{DenseId, Opt};
-use crate::parallel_store::ParallelStore;
 use crate::sparse_set::{SparseSet, SparseSetToken};
+use crate::store_policy::{HotFirst, PlainFamily, TaggedFamily};
 use crate::tagged::Tagged;
 use crate::union_find::{UnionFind, UnionFindToken};
 use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
@@ -428,17 +428,26 @@ pub open(crate) spec fn eg_archive_agrees<
 
 /// Verified equivalence classes: ring + union-find + repr set + use-lists +
 /// min-monomial pool, with the agreement clauses as `wf`.
-pub struct EClasses<T, K, L, N, J, const TRACK: bool, const PROOFS: bool>
+pub struct EClasses<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P = HotFirst>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
     /// The class ring; a root cell carries the class's configured-width key
     /// while the class is live, absent once absorbed.
-    pub(crate) entries: CircularList<Opt<K>, T, TRACK>,
+    pub(crate) entries: CircularList<Opt<K>, T, TRACK, P>,
     /// Per-class data. The sparse set uses the full index word internally so
     /// its length can represent the complete bit-stealing ID cardinality; its
     /// numeric keys convert losslessly to the packed `K` stored in the ring.
@@ -450,27 +459,38 @@ where
     /// frames write distinct class payloads, so equality runs degenerate to
     /// one run per entry). Revisit at EqSat frame scale (goal F5).
     pub(crate) reprs: SparseSet<ClassData<L, T>, <T as DenseId>::Index,
-        InlineStore<ClassData<L, T>, <T as DenseId>::Index>, TRACK>,
+        <P as TaggedFamily<ClassData<L, T>, T::Index, TRACK>>::Store, TRACK,
+        crate::value_compressor::NoValueCompression, P>,
     /// Verified canonical-representative lookup.
-    pub(crate) uf: UnionFind<T, J, TRACK, PROOFS>,
+    pub(crate) uf: UnionFind<T, J, TRACK, PROOFS, P>,
     /// Per-class parent lists.
-    pub(crate) uses: ListArena<T, L, N, TRACK>,
-    /// Min-monomial pool: flat rows of `min_width` columns. `ParallelStore`,
-    /// as production's `VecP`: `Opt` owns its niche bit, so it cannot sit in
-    /// a bit-stealing `InlineStore`.
-    pub(crate) min_pool: SpVec<Opt<T>, usize, ParallelStore<Opt<T>, usize>, TRACK>,
+    pub(crate) uses: ListArena<T, L, N, TRACK, P>,
+    /// Min-monomial pool: flat rows of `min_width` columns. A plain-family
+    /// column (`ParallelStore` under the default policy, as production's
+    /// `VecP`): `Opt` owns its niche bit, so it cannot sit in a bit-stealing
+    /// `InlineStore`.
+    pub(crate) min_pool: SpVec<Opt<T>, usize, <P as PlainFamily<Opt<T>, usize, TRACK>>::Store, TRACK>,
     /// Fixed row width; 0 until `set_min_width`.
     pub(crate) min_width: usize,
 }
 
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool>
-    EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P>
+    EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
     /// Convert the public, packed class-key type to the sparse set's full-word
     /// internal key. The numeric identity is unchanged.
@@ -543,12 +563,12 @@ where
 
     /// The ring component (spec ref, for iterator ensures).
     pub open(crate) spec fn entries_ref(&self)
-        -> &CircularList<Opt<K>, T, TRACK> {
+        -> &CircularList<Opt<K>, T, TRACK, P> {
         &self.entries
     }
 
     /// The use-list arena (spec ref, for iterator ensures).
-    pub open(crate) spec fn uses_ref(&self) -> &ListArena<T, L, N, TRACK> {
+    pub open(crate) spec fn uses_ref(&self) -> &ListArena<T, L, N, TRACK, P> {
         &self.uses
     }
 
@@ -680,10 +700,11 @@ where
         }
         let e = EClasses {
             entries: CircularList::new(),
-            reprs: SparseSet::new_inline(),
+            reprs: SparseSet::with_store(
+                <P as TaggedFamily<ClassData<L, T>, T::Index, TRACK>>::empty()),
             uf: UnionFind::new(),
             uses: ListArena::new(),
-            min_pool: SpVec::<Opt<T>, usize, ParallelStore<Opt<T>, usize>, TRACK>::new(),
+            min_pool: SpVec::with_store(<P as PlainFamily<Opt<T>, usize, TRACK>>::empty()),
             min_width: 0,
         };
         proof {
@@ -1187,14 +1208,23 @@ pub struct MergeInfo<T: DenseId, L: DenseId> {
     pub absorbed_atomic: bool,
 }
 
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool>
-    EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P>
+    EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
 
     /// Re-establishes `eg_model_wf` after a merge's three mutations (union,
@@ -2159,6 +2189,8 @@ where
                     assert(row.as_nat() * (self.min_width as nat) + (self.min_width as nat)
                         == (row.as_nat() + 1) * (self.min_width as nat)) by (nonlinear_arith);
                     <T::Index as IndexLike>::lemma_max_nat_fits_usize();
+                    // The pool's length fits `usize` (store `wf`, via its lemma).
+                    self.min_pool.store.lemma_wf_data_len();
                 }
                 let base = row.as_usize() * self.min_width;
                 let cell = self.min_pool.get_index(base + col);
@@ -2329,6 +2361,8 @@ where
             assert((row.as_nat() + 1) * w <= self.min_pool.view().len());
             assert(row.as_nat() * w + w == (row.as_nat() + 1) * w) by (nonlinear_arith);
             <T::Index as IndexLike>::lemma_max_nat_fits_usize();
+            // The pool's length fits `usize` (store `wf`, via its lemma).
+            self.min_pool.store.lemma_wf_data_len();
             self.lemma_mid_pool_wf(o, key, row);
         }
         let base = row.as_usize() * self.min_width;
@@ -2604,7 +2638,7 @@ where
     /// Iterate `start`'s class ring (the verified `RingIter`: exactly the
     /// ring's nodes, each once, in successor order).
     pub fn iter_class(&self, start: T)
-        -> (it: crate::circular_list::RingIter<'_, Opt<K>, T, TRACK>)
+        -> (it: crate::circular_list::RingIter<'_, Opt<K>, T, TRACK, P>)
         requires self.wf(),
         ensures start.id_nat() < self.n_spec() ==> ({
             &&& it.list_ref() == self.entries_ref()
@@ -2621,7 +2655,7 @@ where
     /// Iterate class `key`'s use-list (the verified `ListIter`). Refuses a
     /// dead key.
     pub fn iter_uses(&self, key: K)
-        -> (it: crate::list::ListIter<'_, T, L, N, TRACK>)
+        -> (it: crate::list::ListIter<'_, T, L, N, TRACK, P>)
         requires self.wf(),
         ensures self.contains_key_spec(key) ==> ({
             &&& it.arena_ref() == self.uses_ref()
@@ -2713,7 +2747,7 @@ where
 
     /// Direct read access to the use-list arena (production's `uses`; the
     /// rebuild loop iterates an absorbed list by id).
-    pub fn uses(&self) -> (a: &ListArena<T, L, N, TRACK>)
+    pub fn uses(&self) -> (a: &ListArena<T, L, N, TRACK, P>)
         requires self.wf(),
         ensures a == self.uses_ref(), a.wf(),
     {
@@ -2851,14 +2885,23 @@ impl EClassesToken {
     }
 }
 
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool>
-    EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P>
+    EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
     /// Mark the aggregate: one frame on every component, atomically from the
     /// caller's view (a component that cannot mark refuses before the next
@@ -3055,6 +3098,8 @@ where
         self.reprs.push_frames(shrink);
         self.uf.push_frames(shrink);
         self.uses.push_frames(shrink);
+        // The pool's row count fits its index word (store `wf`, via its lemma).
+        proof { self.min_pool.store.lemma_wf_data_len(); }
         self.min_pool.push_frame(shrink);
         proof {
             reveal(eg_archive_agrees);
@@ -3526,13 +3571,23 @@ where
 // the union-find's glue — doc/design/egraph-class-layer.md).
 // ---------------------------------------------------------------------------
 
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool> EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P>
+    EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
     /// Merge with justification (records the proof edge `a—b`).
     pub fn merge_justified(&mut self, a: T, b: T, just: J) -> Option<MergeInfo<T, L>> {
@@ -3575,7 +3630,9 @@ where
     }
 
     /// Read-only proof-parent forest for an Euler-tour batch index.
-    pub fn proof_parent(&self) -> Option<&crate::VecI<T, T::Index, TRACK>> {
+    pub fn proof_parent(
+        &self,
+    ) -> Option<&SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>> {
         self.uf.proof_parent()
     }
 
@@ -3606,14 +3663,23 @@ impl core::fmt::Debug for EClassesToken {
 }
 
 // Production-surface parity (the pre-swap class layer shipped Default).
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool> Default
-    for EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P> Default
+    for EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
     fn default() -> Self {
         Self::new()

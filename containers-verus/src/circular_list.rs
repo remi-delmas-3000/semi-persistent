@@ -43,8 +43,9 @@
 //!   ghost `model` stays `Seq<Seq<usize>>` (logical indices), so every merge
 //!   lemma is width-agnostic. The buffer is generic — it is only *named*
 //!   `EClass`-anything in the e-graph context.
-//! - Storage is the verified semi-persistent `Vec` over `InlineStore`
-//!   (production parity): the mark/restore capture flag is stolen from `next`'s
+//! - Storage is the verified semi-persistent `Vec` over the store the policy
+//!   parameter `P` chooses (`crate::store_policy`; the default `HotFirst` gives
+//!   `InlineStore`, production parity): the capture flag is stolen from `next`'s
 //!   spare MSB — the same niche the id word never uses — so a node is exactly
 //!   `payload + one id word` with NO side capture bitmap. This is production's
 //!   `VecI<EClassEntry, _>` layout verbatim (`egraph/src/classes.rs`, where
@@ -53,9 +54,10 @@
 
 use vstd::prelude::*;
 
+use crate::diff_store::DiffStore;
 use crate::index_like::IndexLike;
-use crate::inline_store::InlineStore;
 use crate::opt::DenseId;
+use crate::store_policy::{HotFirst, TaggedFamily};
 use crate::tagged::Tagged;
 use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
 
@@ -179,8 +181,11 @@ pub open(crate) spec fn rotate(s: Seq<usize>, k: int) -> Seq<usize> {
     s.subrange(k, s.len() as int) + s.subrange(0, k)
 }
 
-pub struct CircularList<T, N: DenseId, const TRACK: bool>
-where T: Sized + Copy + core::default::Default + Send {
+pub struct CircularList<T, N: DenseId, const TRACK: bool, P = HotFirst>
+where
+    T: Sized + Copy + core::default::Default + Send,
+    P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>,
+{
     /// Storage is indexed by the id's own **storage word** `N::Index`, not by
     /// `usize` — production's `VecI<EClassEntry<T, K>, T::Index>` verbatim. For
     /// the 31-bit e-class instantiation, this makes a semi-persistent diff entry
@@ -189,7 +194,7 @@ where T: Sized + Copy + core::default::Default + Send {
     pub(crate) entries: SpVec<
         CircularListNode<T, N>,
         <N as DenseId>::Index,
-        InlineStore<CircularListNode<T, N>, <N as DenseId>::Index>,
+        <P as TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>>::Store,
         TRACK,
     >,
     /// Ghost partition: `model@[c]` is class `c`'s node indices in ring order.
@@ -202,8 +207,11 @@ where T: Sized + Copy + core::default::Default + Send {
     pub(crate) model_snapshots: Ghost<Seq<Seq<Seq<usize>>>>,
 }
 
-impl<T, N: DenseId, const TRACK: bool> CircularList<T, N, TRACK>
-where T: Sized + Copy + core::default::Default + Send {
+impl<T, N: DenseId, const TRACK: bool, P> CircularList<T, N, TRACK, P>
+where
+    T: Sized + Copy + core::default::Default + Send,
+    P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>,
+{
     /// `next_seq()[i]` is node `i`'s successor position (the stored id's dense
     /// index). Decoding through `id_nat` is what keeps the ghost `model` — and
     /// every merge lemma stated over it — width-agnostic `usize`.
@@ -331,12 +339,9 @@ where T: Sized + Copy + core::default::Default + Send {
             c.model_snapshots_view().len() == 0,
     {
         let c = CircularList {
-            entries: SpVec::<
-                CircularListNode<T, N>,
-                <N as DenseId>::Index,
-                InlineStore<CircularListNode<T, N>, <N as DenseId>::Index>,
-                TRACK,
-            >::new(),
+            entries: SpVec::with_store(
+                <P as TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>>::empty(),
+            ),
             model: Ghost(Seq::empty()),
             model_snapshots: Ghost(Seq::empty()),
         };
@@ -392,7 +397,7 @@ where T: Sized + Copy + core::default::Default + Send {
     {
         proof { i.lemma_as_nat_is_id_nat(); }
         // Total-with-documented-panic: explicit node-bound branch.
-        if !(i.to_usize() < self.entries.store.data.len()) {
+        if !(i.to_usize() < self.entries.store.raw_len()) {
             crate::guard::refuse("CircularList::next_of: node id out of range");
         }
         let r = self.entries.get_index(i.to_index()).next;
@@ -413,7 +418,7 @@ where T: Sized + Copy + core::default::Default + Send {
     {
         proof { i.lemma_as_nat_is_id_nat(); }
         // Total-with-documented-panic: explicit node-bound branch.
-        if !(i.to_usize() < self.entries.store.data.len()) {
+        if !(i.to_usize() < self.entries.store.raw_len()) {
             crate::guard::refuse("CircularList::payload_of: node id out of range");
         }
         self.entries.get_index(i.to_index()).payload
@@ -435,7 +440,7 @@ where T: Sized + Copy + core::default::Default + Send {
             final(self).model_snapshots_view() == old(self).model_snapshots_view(),
     {
         // Total-with-documented-panic: explicit node-bound branch.
-        if !(i.to_usize() < self.entries.store.data.len()) {
+        if !(i.to_usize() < self.entries.store.raw_len()) {
             crate::guard::refuse("CircularList::set_payload: node id out of range");
         }
         proof { i.lemma_as_nat_is_id_nat(); }
@@ -495,7 +500,7 @@ where T: Sized + Copy + core::default::Default + Send {
             r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted,
     {
         if self.entries.can_push() {
-            let n = self.entries.store.data.len();
+            let n = self.entries.store.raw_len();
             proof {
                 <N as DenseId>::Index::lemma_max_nat_fits_usize();
                 assert(n as nat == self.entries.view().len());
@@ -630,7 +635,7 @@ where T: Sized + Copy + core::default::Default + Send {
     /// ring order beginning at `start` (production's `iter_class`/`ClassIter`).
     /// The cursor wraps once around and stops when it returns to `start` — so
     /// exactly the ring's nodes are visited, each once.
-    pub fn iter_class(&self, start: N) -> (it: RingIter<'_, T, N, TRACK>)
+    pub fn iter_class(&self, start: N) -> (it: RingIter<'_, T, N, TRACK, P>)
         requires self.wf(),
         ensures start.id_nat() < self.n_spec() ==> ({
             &&& it.list_ref() == self
@@ -643,7 +648,7 @@ where T: Sized + Copy + core::default::Default + Send {
         }),
     {
         // Total-with-documented-panic: node-bound branch.
-        if !(start.to_usize() < self.entries.store.data.len()) {
+        if !(start.to_usize() < self.entries.store.raw_len()) {
             crate::guard::refuse("CircularList::iter_class: node id out of range");
         }
         proof {
@@ -942,6 +947,8 @@ where T: Sized + Copy + core::default::Default + Send {
                 == old(self).model_snapshots_view().push(old(self).model_view()),
             token.frame_idx_spec() == final(self).entries_snapshots_view().len() - 1,
     {
+        // The node count fits the index word (store `wf`, via its lemma).
+        proof { self.entries.store.lemma_wf_data_len(); }
         let entries = self.entries.mark(shrink);
         // Archive the live ring partition alongside the vec snapshot.
         self.model_snapshots = Ghost(self.model_snapshots@.push(self.model@));
@@ -1022,7 +1029,7 @@ where T: Sized + Copy + core::default::Default + Send {
         if !TRACK {
             return Err(crate::error::ContainerError::Untracked);
         }
-        if !(self.entries.store.data.len() < usize::MAX) {
+        if !(self.entries.store.raw_len() < usize::MAX) {
             return Err(crate::error::ContainerError::CapacityExhausted);
         }
         if !(self.entries.depth_exec() < (u32::MAX as usize)) {
@@ -1144,6 +1151,8 @@ where T: Sized + Copy + core::default::Default + Send {
                 == old(self).model_snapshots_view().push(old(self).model_view()),
             final(self).depth_spec() == old(self).depth_spec() + 1,
     {
+        // The node count fits the index word (store `wf`, via its lemma).
+        proof { self.entries.store.lemma_wf_data_len(); }
         self.entries.push_frame(shrink);
         // Archive the live ring partition alongside the vec snapshot.
         self.model_snapshots = Ghost(self.model_snapshots@.push(self.model@));
@@ -1240,11 +1249,11 @@ where T: Sized + Copy + core::default::Default + Send {
 /// swapped `next` pointers.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(800)]
-pub(crate) proof fn lemma_splice_merge<T, N: DenseId, const TRACK: bool>(
-    pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
+pub(crate) proof fn lemma_splice_merge<T, N: DenseId, const TRACK: bool, P>(
+    pre: CircularList<T, N, TRACK, P>, post: &CircularList<T, N, TRACK, P>,
     s: int, a: int, cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         pre.wf(),
         pre.entries.wf(),
@@ -1332,11 +1341,11 @@ pub(crate) proof fn lemma_rotate_props(x: Seq<usize>, k: int)
 
 /// in_range clause of post.wf() after splice.
 #[verifier::spinoff_prover]
-pub(crate) proof fn lemma_splice_in_range<T, N: DenseId, const TRACK: bool>(
-    pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
+pub(crate) proof fn lemma_splice_in_range<T, N: DenseId, const TRACK: bool, P>(
+    pre: CircularList<T, N, TRACK, P>, post: &CircularList<T, N, TRACK, P>,
     cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         pre.wf(), post.n_spec() == pre.n_spec(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1371,11 +1380,11 @@ pub(crate) proof fn lemma_splice_in_range<T, N: DenseId, const TRACK: bool>(
 /// disjoint clause of post.wf() after splice.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(800)]
-pub(crate) proof fn lemma_splice_disjoint<T, N: DenseId, const TRACK: bool>(
-    pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
+pub(crate) proof fn lemma_splice_disjoint<T, N: DenseId, const TRACK: bool, P>(
+    pre: CircularList<T, N, TRACK, P>, post: &CircularList<T, N, TRACK, P>,
     s: int, a: int, cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         pre.wf(), post.n_spec() == pre.n_spec(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1563,11 +1572,11 @@ pub(crate) proof fn lemma_ring_src_injective(
 /// full `pre.wf()`, which implies `model_covers()`, so this is strictly weaker.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(50)]
-pub(crate) proof fn lemma_splice_covers<T, N: DenseId, const TRACK: bool>(
-    pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
+pub(crate) proof fn lemma_splice_covers<T, N: DenseId, const TRACK: bool, P>(
+    pre: CircularList<T, N, TRACK, P>, post: &CircularList<T, N, TRACK, P>,
     cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         pre.model_covers(), post.n_spec() == pre.n_spec(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1609,11 +1618,11 @@ pub(crate) proof fn lemma_splice_covers<T, N: DenseId, const TRACK: bool>(
 /// cyclic clause of post.wf() after splice — the crux.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(800)]
-pub(crate) proof fn lemma_splice_cyclic<T, N: DenseId, const TRACK: bool>(
-    pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
+pub(crate) proof fn lemma_splice_cyclic<T, N: DenseId, const TRACK: bool, P>(
+    pre: CircularList<T, N, TRACK, P>, post: &CircularList<T, N, TRACK, P>,
     s: int, a: int, cs: int, ca: int, ps: int, pa: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         pre.wf(), post.n_spec() == pre.n_spec(),
         0 <= s < pre.n_spec(), 0 <= a < pre.n_spec(),
@@ -1696,10 +1705,10 @@ pub(crate) proof fn lemma_splice_cyclic<T, N: DenseId, const TRACK: bool>(
 }
 
 /// pre cyclic at a specific (ring, pos): `pns[pm[c][p]] == pm[c][(p+1) mod]`.
-pub(crate) proof fn lemma_pre_cyclic_at<T, N: DenseId, const TRACK: bool>(
-    pre: CircularList<T, N, TRACK>, c: int, p: int,
+pub(crate) proof fn lemma_pre_cyclic_at<T, N: DenseId, const TRACK: bool, P>(
+    pre: CircularList<T, N, TRACK, P>, c: int, p: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires pre.wf(), 0 <= c < pre.model@.len(), 0 <= p < pre.model@[c].len(),
     ensures
         pre.next_seq()[pre.model@[c][p] as int]
@@ -1709,10 +1718,10 @@ pub(crate) proof fn lemma_pre_cyclic_at<T, N: DenseId, const TRACK: bool>(
 }
 
 /// A node in a ring other than cs/ca is neither s nor a (disjointness).
-pub(crate) proof fn lemma_other_ring_avoids_sa<T, N: DenseId, const TRACK: bool>(
-    pre: CircularList<T, N, TRACK>, s: int, a: int, cs: int, ca: int, c: int, p: int,
+pub(crate) proof fn lemma_other_ring_avoids_sa<T, N: DenseId, const TRACK: bool, P>(
+    pre: CircularList<T, N, TRACK, P>, s: int, a: int, cs: int, ca: int, c: int, p: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         pre.wf(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(),
@@ -1734,11 +1743,11 @@ pub(crate) proof fn lemma_other_ring_avoids_sa<T, N: DenseId, const TRACK: bool>
 /// UNCHANGED by the swap (it is neither `s` nor `a`), and old `cyclic` plus the
 /// rotate-successor arithmetic give `next[merged[p]] == merged[p+1]`.
 #[verifier::spinoff_prover]
-pub(crate) proof fn lemma_merge_interior_prefix<T, N: DenseId, const TRACK: bool>(
-    pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
+pub(crate) proof fn lemma_merge_interior_prefix<T, N: DenseId, const TRACK: bool, P>(
+    pre: CircularList<T, N, TRACK, P>, post: &CircularList<T, N, TRACK, P>,
     cs: int, ca: int, ps: int, pa: int, p: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         pre.wf(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1802,11 +1811,11 @@ pub(crate) proof fn lemma_merge_interior_prefix<T, N: DenseId, const TRACK: bool
 /// Interior-of-suffix step of the merged ring's cyclic law. Mirror of the
 /// prefix case, indexing into `ca`'s rotation (offset by `rslen`).
 #[verifier::spinoff_prover]
-pub(crate) proof fn lemma_merge_interior_suffix<T, N: DenseId, const TRACK: bool>(
-    pre: CircularList<T, N, TRACK>, post: &CircularList<T, N, TRACK>,
+pub(crate) proof fn lemma_merge_interior_suffix<T, N: DenseId, const TRACK: bool, P>(
+    pre: CircularList<T, N, TRACK, P>, post: &CircularList<T, N, TRACK, P>,
     cs: int, ca: int, ps: int, pa: int, p: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         pre.wf(),
         0 <= cs < pre.model@.len(), 0 <= ca < pre.model@.len(), cs != ca,
@@ -1870,9 +1879,12 @@ pub(crate) proof fn lemma_merge_interior_suffix<T, N: DenseId, const TRACK: bool
 /// returns to `start`. The ghost `(c, p0)` pin the located ring and the start's
 /// position within it; `cursor_ok` is "`cur` names `class_seq[pos]`, or the
 /// walk is done and `pos == ring length`".
-pub struct RingIter<'a, T, N: DenseId, const TRACK: bool>
-where T: Sized + Copy + core::default::Default + Send {
-    pub(crate) list: &'a CircularList<T, N, TRACK>,
+pub struct RingIter<'a, T, N: DenseId, const TRACK: bool, P = HotFirst>
+where
+    T: Sized + Copy + core::default::Default + Send,
+    P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>,
+{
+    pub(crate) list: &'a CircularList<T, N, TRACK, P>,
     /// The node the walk started at, as the id type — production's `ClassIter`
     /// stores `start_idx: T`, and yielding `N` (not `usize`) is what lets the
     /// consumer's `iter_class` return `impl Iterator<Item = T>` unchanged.
@@ -1898,10 +1910,10 @@ where T: Sized + Copy + core::default::Default + Send {
 /// Disjointness within a single ring: two positions of ring `c` holding the
 /// same node index are the same position. Isolates `model_disjoint`'s
 /// quad-nested instantiation so `RingIter::next` never brings it into scope.
-pub(crate) proof fn lemma_ring_same_pos<T, N: DenseId, const TRACK: bool>(
-    list: &CircularList<T, N, TRACK>, c: int, p1: int, p2: int,
+pub(crate) proof fn lemma_ring_same_pos<T, N: DenseId, const TRACK: bool, P>(
+    list: &CircularList<T, N, TRACK, P>, c: int, p1: int, p2: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         list.model_disjoint(),
         0 <= c < list.model@.len(),
@@ -1938,10 +1950,10 @@ pub(crate) proof fn lemma_ring_step_arith(p0: int, oldpos: int, len: int, j: int
 /// then under disjointness `locate(start) == (c, p0)`, so the caller-facing
 /// `class_seq(start)` equals the iterator's internal walk `rotate(model[c],
 /// p0)`. Isolates the `choose`/disjoint reasoning out of the hot `next` body.
-pub(crate) proof fn lemma_locate_pinned<T, N: DenseId, const TRACK: bool>(
-    list: &CircularList<T, N, TRACK>, start: int, c: int, p0: int,
+pub(crate) proof fn lemma_locate_pinned<T, N: DenseId, const TRACK: bool, P>(
+    list: &CircularList<T, N, TRACK, P>, start: int, c: int, p0: int,
 )
-    where T: Sized + Copy + core::default::Default + Send, N: DenseId
+    where T: Sized + Copy + core::default::Default + Send, N: DenseId, P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>
     requires
         list.model_disjoint(),
         0 <= c < list.model@.len(),
@@ -1958,10 +1970,13 @@ pub(crate) proof fn lemma_locate_pinned<T, N: DenseId, const TRACK: bool>(
     assert(list.model_disjoint());  // (lc,lp) and (c,p0) both name start ⟹ equal
 }
 
-impl<'a, T, N: DenseId, const TRACK: bool> RingIter<'a, T, N, TRACK>
-where T: Sized + Copy + core::default::Default + Send {
+impl<'a, T, N: DenseId, const TRACK: bool, P> RingIter<'a, T, N, TRACK, P>
+where
+    T: Sized + Copy + core::default::Default + Send,
+    P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>,
+{
     /// The list this iterator walks (spec counterpart; fields are `pub(crate)`).
-    pub open(crate) spec fn list_ref(&self) -> &'a CircularList<T, N, TRACK> {
+    pub open(crate) spec fn list_ref(&self) -> &'a CircularList<T, N, TRACK, P> {
         self.list
     }
 
@@ -2167,9 +2182,10 @@ impl core::fmt::Debug for CircularListToken {
 // 1-line delegation to the verified inherent `next`, mirroring `ListIter`.
 // Yields node indices in ring order (production's `ClassIter`).
 // ---------------------------------------------------------------------------
-impl<'a, T, N: DenseId, const TRACK: bool> Iterator for RingIter<'a, T, N, TRACK>
+impl<'a, T, N: DenseId, const TRACK: bool, P> Iterator for RingIter<'a, T, N, TRACK, P>
 where
     T: Sized + Copy + core::default::Default + Send,
+    P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>,
 {
     type Item = N;
 
@@ -2183,9 +2199,10 @@ where
 // White-box oracle access (plain Rust; see bplus.rs's matching comment).
 // Read-only — cannot violate any invariant.
 // ---------------------------------------------------------------------------
-impl<T, N: DenseId, const TRACK: bool> CircularList<T, N, TRACK>
+impl<T, N: DenseId, const TRACK: bool, P> CircularList<T, N, TRACK, P>
 where
     T: Sized + Copy + core::default::Default + Send,
+    P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>,
 {
     /// Read-only entries access for white-box tests.
     #[doc(hidden)]
@@ -2194,7 +2211,7 @@ where
     ) -> &SpVec<
         CircularListNode<T, N>,
         <N as DenseId>::Index,
-        InlineStore<CircularListNode<T, N>, <N as DenseId>::Index>,
+        <P as TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>>::Store,
         TRACK,
     > {
         &self.entries

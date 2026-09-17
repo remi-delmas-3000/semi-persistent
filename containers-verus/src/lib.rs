@@ -142,6 +142,7 @@ pub mod parallel_store;
 pub mod sorted_cursor;
 pub mod sorted_vec_cursor;
 pub mod sparse_set;
+pub mod store_policy;
 pub mod tagged;
 pub mod tier_policy;
 pub mod trail_store;
@@ -185,6 +186,7 @@ pub use parallel_store::ParallelStore;
 pub use sorted_cursor::SortedCursor;
 pub use sorted_vec_cursor::SortedVecCursor;
 pub use sparse_set::{SparseSet, SparseSetToken};
+pub use store_policy::{HotFirst, PlainFamily, TaggedFamily, TrailFirst};
 pub use tagged::{BoolTagged, Pair, Tagged};
 pub use tier_policy::{
     AdaptiveInput, AdaptiveReport, InvalidRatio, Ratio, ReclaimPolicy, RolloverPolicy, TierLimit,
