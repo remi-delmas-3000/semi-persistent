@@ -22,7 +22,8 @@ containers`).
 | `09f00b0` | EClasses component contents (entries, reprs, uses, pool) through `restore`/`try_restore`; benchmark protocol frozen |
 | `2f99644` | `try_mark_adaptive` marker removed (trust 50 + 5); benchmark-attributed constant-factor fixes (pre-sized dedupe buffers, single-bound byte fold); ledgers, CI trust constant, this report and the performance investigation |
 | `f304bc7` | B+ tree above legacy speed (cursor leaf cache, single validation, fused leaf fill, incremental `last_leaf`), 10M/100M bench sweep, find-sweep bench loop fix |
-| (last) | final two-run benchmark results appended to the performance report; goal extended with the caching, store-policy and `VecD` work (handoff "Next actions") |
+| `45fc132` | final two-run benchmark results appended to the performance report; goal extended with the caching, store-policy and `VecD` work (handoff "Next actions") |
+| `987a964` | Extended goal 1(a): the Trail-to-Hot dedupe set cached on the vector (`trail_seen`), five edge-of-budget proofs decomposed, per-mark small-frame rollover benchmark (1.09×) |
 
 ## 2. Per-container contract / verification matrix
 

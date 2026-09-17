@@ -63,28 +63,9 @@ pub trait HintContent: Sized {
         ensures a.fp_spec() == b.fp_spec();
 }
 
-/// Any key occurring in a log has a LAST occurrence: walk down from the
-/// highest occurrence. The bridge from "the log mentions fp" to
-/// `index_agrees`'s last-occurrence hypothesis, which is what turns an absent
-/// `get_by_key` into "the log does not mention this key at all".
-pub proof fn lemma_last_occurrence_exists<K, V>(log: Seq<(K, V)>, i: int)
-    requires
-        0 <= i < log.len(),
-    ensures
-        exists|q: int| #[trigger] crate::map::is_last_occurrence(log, q)
-            && log[q].0 == log[i].0,
-    decreases log.len() - i,
-{
-    if crate::map::is_last_occurrence(log, i) {
-        assert(crate::map::is_last_occurrence(log, i) && log[i].0 == log[i].0);
-    } else {
-        let j = choose|j: int| i < j < log.len() && (#[trigger] log[j]).0 == log[i].0;
-        lemma_last_occurrence_exists(log, j);
-        let q = choose|q: int| #[trigger] crate::map::is_last_occurrence(log, q)
-            && log[q].0 == log[j].0;
-        assert(crate::map::is_last_occurrence(log, q) && log[q].0 == log[i].0);
-    }
-}
+// "Any key occurring in a log has a LAST occurrence" — the bridge from "the
+// log mentions fp" to `index_agrees`'s last-occurrence hypothesis — lives with
+// the map: `crate::map::lemma_last_occurrence_exists`.
 
 /// The verified arena + fingerprint index pair.
 pub struct HintedArena<T, I, const TRACK: bool = true>
@@ -654,7 +635,7 @@ where
                             // absent lookup refutes.
                             assert(!pre.index.index_view().contains_key(fp));
                             if pre.index.log_view()[a].0 == fp {
-                                lemma_last_occurrence_exists(pre.index.log_view(), a);
+                                crate::map::lemma_last_occurrence_exists(pre.index.log_view(), a);
                                 let last = choose|q: int|
                                     #[trigger] crate::map::is_last_occurrence(
                                         pre.index.log_view(), q)

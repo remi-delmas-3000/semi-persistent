@@ -2158,3 +2158,60 @@ consumers **1267 passed, 45 ignored**; canary **2 passed**; partial-API audit
 at the unchanged baseline (73/33/40/0); formatting, whitespace and the
 unchanged-legacy check passed; trust **50 default + 5 literal**. Benchmarks:
 `doc/tasks/final-performance-report.md`, "Extended goal 1(a)".
+
+
+## 2026-09-16 — SpMap restore unwinds the discarded suffix (extended goal, item b)
+
+`SpMap::restore` no longer rebuilds its hash index from the survivors. Each
+log position now carries the position of the PREVIOUS occurrence of its key
+(`prev: Vec<Option<I>>`, a column parallel to the log), filled from the value
+`HashMap::insert` already returns when the entry is indexed — so `insert` does
+no extra lookup and no extra clone. Restore reads the target frame's saved
+length, and when the discarded suffix is no larger than the survivors it
+unwinds the index BEFORE the log truncates (`unwind_index`): the discarded
+entries are walked newest first, and each one's key is pointed back at its
+`prev` link (`insert`, the one place restore clones a key) or removed when the
+link is `None`. The cost is one hash operation per discarded entry, and zero
+work for a restore straight after a mark, instead of one hash insert plus one
+key clone per surviving entry. When the suffix outnumbers the survivors the
+old full rebuild (`rebuild_index`, kept verified) is cheaper and is taken.
+
+The fingerprint-bucket variant sketched earlier was dropped: vstd specifies no
+`BuildHasher::hash_one`/`Hasher::finish`, so a spec-level fingerprint would
+have needed a new trusted specification. The previous-occurrence chain needs
+none: it is proved from the index's own last-occurrence agreement.
+
+Proof structure. `wf` gains `prev_agrees` (every link is the last occurrence
+of its key strictly before its position, or `None` when the key has no
+earlier occurrence — `prev_link_ok`); `index_agrees` is restated through the
+part relation `index_agrees_seq`, and `index_agrees_prefix_seq` is its
+restriction to `[0, bound)`. `unwind_index`'s loop invariant is prefix
+agreement at the running bound, and `lemma_unwind_step` shows one retirement
+step lowers the bound by one (the retired position is the last occurrence of
+its key within the bound; its link is the unique last occurrence below it).
+`lemma_index_agrees_after_truncate` and `lemma_prev_agrees_after_truncate`
+turn prefix agreement into full agreement once the log and the column are
+cut; `lemma_insert_prev_link` proves the chain maintenance of `insert`,
+using `lemma_last_occurrence_exists` (moved from `hinted_arena` to `map`,
+where it belongs) for the "no earlier occurrence" case. No proof needed
+decomposition for the solver's limit. The public contract of every map
+operation is unchanged, so `HintedArena` and the consumers re-verify without
+edits. No new trust; the partial-API count is unchanged (73/33/40/0).
+
+Targeted evidence: `map` module **31 verified, zero errors**
+(45 s, `scratchpad/map_verify3.log`); `hinted_arena` module **14 verified,
+zero errors** (`scratchpad/hinted_verify1.log`).
+
+Gate evidence (fresh, run in a worktree holding exactly this commit's files,
+`/tmp/sp-d21-1b-*.log`): full default **2614 verified, zero errors** (eight
+more functions than `987a964`: the map's new lemmas and `unwind_index`);
+literal-types **2614 verified, zero errors**; conditional composition **80
+verified**; `au-verus` **29 verified**; feature suite **277 passed, 10
+ignored**; release differential policy matrix with `PROPTEST_CASES=1024`
+**4 passed**; B+ tree, oracle and reference-e-graph property tests **31
+passed**; e-graph/SAT consumers **1267 passed, 45 ignored**; canary **2
+passed**; partial-API audit at the unchanged baseline (73/33/40/0);
+formatting, whitespace and the unchanged-legacy check passed; trust **50
+default + 5 literal**. Benchmarks: `doc/tasks/final-performance-report.md`,
+"Extended goal 1(b)".
+

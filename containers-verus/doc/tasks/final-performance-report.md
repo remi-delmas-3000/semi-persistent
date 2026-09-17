@@ -274,6 +274,43 @@ measured on both revisions with the same bench source: `f304bc7` 9.83 µs,
 now 9.01 µs — **1.09×** (interval [0.915, 0.920]), i.e. ~13 ns per mark, the
 allocation plus free the pass used to pay.
 
+## Extended goal 1(b): SpMap restore over the discarded suffix (after `987a964`)
+
+`SpMap::restore` used to clear its hash index and re-insert one cloned key per
+surviving entry, whatever the size of the frame being discarded (the legacy
+`Map` still does). Each log entry now records its key's previous occurrence
+(`prev`, filled from the value `HashMap::insert` returns, so `insert` pays one
+`Vec` push and no extra lookup), and restore unwinds the index over the
+discarded entries only, falling back to the rebuild when the suffix outnumbers
+the survivors. Two cases were added to `retained_containers_bench` for the
+SMT-style cycle the change is for (a large live map, a few inserts per frame,
+restore): `map/restore_small_suffix` (100 000 live u64 keys, 64 inserts per
+frame) and `map/restore_small_suffix_string` (20 000 live String keys, 64 per
+frame); the existing `map/intern*` cases cover the insert path. Runs A/B on
+the 1(b) tree and on the previous commit (same bench source), baselines
+`runA_1b`/`runB_1b` and `1a_A`/`1a_B`; means below, multiplier = old time ÷
+new time.
+
+| Case | Legacy | Verified at `987a964` | Verified now | vs legacy | vs `987a964` |
+|---|---|---|---|---|---|
+| `map/restore_small_suffix` | 528 µs | 515 µs | 544 ns | **970×** | **946×** |
+| `map/restore_small_suffix_string` | 724 µs | 755 µs | 3.51 µs | **206×** | **215×** |
+| `map/intern` (u64, mark/restore cycle) | 1.246 ms | 0.857 ms | 0.862 ms | 1.45× | 0.99× (rerun 1.03×, see below) |
+| `map/intern_string` (insert-or-hit) | 1.705 ms | 1.713 ms | 1.767 ms | 0.96× | 0.97× |
+| `map/intern_composite` (insert-or-hit) | 1.346 ms | 1.344 ms | 1.356 ms | 0.99× | 0.99× |
+
+Frozen-rule verdicts: paired (verified vs legacy) 5 pass; checkpoint
+(verified now vs verified at `987a964`) 9 pass, 1 inconclusive
+(`map/intern/verified`: 1.059 in run A against 0.951 in run B, the two runs
+landing on the two placement modes seen throughout this report; the legacy
+arm moved 0.99/1.02 in the same binaries). The protocol rerun at
+`--sample-size 100 --warm-up-time 3 --measurement-time 10` on both trees
+(`rerun_1b`/`1a_rerun`) gives 848 µs → 823 µs, 0.971 [0.955, 0.988], pass
+(legacy 0.994 in the same binaries). The insert-path cost
+of the chain column is the 3–4 % on the String and composite interning cases
+(one `Option<usize>` push per insert next to a key clone and a hash insert);
+both stay inside τ.
+
 ## Results (revision `f304bc7`, runs A and B on 2026-09-16 17:05–18:45, reruns 18:50–19:10)
 
 Bench binaries: `/tmp/sp-d21-bench-binaries-f304bc7.md5`; driver log

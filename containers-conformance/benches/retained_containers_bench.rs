@@ -15,6 +15,9 @@
 //! - `class_ring/*`: isolated untracked splice/traversal and tracked
 //!   merge/restore for the ring protocol inside the class layer. Aggregate
 //!   retained-vs-verified measurements live in `eclasses_bench`.
+//! - `map/intern*`: the interner pattern (insert-or-hit) over the key shapes
+//!   the consumers use; `map/restore_small_suffix*`: a large live map with a
+//!   few inserts per frame and a restore — the SMT-style mark/backtrack use.
 //!
 //! Criterion supplies warm-up, adaptive iteration counts, outlier analysis,
 //! and bootstrap confidence intervals. Results remain host- and revision-bound:
@@ -865,6 +868,100 @@ fn bench_map_intern_composite(c: &mut Criterion) {
 
     g.finish();
 }
+
+// ---------------------------------------------------------------------------
+// map/restore_small_suffix: the SMT-style map cycle — a large live map, then
+// per frame a handful of inserts and a restore. Legacy rebuilds the whole
+// index (one key clone per survivor) on every restore; the verified map
+// unwinds only the discarded suffix. Measured with u64 keys (LitValStore
+// pattern) and String keys (registry pattern, where the clone is a heap
+// allocation). The map is built once per bench; each iteration returns it
+// to the marked state, so the setup is outside the timed region.
+// ---------------------------------------------------------------------------
+
+fn bench_map_restore_small_suffix(c: &mut Criterion) {
+    const LIVE: usize = 100_000;
+    const PER_FRAME: u64 = 64;
+
+    let mut g = c.benchmark_group("map/restore_small_suffix");
+    g.bench_function("legacy", |b| {
+        let mut m: prod::Map<u64, (), usize, true> = prod::Map::new();
+        for k in 0..LIVE as u64 {
+            m.insert(k, ());
+        }
+        b.iter(|| {
+            let tok = m.mark(prod::ShrinkPolicy::Never);
+            for k in 0..PER_FRAME {
+                m.insert(LIVE as u64 + k, ());
+            }
+            m.restore(tok);
+            black_box(m.len())
+        })
+    });
+    g.bench_function("verified", |b| {
+        let mut m: verus::SpMap<u64, (), usize, true> = verus::SpMap::new();
+        for k in 0..LIVE as u64 {
+            m.try_insert(k, ()).expect("insert: within index word");
+        }
+        b.iter(|| {
+            let tok = m
+                .try_mark(verus::ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness");
+            for k in 0..PER_FRAME {
+                m.try_insert(LIVE as u64 + k, ())
+                    .expect("insert: within index word");
+            }
+            m.try_restore(tok).expect("restore: own token");
+            black_box(m.len())
+        })
+    });
+    g.finish();
+
+    let mut g = c.benchmark_group("map/restore_small_suffix_string");
+    const LIVE_STRING: usize = 20_000;
+    fn key(i: u64) -> String {
+        format!("op::namespace_{}::symbol_{:08}", i % 37, i)
+    }
+    g.bench_function("legacy", |b| {
+        let mut m: prod::Map<String, u32, usize, true> = prod::Map::new();
+        for i in 0..LIVE_STRING as u64 {
+            m.insert(key(i), i as u32);
+        }
+        let fresh: Vec<String> = (0..PER_FRAME)
+            .map(|k| key(LIVE_STRING as u64 + k))
+            .collect();
+        b.iter(|| {
+            let tok = m.mark(prod::ShrinkPolicy::Never);
+            for (k, s) in fresh.iter().enumerate() {
+                m.insert(s.clone(), k as u32);
+            }
+            m.restore(tok);
+            black_box(m.len())
+        })
+    });
+    g.bench_function("verified", |b| {
+        let mut m: verus::SpMap<String, u32, usize, true> = verus::SpMap::new();
+        for i in 0..LIVE_STRING as u64 {
+            m.try_insert(key(i), i as u32)
+                .expect("insert: within index word");
+        }
+        let fresh: Vec<String> = (0..PER_FRAME)
+            .map(|k| key(LIVE_STRING as u64 + k))
+            .collect();
+        b.iter(|| {
+            let tok = m
+                .try_mark(verus::ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness");
+            for (k, s) in fresh.iter().enumerate() {
+                m.try_insert(s.clone(), k as u32)
+                    .expect("insert: within index word");
+            }
+            m.try_restore(tok).expect("restore: own token");
+            black_box(m.len())
+        })
+    });
+    g.finish();
+}
 criterion_group!(
     benches,
     bench_vec_try_extend,
@@ -879,6 +976,7 @@ criterion_group!(
     bench_map_intern,
     bench_map_intern_string,
     bench_map_intern_composite,
+    bench_map_restore_small_suffix,
     bench_sparse_set_churn,
     bench_aov_log,
 );

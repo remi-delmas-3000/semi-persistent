@@ -73,8 +73,9 @@
 //! The seed perturbs which BUCKET a key lands in — nothing else. `SpMap`'s
 //! observable behaviour is already seed-independent by construction: the
 //! append-only log is the source of truth, `iter()` walks that log in insertion
-//! order, `rebuild_index` replays the log in insertion order, and the index is
-//! never iterated (lookup-only: `get`/`contains_key`/`insert`/`clear`). So
+//! order, `rebuild_index` replays the log in insertion order, `unwind_index`
+//! walks the discarded suffix in reverse position order, and the index is
+//! never iterated (lookup-only: `get`/`contains_key`/`insert`/`remove`/`clear`). So
 //! fixing the seed changes no output; it makes the internal memory layout and
 //! probe sequences reproducible too, which is what makes a hash-order bug or a
 //! performance regression bisectable rather than a coin flip.

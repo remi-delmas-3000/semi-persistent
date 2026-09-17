@@ -6,14 +6,22 @@
 //! (mark/restore) lives entirely in that already-verified log. A `HashMap`
 //! accelerates key lookup, mapping each key to the dense log index of its MOST
 //! RECENT entry (last-write-wins; older entries linger in the log as shadows).
-//! On `restore` the log truncates and the index is rebuilt from the survivors.
+//! Each log position also records the PREVIOUS occurrence of its key (`prev`,
+//! a parallel column filled from the value `HashMap::insert` hands back). On
+//! `restore` the index is unwound over the entries about to be discarded,
+//! newest first: each key is pointed back at its previous occurrence or
+//! dropped, so the work is proportional to the truncated suffix, not to the
+//! survivors, and no surviving key is cloned. When the suffix outnumbers the
+//! survivors the full rebuild (`rebuild_index`) is cheaper and is used instead.
 //!
 //! Verified invariant (`wf`): the exec index agrees with `is_last_occurrence`,
 //! the declarative "this position is the latest one holding its key", over the
-//! current log. From that, `get_by_key`/`contains_key` provably read the
-//! latest value, and `restore` provably returns the map to its marked logical
-//! contents (the log headline theorem composes through). `rebuild_index`
-//! re-establishes the agreement after a restore.
+//! current log, and `prev` agrees with `is_last_occurrence_prefix` (the same
+//! statement cut at the entry's own position). From that, `get_by_key`/
+//! `contains_key` provably read the latest value, and `restore` provably
+//! returns the map to its marked logical contents (the log headline theorem
+//! composes through). `unwind_index` and `rebuild_index` each re-establish
+//! the agreement after a restore.
 //!
 //! Keys are `K: Clone + Hash + Eq` (production parity — String/Vec keys work).
 //! The one clone-spec fact needed is the key model's own requirement (3):
@@ -32,8 +40,9 @@
 //!
 //! Note the seed is invisible to this map's OBSERVABLE behaviour either way:
 //! the log is the source of truth, `iter()` walks it in insertion order,
-//! `rebuild_index` replays it in insertion order, and the index is never
-//! iterated (lookup-only). Fixing the seed makes the internal layout and probe
+//! `rebuild_index` replays it in insertion order, `unwind_index` walks it in
+//! reverse position order, and the index is never iterated (lookup-only).
+//! Fixing the seed makes the internal layout and probe
 //! sequences reproducible too. See `hasher_spec` for the full policy.
 //!
 //! vstd models `std::HashMap<K, V, S>` generically over any `S: BuildHasher`,
@@ -99,6 +108,12 @@ where
 {
     pub(crate) log: AppendOnlyVec<(K, V), I, TRACK>,
     pub(crate) index: HashMap<K, I, IndexHasher>,
+    /// Previous-occurrence chain, parallel to the log: `prev[p]` is the position
+    /// of the last entry holding `log[p].0` BEFORE `p`, or `None` when `p` is the
+    /// key's first occurrence. It is the value `HashMap::insert` returns when the
+    /// entry is indexed, so it costs no extra lookup, and it is what lets
+    /// `restore` unwind the index over the truncated suffix alone.
+    pub(crate) prev: std::vec::Vec<Option<I>>,
 }
 
 impl<K, V, I: IndexLike, const TRACK: bool> SpMap<K, V, I, TRACK>
@@ -139,20 +154,27 @@ where
     /// "the index value projects to `i`" still pins the stored word uniquely — the
     /// agreement is exactly as strong as before, just stated on the projection.
     pub open(crate) spec fn index_agrees(&self) -> bool {
-        let log = self.log_view();
-        let m = self.index@;
         &&& obeys_key_model::<K>()
         &&& builds_valid_hashers::<IndexHasher>()
-        &&& (forall|i: int| #[trigger] is_last_occurrence(log, i)
-                ==> m.contains_key(log[i].0) && m[log[i].0].as_nat() == i)
-        &&& (forall|k: K| #[trigger] m.contains_key(k)
-                ==> m[k].as_nat() < log.len() && log[m[k].as_nat() as int].0 == k
-                    && is_last_occurrence(log, m[k].as_nat() as int))
+        &&& index_agrees_seq(self.log_view(), self.index@)
+    }
+
+    /// Index/log agreement cut at `bound`: the index describes the last
+    /// occurrences WITHIN `[0, bound)`. `unwind_index`'s running invariant; at
+    /// `bound == log.len()` it is `index_agrees` minus the key-model facts.
+    pub open(crate) spec fn index_agrees_prefix(&self, bound: int) -> bool {
+        index_agrees_prefix_seq(self.log_view(), self.index@, bound)
+    }
+
+    /// The `prev` column agrees with the log (see [`prev_link_ok`]).
+    pub open(crate) spec fn prev_agrees(&self) -> bool {
+        prev_agrees_seq(self.log_view(), self.prev@)
     }
 
     pub open(crate) spec fn wf(&self) -> bool {
         &&& self.log.wf()
         &&& self.index_agrees()
+        &&& self.prev_agrees()
     }
 
     /// Token validity, delegated to the log.
@@ -185,10 +207,12 @@ where
         // does not spec `with_hasher`, so this route keeps seed control free of
         // added trust. See hasher_spec.
         let index: HashMap<K, I, IndexHasher> = HashMap::default();
-        let m = SpMap { log, index };
+        let prev: std::vec::Vec<Option<I>> = std::vec::Vec::new();
+        let m = SpMap { log, index, prev };
         proof {
             assert(m.log_view().len() == 0);
             assert(m.index@ =~= Map::<K, I>::empty());
+            assert(m.prev@.len() == 0);
         }
         m
     }
@@ -340,13 +364,19 @@ where
         broadcast use vstd::std_specs::hash::group_hash_axioms;
         broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
         let ghost old_log = self.log_view();
+        let ghost old_prev = self.prev@;
         let key_for_index = clone_key_exact(&key);
         let id = self.log.push((key, val));
-        self.index.insert(key_for_index, id);
+        // The index's former answer for `key` is exactly the new entry's
+        // previous occurrence (or `None` for a fresh key): record it.
+        let shadowed = self.index.insert(key_for_index, id);
+        self.prev.push(shadowed);
         proof {
             let log = self.log_view();
             let m = self.index@;
             let idn = id.as_nat() as int;
+            assert(self.prev@ =~= old_prev.push(shadowed));
+            lemma_insert_prev_link(old_log, old_prev, old(self).index@, log, self.prev@, shadowed);
             assert(log == old_log.push((key, val)));
             assert(log[idn] == (key, val));
             // The appended entry is the unique new last-occurrence of `key`;
@@ -512,9 +542,14 @@ where
         self.log.is_valid_token(&token.inner)
     }
 
-    /// Restore: truncate the log to the token's snapshot, then rebuild the
-    /// index from the survivors. The log restore reproduces the marked
-    /// contents (headline theorem composes); rebuild re-establishes agreement.
+    /// Restore: unwind the index over the entries the log restore is about to
+    /// discard (newest first, one hash operation per discarded entry, a key
+    /// clone only where the key survives at an earlier position), then
+    /// truncate the log and the `prev` column. When the discarded suffix
+    /// outnumbers the survivors, truncating first and rebuilding from the
+    /// survivors (`rebuild_index`) is the cheaper route and is taken instead.
+    /// Either way the log restore reproduces the marked contents (headline
+    /// theorem composes) and the index provably agrees with them.
     pub(crate) fn restore(&mut self, token: MapToken)
         requires
             old(self).wf(),
@@ -529,19 +564,115 @@ where
             final(self).log_snapshots_view()
                 == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int),
     {
-        self.log.restore(token.inner);
-        self.rebuild_index();
+        let ghost old_log = self.log_view();
+        let ghost old_prev = self.prev@;
+        // The target frame's saved length: what the log restore truncates to.
+        let target = token.inner.frame_idx;
+        let saved_len = self.log.frames[target].as_usize();
+        let n = self.log.len().as_usize();
+        proof {
+            // The log's `wf`: a saved length is within the data and names the
+            // snapshot prefix.
+            assert(self.log.frames@[target as int].as_nat() <= n);
+            assert(old(self).log_snapshots_view()[target as int]
+                == old_log.subrange(0, saved_len as int));
+        }
+        if n - saved_len <= saved_len {
+            self.unwind_index(saved_len);
+            self.log.restore(token.inner);
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+        } else {
+            self.log.restore(token.inner);
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+            self.rebuild_index();
+        }
+    }
+
+    /// Restore's index maintenance, run BEFORE the log truncates to
+    /// `saved_len`: walk the entries about to be discarded, newest first, and
+    /// point each one's key back at its previous occurrence (`prev`) or drop
+    /// it. Touches only the truncated suffix — `log.len() - saved_len` hash
+    /// operations, and a key clone only for the entries whose key survives at
+    /// an earlier position. Leaves the index agreeing with the log's
+    /// `[0, saved_len)` prefix, which is what the truncated log will be.
+    fn unwind_index(&mut self, saved_len: usize)
+        requires
+            old(self).wf(),
+            saved_len <= old(self).log_view().len(),
+        ensures
+            final(self).log == old(self).log,
+            final(self).prev == old(self).prev,
+            final(self).index_agrees_prefix(saved_len as int),
+    {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+        broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
+        let ghost log = self.log_view();
+        let n = self.log.len().as_usize();
+        let mut bound: usize = n;
+        proof {
+            lemma_index_agrees_prefix_full(log, self.index@);
+        }
+        // Invariant: the index agrees with last-occurrence RESTRICTED to the
+        // prefix `[0, bound)`; each step retires the entry at `bound - 1`.
+        while bound > saved_len
+            invariant
+                self.log == old(self).log,
+                self.prev == old(self).prev,
+                log == self.log_view(),
+                n == log.len(),
+                log.len() < I::max_nat(),
+                saved_len <= bound <= n,
+                obeys_key_model::<K>(),
+                builds_valid_hashers::<IndexHasher>(),
+                self.prev_agrees(),
+                self.index_agrees_prefix(bound as int),
+            decreases bound,
+        {
+            let p = bound - 1;
+            let pos = I::try_from_usize(p).expect("log position exceeds the map's index word");
+            let entry = self.log.get(pos);
+            let link = self.prev[p];
+            let ghost before = self.index@;
+            match link {
+                Some(q) => {
+                    // The key survives at `q`: point the index there. This is
+                    // the one place restore clones a key.
+                    let key = clone_key_exact(&entry.0);
+                    self.index.insert(key, q);
+                }
+                None => {
+                    // First occurrence: the key leaves the map.
+                    self.index.remove(&entry.0);
+                }
+            }
+            proof {
+                lemma_unwind_step(log, self.prev@, before, self.index@, bound as int);
+            }
+            bound = p;
+        }
     }
 
     /// Rebuild the index from the current log: scan left-to-right, mapping each
     /// key to the position seen so far. After the full scan each key maps to
     /// its last occurrence.
     fn rebuild_index(&mut self)
-        requires old(self).log.wf(), obeys_key_model::<K>(),
+        requires old(self).log.wf(), obeys_key_model::<K>(), old(self).prev_agrees(),
         ensures
             final(self).wf(),
             final(self).log_view() == old(self).log_view(),
             final(self).log == old(self).log,
+            final(self).prev == old(self).prev,
     {
         broadcast use vstd::std_specs::hash::group_hash_axioms;
         broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
@@ -559,6 +690,7 @@ where
         while i < n
             invariant
                 self.log == old(self).log,
+                self.prev == old(self).prev,
                 log == self.log_view(),
                 n == log.len(),
                 log.len() < I::max_nat(),
@@ -629,6 +761,314 @@ where
 pub open(crate) spec fn is_last_occurrence_prefix<K, V>(log: Seq<(K, V)>, i: int, bound: int) -> bool {
     &&& 0 <= i < bound <= log.len()
     &&& (forall|j: int| i < j < bound ==> (#[trigger] log[j]).0 != log[i].0)
+}
+
+/// Index/log agreement as a relation on the parts: the index contains `k → i`
+/// iff `i` is the last occurrence of `k` in `log`.
+pub open(crate) spec fn index_agrees_seq<K, V, I: IndexLike>(log: Seq<(K, V)>, m: Map<K, I>) -> bool {
+    &&& (forall|i: int| #[trigger] is_last_occurrence(log, i)
+            ==> m.contains_key(log[i].0) && m[log[i].0].as_nat() == i)
+    &&& (forall|k: K| #[trigger] m.contains_key(k)
+            ==> m[k].as_nat() < log.len() && log[m[k].as_nat() as int].0 == k
+                && is_last_occurrence(log, m[k].as_nat() as int))
+}
+
+/// `index_agrees_seq` cut at `bound`: the index describes the last occurrences
+/// within `[0, bound)` and nothing beyond.
+pub open(crate) spec fn index_agrees_prefix_seq<K, V, I: IndexLike>(
+    log: Seq<(K, V)>,
+    m: Map<K, I>,
+    bound: int,
+) -> bool {
+    &&& 0 <= bound <= log.len()
+    &&& (forall|p: int| #[trigger] is_last_occurrence_prefix(log, p, bound)
+            ==> m.contains_key(log[p].0) && m[log[p].0].as_nat() == p)
+    &&& (forall|k: K| #[trigger] m.contains_key(k)
+            ==> m[k].as_nat() < bound && log[m[k].as_nat() as int].0 == k
+                && is_last_occurrence_prefix(log, m[k].as_nat() as int, bound))
+}
+
+/// The chain link at `p`: `prev[p]` is the last occurrence of `log[p].0`
+/// strictly before `p`, or `None` when no earlier entry holds that key.
+pub open(crate) spec fn prev_link_ok<K, V, I: IndexLike>(log: Seq<(K, V)>, prev: Seq<Option<I>>, p: int) -> bool {
+    match prev[p] {
+        Some(q) => q.as_nat() < p && log[q.as_nat() as int].0 == log[p].0
+            && is_last_occurrence_prefix(log, q.as_nat() as int, p),
+        None => forall|j: int| 0 <= j < p ==> (#[trigger] log[j]).0 != log[p].0,
+    }
+}
+
+/// The whole `prev` column agrees with the log.
+pub open(crate) spec fn prev_agrees_seq<K, V, I: IndexLike>(log: Seq<(K, V)>, prev: Seq<Option<I>>) -> bool {
+    &&& prev.len() == log.len()
+    &&& (forall|p: int| 0 <= p < log.len() ==> #[trigger] prev_link_ok(log, prev, p))
+}
+
+/// Any key occurring in a log has a LAST occurrence: walk down from the
+/// highest occurrence. The bridge from "the log mentions this key" to
+/// `index_agrees`'s last-occurrence hypothesis, which is what turns an absent
+/// index entry into "the log does not mention this key at all".
+pub proof fn lemma_last_occurrence_exists<K, V>(log: Seq<(K, V)>, i: int)
+    requires
+        0 <= i < log.len(),
+    ensures
+        exists|q: int| #[trigger] is_last_occurrence(log, q) && log[q].0 == log[i].0,
+    decreases log.len() - i,
+{
+    if is_last_occurrence(log, i) {
+        assert(is_last_occurrence(log, i) && log[i].0 == log[i].0);
+    } else {
+        let j = choose|j: int| i < j < log.len() && (#[trigger] log[j]).0 == log[i].0;
+        lemma_last_occurrence_exists(log, j);
+        let q = choose|q: int| #[trigger] is_last_occurrence(log, q) && log[q].0 == log[j].0;
+        assert(is_last_occurrence(log, q) && log[q].0 == log[i].0);
+    }
+}
+
+/// Full agreement is prefix agreement at the log's own length.
+proof fn lemma_index_agrees_prefix_full<K, V, I: IndexLike>(log: Seq<(K, V)>, m: Map<K, I>)
+    requires index_agrees_seq(log, m),
+    ensures index_agrees_prefix_seq(log, m, log.len() as int),
+{
+    let n = log.len() as int;
+    assert forall|p: int| #[trigger] is_last_occurrence_prefix(log, p, n)
+        implies m.contains_key(log[p].0) && m[log[p].0].as_nat() == p by {
+        assert(is_last_occurrence(log, p));
+    }
+    assert forall|k: K| #[trigger] m.contains_key(k)
+        implies m[k].as_nat() < n && log[m[k].as_nat() as int].0 == k
+            && is_last_occurrence_prefix(log, m[k].as_nat() as int, n) by {
+        assert(is_last_occurrence(log, m[k].as_nat() as int));
+    }
+}
+
+/// Prefix agreement survives truncation to its bound: once the log is cut to
+/// `bound`, agreement on `[0, bound)` is full agreement.
+proof fn lemma_index_agrees_after_truncate<K, V, I: IndexLike>(log: Seq<(K, V)>, m: Map<K, I>, bound: int)
+    requires index_agrees_prefix_seq(log, m, bound),
+    ensures index_agrees_seq(log.subrange(0, bound), m),
+{
+    let log2 = log.subrange(0, bound);
+    assert forall|i: int| #[trigger] is_last_occurrence(log2, i)
+        implies m.contains_key(log2[i].0) && m[log2[i].0].as_nat() == i by {
+        assert forall|j: int| i < j < bound implies (#[trigger] log[j]).0 != log[i].0 by {
+            assert(log2[j] == log[j]);
+            assert(log2[i] == log[i]);
+        }
+        assert(is_last_occurrence_prefix(log, i, bound));
+        assert(log2[i] == log[i]);
+    }
+    assert forall|k: K| #[trigger] m.contains_key(k)
+        implies m[k].as_nat() < log2.len() && log2[m[k].as_nat() as int].0 == k
+            && is_last_occurrence(log2, m[k].as_nat() as int) by {
+        let pos = m[k].as_nat() as int;
+        assert(is_last_occurrence_prefix(log, pos, bound));
+        assert(log2[pos] == log[pos]);
+        assert forall|j: int| pos < j < log2.len() implies (#[trigger] log2[j]).0 != log2[pos].0 by {
+            assert(log2[j] == log[j]);
+        }
+    }
+}
+
+/// A chain link depends only on the log up to its own position, so it is
+/// stable under any change beyond it (an append, a truncation above it).
+proof fn lemma_prev_link_stable<K, V, I: IndexLike>(
+    log1: Seq<(K, V)>,
+    prev1: Seq<Option<I>>,
+    log2: Seq<(K, V)>,
+    prev2: Seq<Option<I>>,
+    p: int,
+)
+    requires
+        0 <= p < log1.len(),
+        p < log2.len(),
+        p < prev1.len(),
+        p < prev2.len(),
+        forall|j: int| 0 <= j <= p ==> #[trigger] log2[j] == log1[j],
+        prev2[p] == prev1[p],
+        prev_link_ok(log1, prev1, p),
+    ensures
+        prev_link_ok(log2, prev2, p),
+{
+    assert(log2[p] == log1[p]);
+    match prev1[p] {
+        Some(q) => {
+            let qi = q.as_nat() as int;
+            assert(log2[qi] == log1[qi]);
+            assert forall|j: int| qi < j < p implies (#[trigger] log2[j]).0 != log2[qi].0 by {
+                assert(log2[j] == log1[j]);
+            }
+        }
+        None => {
+            assert forall|j: int| 0 <= j < p implies (#[trigger] log2[j]).0 != log2[p].0 by {
+                assert(log2[j] == log1[j]);
+            }
+        }
+    }
+}
+
+/// The `prev` column of a truncated log is the truncated `prev` column.
+proof fn lemma_prev_agrees_after_truncate<K, V, I: IndexLike>(log: Seq<(K, V)>, prev: Seq<Option<I>>, bound: int)
+    requires
+        prev_agrees_seq(log, prev),
+        0 <= bound <= log.len(),
+    ensures
+        prev_agrees_seq(log.subrange(0, bound), prev.subrange(0, bound)),
+{
+    let log2 = log.subrange(0, bound);
+    let prev2 = prev.subrange(0, bound);
+    assert forall|p: int| 0 <= p < log2.len() implies #[trigger] prev_link_ok(log2, prev2, p) by {
+        assert(prev_link_ok(log, prev, p));
+        assert forall|j: int| 0 <= j <= p implies #[trigger] log2[j] == log[j] by {}
+        assert(prev2[p] == prev[p]);
+        lemma_prev_link_stable(log, prev, log2, prev2, p);
+    }
+}
+
+/// `insert`'s chain maintenance: appending `(key, val)` and recording the
+/// index's former answer for `key` as the new entry's link keeps the whole
+/// column agreeing. The former answer is `key`'s last occurrence in the old log
+/// (index agreement), or `None` exactly when the old log never mentions `key`.
+proof fn lemma_insert_prev_link<K, V, I: IndexLike>(
+    old_log: Seq<(K, V)>,
+    old_prev: Seq<Option<I>>,
+    old_m: Map<K, I>,
+    log: Seq<(K, V)>,
+    prev: Seq<Option<I>>,
+    shadowed: Option<I>,
+)
+    requires
+        prev_agrees_seq(old_log, old_prev),
+        index_agrees_seq(old_log, old_m),
+        log.len() == old_log.len() + 1,
+        forall|j: int| 0 <= j < old_log.len() ==> #[trigger] log[j] == old_log[j],
+        prev == old_prev.push(shadowed),
+        match shadowed {
+            Some(q) => old_m.contains_key(log[old_log.len() as int].0)
+                && q == old_m[log[old_log.len() as int].0],
+            None => !old_m.contains_key(log[old_log.len() as int].0),
+        },
+    ensures
+        prev_agrees_seq(log, prev),
+{
+    let idn = old_log.len() as int;
+    let key = log[idn].0;
+    assert forall|p: int| 0 <= p < log.len() implies #[trigger] prev_link_ok(log, prev, p) by {
+        if p == idn {
+            match shadowed {
+                Some(q) => {
+                    let qi = q.as_nat() as int;
+                    assert(is_last_occurrence(old_log, qi));
+                    assert(log[qi] == old_log[qi]);
+                    assert forall|j: int| qi < j < idn implies (#[trigger] log[j]).0 != log[qi].0 by {
+                        assert(log[j] == old_log[j]);
+                    }
+                }
+                None => {
+                    assert forall|j: int| 0 <= j < idn implies (#[trigger] log[j]).0 != key by {
+                        if log[j].0 == key {
+                            assert(old_log[j].0 == key);
+                            lemma_last_occurrence_exists(old_log, j);
+                            let q = choose|q: int| #[trigger] is_last_occurrence(old_log, q)
+                                && old_log[q].0 == old_log[j].0;
+                            assert(old_m.contains_key(old_log[q].0));
+                            assert(false);
+                        }
+                    }
+                }
+            }
+        } else {
+            assert(prev_link_ok(old_log, old_prev, p));
+            assert(prev[p] == old_prev[p]);
+            lemma_prev_link_stable(old_log, old_prev, log, prev, p);
+        }
+    }
+}
+
+/// One `unwind_index` step. With the index agreeing on `[0, bound)`, the entry
+/// at `bound - 1` is the last occurrence of its key there, so pointing that key
+/// at the entry's chain link (or dropping it when the link is `None`) leaves the
+/// index agreeing on `[0, bound - 1)`.
+proof fn lemma_unwind_step<K, V, I: IndexLike>(
+    log: Seq<(K, V)>,
+    prev: Seq<Option<I>>,
+    m0: Map<K, I>,
+    m1: Map<K, I>,
+    bound: int,
+)
+    requires
+        1 <= bound <= log.len(),
+        prev.len() == log.len(),
+        prev_link_ok(log, prev, bound - 1),
+        index_agrees_prefix_seq(log, m0, bound),
+        m1 == (match prev[bound - 1] {
+            Some(q) => m0.insert(log[bound - 1].0, q),
+            None => m0.remove(log[bound - 1].0),
+        }),
+    ensures
+        index_agrees_prefix_seq(log, m1, bound - 1),
+{
+    let p = bound - 1;
+    let k = log[p].0;
+    assert(is_last_occurrence_prefix(log, p, bound));
+    assert(m0.contains_key(k) && m0[k].as_nat() == p);
+    // (1) Every last occurrence within [0, p) is indexed at itself.
+    assert forall|r: int| #[trigger] is_last_occurrence_prefix(log, r, p)
+        implies m1.contains_key(log[r].0) && m1[log[r].0].as_nat() == r by {
+        if log[r].0 == k {
+            match prev[p] {
+                Some(q) => {
+                    let qi = q.as_nat() as int;
+                    // `r` and `q` are both the last occurrence of `k` in [0, p).
+                    if r < qi {
+                        assert(log[qi].0 != log[r].0);
+                        assert(false);
+                    }
+                    if qi < r {
+                        assert(log[r].0 != log[qi].0);
+                        assert(false);
+                    }
+                    assert(m1[k] == q);
+                }
+                None => {
+                    assert(log[r].0 != log[p].0);
+                    assert(false);
+                }
+            }
+        } else {
+            // `r < p` and `log[p].0 != log[r].0`: `r` is last within [0, bound) too.
+            assert forall|j: int| r < j < bound implies (#[trigger] log[j]).0 != log[r].0 by {
+                if j == p {
+                    assert(log[j].0 == k);
+                }
+            }
+            assert(is_last_occurrence_prefix(log, r, bound));
+            assert(m0.contains_key(log[r].0) && m0[log[r].0].as_nat() == r);
+            assert(m1.contains_key(log[r].0) && m1[log[r].0] == m0[log[r].0]);
+        }
+    }
+    // (2) Every indexed key points at its last occurrence within [0, p).
+    assert forall|kk: K| #[trigger] m1.contains_key(kk)
+        implies m1[kk].as_nat() < p && log[m1[kk].as_nat() as int].0 == kk
+            && is_last_occurrence_prefix(log, m1[kk].as_nat() as int, p) by {
+        if kk == k {
+            match prev[p] {
+                Some(q) => {
+                    assert(m1[k] == q);
+                }
+                None => {
+                    assert(!m1.contains_key(k));
+                    assert(false);
+                }
+            }
+        } else {
+            assert(m0.contains_key(kk) && m1[kk] == m0[kk]);
+            let pos = m0[kk].as_nat() as int;
+            assert(pos < bound && log[pos].0 == kk && is_last_occurrence_prefix(log, pos, bound));
+            assert(pos != p);
+            assert forall|j: int| pos < j < p implies (#[trigger] log[j]).0 != log[pos].0 by {}
+        }
+    }
 }
 
 /// Clone a map key, with the clone PROVABLY identical to the original.
