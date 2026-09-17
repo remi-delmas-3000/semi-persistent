@@ -608,14 +608,18 @@ where
         crate::parallel_store::shrink_vec_capacity(&mut self.data, factor, headroom);
     }
 
-    #[verifier::external_body]
-    fn heap_bytes(&self) -> usize {
-        // Production formula (containers/src/diff_store.rs, InlineStore):
-        // `capacity() * size_of::<T::Repr>()` — the reprs ARE the backing.
-        // external_body (capacity is unmodeled; read-only). Trust ledger:
-        // group B.
-        self.data.capacity() * core::mem::size_of::<T::Repr>()
-    }
 }
 
 } // verus!
+
+// Byte reporter — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`). Production formula: the reprs ARE the backing.
+impl<T, I> crate::diagnostics::HeapBytes for InlineStore<T, I>
+where
+    T: Tagged,
+    I: IndexLike,
+{
+    fn heap_bytes(&self) -> usize {
+        self.data.capacity() * core::mem::size_of::<T::Repr>()
+    }
+}

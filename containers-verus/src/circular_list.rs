@@ -369,24 +369,6 @@ where
         self.entries.is_empty()
     }
 
-    /// Bytes consumed by diff tracking only, forwarded from the entries vec.
-    /// Diagnostic, no spec content — the same pair production exposes on every
-    /// container (`containers/src/vec.rs`), and the pair the consumer's
-    /// memory-parity claim is measured through: the ring's retained history is
-    /// `(node, N::Index)` per captured write, 16 bytes at 31-bit ids, matching
-    /// the hand-rolled `VecI<EClassEntry, u32>` this replaced. Asserted at
-    /// runtime in `containers-conformance/tests/differential.rs`.
-    pub fn tracking_bytes(&self) -> usize {
-        self.entries.tracking_bytes()
-    }
-
-    /// Total bytes: this struct + the entries vec's store + its tracking. The
-    /// ghost fields cost nothing at runtime (they are erased), so this is the
-    /// whole footprint. Diagnostic; no spec content.
-    pub fn total_bytes(&self) -> usize {
-        self.entries.total_bytes()
-    }
-
     /// `next` of node `i` — its ring successor, returned as the id type itself.
     /// This is the stored word verbatim (no decode), so it is exactly
     /// `next_seq()[i]` under `id_nat`.
@@ -2385,5 +2367,31 @@ where
         TRACK,
     > {
         &self.entries
+    }
+}
+
+// Byte reporters — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`).
+impl<T, N: DenseId, const TRACK: bool, P> CircularList<T, N, TRACK, P>
+where
+    T: Sized + Copy + core::default::Default + Send,
+    P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>,
+{
+    /// Tracking bytes of the entries column (read-only).
+    pub fn tracking_bytes(&self) -> usize {
+        self.entries.tracking_bytes()
+    }
+}
+
+impl<T, N: DenseId, const TRACK: bool, P> CircularList<T, N, TRACK, P>
+where
+    T: Sized + Copy + core::default::Default + Send,
+    P: TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>,
+    <P as TaggedFamily<CircularListNode<T, N>, <N as DenseId>::Index, TRACK>>::Store:
+        crate::diagnostics::HeapBytes,
+{
+    /// Whole footprint of the entries column (read-only).
+    pub fn total_bytes(&self) -> usize {
+        self.entries.total_bytes()
     }
 }

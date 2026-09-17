@@ -121,13 +121,6 @@ impl History {
         self.stamps.is_valid(t.depth as usize, t.generation)
     }
 
-    /// Heap bytes of the genealogy (diagnostic; no spec content). O(max depth).
-    /// The H4b.3 measurement reads this: one shared instance versus the
-    /// per-member `GenStamps` every column used to carry.
-    pub fn heap_bytes(&self) -> usize {
-        self.stamps.heap_bytes()
-    }
-
     /// Restore to `t`: bump the levels strictly below `t.depth` (invalidating the
     /// abandoned future — every token at depth `> t.depth` — while `t` and its
     /// ancestors stay valid), and set the depth to the token's. O(1) amortized;
@@ -300,3 +293,12 @@ where
 }
 
 } // verus!
+
+// Byte reporter — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`).
+impl History {
+    /// Heap bytes of the generation-stamp array (read-only).
+    pub fn heap_bytes(&self) -> usize {
+        crate::diagnostics::HeapBytes::heap_bytes(&self.stamps)
+    }
+}

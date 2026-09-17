@@ -395,3 +395,16 @@ where
 }
 
 } // verus!
+
+// Byte reporter — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`). The trail store keeps no runtime flags: its backing is
+// the data column alone.
+impl<T, I> crate::diagnostics::HeapBytes for TrailStore<T, I>
+where
+    T: Sized + Copy,
+    I: IndexLike,
+{
+    fn heap_bytes(&self) -> usize {
+        self.data.capacity() * core::mem::size_of::<T>()
+    }
+}

@@ -264,18 +264,6 @@ impl Codes {
         }
     }
 
-    /// Bytes of the code column (diagnostic).
-    #[verifier::external_body]
-    pub fn heap_bytes(&self) -> usize {
-        match self {
-            Codes::U8(v) => v.capacity(),
-            Codes::U16(v) => v.capacity() * 2,
-            Codes::U32(v) => v.capacity() * 4,
-            Codes::Usize(v) => v.capacity() * 8,
-            Codes::Packed { words, .. } => words.capacity() * 8,
-        }
-    }
-
     /// Length-based byte count (deterministic; for measurement/comparison, unlike
     /// capacity-based `heap_bytes`).
     pub fn byte_len(&self) -> usize {
@@ -3789,3 +3777,17 @@ impl<T: IndexLike, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>
 }
 
 } // verus!
+
+// Byte reporter — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`).
+impl crate::diagnostics::HeapBytes for Codes {
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Codes::U8(v) => v.capacity(),
+            Codes::U16(v) => v.capacity() * 2,
+            Codes::U32(v) => v.capacity() * 4,
+            Codes::Usize(v) => v.capacity() * 8,
+            Codes::Packed { words, .. } => words.capacity() * 8,
+        }
+    }
+}

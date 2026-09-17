@@ -81,10 +81,6 @@ pub trait SyncMember: Send {
             final(self).model() == old(self).archive()[depth as int],
             final(self).archive() == old(self).archive().subrange(0, depth as int);
 
-    /// Diagnostic heap footprint (for the shared-vs-per-member measurement).
-    fn heap_bytes(&self) -> usize
-        requires self.wf();
-
     /// Diagnostic: sealed (cold) frame count, to observe that a group mark
     /// actually sealed (H1.2) rather than only bumping depths.
     fn cold_frames(&self) -> usize
@@ -182,10 +178,6 @@ where
         proof {
             assert(self.archive() =~= old(self).archive().subrange(0, depth as int));
         }
-    }
-
-    fn heap_bytes(&self) -> usize {
-        self.tracking_bytes()
     }
 
     fn cold_frames(&self) -> usize {
@@ -521,24 +513,6 @@ impl ForkHistory {
         self.history.depth()
     }
 
-    /// Total member heap footprint plus the genealogy's own bytes.
-    pub fn heap_bytes(&self) -> usize
-        requires self.wf(),
-    {
-        let mut total: usize = 0;
-        let n = self.members.len();
-        let mut i: usize = 0;
-        while i < n
-            invariant 0 <= i <= n, n == self.members@.len(), self.wf(),
-            decreases n - i,
-        {
-            let b = self.members[i].heap_bytes();
-            // Saturating: diagnostic only.
-            total = if usize::MAX - total > b { total + b } else { usize::MAX };
-            i = i + 1;
-        }
-        total
-    }
 }
 
 } // verus!
@@ -723,11 +697,6 @@ mod fork_history_tests {
                 gp.members[j].checksum(),
                 "member {j} diverged after restore"
             );
-            assert_eq!(
-                gs.members[j].heap_bytes(),
-                gp.members[j].heap_bytes(),
-                "member {j} encoded size diverged"
-            );
         }
 
         // H3.2: the fan-out actually spawned.
@@ -852,7 +821,10 @@ mod fork_history_tests {
                 }
             }
             let shared_bytes = shared.heap_bytes();
-            let dup_bytes: usize = per_member.iter().map(|m| m.heap_bytes()).sum();
+            let dup_bytes: usize = per_member
+                .iter()
+                .map(|m| crate::diagnostics::HeapBytes::heap_bytes(m))
+                .sum();
             println!(
                 "depth {depth}, {MEMBERS} members: shared history {shared_bytes} B, \
                  per-member duplication {dup_bytes} B ({:.1}x)",

@@ -118,12 +118,6 @@ impl GenStamps {
         self.stamp(depth)
     }
 
-    /// Heap bytes of the stamp array (diagnostic; no spec content). O(max depth).
-    #[verifier::external_body]
-    pub fn heap_bytes(&self) -> usize {
-        self.levels.capacity() * core::mem::size_of::<u64>()
-    }
-
     /// The O(1) validity check for a token `(depth, g)`.
     pub fn is_valid(&self, depth: usize, g: u64) -> (b: bool)
         ensures b == self.valid(depth as nat, g),
@@ -220,3 +214,11 @@ pub proof fn lemma_bump_invalidates(old_g: GenStamps, new_g: GenStamps, cut: nat
 }
 
 } // verus!
+
+// Byte reporter — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`).
+impl crate::diagnostics::HeapBytes for GenStamps {
+    fn heap_bytes(&self) -> usize {
+        self.levels.capacity() * core::mem::size_of::<u64>()
+    }
+}

@@ -491,17 +491,6 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
         }
     }
 
-    // -- monitoring --------------------------------------------------------
-
-    /// Heap bytes held by the uncompressed (hot) top.
-    pub fn hot_bytes(&self) -> usize {
-        crate::vec::log_heap_bytes(&self.hot)
-    }
-
-    /// Heap bytes held by the compressed (cold) bottom.
-    pub fn cold_bytes(&self) -> usize {
-        self.cold.heap_bytes()
-    }
 }
 
 
@@ -518,3 +507,17 @@ pub(crate) fn two_stack_drop_front<T: Copy, I: crate::index_like::IndexLike>(
 }
 
 } // verus!
+
+// Byte reporters — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`).
+impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
+    /// Heap bytes held by the uncompressed (hot) top.
+    pub fn hot_bytes(&self) -> usize {
+        crate::diagnostics::log_heap_bytes(&self.hot)
+    }
+
+    /// Heap bytes held by the compressed (cold) bottom.
+    pub fn cold_bytes(&self) -> usize {
+        crate::diagnostics::HeapBytes::heap_bytes(&self.cold)
+    }
+}

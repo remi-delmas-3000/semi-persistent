@@ -168,13 +168,6 @@ where
             final(self).data() == old(self).data(),
             TRACK ==> final(self).captured() == old(self).captured();
 
-    /// Heap bytes used by the backing storage (diagnostic; no spec content —
-    /// it's a capacity measurement, not part of the semi-persistent contract).
-    /// Default 0 for backends that don't introspect capacity.
-    fn heap_bytes(&self) -> usize {
-        0
-    }
-
     /// Contiguous read access to the raw values, when the backend stores them
     /// contiguously (production parity: `Some` for `ParallelStore`, `None`
     /// for `InlineStore`, whose cells are tag-carrying reprs, not `T`s).

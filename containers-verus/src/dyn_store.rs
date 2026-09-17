@@ -457,14 +457,6 @@ where
         }
     }
 
-    fn heap_bytes(&self) -> usize {
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::heap_bytes(s),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::heap_bytes(s),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::heap_bytes(s),
-        }
-    }
-
     fn as_slice(&self) -> (r: Option<&[T]>) {
         match self {
             DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::as_slice(s),
@@ -475,3 +467,19 @@ where
 }
 
 } // verus!
+
+// Byte reporter — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`).
+impl<T, I> crate::diagnostics::HeapBytes for DynStore<T, I>
+where
+    T: Tagged,
+    I: IndexLike,
+{
+    fn heap_bytes(&self) -> usize {
+        match self {
+            DynStore::Inline(s) => crate::diagnostics::HeapBytes::heap_bytes(s),
+            DynStore::Parallel(s) => crate::diagnostics::HeapBytes::heap_bytes(s),
+            DynStore::Trail(s) => crate::diagnostics::HeapBytes::heap_bytes(s),
+        }
+    }
+}

@@ -491,16 +491,6 @@ impl CaptureBits {
         }
     }
 
-    /// Heap bytes used by the word vector (diagnostic; no spec content —
-    /// capacity is unmodeled by Verus, so this is `external_body`; it reads
-    /// state without mutating. Trust ledger: group B). Matches production's
-    /// `captured.capacity() * size_of::<u64>()` term in
-    /// `ParallelStore::heap_bytes`.
-    #[verifier::external_body]
-    pub fn heap_bytes(&self) -> usize {
-        self.words.capacity() * core::mem::size_of::<u64>()
-    }
-
     /// Drop materialized words that lie entirely beyond `keep_bits` logical
     /// positions, reclaiming their heap. This is production's
     /// `captured.truncate(capacity.div_ceil(64))` in `ParallelStore::shrink_if`
@@ -685,3 +675,11 @@ pub(crate) proof fn lemma_andnot_bit_pointwise(
 }
 
 } // verus!
+
+// Byte reporter — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`).
+impl crate::diagnostics::HeapBytes for CaptureBits {
+    fn heap_bytes(&self) -> usize {
+        self.words.capacity() * core::mem::size_of::<u64>()
+    }
+}

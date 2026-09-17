@@ -1621,7 +1621,7 @@ where
     /// precondition an unverified caller could get wrong became a proof obligation
     /// discharged from `wf`, and it costs solver time here rather than soundness there.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(2000)]
+    #[verifier::rlimit(300)]
     pub(crate) fn splice_raw(&mut self, dst: usize, src: usize)
         requires
             old(self).wf(),
@@ -1654,6 +1654,15 @@ where
             final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view(),
             final(self).model_snapshots_view() == old(self).model_snapshots_view(),
     {
+        // `model_disjoint` and `cache_ok` stay hidden in this body: the old
+        // state's four-variable disjointness quantifier and the self-feeding
+        // `next` quantifier (instantiated at `(l, p)` it creates
+        // `model[l][p + 1]`, which matches it again) would otherwise share
+        // this large context. The ends lemma supplies the two lists' cached
+        // head/tail facts; the delegated lemmas below re-establish both
+        // predicates for the new state in their own small contexts.
+        hide(ListArena::model_disjoint);
+        hide(ListArena::cache_ok);
         // Bound dst.len + src.len before mutating: the two lists are disjoint, so their
         // combined length fits the arena, and the arena fits `N::Index`. No node is
         // pushed here, so unlike prepend/append both facts are about the *current* arena
@@ -1661,6 +1670,8 @@ where
         proof {
             self.lemma_concat_len_bounded(dst as int, src as int);
             self.lemma_nodes_len_fits();
+            self.lemma_cache_ends_at(dst as int);
+            self.lemma_cache_ends_at(src as int);
         }
         let ghost old_nodes = self.nodes_view();
         let ghost old_model = self.model@;
@@ -1745,55 +1756,13 @@ where
                 }
             }
 
-            // --- disjoint: dst++src concatenates two OLD-disjoint lists; every
-            // entry still maps to a distinct old (list,pos), and src is now empty.
-            // Delegated: proved here, with both states' `wf()` in scope, this
-            // one quantifier e-matched its way to 17.6M instantiations.
-            lemma_splice_disjoint(old_model, model, dst as int, src as int);
-
-            // --- cache_ok nexts: only dst's old tail node was relinked
-            // (its next -> src's head); every other node-next is unchanged.
-            assert forall|l2: int, p: int|
-                0 <= l2 < model.len() && 0 <= p < model[l2].len() implies {
-                    let nx = nodes[#[trigger] model[l2][p] as int].next_ref();
-                    if p == model[l2].len() - 1 { nx.is_null() }
-                    else { !nx.is_null() && nx.target() == model[l2][p + 1] }
-                } by {
-                splice_cache_node(*old(self), self, dst as int, src as int,
-                    hd.tail_spec(), hs.head_ref(), dst_empty, src_empty, l2, p);
-            }
-
-            // --- cache_ok heads/tails
-            assert forall|l2: int| 0 <= l2 < model.len() implies {
-                let hh = (#[trigger] heads[l2]).head_ref();
-                if model[l2].len() == 0 { hh.is_null() }
-                else { !hh.is_null() && hh.target() == model[l2][0] }
-            } by {
-                if l2 == src as int {
-                } else if l2 == dst as int {
-                    if old_model[dst as int].len() > 0 {
-                        assert(model[dst as int][0] == old_model[dst as int][0]);
-                    } else if old_model[src as int].len() > 0 {
-                        assert(model[dst as int][0] == old_model[src as int][0]);
-                    }
-                } else {
-                    assert(heads[l2] == old(self).heads_view()[l2]);
-                }
-            }
-            assert forall|l2: int| #![auto] 0 <= l2 < model.len() && model[l2].len() > 0 implies
-                heads[l2].tail_spec() == model[l2][model[l2].len() - 1] by {
-                if l2 == dst as int {
-                    if old_model[src as int].len() > 0 {
-                        assert(model[dst as int][model[dst as int].len() - 1]
-                            == old_model[src as int][old_model[src as int].len() - 1]);
-                    } else {
-                        assert(model[dst as int][model[dst as int].len() - 1]
-                            == old_model[dst as int][old_model[dst as int].len() - 1]);
-                    }
-                } else if l2 != src as int {
-                    assert(heads[l2] == old(self).heads_view()[l2]);
-                }
-            }
+            // --- disjoint and cache_ok: delegated whole (see the note at the
+            // top of the body). Each lemma unfolds the old state's predicate
+            // in its own context and hands the new state's back as a fact.
+            self.lemma_splice_disjoint_arena(*old(self), dst as int, src as int);
+            assert(heads[src as int].head_ref().is_null());  // ListHead::default()
+            self.lemma_splice_cache_ok(*old(self), dst as int, src as int,
+                hd.tail_spec(), hs.head_ref(), dst_empty, src_empty);
 
             // --- list_seq
             assert(self.list_seq(src as int) =~= Seq::<T>::empty());
@@ -1820,7 +1789,9 @@ where
                         nodes[model[m][p] as int].payload == old_nodes[old_model[m][p] as int].payload by {
                         assert(model[m][p] == old_model[m][p]);
                         // m's nodes are disjoint from dst's relinked tail.
-                        assert(dst_empty || model[m][p] != hd.tail_spec());
+                        if !dst_empty {
+                            old(self).lemma_disjoint_entries(m, p, dst as int, dlen - 1);
+                        }
                     }
                 }
             }
@@ -1842,6 +1813,138 @@ where
                     assert(heads[l2] == old(self).heads_view()[l2]);
                     assert(model[l2] == old_model[l2]);
                 }
+            }
+        }
+    }
+
+    /// The cached ends of one list, as facts: what `splice_raw` needs from
+    /// `cache_ok` about `dst` and `src` without unfolding the predicate there.
+    proof fn lemma_cache_ends_at(&self, l: int)
+        requires self.wf(), 0 <= l < self.model@.len(),
+        ensures
+            self.model@[l].len() == 0 ==> self.heads_view()[l].head_ref().is_null(),
+            self.model@[l].len() > 0 ==> !self.heads_view()[l].head_ref().is_null()
+                && self.heads_view()[l].head_ref().target() == self.model@[l][0],
+            self.model@[l].len() > 0
+                ==> self.heads_view()[l].tail_spec() == self.model@[l][self.model@[l].len() - 1],
+            self.heads_view()[l].len_spec() == self.model@[l].len(),
+    {
+    }
+
+    /// Two distinct positions of the model hold distinct nodes: one instance
+    /// of `model_disjoint`, for bodies that keep the predicate hidden.
+    proof fn lemma_disjoint_entries(&self, l1: int, p1: int, l2: int, p2: int)
+        requires self.model_disjoint(),
+            0 <= l1 < self.model@.len(), 0 <= p1 < self.model@[l1].len(),
+            0 <= l2 < self.model@.len(), 0 <= p2 < self.model@[l2].len(),
+            !(l1 == l2 && p1 == p2),
+        ensures self.model@[l1][p1] != self.model@[l2][p2],
+    {
+    }
+
+    /// Splice disjointness at the arena level (the seq-level argument is
+    /// `lemma_splice_disjoint`): the old state's four-variable quantifier
+    /// unfolds only here, never in `splice_raw`.
+    #[verifier::spinoff_prover]
+    proof fn lemma_splice_disjoint_arena(&self, pre: Self, dst: int, src: int)
+        requires pre.model_disjoint(),
+            0 <= dst < pre.model@.len(), 0 <= src < pre.model@.len(), dst != src,
+            self.model@.len() == pre.model@.len(),
+            self.model@[dst] == pre.model@[dst] + pre.model@[src],
+            self.model@[src] == Seq::<usize>::empty(),
+            forall|m: int| 0 <= m < self.model@.len() && m != dst && m != src
+                ==> #[trigger] self.model@[m] == pre.model@[m],
+        ensures self.model_disjoint(),
+    {
+        lemma_splice_disjoint(pre.model@, self.model@, dst, src);
+    }
+
+    /// `cache_ok` after a splice: heads and tails from the old ends of `dst`
+    /// and `src`, `next` pointers node by node through `splice_cache_node`.
+    /// The old state's `cache_ok` (with its self-feeding `next` quantifier)
+    /// unfolds only in this small context.
+    #[verifier::spinoff_prover]
+    proof fn lemma_splice_cache_ok(&self, pre: Self, dst: int, src: int, dtail: usize,
+        shead: NodeRef, dst_empty: bool, src_empty: bool)
+        requires
+            pre.wf(),
+            0 <= dst < pre.model@.len(), 0 <= src < pre.model@.len(), dst != src,
+            self.model@.len() == pre.model@.len(),
+            self.nodes_view().len() == pre.nodes_view().len(),
+            self.heads_view().len() == pre.heads_view().len(),
+            self.model@[dst] == pre.model@[dst] + pre.model@[src],
+            self.model@[src] == Seq::<usize>::empty(),
+            forall|m: int| 0 <= m < self.model@.len() && m != dst && m != src
+                ==> #[trigger] self.model@[m] == pre.model@[m],
+            dst_empty == (pre.model@[dst].len() == 0),
+            src_empty == (pre.model@[src].len() == 0),
+            // nodes: only dtail relinked to shead (when both non-empty); else equal.
+            !dst_empty && !src_empty ==> {
+                &&& dtail == pre.model@[dst][pre.model@[dst].len() - 1]
+                &&& shead == pre.heads_view()[src].head_ref()
+                &&& self.nodes_view()[dtail as int].next_ref() == shead
+                &&& (forall|k: int| 0 <= k < self.nodes_view().len() && k != dtail as int
+                        ==> #[trigger] self.nodes_view()[k] == pre.nodes_view()[k])
+            },
+            (dst_empty || src_empty) ==>
+                (forall|k: int| 0 <= k < self.nodes_view().len()
+                    ==> #[trigger] self.nodes_view()[k] == pre.nodes_view()[k]),
+            // heads: src cleared; dst per case; every other header unchanged.
+            self.heads_view()[src].head_ref().is_null(),
+            forall|l: int| 0 <= l < self.heads_view().len() && l != dst && l != src
+                ==> #[trigger] self.heads_view()[l] == pre.heads_view()[l],
+            src_empty ==> self.heads_view()[dst] == pre.heads_view()[dst],
+            !src_empty && dst_empty ==>
+                self.heads_view()[dst].head_ref() == pre.heads_view()[src].head_ref()
+                && self.heads_view()[dst].tail_spec() == pre.heads_view()[src].tail_spec(),
+            !src_empty && !dst_empty ==>
+                self.heads_view()[dst].head_ref() == pre.heads_view()[dst].head_ref()
+                && self.heads_view()[dst].tail_spec() == pre.heads_view()[src].tail_spec(),
+        ensures self.cache_ok(),
+    {
+        let model = self.model@;
+        let old_model = pre.model@;
+        let nodes = self.nodes_view();
+        let heads = self.heads_view();
+        // --- nexts: node by node.
+        assert forall|l2: int, p: int|
+            0 <= l2 < model.len() && 0 <= p < model[l2].len() implies {
+                let nx = nodes[#[trigger] model[l2][p] as int].next_ref();
+                if p == model[l2].len() - 1 { nx.is_null() }
+                else { !nx.is_null() && nx.target() == model[l2][p + 1] }
+            } by {
+            splice_cache_node(pre, self, dst, src, dtail, shead, dst_empty, src_empty, l2, p);
+        }
+        // --- heads
+        assert forall|l2: int| 0 <= l2 < model.len() implies {
+            let hh = (#[trigger] heads[l2]).head_ref();
+            if model[l2].len() == 0 { hh.is_null() }
+            else { !hh.is_null() && hh.target() == model[l2][0] }
+        } by {
+            if l2 == src {
+            } else if l2 == dst {
+                if old_model[dst].len() > 0 {
+                    assert(model[dst][0] == old_model[dst][0]);
+                } else if old_model[src].len() > 0 {
+                    assert(model[dst][0] == old_model[src][0]);
+                }
+            } else {
+                assert(heads[l2] == pre.heads_view()[l2]);
+            }
+        }
+        // --- tails
+        assert forall|l2: int| #![auto] 0 <= l2 < model.len() && model[l2].len() > 0 implies
+            heads[l2].tail_spec() == model[l2][model[l2].len() - 1] by {
+            if l2 == dst {
+                if old_model[src].len() > 0 {
+                    assert(model[dst][model[dst].len() - 1]
+                        == old_model[src][old_model[src].len() - 1]);
+                } else {
+                    assert(model[dst][model[dst].len() - 1]
+                        == old_model[dst][old_model[dst].len() - 1]);
+                }
+            } else if l2 != src {
+                assert(heads[l2] == pre.heads_view()[l2]);
             }
         }
     }
@@ -2492,33 +2595,6 @@ where
         self.is_empty_raw(l.as_usize())
     }
 
-    /// Bytes consumed by diff tracking only, summed over the two inner vecs.
-    /// Diagnostic, no spec content — the same pair production exposes on every
-    /// container (`containers/src/vec.rs`). Used by the store-choice memory
-    /// exception in `containers-conformance/tests/layout_parity.rs`.
-    /// `external_body`: the sum is an unmodeled capacity diagnostic (like
-    /// `Vec::tracking_bytes`), so the overflow obligation on `+` is not proof
-    /// content — a real footprint never approaches `usize::MAX`.
-    #[verifier::external_body]
-    pub fn tracking_bytes(&self) -> usize {
-        self.heads.tracking_bytes() + self.nodes.tracking_bytes()
-    }
-
-    /// Total bytes: both inner vecs (struct + store backing + tracking). The
-    /// ghost `model`/`model_snapshots` fields are erased, so this is the whole
-    /// runtime footprint. Diagnostic; no spec content.
-    ///
-    /// This is the number memory parity with production is measured through
-    /// (`containers-conformance/tests/list_arena_differential.rs`). Both sides
-    /// use `InlineStore` over `L::Index`/`N::Index` columns, so elements, capture
-    /// flags and diff-log entries are all the same width; the only residual delta
-    /// is a constant 16 bytes from the `u64` `ContainerId`.
-    /// `external_body`: unmodeled capacity diagnostic (see `tracking_bytes`).
-    #[verifier::external_body]
-    pub fn total_bytes(&self) -> usize {
-        self.heads.total_bytes() + self.nodes.total_bytes()
-    }
-
     /// O(1) splice through typed handles: `dst := dst ++ src`, `src` cleared
     /// (handle stays valid and names the empty list).
     #[inline(always)]
@@ -3121,5 +3197,35 @@ where
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// Byte reporters — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`).
+impl<T, L, N, const TRACK: bool, P> ListArena<T, L, N, TRACK, P>
+where
+    T: Sized + Copy + core::default::Default + Tagged,
+    L: DenseId,
+    N: DenseId + Tagged + core::default::Default,
+    P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
+{
+    /// Tracking bytes of both columns (capacity-based; read-only).
+    pub fn tracking_bytes(&self) -> usize {
+        self.heads.tracking_bytes() + self.nodes.tracking_bytes()
+    }
+}
+
+impl<T, L, N, const TRACK: bool, P> ListArena<T, L, N, TRACK, P>
+where
+    T: Sized + Copy + core::default::Default + Tagged,
+    L: DenseId,
+    N: DenseId + Tagged + core::default::Default,
+    P: TaggedFamily<ListHead<N>, L::Index, TRACK> + TaggedFamily<ListNode<T, N>, N::Index, TRACK>,
+    <P as TaggedFamily<ListHead<N>, L::Index, TRACK>>::Store: crate::diagnostics::HeapBytes,
+    <P as TaggedFamily<ListNode<T, N>, N::Index, TRACK>>::Store: crate::diagnostics::HeapBytes,
+{
+    /// Whole footprint of both columns (read-only).
+    pub fn total_bytes(&self) -> usize {
+        self.heads.total_bytes() + self.nodes.total_bytes()
     }
 }

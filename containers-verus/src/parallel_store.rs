@@ -605,14 +605,6 @@ where
         Some(self.data.as_slice())
     }
 
-    #[verifier::external_body]
-    fn heap_bytes(&self) -> usize {
-        // Production formula (containers/src/diff_store.rs): data capacity
-        // plus the capture bit-vector's word capacity. external_body
-        // (capacity is unmodeled and the diagnostic sum carries no spec;
-        // read-only). Trust ledger: group B.
-        self.data.capacity() * core::mem::size_of::<T>() + self.captured.heap_bytes()
-    }
 }
 
 /// Capacity-only shrink: if `cap > factor * len`, `shrink_to(headroom * len)`.
@@ -674,3 +666,17 @@ impl<T: Sized + Copy, I: IndexLike> core::default::Default for ParallelStore<T, 
 }
 
 } // verus!
+
+// Byte reporter — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`). Production formula: data capacity plus the capture
+// bit-vector's word capacity.
+impl<T, I> crate::diagnostics::HeapBytes for ParallelStore<T, I>
+where
+    T: Sized + Copy,
+    I: IndexLike,
+{
+    fn heap_bytes(&self) -> usize {
+        self.data.capacity() * core::mem::size_of::<T>()
+            + crate::diagnostics::HeapBytes::heap_bytes(&self.captured)
+    }
+}

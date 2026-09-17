@@ -249,13 +249,6 @@ pub(crate) fn log_index<T: Copy, I: IndexLike>(
     d[i]
 }
 
-/// Diagnostic byte count of the bare log (capacity-based, mirrors the old
-/// DiffLog::heap_bytes).
-#[verifier::external_body]
-pub(crate) fn log_heap_bytes<T: Copy, I: IndexLike>(d: &std::vec::Vec<(T, I)>) -> usize {
-    d.capacity() * core::mem::size_of::<(T, I)>()
-}
-
 /// Capacity release for the bare log: shrink when capacity exceeds
 /// `factor * len + headroom`. View-preserving; capacity is unmodeled.
 #[verifier::external_body]
@@ -10997,10 +10990,41 @@ where
             && frame_inv_range::<T, I>(self.view(), self.trail_value_pool@,
                 top.start as int, self.trail_value_pool@.len() as int,
                 self.snapshots@[self.depth_spec() - 1], top.saved_len.as_nat())) by {
+            // Pointwise, like the Hot twin: the aggregate `trail_repr_ok`
+            // quantifier is instantiated once, inside the per-header lemma.
             reveal(Vec::frame_partition_ok);
-            reveal(Vec::trail_repr_ok);
+            self.lemma_trail_repr_at(self.trail_stack@.len() - 1);
         }
         reveal(frame_inv_range);
+    }
+
+    /// Per-header accessor for the Trail representation (the Trail twin of
+    /// `lemma_hot_repr_at`): pointwise, so callers never instantiate the
+    /// aggregate quantifier in their own query.
+    pub(crate) proof fn lemma_trail_repr_at(&self, i: int)
+        requires
+            self.trail_repr_ok(),
+            self.frame_partition_ok(),
+            0 <= i < self.trail_stack@.len(),
+        ensures
+            self.trail_stack@[i].start <= self.trail_stack@[i].end,
+            self.trail_stack@[i].end <= self.trail_value_pool@.len(),
+            self.trail_stack@[i].start as int <= self.phys_trail_end(i),
+            self.phys_trail_end(i) <= self.trail_value_pool@.len() as int,
+            i + 1 == self.trail_stack@.len() ==>
+                self.phys_trail_end(i) == self.trail_value_pool@.len() as int,
+            self.cold_stack@.len() + self.hot_stack@.len() + i < self.snapshots@.len(),
+            self.trail_stack@[i].saved_len.as_nat()
+                == self.snapshots@[self.cold_stack@.len() + self.hot_stack@.len() + i].len(),
+            frame_inv_range::<T, I>(
+                self.layer_above_at(self.cold_stack@.len() + self.hot_stack@.len() + i),
+                self.trail_value_pool@, self.trail_stack@[i].start as int,
+                self.phys_trail_end(i),
+                self.snapshots@[self.cold_stack@.len() + self.hot_stack@.len() + i],
+                self.snapshots@[self.cold_stack@.len() + self.hot_stack@.len() + i].len()),
+    {
+        reveal(Vec::trail_repr_ok);
+        reveal(Vec::frame_partition_ok);
     }
 
     #[verifier::spinoff_prover]
@@ -13400,17 +13424,6 @@ where
         self.trail_stack[k - cold - hot].saved_len
     }
 
-    /// Resident non-cold pair entries. This preserves the legacy diagnostic:
-    /// unique ingress remains bounded by touched indices, while trail ingress
-    /// visibly retains duplicate chronological writes.
-    #[verifier::external_body]
-    pub fn diff_log_len(&self) -> (n: usize)
-        requires self.wf(),
-        ensures n == self.diff_log_len_spec(),
-    {
-        self.trail_value_pool.len() + self.hot_value_pool.len()
-    }
-
     /// Current independent tier policy.
     pub fn tier_policy(&self) -> crate::tier_policy::TierPolicy {
         self.tier_policy
@@ -13468,30 +13481,6 @@ where
         ensures v.vec_ref() == self,
     {
         VecView { vec: self }
-    }
-
-    /// Bytes consumed by diff tracking only: diff_log + frames + fork history.
-    /// Diagnostic; no spec content (capacity measurement, external_body).
-    /// Production formula (containers/src/vec.rs): CAPACITY-based, not
-    /// len-based — this reports the actual allocation footprint.
-    #[verifier::external_body]
-    pub fn tracking_bytes(&self) -> usize {
-        self.diff_log.capacity() * core::mem::size_of::<(T, I)>()
-            + self.trail_value_pool.capacity() * core::mem::size_of::<(T, I)>()
-            + self.trail_stack.capacity() * core::mem::size_of::<crate::frame::TrailFrame<I>>()
-            + self.hot_value_pool.capacity() * core::mem::size_of::<(T, I)>()
-            + self.hot_stack.capacity() * core::mem::size_of::<crate::frame::HotFrame<I>>()
-            + self.cold_stack.capacity() * core::mem::size_of::<crate::frame::ColdFrameHdr<I>>()
-            + self.cold_index_runs.capacity() * core::mem::size_of::<crate::frame::IndexRun<I>>()
-            + self.cold_value_pool.capacity() * core::mem::size_of::<T>()
-    }
-
-    /// Total bytes used by this Vec: struct + store backing + tracking.
-    /// Diagnostic; no spec content. Production formula:
-    /// `size_of::<Self>() + store.heap_bytes() + tracking_bytes()`.
-    #[verifier::external_body]
-    pub fn total_bytes(&self) -> usize {
-        core::mem::size_of::<Self>() + self.store.heap_bytes() + self.tracking_bytes()
     }
 
     // ------------------------------------------------------------------
@@ -17046,5 +17035,51 @@ mod restore_prefix_tests {
         v.try_restore(token).unwrap();
         assert_eq!(v.get(0u32), 7);
         assert!(v.diff_log.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Byte reporters — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`). Read-only capacity sums over the crate-private fields;
+// nothing verified calls them.
+// ---------------------------------------------------------------------------
+
+impl<T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>>
+    Vec<T, I, S, TRACK, VC>
+where
+    T: Sized + Copy,
+    I: IndexLike,
+    S: crate::diff_store::DiffStore<T, I, TRACK>,
+{
+    /// Heap bytes of the tracking structures (diff logs, frame stacks, pools),
+    /// capacity-based. Production parity: `tracking_bytes`.
+    pub fn tracking_bytes(&self) -> usize {
+        self.diff_log.capacity() * core::mem::size_of::<(T, I)>()
+            + self.trail_value_pool.capacity() * core::mem::size_of::<(T, I)>()
+            + self.trail_stack.capacity() * core::mem::size_of::<crate::frame::TrailFrame<I>>()
+            + self.hot_value_pool.capacity() * core::mem::size_of::<(T, I)>()
+            + self.hot_stack.capacity() * core::mem::size_of::<crate::frame::HotFrame<I>>()
+            + self.cold_stack.capacity() * core::mem::size_of::<crate::frame::ColdFrameHdr<I>>()
+            + self.cold_index_runs.capacity() * core::mem::size_of::<crate::frame::IndexRun<I>>()
+            + self.cold_value_pool.capacity() * core::mem::size_of::<T>()
+    }
+
+    /// Live diff-log length: the open frame's entries across the Trail and Hot
+    /// pools. Diagnostic (read-only).
+    pub fn diff_log_len(&self) -> usize {
+        self.trail_value_pool.len() + self.hot_value_pool.len()
+    }
+}
+
+impl<T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>>
+    Vec<T, I, S, TRACK, VC>
+where
+    T: Sized + Copy,
+    I: IndexLike,
+    S: crate::diff_store::DiffStore<T, I, TRACK> + crate::diagnostics::HeapBytes,
+{
+    /// Whole footprint: `size_of::<Self>() + store.heap_bytes() + tracking_bytes()`.
+    pub fn total_bytes(&self) -> usize {
+        core::mem::size_of::<Self>() + self.store.heap_bytes() + self.tracking_bytes()
     }
 }

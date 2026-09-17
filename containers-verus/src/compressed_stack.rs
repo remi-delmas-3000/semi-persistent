@@ -184,10 +184,14 @@ impl<T: IndexLike, I: IndexFromNat> CompressedStack<T, I> {
         r
     }
 
-    /// Diagnostic heap footprint of the compressed frames (capacity-based; no
-    /// spec content). The monitoring hook for compressed size.
-    #[verifier::external_body]
-    pub fn heap_bytes(&self) -> usize {
+}
+
+} // verus!
+
+// Byte reporter — OUTSIDE the verified perimeter (stratified; see
+// `diagnostics.rs`).
+impl<T: IndexLike, I: IndexFromNat> crate::diagnostics::HeapBytes for CompressedStack<T, I> {
+    fn heap_bytes(&self) -> usize {
         let mut total = self.frames.capacity() * core::mem::size_of::<FrameEncoding<T, I>>();
         for f in self.frames.iter() {
             total += match f {
@@ -209,5 +213,3 @@ impl<T: IndexLike, I: IndexFromNat> CompressedStack<T, I> {
         total
     }
 }
-
-} // verus!

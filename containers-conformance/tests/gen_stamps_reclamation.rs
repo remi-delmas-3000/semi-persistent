@@ -9,6 +9,7 @@
 
 use semi_persistent_containers_verus as verus;
 use verus::GenStamps;
+use verus::HeapBytes;
 
 // Drive `restores` restore/re-mark cycles at a bounded spine depth and confirm the
 // live size tracks depth, not the restore count.
