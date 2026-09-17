@@ -157,11 +157,15 @@ impl<T: IndexLike, I: IndexFromNat> CompressedStack<T, I> {
     /// `old@ == final@ + r@`: the popped frame was the view's suffix, so the
     /// two-stack restore can materialize it back onto the plain top.
     pub fn pop_frame(&mut self) -> (r: Vec<(T, I)>)
-        requires old(self).wf(), old(self).frames@.len() > 0,
+        requires old(self).wf(),
         ensures
             final(self).wf(),
             old(self)@ == final(self)@ + r@,
     {
+        // Total: popping an empty stack is the documented trap.
+        if self.frames.len() == 0 {
+            crate::guard::refuse("CompressedStack::pop_frame: empty stack");
+        }
         let ghost old_frames = self.frames@;
         let f = self.frames.pop().unwrap();
         let ghost fg = f;

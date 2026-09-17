@@ -57,6 +57,9 @@ Every one is a diagnostic reading state Verus does not model. Sub-groups:
   (unconstrained bool), `debug_check_different_rings` circular_list.rs:667
   (requires-only debug mirror), `white_box_head` list.rs:424 (test
   accessor), `refuse` guard.rs:53 (diverges; no post-state).
+  Update 2026-09-17: `debug_check_different_rings` no longer exists — the
+  public `splice`/`splice_absorb` run a verified walk of the absorbed ring
+  (total public API); the default count is 49.
 
 ### 2.2 Contract-carrying, structurally trusted (std/runtime facts) - 15
 

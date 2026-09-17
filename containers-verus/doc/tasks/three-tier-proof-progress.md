@@ -2367,3 +2367,81 @@ canary **2 passed**; partial-API audit at the unchanged baseline
 (73/33/40/0); formatting, whitespace and the unchanged-legacy check passed;
 trust **50 default + 5 literal**. Benchmarks:
 `doc/tasks/final-performance-report.md`, "Extended goal 4".
+
+## 2026-09-17 — Total public API (extended goal, item 5)
+
+The user's rule: the public API must be 100 % safe — no preconditions; a
+partial function becomes total through a `Result` or a panic, and the
+heavily used ones panic rather than return a `Result`. The partial-API audit
+(`tools/check_partial_api.py`) went from 73 public exec functions carrying a
+`requires` (33 listed, 40 unlisted) to **zero**, and
+`partial-api-allowlist.txt` is empty; the only precondition a public
+function may still state is the receiver's own well-formedness
+(`wf`/`cursor_wf`/`cursor_ok`/`cwf`), which every constructor and operation
+upholds. The checker now reads module visibility from `lib.rs`, so the items
+of a `pub(crate)` module are not counted as public.
+
+What changed, by class. Fourteen internal primitives that nothing outside
+the crate called (`Codes` helpers, `select_layered`, `sync_group::add_member`,
+`two_stack_log::{flush_cold, truncate_hot}`, `Vec::seal_frame`,
+`guard::check_precondition`, `capture_bits::set_true`, …) became
+`pub(crate)`; the unused `RunCol::idx_at` was removed. Refuse-guards
+(`guard::refuse`, the documented trap, on the exact runtime condition the
+erased precondition named) made total `History::{mark, restore_to}`,
+`GenStamps::{stamp, stamp_at}`, the cold and compressed stacks' frame
+operations, every frame's `decode_at` (`ValFrame`, `RunCol`, `DeltaFrame`,
+`ColdFrame`, `DictFrame`, `LayeredFrame`, the value compressors), `Codes`,
+the run compressors and the sync group's seal/restore. `HintedArena`'s
+`complete` predicate joined its `wf` (with a `wf_struct` form for the
+mid-operation `note_hint`), so its six operations need only the invariant.
+`SparseSet::restore` archives snapshot well-formedness in `wf` (the three
+snapshot stacks move in lockstep and every archived triple is `snap_wf`;
+`lemma_archive_after_push` carries it through `mark`/`push_frames`), so the
+guard checks token validity and equal frame indices only.
+`CircularList::{splice, splice_absorb}` refuse an out-of-range id or a
+same-ring pair after a verified walk of the absorbed ring
+(`guard_different_rings`: the cursor's `walk_seq` is `rotate(ring, p0)`, and
+`lemma_rotate_props` shows a node on the ring would have been visited), with
+an O(1) fast path when the absorbed ring is a singleton — `next(aid) == aid`
+puts `aid` alone on its ring (`lemma_singleton_ring`), the case equality
+saturation absorbs most of the time; the
+e-graph's merge keeps the walk-free crate-private cores
+`splice_core`/`splice_absorb_core`, where distinct rings are a theorem, and
+the external_body debug-only walk is gone (trust 50 → 49 default). The
+`DiffStore` protocol — thirteen operations whose preconditions are either
+ghost (`prepare_mark`, `begin_restore`, `finish_restore`: "every set flag is
+named by a diff entry") or bounds the vector has already established — moved
+with the ghost views onto the crate-private supertrait
+`diff_store_ops::DiffStoreOps`; `DiffStore` keeps the total queries and
+maintenance and stays the bound consumers name, every store implements both,
+and the protocol test moved in-crate. `NodeLayout`'s nine primitives and the
+two free helpers, `Tagged`'s four operations, `SpMap::new`
+(`obeys_key_model::<K>() ==> m.wf()`: a property of the type, nothing to
+check) and `CompressedFrame::decode_at` carry requires-free conditional
+contracts (`precondition ==> postcondition`); the layout impls' runtime
+mirrors became refuse-guards, and a new exec twin `is_node_wf` lets the
+generic helpers re-establish `node_wf` after their own guard. Verified
+callers discharge the hypotheses and keep the full contracts; the proofs of
+the composites are unchanged apart from the archive clauses named above.
+
+Gate evidence (fresh, run in a worktree holding exactly this commit's
+files, `/tmp/sp-d21-b7-*.log`): full default **2649 verified, zero errors**
+(twenty-six more functions than `1a90876`: the guards' proof helpers,
+`lemma_archive_after_push`, `guard_different_rings` with
+`lemma_singleton_ring`, `is_node_wf` per layout, the split store impls and
+the cold-frame lemma's five pieces —
+`lemma_hot_frame_encoded_new` went over the solver budget in the new
+context and is decomposed into a facts lemma, the value half and the two
+directions of the coverage half, without any limit raise); literal-types
+**2649 verified, zero errors**; conditional composition **80 verified**;
+`au-verus` **29 verified**; feature suite **277 passed, 10 ignored** (the
+cold-run store test now runs in-crate; the same-ring misuse test asserts
+the refusal in every build); release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed**; B+ tree, oracle and reference-e-graph
+property tests **31 passed**; e-graph/SAT consumers **1267 passed, 45
+ignored**; canary **2 passed**; partial-API audit **0 public partial
+functions, 0 allowed, 0 new, 0 unsafe-public** (from 73/33/40/0);
+formatting, whitespace and the unchanged-legacy check passed; trust **49
+default + 5 literal** (the debug-only ring walk was the one marker
+removed; CI's `EXPECTED_DEFAULT` follows). Benchmarks against `1a90876`:
+`doc/tasks/final-performance-report.md`, "Extended goal 5".

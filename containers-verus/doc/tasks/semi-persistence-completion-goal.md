@@ -208,10 +208,12 @@ evidence for the final source revision.
   tolerance. This is a required completion gate, not an optional observation.
   Follow the performance protocol below; investigate and fix reproducible
   regressions before declaring completion.
-- [ ] Reconcile the known partial-API CI discrepancy (40 unlisted functions at the
+- [x] Reconcile the known partial-API CI discrepancy (40 unlisted functions at the
   baseline) through an explicit contract/exposure review and justified corrections.
   Do not bulk-allowlist entries to hide it. If it remains, report it as an open
-  final-audit item and do not claim all CI checks pass.
+  final-audit item and do not claim all CI checks pass. (Done 2026-09-17,
+  extended goal 5: 0 partial public functions, allowlist empty, no entry ever
+  added — `doc/future/total-api-plan.md` "Status".)
 - [ ] Documentation reflects the completed proofs and any justified foundational
   trust. Verify `containers/` is unchanged, commit the final verified milestone
   locally and leave all work unpushed.

@@ -262,26 +262,28 @@ fn untracked_restore_refuses_as_err() {
     );
 }
 
-/// CircularList::splice same-ring misuse: the different-rings precondition is
-/// spec-level; debug builds walk the ring and panic (release relies on caller
-/// discipline — documented divergence). This test only asserts under
-/// debug_assertions, which cargo test builds enable.
+/// CircularList::splice same-ring misuse: the public `splice` is total — it
+/// walks the absorbed node's ring and refuses (panics) when the survivor is on
+/// it, in every build profile. (The crate-private `splice_core` used by
+/// `EClasses` carries the proven precondition instead of the walk.)
 #[test]
-#[cfg(debug_assertions)]
-fn circular_splice_same_ring_panics_in_debug() {
+fn circular_splice_same_ring_refused() {
     use semi_persistent_containers_verus::circular_list::CircularList;
     use semi_persistent_containers_verus::dense_id::DenseId31;
+    use semi_persistent_containers_verus::opt::DenseId;
     let mut c = CircularList::<u32, DenseId31, true>::new();
     let a = c.try_add_singleton(1).expect("id range");
     let b = c.try_add_singleton(2).expect("id range");
     c.splice(a, b); // legal: different rings -> merged
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        c.splice(a, b); // now the SAME ring: debug guard must fire
+        c.splice(a, b); // now the SAME ring: the guard must refuse
     }));
-    assert!(
-        r.is_err(),
-        "same-ring splice must panic under debug_assertions"
-    );
+    assert!(r.is_err(), "same-ring splice must be refused");
+    // A node id past the allocated range is refused before any walk.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.splice(a, DenseId31::from_usize(7));
+    }));
+    assert!(r.is_err(), "out-of-range splice must be refused");
 }
 
 #[test]

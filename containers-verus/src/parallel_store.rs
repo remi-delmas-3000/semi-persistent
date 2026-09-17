@@ -70,7 +70,7 @@ where
     }
 }
 
-impl<T, I, const TRACK: bool> DiffStore<T, I, TRACK> for ParallelStore<T, I>
+impl<T, I, const TRACK: bool> crate::diff_store_ops::DiffStoreOps<T, I, TRACK> for ParallelStore<T, I>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -78,30 +78,6 @@ where
     open spec fn data(&self) -> Seq<T> { self.data_spec() }
     open spec fn captured(&self) -> Seq<bool> { self.captured_spec() }
     open spec fn wf(&self) -> bool { self.wf_spec_at::<TRACK>() }
-
-    proof fn lemma_wf_captured_len(&self) {}
-
-    proof fn lemma_wf_data_len(&self) {}
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.data.len() == 0
-    }
-
-    #[inline(always)]
-    fn raw_len(&self) -> (n: usize) {
-        self.data.len()
-    }
-
-    #[inline(always)]
-    fn len(&self) -> I {
-        // Production's line verbatim (containers/src/diff_store.rs:95). vstd
-        // specs `Option::expect` with `requires option is Some`, which `wf()`
-        // discharges (`data().len() < I::max_nat()`), so no hand-written dead
-        // arm is needed — and an unverified caller who overflowed still traps
-        // here, at production's trap point with production's message.
-        I::try_from_usize(self.data.len()).expect("len overflow")
-    }
 
     #[inline(always)]
     fn get(&self, i: I) -> T {
@@ -121,43 +97,6 @@ where
                 assert(self.captured_spec() =~= old(self).captured_spec().push(false));
             }
         }
-    }
-
-    #[inline(always)]
-    fn pop(&mut self) -> Option<T> {
-        broadcast use crate::diff_store::lemma_parallel_discipline;
-        let r = self.data.pop();
-        if TRACK && r.is_some() {
-            // Retire the vanished position's flag so tail_clear holds at the
-            // shorter length. A pure bounds-check branch while nothing is
-            // materialized — the entire TRACK=false lifetime.
-            self.captured.clear_bit(self.data.len());
-            proof {
-                let new_len = self.data@.len() as int;
-                // tail_clear at new_len: position new_len was just cleared;
-                // positions > new_len were tail-clear at old_len == new_len+1.
-                assert forall|k: int| new_len <= k
-                    && #[trigger] (k / 64) < self.captured.words_view().len()
-                    implies !crate::capture_bits::spec_bit(
-                        self.captured.words_view(), k) by {
-                    if k == new_len {
-                        assert(!crate::capture_bits::padded_bit(
-                            self.captured.words_view(), k));
-                    } else {
-                        // k >= old_len: pre-pop tail_clear pinned it false,
-                        // and clear_bit preserved every other position.
-                        assert(crate::capture_bits::padded_bit(
-                            self.captured.words_view(), k)
-                            == crate::capture_bits::padded_bit(
-                                old(self).captured.words_view(), k));
-                        assert(!crate::capture_bits::padded_bit(
-                            old(self).captured.words_view(), k));
-                    }
-                }
-                assert(self.captured_spec() =~= old(self).captured_spec().drop_last());
-            }
-        }
-        r
     }
 
     #[inline(always)]
@@ -302,16 +241,9 @@ where
 
     open spec fn unique_capture_spec(&self) -> bool { true }
 
-    fn unique_capture(&self) -> bool { true }
-
     open spec fn needs_replayed_indices_spec(&self) -> bool { false }
 
     open spec fn restore_entries_clear_capture_spec(&self) -> bool { false }
-
-    fn needs_replayed_indices(&self) -> bool { false }
-
-    #[inline(always)]
-    fn restore_entries_clear_capture(&self) -> bool { false }
 
     fn begin_restore(&mut self, _replayed_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_parallel_discipline;
@@ -526,6 +458,81 @@ where
         // prefix the loop invariant IS the postcondition (any entry pointing
         // below saved_len is automatically in-bounds).
     }
+}
+
+impl<T, I, const TRACK: bool> DiffStore<T, I, TRACK> for ParallelStore<T, I>
+where
+    T: Sized + Copy,
+    I: IndexLike,
+{
+
+    proof fn lemma_wf_captured_len(&self) {}
+
+    proof fn lemma_wf_data_len(&self) {}
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.data.len() == 0
+    }
+
+    #[inline(always)]
+    fn raw_len(&self) -> (n: usize) {
+        self.data.len()
+    }
+
+    #[inline(always)]
+    fn len(&self) -> I {
+        // Production's line verbatim (containers/src/diff_store.rs:95). vstd
+        // specs `Option::expect` with `requires option is Some`, which `wf()`
+        // discharges (`data().len() < I::max_nat()`), so no hand-written dead
+        // arm is needed — and an unverified caller who overflowed still traps
+        // here, at production's trap point with production's message.
+        I::try_from_usize(self.data.len()).expect("len overflow")
+    }
+
+    #[inline(always)]
+    fn pop(&mut self) -> Option<T> {
+        broadcast use crate::diff_store::lemma_parallel_discipline;
+        let r = self.data.pop();
+        if TRACK && r.is_some() {
+            // Retire the vanished position's flag so tail_clear holds at the
+            // shorter length. A pure bounds-check branch while nothing is
+            // materialized — the entire TRACK=false lifetime.
+            self.captured.clear_bit(self.data.len());
+            proof {
+                let new_len = self.data@.len() as int;
+                // tail_clear at new_len: position new_len was just cleared;
+                // positions > new_len were tail-clear at old_len == new_len+1.
+                assert forall|k: int| new_len <= k
+                    && #[trigger] (k / 64) < self.captured.words_view().len()
+                    implies !crate::capture_bits::spec_bit(
+                        self.captured.words_view(), k) by {
+                    if k == new_len {
+                        assert(!crate::capture_bits::padded_bit(
+                            self.captured.words_view(), k));
+                    } else {
+                        // k >= old_len: pre-pop tail_clear pinned it false,
+                        // and clear_bit preserved every other position.
+                        assert(crate::capture_bits::padded_bit(
+                            self.captured.words_view(), k)
+                            == crate::capture_bits::padded_bit(
+                                old(self).captured.words_view(), k));
+                        assert(!crate::capture_bits::padded_bit(
+                            old(self).captured.words_view(), k));
+                    }
+                }
+                assert(self.captured_spec() =~= old(self).captured_spec().drop_last());
+            }
+        }
+        r
+    }
+
+    fn unique_capture(&self) -> bool { true }
+
+    fn needs_replayed_indices(&self) -> bool { false }
+
+    #[inline(always)]
+    fn restore_entries_clear_capture(&self) -> bool { false }
 
     /// Raw data column: one clamped copy_from_slice per run, straight through
     /// the vstd-specified as_mut_slice / split_at_mut / copy_from_slice chain
@@ -646,12 +653,12 @@ where
     // `TRACK` values, so the ensures is stated for each.
     pub(crate) fn new() -> (s: ParallelStore<T, I>)
         ensures
-            DiffStore::<T, I, false>::wf(&s),
-            DiffStore::<T, I, true>::wf(&s),
-            DiffStore::<T, I, false>::data(&s).len() == 0,
-            DiffStore::<T, I, true>::data(&s).len() == 0,
-            DiffStore::<T, I, false>::captured(&s).len() == 0,
-            DiffStore::<T, I, true>::captured(&s).len() == 0,
+            crate::diff_store_ops::DiffStoreOps::<T, I, false>::wf(&s),
+            crate::diff_store_ops::DiffStoreOps::<T, I, true>::wf(&s),
+            crate::diff_store_ops::DiffStoreOps::<T, I, false>::data(&s).len() == 0,
+            crate::diff_store_ops::DiffStoreOps::<T, I, true>::data(&s).len() == 0,
+            crate::diff_store_ops::DiffStoreOps::<T, I, false>::captured(&s).len() == 0,
+            crate::diff_store_ops::DiffStoreOps::<T, I, true>::captured(&s).len() == 0,
     {
         proof { I::lemma_max_nat_positive(); }  // 0 < I::max_nat()
         ParallelStore { data: Vec::new(), captured: CaptureBits::new(), _phantom: core::marker::PhantomData }

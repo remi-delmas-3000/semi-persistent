@@ -1,8 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use semi_persistent_containers_verus::dyn_store::DynStore;
-use semi_persistent_containers_verus::{DiffStore, InlineStore, StoreKind};
+//! Cold-run restore clamping, driven through the store protocol directly.
+//! In-crate (not an integration test) because the protocol operations are
+//! sealed on the crate-private `DiffStoreOps` supertrait.
+
+use crate::diff_store_ops::DiffStoreOps;
+use crate::dyn_store::DynStore;
+use crate::{DiffStore, InlineStore, StoreKind};
 
 fn check_clamped_run<S: DiffStore<u32, u64, true>>(mut store: S) {
     store.push(7);
@@ -34,14 +39,14 @@ fn dynamic_cold_runs_are_clamped_for_every_backend() {
 fn inline_cold_run_preserves_tags_even_when_untracked() {
     type Store = InlineStore<u32, u64>;
     let mut store = Store::default();
-    <Store as DiffStore<u32, u64, true>>::push(&mut store, 7);
-    <Store as DiffStore<u32, u64, true>>::mark_captured(&mut store, 0);
+    <Store as DiffStoreOps<u32, u64, true>>::push(&mut store, 7);
+    <Store as DiffStoreOps<u32, u64, true>>::mark_captured(&mut store, 0);
     <Store as DiffStore<u32, u64, false>>::restore_run(&mut store, 0, &[9]);
     let mut log = Vec::new();
-    <Store as DiffStore<u32, u64, true>>::capture(&mut store, 0, 1, &mut log);
+    <Store as DiffStoreOps<u32, u64, true>>::capture(&mut store, 0, 1, &mut log);
     assert!(
         log.is_empty(),
         "Cold replay must preserve the existing capture tag"
     );
-    assert_eq!(<Store as DiffStore<u32, u64, true>>::get(&store, 0), 9);
+    assert_eq!(<Store as DiffStoreOps<u32, u64, true>>::get(&store, 0), 9);
 }

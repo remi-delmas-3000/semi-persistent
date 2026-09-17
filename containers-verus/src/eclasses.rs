@@ -1812,7 +1812,7 @@ where
             }
         }
         let none_pay = Opt::<K>::none();
-        self.entries.splice_absorb(s, ab, none_pay);
+        self.entries.splice_absorb_core(s, ab, none_pay);
         self.reprs.remove(raw_key);
         proof {
             // assemble the pointwise splice ensures into the update form.

@@ -108,6 +108,9 @@ pub mod dense_id;
 pub mod dense_span_map;
 pub mod diff_compress;
 pub mod diff_store;
+pub(crate) mod diff_store_ops;
+#[cfg(test)]
+mod diff_store_ops_tests;
 pub mod eclasses;
 pub mod error;
 #[cfg(feature = "literal-types")]

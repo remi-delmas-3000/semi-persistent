@@ -440,9 +440,13 @@ impl<T: Copy, I: IndexLike, VC: ValueCompressor<T>> LayeredFrame<T, I, VC> {
     /// arithmetic through `try_from_usize` and pinned to the model's index by
     /// `as_nat` injectivity, so plain `IndexLike` suffices (no `IndexFromNat`).
     pub fn decode_at(&self, i: usize) -> (e: (T, I))
-        requires self.wf(), i < self.decode().len(),
-        ensures e == self.decode()[i as int],
+        requires self.wf(),
+        ensures i < self.decode().len() ==> e == self.decode()[i as int],
     {
+        // Total: an out-of-range position is the documented trap.
+        if !(i < VC::decoded_len(&self.vals)) {
+            crate::guard::refuse("LayeredFrame::decode_at: position out of range");
+        }
         let v = VC::decode_at(&self.vals, i);
         proof {
             assert(self.decode()[i as int].0 == v);

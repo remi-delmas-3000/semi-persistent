@@ -665,41 +665,217 @@ where
         RingIter { list: self, start, cur: start, pos: Ghost(0), done: false, c: Ghost(c), p0: Ghost(p0) }
     }
 
-    /// Debug-build runtime mirror of `splice`'s different-rings precondition.
-    /// This `external_body` diagnostic walks the ring containing `s`
-    /// looking for `a` (bounded by the node count) and panics on a hit. A
-    /// no-op in release builds — see the rationale at the `splice` call site.
-    #[verifier::external_body]
-    fn debug_check_different_rings(&self, s: N, a: N)
-        requires
-            self.wf(),
-            s.id_nat() < self.n_spec(),
-            a.id_nat() < self.n_spec(),
-            self.locate(s.id_nat() as int).0 != self.locate(a.id_nat() as int).0,
+    /// A node whose `next` is itself sits on a ring of length one.
+    #[verifier::spinoff_prover]
+    proof fn lemma_singleton_ring(&self, a: int)
+        requires self.wf(), 0 <= a < self.n_spec(), self.next_seq()[a] == a,
+        ensures
+            0 <= self.locate(a).0 < self.model@.len(),
+            self.locate(a).1 == 0,
+            self.model@[self.locate(a).0].len() == 1,
+            self.model@[self.locate(a).0][0] == a,
     {
-        #[cfg(debug_assertions)]
-        {
-            let su = s.to_usize();
-            let au = a.to_usize();
-            let mut same_ring = su == au;
-            let mut cur = self.entries.get_index(s.to_index()).next.to_usize();
-            let mut budget = self.entries.len().as_usize();
-            while cur != su && budget > 0 {
-                if cur == au {
-                    same_ring = true;
+        let m = self.model@;
+        assert(self.in_some_ring(a));
+        let c = self.locate(a).0;
+        let p = self.locate(a).1;
+        assert(0 <= c < m.len() && 0 <= p < m[c].len() && m[c][p] == a);
+        let len = m[c].len() as int;
+        let succ = if p + 1 < len { p + 1 } else { 0 };
+        // cyclic at (c, p): next of the node at p is the node at succ.
+        assert(self.next_seq()[m[c][p] as int] == m[c][succ]);
+        assert(m[c][succ] == m[c][p]);
+        // disjoint: one node, one position ⟹ succ == p.
+        assert(succ == p);
+        if p + 1 < len {
+            assert(false);
+        }
+        assert(p == 0 && len == 1);
+    }
+
+    /// Runtime same-ring guard behind the public `splice`/`splice_absorb`:
+    /// refuses an out-of-range id, then walks the ring of `aid` (the ring the
+    /// splice absorbs — the smaller one under a union-by-size discipline) and
+    /// refuses when `sid` is on it. O(|ring(aid)|). The crate-private cores skip
+    /// the walk where the caller proves the rings distinct (`EClasses`: the two
+    /// nodes have distinct union-find roots).
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(100)]
+    fn guard_different_rings(&self, sid: N, aid: N)
+        requires self.wf(),
+        ensures
+            sid.id_nat() < self.n_spec(),
+            aid.id_nat() < self.n_spec(),
+            self.locate(sid.id_nat() as int).0 != self.locate(aid.id_nat() as int).0,
+    {
+        if !(sid.to_usize() < self.entries.store.raw_len()) {
+            crate::guard::refuse("CircularList::splice: survivor node id out of range");
+        }
+        if !(aid.to_usize() < self.entries.store.raw_len()) {
+            crate::guard::refuse("CircularList::splice: absorbed node id out of range");
+        }
+        let ghost s = sid.id_nat();
+        let ghost a = aid.id_nat();
+        proof {
+            // covers ⟹ locate's choose is satisfiable for both nodes.
+            assert(self.in_some_ring(s as int));
+            assert(self.in_some_ring(a as int));
+        }
+        // Fast path: the same node is refused outright, and a SINGLETON
+        // absorbed ring (`next(aid) == aid`) holds nothing but `aid`, so the
+        // rings differ — one load instead of the cursor walk. Equality
+        // saturation absorbs singleton classes most of the time.
+        let su = sid.to_usize();
+        let au = aid.to_usize();
+        if su == au {
+            crate::guard::refuse("CircularList::splice: the two nodes are the same node");
+        }
+        let nxt = self.next_of(aid);
+        if nxt.to_usize() == au {
+            proof {
+                self.lemma_singleton_ring(a as int);
+                let ca = self.locate(a as int).0;
+                let cs = self.locate(s as int).0;
+                let ps = self.locate(s as int).1;
+                let pa = self.locate(a as int).1;
+                if cs == ca {
+                    // both positions lie below the ring length 1
+                    assert(ps == 0 && pa == 0);
+                    assert(self.model@[ca][0] == s as int && self.model@[ca][0] == a as int);
+                    assert(false);
                 }
-                cur = self.entries.get_index(N::from_usize(cur).to_index()).next.to_usize();
-                budget -= 1;
             }
-            crate::guard::check_precondition_erased(
-                !same_ring,
-                "CircularList::splice: s and a are in the same ring",
-            );
+            return;
         }
-        #[cfg(not(debug_assertions))]
+        let mut it = self.iter_class(aid);
+        let ghost ca = it.c_spec();
+        let ghost pa = it.p0_spec();
+        proof {
+            // The cursor's (c, p0) is `locate(a)`; the walk is rotate(ring, pa).
+            lemma_locate_pinned(self, a as int, ca, pa);
+            lemma_rotate_props(self.model@[ca], pa);
+        }
+        // The walk is verified in isolation: everything it needs is restated
+        // as an invariant (`s` names the survivor; the cursor keeps its ring).
+        loop
+            invariant
+                self.wf(),
+                it.list_ref() == self,
+                it.c_spec() == ca,
+                it.p0_spec() == pa,
+                it.cursor_ok(),
+                s == sid.id_nat(),
+                forall|q: int| 0 <= q < it.pos_spec() ==> (#[trigger] it.walk_seq()[q]) as nat != s,
+            ensures
+                it.done_spec(),
+            decreases self.model@[ca].len() - it.pos_spec(),
         {
-            let _ = (s, a);
+            let ghost pos = it.pos_spec();
+            let ghost walk = it.walk_seq();
+            let r = it.next();
+            proof {
+                // `next` keeps the list, the ring and the start position, so
+                // the walk is the same sequence before and after the step.
+                assert(it.walk_seq() == walk);
+            }
+            match r {
+                Some(nid) => {
+                    let nu = nid.to_usize();
+                    let su = sid.to_usize();
+                    if nu == su {
+                        crate::guard::refuse("CircularList::splice: the two nodes are on the same ring");
+                    }
+                    proof {
+                        assert(walk[pos as int] as nat == nid.id_nat());
+                        assert(nid.id_nat() != s);
+                    }
+                }
+                None => {
+                    break;
+                }
+            }
         }
+        proof {
+            // done ⟹ pos == |ring(aid)|: `s` is at no position of rotate(ring, pa),
+            // hence at no position of the ring itself ⟹ locate(s).0 != ca.
+            let ring = self.model@[ca];
+            let len = ring.len() as int;
+            let cs = self.locate(s as int).0;
+            let ps = self.locate(s as int).1;
+            assert(it.pos_spec() == ring.len());
+            if cs == ca {
+                assert(0 <= ps < len && ring[ps] == s as int);
+                let q = if ps >= pa { ps - pa } else { ps - pa + len };
+                assert(0 <= q < len);
+                assert(rotate(ring, pa)[q] == ring[ps]);
+                assert(it.walk_seq()[q] as nat == s);
+                assert(false);
+            }
+        }
+    }
+
+    /// Splice the rings (classes) of `sid` and `aid`: the O(1) circular-list
+    /// join (`sid`'s ring absorbs `aid`'s, whose slot is emptied). Total: an
+    /// out-of-range id or two nodes on the SAME ring (which would split it) is
+    /// refused after a walk of `aid`'s ring — O(|ring(aid)|) on top of the O(1)
+    /// join. See [`Self::splice_absorb`] for the payload-rewriting merge and
+    /// the crate-private `splice_core` for the walk-free verified core.
+    pub fn splice(&mut self, sid: N, aid: N)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).n_spec() == old(self).n_spec(),
+            final(self).payload_seq() == old(self).payload_seq(),
+            final(self).model_view().len() == old(self).model_view().len(),
+            ({
+                let s = sid.id_nat() as int;
+                let a = aid.id_nat() as int;
+                let cs = old(self).locate(s).0;
+                let ca = old(self).locate(a).0;
+                let ps = old(self).locate(s).1;
+                let pa = old(self).locate(a).1;
+                &&& final(self).model_view()[cs]
+                        == rotate(old(self).model_view()[cs], ps + 1)
+                            + rotate(old(self).model_view()[ca], pa + 1)
+                &&& final(self).model_view()[ca] == Seq::<usize>::empty()
+                &&& (forall|c: int| 0 <= c < final(self).model_view().len() && c != cs && c != ca
+                        ==> #[trigger] final(self).model_view()[c] == old(self).model_view()[c])
+            }),
+    {
+        self.guard_different_rings(sid, aid);
+        self.splice_core(sid, aid);
+    }
+
+    /// `splice` composed with `set_payload(aid, a_payload)` in ONE tracked
+    /// write of the absorbed cell (the class merge marks the absorbed class's
+    /// key absent). Total with the same guard as [`Self::splice`].
+    pub fn splice_absorb(&mut self, sid: N, aid: N, a_payload: T)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).n_spec() == old(self).n_spec(),
+            final(self).payload_seq()
+                == old(self).payload_seq().update(aid.id_nat() as int, a_payload),
+            final(self).model_view().len() == old(self).model_view().len(),
+            ({
+                let s = sid.id_nat() as int;
+                let a = aid.id_nat() as int;
+                let cs = old(self).locate(s).0;
+                let ca = old(self).locate(a).0;
+                let ps = old(self).locate(s).1;
+                let pa = old(self).locate(a).1;
+                &&& final(self).model_view()[cs]
+                        == rotate(old(self).model_view()[cs], ps + 1)
+                            + rotate(old(self).model_view()[ca], pa + 1)
+                &&& final(self).model_view()[ca] == Seq::<usize>::empty()
+                &&& (forall|c: int| 0 <= c < final(self).model_view().len() && c != cs && c != ca
+                        ==> #[trigger] final(self).model_view()[c] == old(self).model_view()[c])
+            }),
+            final(self).entries_snapshots_view() == old(self).entries_snapshots_view(),
+            final(self).model_snapshots_view() == old(self).model_snapshots_view(),
+    {
+        self.guard_different_rings(sid, aid);
+        self.splice_absorb_core(sid, aid, a_payload);
     }
 
     /// Splice the rings (classes) of `s` and `a` by swapping their `next`
@@ -717,7 +893,7 @@ where
     /// and every `set_index` runs the capture protocol. See `splice_absorb`.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(800)]
-    pub fn splice(&mut self, sid: N, aid: N)
+    pub(crate) fn splice_core(&mut self, sid: N, aid: N)
         requires
             old(self).wf(),
             sid.id_nat() < old(self).n_spec(),
@@ -745,15 +921,10 @@ where
                         ==> #[trigger] final(self).model_view()[c] == old(self).model_view()[c])
             }),
     {
-        // In debug builds, mirror the spec-level different-rings precondition
-        // whose ghost model is erased at runtime. A faithful runtime check
-        // walks a ring — O(class size) on a hot
-        // O(1) operation, an unacceptable complexity change for release
-        // builds. Debug builds pay the walk (external_body diagnostic below);
-        // release relies on caller discipline — in the e-graph, union-find
-        // guarantees distinct classes before a splice, the same discipline
-        // production's unchecked ring merge relies on.
-        self.debug_check_different_rings(sid, aid);
+        // Crate-private core: the different-rings precondition is PROVEN by the
+        // caller (`EClasses`: the two nodes have distinct union-find roots), so
+        // no runtime walk is paid on the e-graph's merge path. The public
+        // `splice` establishes it with `guard_different_rings`.
         // The whole proof below is stated over the dense indices; bind them
         // once (ghost) and the storage words once (exec), so the id→word
         // conversion is paid twice per splice, not per proof step.
@@ -838,7 +1009,7 @@ where
     /// verbatim.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(800)]
-    pub fn splice_absorb(&mut self, sid: N, aid: N, a_payload: T)
+    pub(crate) fn splice_absorb_core(&mut self, sid: N, aid: N, a_payload: T)
         requires
             old(self).wf(),
             sid.id_nat() < old(self).n_spec(),
@@ -869,9 +1040,8 @@ where
             final(self).entries_snapshots_view() == old(self).entries_snapshots_view(),
             final(self).model_snapshots_view() == old(self).model_snapshots_view(),
     {
-        // Body is `splice`'s verbatim except for the absorbed cell's payload;
-        // see `splice` for the commentary on each step.
-        self.debug_check_different_rings(sid, aid);
+        // Body is `splice_core`'s verbatim except for the absorbed cell's
+        // payload; see `splice_core` for the commentary on each step.
         proof {
             crate::opt::lemma_id_nat_fits_usize(sid);
             crate::opt::lemma_id_nat_fits_usize(aid);

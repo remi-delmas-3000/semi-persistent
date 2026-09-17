@@ -68,8 +68,8 @@ where
     /// `TRACK`) — the consumer calls `InlineStore::new()` bare.
     pub(crate) fn new() -> (s: InlineStore<T, I>)
         ensures
-            DiffStore::<T, I, false>::wf(&s),
-            DiffStore::<T, I, true>::wf(&s),
+            crate::diff_store_ops::DiffStoreOps::<T, I, false>::wf(&s),
+            crate::diff_store_ops::DiffStoreOps::<T, I, true>::wf(&s),
             s.data_spec().len() == 0,
             s.captured_spec().len() == 0,
     {
@@ -87,7 +87,7 @@ impl<T: Tagged, I: IndexLike> core::default::Default for InlineStore<T, I> {
     }
 }
 
-impl<T, I, const TRACK: bool> DiffStore<T, I, TRACK> for InlineStore<T, I>
+impl<T, I, const TRACK: bool> crate::diff_store_ops::DiffStoreOps<T, I, TRACK> for InlineStore<T, I>
 where
     T: Tagged,
     I: IndexLike,
@@ -95,27 +95,6 @@ where
     open spec fn data(&self) -> Seq<T> { self.data_spec() }
     open spec fn captured(&self) -> Seq<bool> { self.captured_spec() }
     open spec fn wf(&self) -> bool { self.wf_spec() }
-
-    proof fn lemma_wf_captured_len(&self) {}
-
-    proof fn lemma_wf_data_len(&self) {}
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.data.len() == 0
-    }
-
-    #[inline(always)]
-    fn raw_len(&self) -> (n: usize) {
-        self.data.len()
-    }
-
-    #[inline(always)]
-    fn len(&self) -> I {
-        // Production's line verbatim (containers/src/diff_store.rs:246); vstd's
-        // `Option::expect` spec requires `is Some`, discharged by wf.
-        I::try_from_usize(self.data.len()).expect("len overflow")
-    }
 
     #[inline(always)]
     fn get(&self, i: I) -> T {
@@ -127,15 +106,6 @@ where
         broadcast use crate::diff_store::lemma_inline_discipline;
         let r = value.into_repr();
         self.data.push(r);
-    }
-
-    #[inline(always)]
-    fn pop(&mut self) -> Option<T> {
-        broadcast use crate::diff_store::lemma_inline_discipline;
-        match self.data.pop() {
-            Some(r) => Some(T::from_repr(&r)),
-            None => None,
-        }
     }
 
     #[inline(always)]
@@ -268,7 +238,7 @@ where
                     // trait-level existential, then the loop's cleared-so-far
                     // invariant (k == m at exit) finishes.
                     assert(old(self).captured_spec()[i]);
-                    assert(DiffStore::<T, I, TRACK>::captured(&*old(self))[i]);
+                    assert(crate::diff_store_ops::DiffStoreOps::<T, I, TRACK>::captured(&*old(self))[i]);
                     assert(exists|kk: int| 0 <= kk < prev_diffs@.len()
                         && (#[trigger] prev_diffs@[kk]).1.as_nat() == i as nat);
                     assert(!(T::tag_of(self.data@[i])));
@@ -311,7 +281,7 @@ where
         } else {
             proof {
                 assert(self.captured_spec() =~= old(self).captured_spec());
-                assert(<Self as DiffStore<T, I, TRACK>>::unique_capture_spec(self));
+                assert(<Self as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::unique_capture_spec(self));
             }
         }
     }
@@ -336,16 +306,9 @@ where
 
     open spec fn unique_capture_spec(&self) -> bool { true }
 
-    fn unique_capture(&self) -> bool { true }
-
     open spec fn needs_replayed_indices_spec(&self) -> bool { true }
 
     open spec fn restore_entries_clear_capture_spec(&self) -> bool { true }
-
-    fn needs_replayed_indices(&self) -> bool { true }
-
-    #[inline(always)]
-    fn restore_entries_clear_capture(&self) -> bool { true }
 
     fn begin_restore(&mut self, replayed_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_inline_discipline;
@@ -396,7 +359,7 @@ where
             assert forall|i: int| 0 <= i < self.data@.len()
                 implies !(#[trigger] T::tag_of(self.data@[i])) by {
                 if T::tag_of(old(self).data@[i]) {
-                    assert(DiffStore::<T, I, TRACK>::captured(&*old(self))[i]);
+                    assert(crate::diff_store_ops::DiffStoreOps::<T, I, TRACK>::captured(&*old(self))[i]);
                 }
             }
         }
@@ -548,11 +511,55 @@ where
                         && (#[trigger] current_frame_diffs@[kk]).1.as_nat() == i as nat
                 ) by {
                 // requires (all-clear below saved_len), via the trait view.
-                assert(!(DiffStore::<T, I, TRACK>::captured(&*old(self))[i]));
+                assert(!(crate::diff_store_ops::DiffStoreOps::<T, I, TRACK>::captured(&*old(self))[i]));
                 assert(!(T::tag_of(old(self).data@[i])));
             }
         }
     }
+}
+
+impl<T, I, const TRACK: bool> DiffStore<T, I, TRACK> for InlineStore<T, I>
+where
+    T: Tagged,
+    I: IndexLike,
+{
+
+    proof fn lemma_wf_captured_len(&self) {}
+
+    proof fn lemma_wf_data_len(&self) {}
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.data.len() == 0
+    }
+
+    #[inline(always)]
+    fn raw_len(&self) -> (n: usize) {
+        self.data.len()
+    }
+
+    #[inline(always)]
+    fn len(&self) -> I {
+        // Production's line verbatim (containers/src/diff_store.rs:246); vstd's
+        // `Option::expect` spec requires `is Some`, discharged by wf.
+        I::try_from_usize(self.data.len()).expect("len overflow")
+    }
+
+    #[inline(always)]
+    fn pop(&mut self) -> Option<T> {
+        broadcast use crate::diff_store::lemma_inline_discipline;
+        match self.data.pop() {
+            Some(r) => Some(T::from_repr(&r)),
+            None => None,
+        }
+    }
+
+    fn unique_capture(&self) -> bool { true }
+
+    fn needs_replayed_indices(&self) -> bool { true }
+
+    #[inline(always)]
+    fn restore_entries_clear_capture(&self) -> bool { true }
 
     fn restore_run(&mut self, base: I, values: &[T]) {
         broadcast use crate::diff_store::lemma_inline_discipline;

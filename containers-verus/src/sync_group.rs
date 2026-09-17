@@ -62,7 +62,6 @@ pub trait SyncMember: Send {
     fn seal_frame(&mut self, shrink: ShrinkPolicy)
         requires
             old(self).wf(),
-            old(self).can_seal(),
         ensures
             final(self).wf(),
             final(self).depth_spec() == old(self).depth_spec() + 1,
@@ -76,7 +75,6 @@ pub trait SyncMember: Send {
     fn restore_frame(&mut self, depth: usize)
         requires
             old(self).wf(),
-            (depth as nat) < old(self).depth_spec(),
         ensures
             final(self).wf(),
             final(self).depth_spec() == depth as nat,
@@ -164,6 +162,11 @@ where
     }
 
     fn seal_frame(&mut self, shrink: ShrinkPolicy) {
+        // Total: a member that cannot seal (depth ceiling or index word) is
+        // the documented trap; the group checks `can_seal_now` first.
+        if !self.can_seal_now() {
+            crate::guard::refuse("SyncMember::seal_frame: member cannot open another frame");
+        }
         let _ = crate::vec::Vec::seal_frame(self, shrink);
         proof {
             assert(self.archive() =~= old(self).archive().push(old(self).model()));
@@ -171,6 +174,10 @@ where
     }
 
     fn restore_frame(&mut self, depth: usize) {
+        // Total: a depth at or above the member's is the documented trap.
+        if !(depth < self.depth_exec()) {
+            crate::guard::refuse("SyncMember::restore_frame: depth is not below the member's");
+        }
         crate::vec::Vec::restore_frame(self, depth);
         proof {
             assert(self.archive() =~= old(self).archive().subrange(0, depth as int));
@@ -259,7 +266,9 @@ impl ForkHistory {
 
     /// Adopt a member. It must already be at the group's depth (a fresh member
     /// joins a fresh group at depth 0; joining later means catching up first).
-    pub fn add_member(&mut self, m: Box<dyn SyncMember>)
+    // Crate-private since the total-API pass; exercised by the in-crate group tests.
+    #[allow(dead_code)]
+    pub(crate) fn add_member(&mut self, m: Box<dyn SyncMember>)
         requires
             old(self).wf(),
             m.wf(),

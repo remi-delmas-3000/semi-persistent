@@ -510,6 +510,357 @@ per level, so `Smt32`/`Smt64` are the configurations the SAT core wraps;
 the saturation configurations are unchanged. Whether the empty-frame cost
 matters is a question for the integration's own traces.
 
+## Extended goal 5: total public API (after `1a90876`)
+
+Every public exec function became total (progress doc, "Total public
+API"). The runtime consequences are confined to guards: two extra compares
+in `SparseSet::restore`; a same-ring guard in the public
+`CircularList::{splice, splice_absorb}` (a singleton absorbed ring is
+recognised from one load, `next(aid) == aid`; any other ring is walked; the
+e-graph's merge uses the crate-private guard-free cores, so its path is
+unchanged); refuse-guards on `HintedArena::{get, set}`, `History`,
+`GenStamps`, the frames' `decode_at` and `Codes::get` that repeat a bound
+the caller checked (the same compare `rustc` emits on the indexing, so LLVM
+folds it); and the layout guards, which already ran as `check_precondition`
+and are now `if !cond { refuse }`. The sealed store protocol and the
+conditional contracts are contract-only changes.
+
+Protocol as frozen in this report: τ = 1.08, two interleaved runs per tree
+(candidate `total_A`/`total_B`, previous commit `prev5_A`/`prev5_B` from a
+worktree at `1a90876` with its own build, same benchmark files), ratio
+intervals from Criterion's 95 % confidence intervals, inconclusive cases
+rerun once per side at `--sample-size 100 --warm-up-time 3
+--measurement-time 10` (`total_R`/`prev5_R`). Targets: `retained_containers_bench`
+(`class_ring/`, `sparse_set/`, `vec/`), `eclasses_bench`,
+`bplus_cursor_bitset_bench`, `three_tier_bench`, and the e-graph's
+`store_bench` and `saturate_bench` (2026-09-17 12:14–13:15, Apple M4 Pro).
+
+**First pass, 208 cases: 163 pass, 42 inconclusive, 3 regression — all
+three in `class_ring/`.** `class_ring/splice_untracked/verified` measured
+2.4× (15.4 µs against 6.3 µs for 10 000 singleton merges — 0.7 ns per
+splice on the previous tree: the untracked pointer swap over contiguous
+singleton pairs vectorises, so the guard's two loads and branches doubled
+it) and `class_ring/merge_restore/verified` 1.12×. The guard then gained
+its O(1) singleton fast path (`next(aid) == aid` ⟹ the absorbed ring holds
+only `aid`, `lemma_singleton_ring`), and the benchmark now observes the
+merged ring through a walk from a black-boxed node so neither side can
+elide a swap; the group was re-measured on both trees
+(`total_E`/`total_F` vs `prev5_E`/`prev5_F`, the corrected benchmark file
+on both sides):
+
+| Case | Checkpoint mean (total_E/total_F) | Final mean (total_E/total_F) | Ratio total_E | Ratio total_F | Status |
+|---|---|---|---|---|---|
+| `class_ring/merge_restore/legacy` | 88.155 µs / 88.398 µs | 89.040 µs / 88.156 µs | 1.010 [1.006, 1.015] | 0.997 [0.995, 1.000] | pass |
+| `class_ring/merge_restore/verified` | 44.082 µs / 44.273 µs | 44.449 µs / 44.689 µs | 1.008 [1.007, 1.010] | 1.009 [1.006, 1.013] | pass |
+| `class_ring/splice_untracked/legacy` | 5.852 µs / 5.790 µs | 7.757 µs / 7.740 µs | 1.325 [1.316, 1.336] | 1.337 [1.334, 1.339] | **regression** |
+| `class_ring/splice_untracked/verified` | 7.370 µs / 7.300 µs | 7.934 µs / 7.941 µs | 1.077 [1.057, 1.097] | 1.088 [1.067, 1.111] | **inconclusive** |
+| `class_ring/walk/legacy` | 92.391 µs / 92.582 µs | 92.697 µs / 92.441 µs | 1.003 [1.001, 1.005] | 0.998 [0.997, 1.000] | pass |
+| `class_ring/walk/verified` | 96.251 µs / 96.246 µs | 92.396 µs / 97.172 µs | 0.960 [0.958, 0.962] | 1.010 [0.973, 1.055] | pass |
+
+`merge_restore/verified` is back to 1.01; `splice_untracked/verified` is
+1.08–1.09 with intervals straddling τ (inconclusive: ≈ 0.6 ns of guard on a
+0.7 ns operation); the `splice_untracked/legacy` row is the reference side
+itself (unchanged code) moving 1.33× between the two builds — a
+code-placement effect of the new binary, flagged by the tool as drift, not
+a verified-side change. Paired inside the new binary the verified splice is
+within 3 % of legacy:
+
+| Case | Legacy mean (total_E/total_F) | Final mean (total_E/total_F) | Ratio total_E | Ratio total_F | Status |
+|---|---|---|---|---|---|
+| `class_ring/merge_restore/verified` | 89.040 µs / 88.156 µs | 44.449 µs / 44.689 µs | 0.499 [0.497, 0.501] | 0.507 [0.505, 0.509] | pass |
+| `class_ring/splice_untracked/verified` | 7.757 µs / 7.740 µs | 7.934 µs / 7.941 µs | 1.023 [1.015, 1.029] | 1.026 [1.022, 1.030] | pass |
+| `class_ring/walk/verified` | 92.697 µs / 92.441 µs | 92.396 µs / 97.172 µs | 0.997 [0.994, 1.000] | 1.051 [1.015, 1.097] | **inconclusive** |
+
+**Inconclusive reruns (42 cases at the higher settings): 30 pass, 11 stay
+inconclusive, and `three_tier_v1/promotion/cold_survivor_write_restore/dyn_parallel`
+is mixed** (1.08 / 0.84 / 1.11 over the three runs: neither every upper
+bound ≤ τ nor every lower bound > τ, so inconclusive under the frozen rule;
+it is also on the reference-side drift list below).
+
+| Case | Checkpoint mean (total_R) | Final mean (total_R) | Ratio total_R | Status |
+|---|---|---|---|---|
+| `bplus/cursor_seek_branchless/prod` | 1.051 ms | 1.182 ms | 1.125 [1.078, 1.182] | **inconclusive** |
+| `three_tier/end_to_end/buffered_unique` | 31.723 µs | 33.651 µs | 1.061 [1.014, 1.110] | **inconclusive** |
+| `three_tier/end_to_end/eqsat_retained` | 39.059 µs | 37.165 µs | 0.952 [0.893, 1.014] | pass |
+| `three_tier/end_to_end/restore_optimized` | 40.601 µs | 35.215 µs | 0.867 [0.816, 0.921] | pass |
+| `three_tier/end_to_end/smt_backtrack` | 39.804 µs | 36.862 µs | 0.926 [0.867, 0.991] | pass |
+| `three_tier/mark/explicit_defer_smt` | 22.9 ns | 19.1 ns | 0.832 [0.683, 1.026] | pass |
+| `three_tier/mark/no_rollover_production` | 38.6 ns | 36.7 ns | 0.952 [0.896, 1.031] | pass |
+| `three_tier/mark/no_rollover_smt` | 17.9 ns | 22.0 ns | 1.232 [1.044, 1.451] | **inconclusive** |
+| `three_tier/restore/cold_one_frame` | 154.1 ns | 148.5 ns | 0.964 [0.916, 1.015] | pass |
+| `three_tier/write/high_duplicates/parallel_buffered_unique` | 1.260 µs | 1.440 µs | 1.142 [1.076, 1.224] | **inconclusive** |
+| `three_tier_v1/promotion/cold_survivor_write_restore/dyn_parallel` | 2.541 µs | 2.822 µs | 1.111 [1.103, 1.118] | **regression** |
+| `three_tier_v1/promotion/cold_survivor_write_restore/static_vecp` | 1.480 µs | 1.488 µs | 1.006 [1.000, 1.011] | pass |
+| `three_tier_v1/restore/deep_64_frames/production_veci` | 931.4 ns | 913.9 ns | 0.981 [0.953, 0.999] | pass |
+| `three_tier_v1/restore/direct_cold_contiguous/dyn_inline` | 182.5 ns | 192.5 ns | 1.055 [1.000, 1.112] | **inconclusive** |
+| `three_tier_v1/restore/direct_cold_contiguous/dyn_parallel` | 153.9 ns | 150.7 ns | 0.979 [0.928, 1.033] | pass |
+| `three_tier_v1/restore/direct_cold_contiguous/dyn_trail` | 122.2 ns | 123.5 ns | 1.011 [0.946, 1.080] | pass |
+| `three_tier_v1/restore/direct_cold_contiguous/static_veci` | 206.8 ns | 205.5 ns | 0.994 [0.945, 1.044] | pass |
+| `three_tier_v1/restore/direct_cold_contiguous/static_vecp` | 158.6 ns | 163.2 ns | 1.029 [0.983, 1.077] | pass |
+| `three_tier_v1/restore/direct_cold_contiguous/static_vect` | 144.3 ns | 142.2 ns | 0.985 [0.933, 1.040] | pass |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_inline` | 35.0 ns | 33.4 ns | 0.955 [0.926, 0.987] | pass |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_parallel` | 42.4 ns | 42.8 ns | 1.010 [0.982, 1.039] | pass |
+| `three_tier_v1/restore/shallow_high_duplicates/production_veci` | 52.9 ns | 52.0 ns | 0.982 [0.957, 1.008] | pass |
+| `three_tier_v1/restore/shallow_high_duplicates/production_vecp` | 61.5 ns | 59.9 ns | 0.974 [0.959, 0.989] | pass |
+| `three_tier_v1/restore/shallow_high_duplicates/static_veci` | 33.6 ns | 34.1 ns | 1.014 [0.985, 1.045] | pass |
+| `three_tier_v1/restore/shallow_high_duplicates/static_vecp` | 40.1 ns | 39.2 ns | 0.979 [0.963, 0.995] | pass |
+| `three_tier_v1/rollover/hot_to_cold_contiguous/defer` | 29.9 ns | 29.6 ns | 0.991 [0.960, 1.022] | pass |
+| `three_tier_v1/rollover/hot_to_cold_singleton_runs/defer` | 29.5 ns | 29.6 ns | 1.003 [0.963, 1.044] | pass |
+| `three_tier_v1/rollover/trail_to_hot_high_duplicates/defer` | 14.7 ns | 14.4 ns | 0.986 [0.842, 1.151] | **inconclusive** |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/dyn_inline` | 98.324 µs | 95.351 µs | 0.970 [0.956, 0.984] | pass |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/dyn_parallel` | 84.978 µs | 95.484 µs | 1.124 [1.059, 1.190] | **inconclusive** |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_inline` | 34.896 µs | 34.656 µs | 0.993 [0.970, 1.016] | pass |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_parallel` | 43.874 µs | 31.127 µs | 0.709 [0.681, 0.741] | pass |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_trail` | 46.308 µs | 52.097 µs | 1.125 [1.073, 1.176] | **inconclusive** |
+| `three_tier_v1/trace/large_retained_256_frames/dyn_inline` | 102.325 µs | 102.886 µs | 1.005 [0.996, 1.015] | pass |
+| `three_tier_v1/trace/large_retained_256_frames/production_veci` | 42.212 µs | 42.818 µs | 1.014 [1.007, 1.022] | pass |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_inline` | 67.881 µs | 66.053 µs | 0.973 [0.955, 0.992] | pass |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_parallel` | 61.209 µs | 62.234 µs | 1.017 [0.987, 1.047] | pass |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_trail` | 68.636 µs | 64.930 µs | 0.946 [0.903, 0.992] | pass |
+| `three_tier_v1/write/low_duplicates/dyn_inline` | 2.770 µs | 2.985 µs | 1.078 [1.058, 1.098] | **inconclusive** |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096/dyn_inline` | 16.5 ns | 16.4 ns | 0.998 [0.873, 1.139] | **inconclusive** |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096/dyn_parallel` | 15.9 ns | 15.8 ns | 0.989 [0.876, 1.115] | **inconclusive** |
+| `vec/try_extend/legacy` | 219.266 µs | 197.037 µs | 0.899 [0.883, 0.914] | pass |
+
+**Verdict: no verified-side regression against `1a90876`.** Over the 208
+cases after the class-ring re-measurement and the reruns: 194 pass, 13
+inconclusive (nanosecond three-tier cases with wide intervals on both
+sides, one 12 % `prod`-side B+ tree drift, the singleton splice at the τ
+edge), one reference-side row (`class_ring/splice_untracked/legacy`,
+unchanged code, 1.33 between builds), 0 verified-side regression.
+Reference-side same-code drift above
+8 % in the first pass (the tool's list; these bound what the machine and
+code placement contribute):
+
+- `bplus/scan_only/verus`
+- `eclasses/find_sweep/verified/4096`
+- `three_tier/end_to_end/buffered_unique`
+- `three_tier/end_to_end/restore_optimized`
+- `three_tier/mark/explicit_defer_smt`
+- `three_tier_v1/promotion/cold_survivor_write_restore/dyn_parallel`
+- `three_tier_v1/trace/eqsat_retained_64_frames/dyn_parallel`
+- `three_tier_v1/trace/eqsat_retained_64_frames/dyn_trail`
+- `three_tier_v1/trace/smt_backtracking_128/dyn_parallel`
+- `three_tier_v1/write/low_duplicates/dyn_inline`
+
+The e-graph itself is unchanged within noise — saturation 0.98–1.00,
+`store_bench` push/pop 0.96–1.00 on both configurations, `eclasses/*`
+0.99–1.01, `sparse_set/churn/verified` 1.03 — which is the point of keeping
+the walk-free cores on the merge path.
+
+First pass, every case (`total_A`/`total_B` vs `prev5_A`/`prev5_B`):
+
+| Case | Checkpoint mean (total_A/total_B) | Final mean (total_A/total_B) | Ratio total_A | Ratio total_B | Status |
+|---|---|---|---|---|---|
+| `bitset/set_test_churn/prod` | 40.301 µs / 40.313 µs | 40.284 µs / 40.050 µs | 1.000 [0.999, 1.001] | 0.993 [0.993, 0.994] | pass |
+| `bitset/set_test_churn/verus` | 40.162 µs / 40.298 µs | 40.199 µs / 40.315 µs | 1.001 [1.000, 1.002] | 1.000 [1.000, 1.001] | pass |
+| `bplus/cursor_seek/prod` | 995.837 µs / 994.860 µs | 995.756 µs / 995.512 µs | 1.000 [0.999, 1.001] | 1.001 [0.998, 1.003] | pass |
+| `bplus/cursor_seek/verus` | 971.731 µs / 969.885 µs | 951.815 µs / 953.328 µs | 0.980 [0.978, 0.981] | 0.983 [0.982, 0.984] | pass |
+| `bplus/cursor_seek_branchless/prod` | 1.028 ms / 992.715 µs | 1.094 ms / 1.135 ms | 1.065 [1.052, 1.078] | 1.144 [1.138, 1.149] | **inconclusive** |
+| `bplus/cursor_seek_branchless/verus` | 925.368 µs / 936.320 µs | 912.349 µs / 916.724 µs | 0.986 [0.980, 0.993] | 0.979 [0.977, 0.981] | pass |
+| `bplus/from_sorted_only/prod` | 13.517 µs / 13.373 µs | 13.545 µs / 13.609 µs | 1.002 [1.000, 1.004] | 1.018 [1.016, 1.019] | pass |
+| `bplus/from_sorted_only/verus` | 11.142 µs / 11.094 µs | 11.191 µs / 11.253 µs | 1.004 [1.003, 1.006] | 1.014 [1.013, 1.015] | pass |
+| `bplus/from_sorted_then_scan/prod` | 76.534 µs / 76.325 µs | 76.533 µs / 76.483 µs | 1.000 [0.999, 1.001] | 1.002 [1.001, 1.003] | pass |
+| `bplus/from_sorted_then_scan/verus` | 26.831 µs / 25.586 µs | 25.988 µs / 26.611 µs | 0.969 [0.966, 0.971] | 1.040 [1.038, 1.043] | pass |
+| `bplus/insert_shuffled/prod` | 1.837 ms / 1.849 ms | 1.827 ms / 1.822 ms | 0.995 [0.992, 0.997] | 0.986 [0.984, 0.987] | pass |
+| `bplus/insert_shuffled/verus` | 1.782 ms / 1.778 ms | 1.769 ms / 1.768 ms | 0.993 [0.991, 0.994] | 0.995 [0.993, 0.996] | pass |
+| `bplus/insert_shuffled_branchless/prod` | 1.836 ms / 1.853 ms | 1.870 ms / 1.841 ms | 1.018 [1.015, 1.021] | 0.993 [0.990, 0.997] | pass |
+| `bplus/insert_shuffled_branchless/verus` | 1.670 ms / 1.665 ms | 1.677 ms / 1.673 ms | 1.004 [1.001, 1.007] | 1.005 [1.002, 1.007] | pass |
+| `bplus/scan_only/prod` | 57.518 µs / 57.322 µs | 57.609 µs / 57.588 µs | 1.002 [1.001, 1.002] | 1.005 [1.004, 1.005] | pass |
+| `bplus/scan_only/verus` | 14.354 µs / 15.849 µs | 14.741 µs / 14.788 µs | 1.027 [1.023, 1.031] | 0.933 [0.931, 0.935] | pass |
+| `class_ring/merge_restore/legacy` | 87.835 µs / 88.303 µs | 87.585 µs / 87.486 µs | 0.997 [0.995, 0.999] | 0.991 [0.989, 0.993] | pass |
+| `class_ring/merge_restore/verified` | 43.915 µs / 43.933 µs | 49.205 µs / 49.234 µs | 1.120 [1.118, 1.122] | 1.121 [1.118, 1.123] | **regression** |
+| `class_ring/splice_untracked/legacy` | 5.776 µs / 5.769 µs | 7.695 µs / 7.693 µs | 1.332 [1.331, 1.333] | 1.333 [1.332, 1.335] | **regression** |
+| `class_ring/splice_untracked/verified` | 6.317 µs / 6.317 µs | 15.384 µs / 15.373 µs | 2.435 [2.428, 2.442] | 2.433 [2.427, 2.440] | **regression** |
+| `class_ring/walk/legacy` | 92.473 µs / 92.307 µs | 92.380 µs / 92.277 µs | 0.999 [0.998, 1.000] | 1.000 [0.999, 1.001] | pass |
+| `class_ring/walk/verified` | 92.402 µs / 92.443 µs | 92.361 µs / 92.333 µs | 1.000 [0.998, 1.002] | 0.999 [0.996, 1.000] | pass |
+| `eclasses/find_sweep/retained/4096` | 252.227 µs / 252.240 µs | 252.233 µs / 220.762 µs | 1.000 [0.999, 1.001] | 0.875 [0.865, 0.887] | pass |
+| `eclasses/find_sweep/verified/4096` | 302.906 µs / 205.124 µs | 302.942 µs / 202.756 µs | 1.000 [0.999, 1.001] | 0.988 [0.987, 0.990] | pass |
+| `eclasses/mark_merge_restore/retained/4096` | 14.028 µs / 14.113 µs | 14.229 µs / 14.233 µs | 1.014 [1.012, 1.017] | 1.008 [1.003, 1.014] | pass |
+| `eclasses/mark_merge_restore/verified/4096` | 12.175 µs / 12.259 µs | 12.245 µs / 12.246 µs | 1.006 [1.001, 1.011] | 0.999 [0.994, 1.004] | pass |
+| `eclasses/merge_cascade/retained/4096` | 126.337 µs / 125.390 µs | 127.685 µs / 125.848 µs | 1.011 [1.010, 1.012] | 1.004 [1.002, 1.005] | pass |
+| `eclasses/merge_cascade/verified/4096` | 108.682 µs / 108.128 µs | 107.885 µs / 108.520 µs | 0.993 [0.992, 0.994] | 1.004 [1.003, 1.005] | pass |
+| `saturate/ac10/naive/run` | 39.591 ms / 39.710 ms | 39.456 ms / 39.497 ms | 0.997 [0.994, 0.999] | 0.995 [0.992, 0.997] | pass |
+| `saturate/ac10/semi/run` | 25.809 ms / 26.011 ms | 25.641 ms / 25.604 ms | 0.993 [0.991, 0.997] | 0.984 [0.981, 0.988] | pass |
+| `saturate/ac6/naive/run` | 1.425 ms / 1.420 ms | 1.408 ms / 1.410 ms | 0.988 [0.980, 0.995] | 0.993 [0.987, 0.999] | pass |
+| `saturate/ac6/semi/run` | 734.195 µs / 731.808 µs | 726.521 µs / 731.002 µs | 0.990 [0.985, 0.994] | 0.999 [0.993, 1.004] | pass |
+| `saturate/accompl32/run` | 900.508 µs / 904.914 µs | 906.021 µs / 899.457 µs | 1.006 [1.000, 1.014] | 0.994 [0.989, 0.998] | pass |
+| `saturate/accompl64/run` | 2.287 ms / 2.314 ms | 2.293 ms / 2.288 ms | 1.003 [0.998, 1.008] | 0.989 [0.986, 0.992] | pass |
+| `saturate/plain7/naive/run` | 10.256 ms / 10.204 ms | 10.182 ms / 10.204 ms | 0.993 [0.992, 0.994] | 1.000 [0.999, 1.001] | pass |
+| `saturate/plain7/semi/run` | 5.764 ms / 5.748 ms | 5.749 ms / 5.742 ms | 0.997 [0.996, 0.998] | 0.999 [0.997, 1.001] | pass |
+| `sparse_set/churn/legacy` | 343.823 µs / 344.326 µs | 347.119 µs / 345.741 µs | 1.010 [1.006, 1.013] | 1.004 [1.002, 1.006] | pass |
+| `sparse_set/churn/verified` | 295.323 µs / 294.880 µs | 301.132 µs / 303.270 µs | 1.020 [1.016, 1.025] | 1.028 [1.024, 1.034] | pass |
+| `store/sp-t880.base/eqsat32` | 4.860 ms / 4.819 ms | 4.849 ms / 4.630 ms | 0.998 [0.955, 1.043] | 0.961 [0.929, 0.995] | pass |
+| `store/sp-t880.base/smt32` | 4.566 ms / 4.529 ms | 4.548 ms / 4.533 ms | 0.996 [0.995, 0.998] | 1.001 [0.999, 1.003] | pass |
+| `store/sp-t880.cycles/eqsat32` | 26.878 ms / 26.686 ms | 26.971 ms / 25.636 ms | 1.003 [0.951, 1.059] | 0.961 [0.923, 1.002] | pass |
+| `store/sp-t880.cycles/smt32` | 25.135 ms / 25.049 ms | 24.962 ms / 24.961 ms | 0.993 [0.992, 0.995] | 0.996 [0.995, 0.998] | pass |
+| `store/sp-t880.empty/eqsat32` | 4.960 ms / 4.944 ms | 4.963 ms / 4.736 ms | 1.001 [0.959, 1.046] | 0.958 [0.928, 0.991] | pass |
+| `store/sp-t880.empty/smt32` | 4.681 ms / 4.668 ms | 4.676 ms / 4.669 ms | 0.999 [0.998, 1.001] | 1.000 [0.999, 1.001] | pass |
+| `store/sp-t880.empty20k/eqsat32` | 16.763 ms / 16.797 ms | 16.816 ms / 16.715 ms | 1.003 [0.990, 1.016] | 0.995 [0.982, 1.008] | pass |
+| `store/sp-t880.empty20k/smt32` | 18.018 ms / 17.995 ms | 17.946 ms / 17.932 ms | 0.996 [0.992, 0.999] | 0.996 [0.994, 0.999] | pass |
+| `store/sp-t880.norun/eqsat32` | 7.485 ms / 7.439 ms | 7.480 ms / 7.293 ms | 0.999 [0.971, 1.028] | 0.980 [0.959, 1.004] | pass |
+| `store/sp-t880.norun/smt32` | 7.134 ms / 7.137 ms | 7.148 ms / 7.123 ms | 1.002 [1.000, 1.003] | 0.998 [0.996, 1.000] | pass |
+| `store/sp-t880.rerun/eqsat32` | 5.973 ms / 5.930 ms | 5.972 ms / 5.720 ms | 1.000 [0.954, 1.047] | 0.965 [0.933, 1.000] | pass |
+| `store/sp-t880.rerun/smt32` | 5.594 ms / 5.576 ms | 5.581 ms / 5.573 ms | 0.998 [0.996, 0.999] | 1.000 [0.998, 1.001] | pass |
+| `store/sp-t880.rerunnorun/eqsat32` | 4.866 ms / 4.840 ms | 4.872 ms / 4.655 ms | 1.001 [0.958, 1.046] | 0.962 [0.931, 0.996] | pass |
+| `store/sp-t880.rerunnorun/smt32` | 4.587 ms / 4.556 ms | 4.563 ms / 4.553 ms | 0.995 [0.992, 0.997] | 0.999 [0.998, 1.001] | pass |
+| `three_tier/adaptive_decision/high_duplicates_convert/512` | 1.125 µs / 1.105 µs | 1.127 µs / 1.114 µs | 1.002 [0.989, 1.016] | 1.008 [0.991, 1.024] | pass |
+| `three_tier/adaptive_decision/low_duplicates_no_convert/512` | 2.045 µs / 2.008 µs | 2.123 µs / 2.125 µs | 1.038 [1.027, 1.052] | 1.058 [1.044, 1.073] | pass |
+| `three_tier/conversion/hot_to_cold_runs` | 36.222 µs / 36.102 µs | 36.166 µs / 36.213 µs | 0.998 [0.996, 1.001] | 1.003 [0.999, 1.007] | pass |
+| `three_tier/conversion/trail_to_hot_dedupe` | 8.745 µs / 8.667 µs | 8.815 µs / 8.810 µs | 1.008 [1.002, 1.014] | 1.017 [1.009, 1.024] | pass |
+| `three_tier/diagnostics/reporting_excluded_from_timing` | 0.7 ns / 0.7 ns | 0.7 ns / 0.7 ns | 1.002 [0.996, 1.009] | 1.003 [0.999, 1.008] | pass |
+| `three_tier/end_to_end/buffered_unique` | 35.598 µs / 30.666 µs | 32.101 µs / 36.701 µs | 0.902 [0.743, 1.106] | 1.197 [1.057, 1.343] | **inconclusive** |
+| `three_tier/end_to_end/eqsat_retained` | 34.738 µs / 33.160 µs | 34.805 µs / 35.583 µs | 1.002 [0.813, 1.248] | 1.073 [0.871, 1.319] | **inconclusive** |
+| `three_tier/end_to_end/eqsat_retained_production` | 12.468 µs / 12.482 µs | 12.347 µs / 12.163 µs | 0.990 [0.977, 1.004] | 0.974 [0.972, 0.977] | pass |
+| `three_tier/end_to_end/restore_optimized` | 35.624 µs / 31.809 µs | 35.510 µs / 33.941 µs | 0.997 [0.824, 1.217] | 1.067 [1.000, 1.144] | **inconclusive** |
+| `three_tier/end_to_end/smt_backtrack` | 43.458 µs / 41.293 µs | 48.901 µs / 45.923 µs | 1.125 [0.936, 1.323] | 1.112 [0.849, 1.456] | **inconclusive** |
+| `three_tier/end_to_end/smt_backtrack_production` | 15.795 µs / 15.895 µs | 15.849 µs / 15.790 µs | 1.003 [1.001, 1.006] | 0.993 [0.990, 0.997] | pass |
+| `three_tier/mark/explicit_defer_smt` | 19.7 ns / 16.8 ns | 19.2 ns / 18.6 ns | 0.977 [0.671, 1.411] | 1.110 [0.732, 1.687] | **inconclusive** |
+| `three_tier/mark/hot_to_cold` | 4.804 µs / 4.761 µs | 4.746 µs / 4.764 µs | 0.988 [0.983, 0.992] | 1.001 [0.997, 1.004] | pass |
+| `three_tier/mark/no_rollover_production` | 27.1 ns / 27.3 ns | 27.2 ns / 28.8 ns | 1.005 [0.965, 1.045] | 1.052 [0.975, 1.168] | **inconclusive** |
+| `three_tier/mark/no_rollover_smt` | 19.5 ns / 20.4 ns | 16.5 ns / 19.0 ns | 0.848 [0.562, 1.287] | 0.932 [0.667, 1.328] | **inconclusive** |
+| `three_tier/mark/trail_to_hot` | 1.115 µs / 1.100 µs | 1.110 µs / 1.120 µs | 0.995 [0.978, 1.014] | 1.018 [1.004, 1.030] | pass |
+| `three_tier/promotion/cold_survivor_write_restore` | 5.913 µs / 5.946 µs | 5.933 µs / 5.984 µs | 1.003 [0.994, 1.012] | 1.006 [0.991, 1.020] | pass |
+| `three_tier/restore/all_tiers_deep` | 424.8 ns / 416.6 ns | 415.2 ns / 418.1 ns | 0.977 [0.952, 1.005] | 1.004 [0.980, 1.028] | pass |
+| `three_tier/restore/cold_one_frame` | 131.8 ns / 136.1 ns | 130.7 ns / 133.3 ns | 0.991 [0.863, 1.139] | 0.979 [0.835, 1.142] | **inconclusive** |
+| `three_tier/restore/hot_one_frame` | 329.2 ns / 333.9 ns | 342.7 ns / 331.4 ns | 1.041 [1.026, 1.058] | 0.992 [0.966, 1.020] | pass |
+| `three_tier/restore/production_one_frame` | 486.8 ns / 482.4 ns | 488.5 ns / 493.7 ns | 1.003 [0.978, 1.029] | 1.023 [0.995, 1.052] | pass |
+| `three_tier/restore/trail_one_frame` | 337.2 ns / 326.9 ns | 339.7 ns / 328.4 ns | 1.007 [0.990, 1.034] | 1.005 [0.995, 1.014] | pass |
+| `three_tier/write/high_duplicates/inline_restore_optimized` | 1.167 µs / 1.169 µs | 1.160 µs / 1.160 µs | 0.994 [0.984, 1.004] | 0.992 [0.984, 1.001] | pass |
+| `three_tier/write/high_duplicates/parallel_buffered_unique` | 1.227 µs / 1.303 µs | 1.312 µs / 1.327 µs | 1.069 [1.055, 1.087] | 1.019 [1.001, 1.039] | **inconclusive** |
+| `three_tier/write/high_duplicates/production` | 1.216 µs / 1.214 µs | 1.216 µs / 1.221 µs | 1.000 [0.991, 1.010] | 1.005 [0.998, 1.012] | pass |
+| `three_tier/write/high_duplicates/trail_adaptive` | 1.590 µs / 1.550 µs | 1.577 µs / 1.576 µs | 0.992 [0.974, 1.010] | 1.017 [1.010, 1.026] | pass |
+| `three_tier/write/high_duplicates/trail_smt` | 1.594 µs / 1.575 µs | 1.586 µs / 1.586 µs | 0.995 [0.977, 1.014] | 1.007 [0.999, 1.014] | pass |
+| `three_tier/write/low_duplicates/inline_restore_optimized` | 1.860 µs / 1.874 µs | 1.876 µs / 1.888 µs | 1.009 [1.006, 1.012] | 1.008 [1.001, 1.015] | pass |
+| `three_tier/write/low_duplicates/parallel_buffered_unique` | 2.067 µs / 2.062 µs | 2.095 µs / 2.126 µs | 1.013 [1.007, 1.021] | 1.031 [1.025, 1.037] | pass |
+| `three_tier/write/low_duplicates/production` | 2.211 µs / 2.216 µs | 2.274 µs / 2.254 µs | 1.028 [1.022, 1.034] | 1.017 [1.011, 1.024] | pass |
+| `three_tier/write/low_duplicates/trail_adaptive` | 1.594 µs / 1.600 µs | 1.593 µs / 1.579 µs | 0.999 [0.985, 1.015] | 0.987 [0.976, 0.997] | pass |
+| `three_tier/write/low_duplicates/trail_smt` | 1.615 µs / 1.632 µs | 1.616 µs / 1.621 µs | 1.001 [0.992, 1.009] | 0.993 [0.984, 1.002] | pass |
+| `three_tier_v1/promotion/cold_survivor_write_restore/dyn_inline` | 2.000 µs / 2.018 µs | 2.006 µs / 2.010 µs | 1.003 [0.986, 1.022] | 0.996 [0.980, 1.012] | pass |
+| `three_tier_v1/promotion/cold_survivor_write_restore/dyn_parallel` | 2.642 µs / 2.869 µs | 2.842 µs / 2.416 µs | 1.076 [1.065, 1.085] | 0.842 [0.834, 0.850] | **inconclusive** |
+| `three_tier_v1/promotion/cold_survivor_write_restore/dyn_trail` | 2.087 µs / 2.076 µs | 2.082 µs / 2.077 µs | 0.998 [0.990, 1.005] | 1.000 [0.993, 1.008] | pass |
+| `three_tier_v1/promotion/cold_survivor_write_restore/static_veci` | 1.385 µs / 1.394 µs | 1.391 µs / 1.399 µs | 1.004 [0.996, 1.013] | 1.004 [0.994, 1.014] | pass |
+| `three_tier_v1/promotion/cold_survivor_write_restore/static_vecp` | 1.469 µs / 1.467 µs | 1.474 µs / 1.643 µs | 1.003 [0.996, 1.011] | 1.120 [1.111, 1.129] | **inconclusive** |
+| `three_tier_v1/promotion/cold_survivor_write_restore/static_vect` | 1.022 µs / 1.014 µs | 1.021 µs / 1.033 µs | 0.999 [0.965, 1.034] | 1.019 [0.984, 1.054] | pass |
+| `three_tier_v1/restore/deep_64_frames/dyn_inline` | 639.7 ns / 642.4 ns | 636.1 ns / 643.6 ns | 0.994 [0.986, 1.003] | 1.002 [0.991, 1.011] | pass |
+| `three_tier_v1/restore/deep_64_frames/dyn_parallel` | 641.2 ns / 597.8 ns | 597.5 ns / 599.5 ns | 0.932 [0.921, 0.944] | 1.003 [0.997, 1.008] | pass |
+| `three_tier_v1/restore/deep_64_frames/dyn_trail` | 2.214 µs / 2.326 µs | 2.201 µs / 2.198 µs | 0.994 [0.983, 1.006] | 0.945 [0.918, 0.973] | pass |
+| `three_tier_v1/restore/deep_64_frames/production_veci` | 896.3 ns / 896.7 ns | 901.0 ns / 924.0 ns | 1.005 [0.990, 1.021] | 1.030 [0.992, 1.081] | **inconclusive** |
+| `three_tier_v1/restore/deep_64_frames/production_vecp` | 893.7 ns / 896.0 ns | 893.0 ns / 895.0 ns | 0.999 [0.983, 1.017] | 0.999 [0.980, 1.018] | pass |
+| `three_tier_v1/restore/deep_64_frames/static_veci` | 541.9 ns / 541.1 ns | 547.7 ns / 545.5 ns | 1.011 [0.994, 1.027] | 1.008 [0.991, 1.025] | pass |
+| `three_tier_v1/restore/deep_64_frames/static_vecp` | 512.9 ns / 516.0 ns | 514.5 ns / 512.7 ns | 1.003 [0.974, 1.033] | 0.994 [0.966, 1.020] | pass |
+| `three_tier_v1/restore/deep_64_frames/static_vect` | 2.571 µs / 2.570 µs | 2.569 µs / 2.562 µs | 0.999 [0.995, 1.005] | 0.997 [0.992, 1.002] | pass |
+| `three_tier_v1/restore/direct_cold_contiguous/dyn_inline` | 165.8 ns / 168.0 ns | 163.6 ns / 161.7 ns | 0.987 [0.842, 1.155] | 0.963 [0.826, 1.121] | **inconclusive** |
+| `three_tier_v1/restore/direct_cold_contiguous/dyn_parallel` | 130.8 ns / 135.0 ns | 128.2 ns / 129.1 ns | 0.980 [0.855, 1.128] | 0.957 [0.829, 1.114] | **inconclusive** |
+| `three_tier_v1/restore/direct_cold_contiguous/dyn_trail` | 104.0 ns / 103.4 ns | 102.2 ns / 100.8 ns | 0.982 [0.814, 1.184] | 0.975 [0.833, 1.138] | **inconclusive** |
+| `three_tier_v1/restore/direct_cold_contiguous/static_veci` | 187.6 ns / 187.4 ns | 186.5 ns / 188.3 ns | 0.994 [0.817, 1.204] | 1.005 [0.832, 1.213] | **inconclusive** |
+| `three_tier_v1/restore/direct_cold_contiguous/static_vecp` | 142.6 ns / 145.5 ns | 145.6 ns / 145.8 ns | 1.021 [0.871, 1.202] | 1.002 [0.848, 1.179] | **inconclusive** |
+| `three_tier_v1/restore/direct_cold_contiguous/static_vect` | 128.2 ns / 128.6 ns | 126.8 ns / 127.3 ns | 0.989 [0.794, 1.233] | 0.990 [0.791, 1.240] | **inconclusive** |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_inline` | 31.9 ns / 31.6 ns | 31.9 ns / 34.6 ns | 0.999 [0.928, 1.075] | 1.095 [1.023, 1.170] | **inconclusive** |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_parallel` | 36.4 ns / 38.1 ns | 39.0 ns / 40.4 ns | 1.071 [0.954, 1.209] | 1.060 [0.912, 1.260] | **inconclusive** |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_trail` | 335.4 ns / 327.1 ns | 324.4 ns / 324.9 ns | 0.967 [0.956, 0.978] | 0.993 [0.984, 1.002] | pass |
+| `three_tier_v1/restore/shallow_high_duplicates/production_veci` | 56.0 ns / 55.2 ns | 53.6 ns / 55.2 ns | 0.956 [0.870, 1.053] | 1.002 [0.907, 1.109] | **inconclusive** |
+| `three_tier_v1/restore/shallow_high_duplicates/production_vecp` | 55.7 ns / 56.3 ns | 61.2 ns / 61.4 ns | 1.100 [0.998, 1.215] | 1.092 [0.938, 1.257] | **inconclusive** |
+| `three_tier_v1/restore/shallow_high_duplicates/static_veci` | 30.1 ns / 28.8 ns | 30.5 ns / 30.2 ns | 1.015 [0.854, 1.206] | 1.052 [0.892, 1.227] | **inconclusive** |
+| `three_tier_v1/restore/shallow_high_duplicates/static_vecp` | 34.7 ns / 33.7 ns | 35.1 ns / 38.2 ns | 1.011 [0.894, 1.125] | 1.134 [1.073, 1.201] | **inconclusive** |
+| `three_tier_v1/restore/shallow_high_duplicates/static_vect` | 344.2 ns / 344.4 ns | 343.0 ns / 342.6 ns | 0.996 [0.983, 1.011] | 0.995 [0.981, 1.008] | pass |
+| `three_tier_v1/rollover/both_edges_high_duplicates/explicit_apply_configured` | 1.447 µs / 1.441 µs | 1.454 µs / 1.448 µs | 1.005 [0.997, 1.013] | 1.004 [0.991, 1.018] | pass |
+| `three_tier_v1/rollover/both_edges_high_duplicates/force_closed` | 1.446 µs / 1.442 µs | 1.429 µs / 1.450 µs | 0.988 [0.975, 1.000] | 1.006 [0.997, 1.015] | pass |
+| `three_tier_v1/rollover/both_edges_high_duplicates/source_compatible_try_mark` | 1.447 µs / 1.440 µs | 1.449 µs / 1.462 µs | 1.001 [0.991, 1.012] | 1.016 [1.009, 1.022] | pass |
+| `three_tier_v1/rollover/hot_to_cold_contiguous/apply_configured` | 4.799 µs / 4.768 µs | 4.777 µs / 4.762 µs | 0.996 [0.991, 1.000] | 0.999 [0.995, 1.002] | pass |
+| `three_tier_v1/rollover/hot_to_cold_contiguous/defer` | 30.1 ns / 29.8 ns | 30.3 ns / 29.7 ns | 1.006 [0.896, 1.125] | 0.995 [0.872, 1.134] | **inconclusive** |
+| `three_tier_v1/rollover/hot_to_cold_contiguous/force_closed` | 4.788 µs / 4.765 µs | 4.785 µs / 4.756 µs | 0.999 [0.996, 1.003] | 0.998 [0.995, 1.002] | pass |
+| `three_tier_v1/rollover/hot_to_cold_singleton_runs/apply_configured` | 2.293 µs / 2.268 µs | 2.303 µs / 2.300 µs | 1.004 [0.978, 1.031] | 1.014 [1.002, 1.026] | pass |
+| `three_tier_v1/rollover/hot_to_cold_singleton_runs/defer` | 30.2 ns / 29.2 ns | 29.5 ns / 29.0 ns | 0.974 [0.863, 1.097] | 0.991 [0.893, 1.112] | **inconclusive** |
+| `three_tier_v1/rollover/hot_to_cold_singleton_runs/force_closed` | 2.296 µs / 2.271 µs | 2.271 µs / 2.281 µs | 0.989 [0.974, 1.004] | 1.004 [0.993, 1.016] | pass |
+| `three_tier_v1/rollover/trail_to_hot_high_duplicates/apply_configured` | 1.108 µs / 1.122 µs | 1.121 µs / 1.116 µs | 1.012 [0.997, 1.027] | 0.995 [0.979, 1.011] | pass |
+| `three_tier_v1/rollover/trail_to_hot_high_duplicates/defer` | 18.7 ns / 19.6 ns | 18.2 ns / 16.5 ns | 0.969 [0.631, 1.473] | 0.839 [0.557, 1.307] | **inconclusive** |
+| `three_tier_v1/rollover/trail_to_hot_high_duplicates/force_closed` | 1.110 µs / 1.101 µs | 1.103 µs / 1.110 µs | 0.994 [0.978, 1.010] | 1.008 [0.993, 1.023] | pass |
+| `three_tier_v1/rollover/trail_to_hot_small_frames_per_mark/apply_configured_x64` | 8.863 µs / 8.864 µs | 8.921 µs / 9.021 µs | 1.007 [1.004, 1.010] | 1.018 [1.003, 1.038] | pass |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/dyn_inline` | 94.527 µs / 94.050 µs | 102.595 µs / 99.085 µs | 1.085 [1.055, 1.109] | 1.054 [1.000, 1.106] | **inconclusive** |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/dyn_parallel` | 90.099 µs / 93.086 µs | 99.628 µs / 93.596 µs | 1.106 [1.056, 1.155] | 1.005 [0.959, 1.051] | **inconclusive** |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/dyn_trail` | 102.908 µs / 97.313 µs | 99.530 µs / 92.854 µs | 0.967 [0.919, 1.013] | 0.954 [0.874, 1.043] | pass |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/production_veci` | 37.167 µs / 37.049 µs | 38.095 µs / 37.154 µs | 1.025 [1.023, 1.026] | 1.003 [1.001, 1.005] | pass |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/production_vecp` | 56.767 µs / 57.213 µs | 57.385 µs / 57.342 µs | 1.011 [1.009, 1.012] | 1.002 [0.998, 1.007] | pass |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/static_veci` | 51.277 µs / 51.422 µs | 51.385 µs / 51.348 µs | 1.002 [1.001, 1.004] | 0.999 [0.996, 1.001] | pass |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/static_vecp` | 57.611 µs / 57.480 µs | 57.664 µs / 57.946 µs | 1.001 [0.993, 1.012] | 1.008 [1.003, 1.013] | pass |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/static_vect` | 38.661 µs / 38.407 µs | 38.322 µs / 38.403 µs | 0.991 [0.984, 0.996] | 1.000 [0.996, 1.003] | pass |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_inline` | 54.422 µs / 53.934 µs | 62.016 µs / 59.215 µs | 1.140 [1.081, 1.196] | 1.098 [0.963, 1.234] | **inconclusive** |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_parallel` | 50.790 µs / 44.336 µs | 51.614 µs / 48.883 µs | 1.016 [0.898, 1.140] | 1.103 [1.024, 1.179] | **inconclusive** |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_trail` | 54.400 µs / 50.159 µs | 51.727 µs / 54.946 µs | 0.951 [0.771, 1.169] | 1.095 [0.905, 1.301] | **inconclusive** |
+| `three_tier_v1/trace/eqsat_retained_64_frames/production_veci` | 19.297 µs / 19.376 µs | 19.520 µs / 19.666 µs | 1.012 [1.008, 1.014] | 1.015 [1.011, 1.019] | pass |
+| `three_tier_v1/trace/eqsat_retained_64_frames/production_vecp` | 21.666 µs / 21.816 µs | 21.860 µs / 21.963 µs | 1.009 [1.007, 1.011] | 1.007 [1.004, 1.009] | pass |
+| `three_tier_v1/trace/eqsat_retained_64_frames/static_veci` | 23.744 µs / 23.705 µs | 23.674 µs / 23.741 µs | 0.997 [0.995, 0.999] | 1.002 [1.000, 1.003] | pass |
+| `three_tier_v1/trace/eqsat_retained_64_frames/static_vecp` | 24.201 µs / 24.038 µs | 24.172 µs / 24.263 µs | 0.999 [0.996, 1.001] | 1.009 [1.007, 1.012] | pass |
+| `three_tier_v1/trace/eqsat_retained_64_frames/static_vect` | 20.785 µs / 21.441 µs | 21.033 µs / 20.970 µs | 1.012 [1.007, 1.018] | 0.978 [0.974, 0.982] | pass |
+| `three_tier_v1/trace/large_retained_256_frames/dyn_inline` | 101.541 µs / 100.480 µs | 107.170 µs / 106.928 µs | 1.055 [1.017, 1.089] | 1.064 [1.038, 1.089] | **inconclusive** |
+| `three_tier_v1/trace/large_retained_256_frames/dyn_parallel` | 100.100 µs / 103.025 µs | 99.328 µs / 99.047 µs | 0.992 [0.949, 1.036] | 0.961 [0.925, 1.002] | pass |
+| `three_tier_v1/trace/large_retained_256_frames/dyn_trail` | 107.562 µs / 105.402 µs | 104.503 µs / 104.312 µs | 0.972 [0.922, 1.034] | 0.990 [0.919, 1.064] | pass |
+| `three_tier_v1/trace/large_retained_256_frames/production_veci` | 41.615 µs / 41.585 µs | 43.200 µs / 44.667 µs | 1.038 [1.017, 1.067] | 1.074 [1.067, 1.083] | **inconclusive** |
+| `three_tier_v1/trace/large_retained_256_frames/production_vecp` | 58.731 µs / 58.047 µs | 59.026 µs / 58.792 µs | 1.005 [0.986, 1.024] | 1.013 [0.993, 1.032] | pass |
+| `three_tier_v1/trace/large_retained_256_frames/static_veci` | 58.328 µs / 57.483 µs | 58.524 µs / 58.349 µs | 1.003 [1.002, 1.005] | 1.015 [1.012, 1.018] | pass |
+| `three_tier_v1/trace/large_retained_256_frames/static_vecp` | 63.173 µs / 63.410 µs | 62.909 µs / 63.032 µs | 0.996 [0.992, 1.000] | 0.994 [0.993, 0.996] | pass |
+| `three_tier_v1/trace/large_retained_256_frames/static_vect` | 44.734 µs / 44.683 µs | 44.969 µs / 44.995 µs | 1.005 [0.999, 1.011] | 1.007 [1.000, 1.013] | pass |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_inline` | 72.900 µs / 73.471 µs | 74.456 µs / 70.576 µs | 1.021 [0.931, 1.105] | 0.961 [0.885, 1.041] | **inconclusive** |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_parallel` | 64.546 µs / 58.108 µs | 64.386 µs / 64.289 µs | 0.998 [0.897, 1.115] | 1.106 [1.029, 1.182] | **inconclusive** |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_trail` | 71.813 µs / 66.873 µs | 71.014 µs / 73.258 µs | 0.989 [0.884, 1.117] | 1.095 [0.989, 1.198] | **inconclusive** |
+| `three_tier_v1/trace/smt_backtracking_128/production_veci` | 23.414 µs / 23.405 µs | 23.284 µs / 24.450 µs | 0.994 [0.992, 0.997] | 1.045 [1.041, 1.048] | pass |
+| `three_tier_v1/trace/smt_backtracking_128/production_vecp` | 32.349 µs / 32.167 µs | 31.880 µs / 31.934 µs | 0.986 [0.983, 0.988] | 0.993 [0.990, 0.995] | pass |
+| `three_tier_v1/trace/smt_backtracking_128/static_veci` | 29.777 µs / 29.889 µs | 29.843 µs / 29.814 µs | 1.002 [0.999, 1.006] | 0.997 [0.995, 1.000] | pass |
+| `three_tier_v1/trace/smt_backtracking_128/static_vecp` | 33.326 µs / 32.823 µs | 32.846 µs / 32.831 µs | 0.986 [0.962, 1.004] | 1.000 [0.997, 1.003] | pass |
+| `three_tier_v1/trace/smt_backtracking_128/static_vect` | 21.368 µs / 21.544 µs | 20.706 µs / 20.882 µs | 0.969 [0.922, 1.024] | 0.969 [0.931, 1.009] | pass |
+| `three_tier_v1/write/high_duplicates/dyn_inline` | 1.786 µs / 1.808 µs | 1.806 µs / 1.784 µs | 1.011 [1.006, 1.017] | 0.987 [0.983, 0.991] | pass |
+| `three_tier_v1/write/high_duplicates/dyn_parallel` | 1.754 µs / 1.778 µs | 1.777 µs / 1.778 µs | 1.013 [1.007, 1.019] | 1.000 [0.994, 1.005] | pass |
+| `three_tier_v1/write/high_duplicates/dyn_trail` | 2.185 µs / 2.205 µs | 2.298 µs / 2.239 µs | 1.052 [1.044, 1.058] | 1.015 [1.004, 1.026] | pass |
+| `three_tier_v1/write/high_duplicates/production_veci` | 780.5 ns / 797.9 ns | 789.2 ns / 785.1 ns | 1.011 [1.001, 1.024] | 0.984 [0.965, 1.006] | pass |
+| `three_tier_v1/write/high_duplicates/production_vecp` | 1.203 µs / 1.209 µs | 1.216 µs / 1.210 µs | 1.011 [1.003, 1.019] | 1.001 [0.998, 1.005] | pass |
+| `three_tier_v1/write/high_duplicates/static_veci` | 1.169 µs / 1.176 µs | 1.170 µs / 1.169 µs | 1.001 [0.995, 1.007] | 0.994 [0.988, 0.999] | pass |
+| `three_tier_v1/write/high_duplicates/static_vecp` | 1.198 µs / 1.200 µs | 1.201 µs / 1.200 µs | 1.002 [0.989, 1.014] | 1.000 [0.995, 1.004] | pass |
+| `three_tier_v1/write/high_duplicates/static_vect` | 1.134 µs / 1.150 µs | 1.149 µs / 1.152 µs | 1.013 [1.003, 1.023] | 1.002 [0.993, 1.013] | pass |
+| `three_tier_v1/write/low_duplicates/dyn_inline` | 2.709 µs / 3.498 µs | 3.084 µs / 3.224 µs | 1.139 [1.065, 1.214] | 0.922 [0.851, 0.989] | **inconclusive** |
+| `three_tier_v1/write/low_duplicates/dyn_parallel` | 2.622 µs / 2.646 µs | 2.717 µs / 2.695 µs | 1.037 [1.031, 1.042] | 1.019 [1.011, 1.027] | pass |
+| `three_tier_v1/write/low_duplicates/dyn_trail` | 2.195 µs / 2.211 µs | 2.231 µs / 2.245 µs | 1.016 [0.997, 1.035] | 1.015 [1.002, 1.031] | pass |
+| `three_tier_v1/write/low_duplicates/production_veci` | 1.511 µs / 1.509 µs | 1.525 µs / 1.533 µs | 1.009 [0.983, 1.038] | 1.016 [0.987, 1.046] | pass |
+| `three_tier_v1/write/low_duplicates/production_vecp` | 2.232 µs / 2.202 µs | 2.301 µs / 2.279 µs | 1.031 [1.026, 1.037] | 1.035 [1.027, 1.043] | pass |
+| `three_tier_v1/write/low_duplicates/static_veci` | 2.113 µs / 2.112 µs | 2.171 µs / 2.145 µs | 1.028 [1.016, 1.039] | 1.015 [1.006, 1.024] | pass |
+| `three_tier_v1/write/low_duplicates/static_vecp` | 2.299 µs / 2.307 µs | 2.358 µs / 2.330 µs | 1.026 [1.016, 1.037] | 1.010 [1.002, 1.018] | pass |
+| `three_tier_v1/write/low_duplicates/static_vect` | 1.163 µs / 1.166 µs | 1.186 µs / 1.175 µs | 1.019 [1.012, 1.028] | 1.008 [0.996, 1.020] | pass |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_256/dyn_inline` | 368.1 ns / 377.3 ns | 371.1 ns / 365.3 ns | 1.008 [0.990, 1.026] | 0.968 [0.950, 0.982] | pass |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_256/dyn_parallel` | 373.6 ns / 363.7 ns | 365.0 ns / 365.9 ns | 0.977 [0.967, 0.988] | 1.006 [0.991, 1.021] | pass |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_256/dyn_trail` | 1.469 µs / 1.458 µs | 1.461 µs / 1.486 µs | 0.994 [0.982, 1.007] | 1.019 [1.009, 1.030] | pass |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096/dyn_inline` | 18.9 ns / 19.5 ns | 19.5 ns / 19.9 ns | 1.034 [0.670, 1.583] | 1.021 [0.712, 1.470] | **inconclusive** |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096/dyn_parallel` | 18.0 ns / 18.4 ns | 18.3 ns / 19.2 ns | 1.017 [0.672, 1.543] | 1.045 [0.726, 1.472] | **inconclusive** |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096/dyn_trail` | 1.144 µs / 1.121 µs | 1.121 µs / 1.123 µs | 0.980 [0.951, 1.007] | 1.002 [0.987, 1.016] | pass |
+| `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_inline` | 424.6 ns / 422.0 ns | 426.4 ns / 424.0 ns | 1.004 [0.992, 1.017] | 1.005 [0.992, 1.018] | pass |
+| `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_parallel` | 423.6 ns / 425.1 ns | 423.8 ns / 424.2 ns | 1.000 [0.990, 1.011] | 0.998 [0.987, 1.009] | pass |
+| `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_trail` | 1.683 µs / 1.691 µs | 1.709 µs / 1.755 µs | 1.015 [0.984, 1.047] | 1.037 [1.006, 1.067] | pass |
+| `three_tier_v2/adaptive/unique_W512_U512_R1/budget_4096/dyn_inline` | 4.953 µs / 4.924 µs | 4.933 µs / 4.896 µs | 0.996 [0.991, 1.001] | 0.994 [0.992, 0.997] | pass |
+| `three_tier_v2/adaptive/unique_W512_U512_R1/budget_4096/dyn_parallel` | 4.949 µs / 4.900 µs | 4.883 µs / 4.871 µs | 0.987 [0.983, 0.991] | 0.994 [0.991, 0.997] | pass |
+| `three_tier_v2/adaptive/unique_W512_U512_R1/budget_4096/dyn_trail` | 2.109 µs / 2.098 µs | 2.127 µs / 2.112 µs | 1.009 [0.997, 1.019] | 1.006 [0.997, 1.017] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_32768/dyn_inline` | 21.757 µs / 21.697 µs | 21.684 µs / 22.208 µs | 0.997 [0.993, 1.000] | 1.024 [1.018, 1.028] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_32768/dyn_inline_shrink` | 21.896 µs / 21.873 µs | 21.928 µs / 22.234 µs | 1.001 [0.998, 1.005] | 1.017 [1.014, 1.018] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_32768/dyn_parallel` | 21.642 µs / 21.765 µs | 21.768 µs / 22.033 µs | 1.006 [1.002, 1.010] | 1.012 [1.008, 1.017] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_32768/dyn_parallel_shrink` | 21.928 µs / 21.837 µs | 21.813 µs / 21.693 µs | 0.995 [0.990, 0.999] | 0.993 [0.990, 0.997] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_32768/dyn_trail` | 79.023 µs / 78.931 µs | 78.752 µs / 78.089 µs | 0.997 [0.995, 0.998] | 0.989 [0.979, 0.998] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_32768/dyn_trail_shrink` | 78.646 µs / 79.752 µs | 79.120 µs / 78.787 µs | 1.006 [0.992, 1.021] | 0.988 [0.985, 0.991] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_65536/dyn_inline` | 7.050 µs / 7.020 µs | 7.066 µs / 7.073 µs | 1.002 [0.999, 1.006] | 1.008 [1.003, 1.012] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_65536/dyn_inline_shrink` | 7.319 µs / 7.334 µs | 7.296 µs / 7.372 µs | 0.997 [0.994, 1.000] | 1.005 [0.998, 1.014] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_65536/dyn_parallel` | 7.078 µs / 6.916 µs | 7.004 µs / 6.933 µs | 0.989 [0.984, 0.995] | 1.003 [0.998, 1.008] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_65536/dyn_parallel_shrink` | 7.262 µs / 7.223 µs | 7.285 µs / 7.239 µs | 1.003 [0.999, 1.007] | 1.002 [0.994, 1.008] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_65536/dyn_trail` | 63.661 µs / 63.709 µs | 64.052 µs / 63.593 µs | 1.006 [1.005, 1.007] | 0.998 [0.991, 1.008] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_65536/dyn_trail_shrink` | 64.331 µs / 64.319 µs | 64.503 µs / 64.029 µs | 1.003 [0.998, 1.009] | 0.995 [0.991, 0.999] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_unbounded/dyn_inline` | 153.7 ns / 154.8 ns | 154.2 ns / 157.5 ns | 1.003 [0.990, 1.016] | 1.018 [1.003, 1.032] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_unbounded/dyn_parallel` | 155.7 ns / 155.9 ns | 147.9 ns / 140.2 ns | 0.950 [0.922, 0.978] | 0.899 [0.880, 0.917] | pass |
+| `three_tier_v2/large/W64_U16_R1_frames256/budget_unbounded/dyn_trail` | 157.6 ns / 154.0 ns | 157.3 ns / 151.3 ns | 0.998 [0.982, 1.012] | 0.983 [0.964, 1.000] | pass |
+| `vec/mark_set_restore/legacy` | 315.314 µs / 329.429 µs | 331.058 µs / 332.163 µs | 1.050 [1.044, 1.057] | 1.008 [0.998, 1.020] | pass |
+| `vec/mark_set_restore/verified` | 196.447 µs / 201.259 µs | 185.753 µs / 185.175 µs | 0.946 [0.943, 0.948] | 0.920 [0.916, 0.924] | pass |
+| `vec/push_pop_untracked/legacy` | 218.357 µs / 218.161 µs | 217.321 µs / 216.913 µs | 0.995 [0.992, 0.998] | 0.994 [0.991, 0.998] | pass |
+| `vec/push_pop_untracked/verified` | 175.695 µs / 182.924 µs | 182.068 µs / 182.271 µs | 1.036 [1.007, 1.067] | 0.996 [0.966, 1.028] | pass |
+| `vec/restore_replay/legacy` | 320.440 µs / 320.794 µs | 320.244 µs / 320.320 µs | 0.999 [0.998, 1.001] | 0.999 [0.997, 1.000] | pass |
+| `vec/restore_replay/verified` | 161.447 µs / 161.564 µs | 172.090 µs / 169.026 µs | 1.066 [1.063, 1.068] | 1.046 [1.039, 1.053] | pass |
+| `vec/try_extend/legacy` | 194.043 µs / 192.178 µs | 216.588 µs / 194.843 µs | 1.116 [1.105, 1.128] | 1.014 [0.997, 1.031] | **inconclusive** |
+| `vec/try_extend/verified` | 152.914 µs / 148.911 µs | 137.307 µs / 133.321 µs | 0.898 [0.812, 0.991] | 0.895 [0.816, 0.982] | pass |
+
 ## Results (revision `f304bc7`, runs A and B on 2026-09-16 17:05–18:45, reruns 18:50–19:10)
 
 Bench binaries: `/tmp/sp-d21-bench-binaries-f304bc7.md5`; driver log

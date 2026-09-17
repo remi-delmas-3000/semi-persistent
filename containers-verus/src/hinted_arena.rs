@@ -134,7 +134,10 @@ where
     /// are distinct (each fingerprint inserted once, so its bucket is
     /// stable), and every hinted id round-trips through `as_nat` (it was
     /// minted from a real cell id).
-    pub open(crate) spec fn wf(&self) -> bool {
+    /// Structural well-formedness: the column, the index and the spill table
+    /// agree. The operations' helper (`note_hint`) is stated over this part
+    /// alone, because it runs while a fresh cell is not yet hinted.
+    pub open(crate) spec fn wf_struct(&self) -> bool {
         &&& self.col.wf()
         &&& self.index.wf()
         &&& forall|p: int| 0 <= p < self.index.log_view().len()
@@ -150,6 +153,14 @@ where
                 0 <= a < b < self.index.log_view().len()
                 ==> (#[trigger] self.index.log_view()[a].1)
                     != (#[trigger] self.index.log_view()[b].1)
+    }
+
+    /// Well-formedness as callers see it: the structure plus completeness.
+    /// Every operation preserves both, so callers owe only `wf` (the
+    /// total-API convention).
+    pub open(crate) spec fn wf(&self) -> bool {
+        &&& self.wf_struct()
+        &&& self.complete()
     }
 
     /// Empty arena of the selected store kind.
@@ -175,9 +186,13 @@ where
     }
 
     pub fn get(&self, i: I) -> (v: T)
-        requires self.wf(), i.as_nat() < self.view().len(),
-        ensures v == self.view()[i.as_nat() as int],
+        requires self.wf(),
+        ensures i.as_nat() < self.view().len() ==> v == self.view()[i.as_nat() as int],
     {
+        // Total: an out-of-range id is the documented trap.
+        if !(i.as_usize() < self.col.len().as_usize()) {
+            crate::guard::refuse("HintedArena::get: id out of bounds");
+        }
         self.col.get_index(i)
     }
 
@@ -188,7 +203,6 @@ where
     pub fn push(&mut self, t: T) -> (r: Result<I, ContainerError>)
         requires
             old(self).wf(),
-            old(self).complete(),
         ensures
             final(self).wf(),
             final(self).complete(),
@@ -199,6 +213,7 @@ where
                 && final(self).snapshots_view() == old(self).snapshots_view(),
     {
         let ghost pre = *self;
+        proof { assert(pre.complete()); }
         if !self.col.can_push() {
             return Err(ContainerError::CapacityExhausted);
         }
@@ -248,15 +263,18 @@ where
     pub fn set(&mut self, id: I, t: T)
         requires
             old(self).wf(),
-            old(self).complete(),
-            id.as_nat() < old(self).view().len(),
         ensures
             final(self).wf(),
             final(self).complete(),
             final(self).view() == old(self).view().update(id.as_nat() as int, t),
             final(self).snapshots_view() == old(self).snapshots_view(),
     {
+        // Total: an out-of-range id is the documented trap.
+        if !(id.as_usize() < self.col.len().as_usize()) {
+            crate::guard::refuse("HintedArena::set: id out of bounds");
+        }
         let ghost pre = *self;
+        proof { assert(pre.complete()); }
         self.col.set_index(id, t);
         let fp = t.fp();
         let ghost mid = *self;
@@ -295,7 +313,6 @@ where
     pub fn mark(&mut self, shrink: ShrinkPolicy) -> (r: Result<VecToken, ContainerError>)
         requires
             old(self).wf(),
-            old(self).complete(),
         ensures
             final(self).wf(),
             final(self).complete(),
@@ -353,11 +370,6 @@ where
     pub fn restore(&mut self, token: VecToken) -> (r: Result<(), ContainerError>)
         requires
             old(self).wf(),
-            old(self).complete(),
-            // The frame the token names is in range of the snapshot stack.
-            // (`is_valid_token` answers this exactly; the caller checks it or
-            // holds it from its own mark.)
-            token.frame_idx_spec() < old(self).snapshots_view().len(),
         ensures
             final(self).wf(),
             final(self).complete(),
@@ -368,9 +380,15 @@ where
             r is Err ==> final(self).view() == old(self).view()
                 && final(self).snapshots_view() == old(self).snapshots_view(),
     {
+        // Total: a token outside the live frame stack is refused, like the
+        // column's own `try_restore`.
+        if !self.col.is_valid_token(&token) {
+            return Err(ContainerError::InvalidToken);
+        }
         let ghost pre = *self;
         let r = self.col.try_restore(token);
         proof {
+            assert(pre.complete());
             // The index is untouched, so every hint the old state had, the
             // new state has - literally the same buckets.
             assert(self.index == pre.index && self.spill == pre.spill);
@@ -434,7 +452,6 @@ where
     pub fn probe(&self, t: &T) -> (r: Option<I>)
         requires
             self.wf(),
-            self.complete(),
         ensures
             match r {
                 Some(id) => id.as_nat() < self.view().len()
@@ -443,6 +460,7 @@ where
                     ==> !T::eq_spec(&(#[trigger] self.view()[j]), t),
             },
     {
+        proof { assert(self.complete()); }
         let fp = t.fp();
         let live = self.col.len();
         match self.index.get_by_key(&fp) {
@@ -470,7 +488,6 @@ where
                 while e < blen
                     invariant
                         self.wf(),
-                        self.complete(),
                         fp == t.fp_spec(),
                         live.as_nat() == self.view().len(),
                         self.index.index_view().contains_key(fp),
@@ -527,9 +544,9 @@ where
     /// exhaustion takes the crate's documented trap.
     fn note_hint(&mut self, fp: u32, id: I)
         requires
-            old(self).wf(),
+            old(self).wf_struct(),
         ensures
-            final(self).wf(),
+            final(self).wf_struct(),
             final(self).col == old(self).col,
             // The new hint.
             final(self).hinted(fp, id.as_nat()),

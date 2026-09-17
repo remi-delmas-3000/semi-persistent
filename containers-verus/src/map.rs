@@ -187,14 +187,18 @@ where
         self.log.is_restorable_spec(token.inner)
     }
 
+    /// Total constructor. The map is `wf` for every key type that conforms to
+    /// the HashMap key model (`obeys_key_model`: vstd proves it for primitive
+    /// keys via `group_hash_axioms`; a verified caller with a custom key type
+    /// establishes it once for `K`). It is a property of the TYPE, not of any
+    /// value, so it is a conditional postcondition rather than a precondition:
+    /// nothing to check at runtime, and a non-conforming key type gets an
+    /// ordinary (unverified) map rather than a trap.
     pub fn new() -> (m: Self)
-        requires
-            // The key type must conform to the HashMap key model. vstd proves
-            // this for primitive keys via group_hash_axioms; a custom key type
-            // supplies it with `assume(obeys_key_model::<MyKey>())`. It is a
-            // property of `K`, so it threads through `wf` for the map's life.
-            obeys_key_model::<K>(),
-        ensures m.wf(), m.log_view().len() == 0, m.index_view() == Map::<K, I>::empty(),
+        ensures
+            obeys_key_model::<K>() ==> m.wf(),
+            m.log_view().len() == 0,
+            m.index_view() == Map::<K, I>::empty(),
     {
         broadcast use vstd::std_specs::hash::group_hash_axioms;
         broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;

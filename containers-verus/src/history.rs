@@ -94,13 +94,18 @@ impl History {
     pub fn mark(&mut self) -> (t: GroupToken)
         requires
             old(self).wf(),
-            old(self).depth_spec() < u32::MAX as nat,
         ensures
             final(self).wf(),
             final(self).depth_spec() == old(self).depth_spec() + 1,
             t.depth_spec() == old(self).depth_spec(),
             final(self).valid_spec(t),
     {
+        // Total: the depth ceiling is the group's documented trap, not a
+        // caller obligation (the marks the engine takes are bounded by its
+        // own frame budget long before).
+        if !(self.depth < u32::MAX) {
+            crate::guard::refuse("History::mark: frame depth at u32 ceiling");
+        }
         let d = self.depth;
         let g = self.stamps.stamp_at(d as usize);
         self.depth = d + 1;
@@ -131,12 +136,18 @@ impl History {
     pub fn restore_to(&mut self, t: GroupToken)
         requires
             old(self).wf(),
-            old(self).valid_spec(t),
-            t.depth_spec() < old(self).depth_spec(),
         ensures
             final(self).wf(),
             final(self).depth_spec() == t.depth_spec(),
     {
+        // Total: a stale or reused token, or one at or above the live depth,
+        // is the documented trap (production's expect messages).
+        if !self.is_valid(t) {
+            crate::guard::refuse("History::restore_to: token is stale (its frame was cut)");
+        }
+        if !(t.depth < self.depth) {
+            crate::guard::refuse("History::restore_to: token depth is not below the live depth");
+        }
         self.stamps.bump_from((t.depth + 1) as usize);
         self.depth = t.depth;
     }

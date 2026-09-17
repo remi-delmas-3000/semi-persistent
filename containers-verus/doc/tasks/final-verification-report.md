@@ -28,7 +28,8 @@ containers`).
 | `f9ffab0` | Extended goal 2: store policy for every composite (`store_policy::{TaggedFamily, PlainFamily, HotFirst, TrailFirst}`, `P = HotFirst` on `UnionFind`, `SparseSet`, `CircularList`, `ListArena`, `BPlusTreeSet`, `EClasses`), `DiffStore::lemma_wf_data_len` |
 | `08dc0d5` | Extended goal 1(d): `HintedArena::note_hint` pushes into its bucket through two `core::mem::swap`s against an empty vector instead of copying the bucket; 1(c) settled by inspection |
 | `ec1dd5e` | Extended goal 3: the e-graph's ten cache columns static `VecI` after measuring the three disciplines (all within 2.2 %); `VecD` sites and the `SEMPER_DIFF`/`--diff-mode` lever removed from the e-graph; new `store_bench` (push/pop workload); verified crate untouched |
-| (this commit) | Extended goal 4: `EGraphConfig::Policy` with `EqSat32`/`EqSat64` (Hot-first) and `Smt32`/`Smt64` (Trail-first) configurations; the class layer and the node caches follow the policy; `store_policy::{tagged_vec, plain_vec}` public total constructors; family stores declared `Send` |
+| `1a90876` | Extended goal 4: `EGraphConfig::Policy` with `EqSat32`/`EqSat64` (Hot-first) and `Smt32`/`Smt64` (Trail-first) configurations; the class layer and the node caches follow the policy; `store_policy::{tagged_vec, plain_vec}` public total constructors; family stores declared `Send` |
+| (this commit) | Extended goal 5: total public API — every public exec function is total (73 → 0 public `requires` beyond the receiver's own `wf`); the store protocol sealed on the crate-private `DiffStoreOps` supertrait; `CircularList::{splice, splice_absorb}` guarded by a verified walk of the absorbed ring (crate-private walk-free cores for `EClasses`); `SparseSet::restore` total through an archived snapshot invariant; `NodeLayout` primitives, `History`, `GenStamps`, `HintedArena`, frames, compressors, `Tagged` and `SpMap::new` converted to refuse-guards or conditional contracts; 14 internal primitives `pub(crate)`; the allowlist is empty and the checker is module-aware |
 
 ## 2. Per-container contract / verification matrix
 
@@ -42,8 +43,8 @@ snapshot at frame `k`.
 | `Vec` (three-tier semi-persistent vector) | constructors: `wf`, empty view and history; `set_index`/`try_push`/`pop`: view updated exactly, snapshots unchanged; `try_mark*`: view unchanged, depth + 1, snapshots pushed with the old view, rejection leaves the model unchanged; rollover in any legal order (`flush_trail`, `compress_hot`, `apply_tier_policy`, `apply_adaptive`, configured/forced rollover on mark): `tiers_only_changed` — view, depth, snapshots, canonical history, store and policy unchanged | `try_restore`/`restore`: view `= S[k]`, depth `= k`, snapshots `= S[..k]`; rejection unchanged; `pending_restore_indices`: `Some` iff restorable and the set is exactly the indices captured by frames in `[k, depth)`; `sequence_witness_checked` composes mark/write/restore/rollover end to end from these contracts alone | 5 byte reporters/diagnostics (`log_heap_bytes`, `log_shrink_capacity`, `diff_log_len`, `tracking_bytes`, `total_bytes`) |
 | `AppendOnlyVec` | push appends exactly; mark exact | `try_restore`: view `= S[k]`, depth `= k`, prefix | `shrink_aov_capacity` (capacity only) |
 | `SpMap` | insert appends to the log and records the key's previous occurrence; index and `prev` column agree with the log | `try_restore`/`restore`: log `= S[k]`, depth `= k`, prefix; index unwound over the discarded suffix (rebuilt from the survivors only when the suffix outnumbers them); rejection unchanged | `clone_key_exact` (key-model projection) |
-| `SparseSet` | insert/remove exact over dense/sparse/indices | `restore`: dense, sparse and indices views `= S[k]`, archives truncated; requires the archived snapshot well-formed (component-boundary precondition, established by `EClasses`) | `values_equal` (unconstrained bool) |
-| `CircularList` | splice/walk exact over entries and ring model; splice requires distinct rings (component-boundary precondition) | `try_restore`: entries and model views `= S[k]`, both archives truncated; `Err` leaves the state unchanged | `debug_check_different_rings` (debug diagnostic) |
+| `SparseSet` | insert/remove exact over dense/sparse/indices; `wf` archives every snapshot triple as a valid sparse-set state | `restore` (total: refuses an invalid token or disagreeing frame indices): dense, sparse and indices views `= S[k]`, archives truncated | `values_equal` (unconstrained bool) |
+| `CircularList` | splice/walk exact over entries and ring model; the public `splice`/`splice_absorb` refuse a same-ring pair after a verified walk of the absorbed ring (the crate-private cores keep the distinct-rings precondition, a theorem in `EClasses`) | `try_restore`: entries and model views `= S[k]`, both archives truncated; `Err` leaves the state unchanged | — |
 | `ListArena` | append/iterate exact over heads, nodes and model | `try_restore`: heads, nodes and model views `= S[k]` at one shared frame, three archive prefixes; `Err` unchanged | `white_box_head` (test accessor), `tracking_bytes`, `total_bytes` |
 | `UnionFind` | union/find exact over roots, parent and rank | `try_restore`: roots, parent and rank views `= S[k]`, roots and parent archive prefixes, parent and rank marks agree; `Err` unchanged | — |
 | `EClasses` | merge/find exact over roots; `min_width` preserved | `restore`/`try_restore` under full validity (which `try_restore` checks): roots, size, depth, roots archive prefix, and every component column and archive prefix (entries model and nodes, reprs dense/sparse/indices, uses model, minimum pool); `Err` unchanged | — |
@@ -62,13 +63,13 @@ deduplication and migration primitives", "Hot-to-Cold migration primitives",
 ## 3. Trust inventory (final source)
 
 Re-derived from `grep '#[verifier::external_body]'` on the final source:
-**50 default-build markers + 5 gated by `literal-types`** (the session started
-at 74 + 5), **4 default axioms** (`axiom_index_hasher_builds_valid_hashers`;
+**49 default-build markers + 5 gated by `literal-types`** (the session started
+at 74 + 5; the debug-only ring walk left with the total public API), **4 default axioms** (`axiom_index_hasher_builds_valid_hashers`;
 `obeys_key_model` for `DenseId31`, `DenseId63`, `DenseUsize`, plus one generated
 per `define_id*!` id type) **+ 5 gated axioms**, no `admit`/`assume` in project
 sources (CI-checked). Every default marker, by ledger group:
 
-| Group | Items (50) |
+| Group | Items (49) |
 |---|---|
 | A — opaque identity (3) | `struct ContainerId`, `ContainerId::new`, `ContainerId::eq` |
 | B — unmodeled std behaviour: byte reporters, no `ensures` (12) | `Vec::{tracking_bytes,total_bytes,log_heap_bytes,diff_log_len}`, `ListArena::{tracking_bytes,total_bytes}`, `heap_bytes` in `CaptureBits`, `CompressedStack`, `diff_compress`, `GenStamps`, `InlineStore`, `ParallelStore` |
@@ -77,7 +78,7 @@ sources (CI-checked). Every default marker, by ledger group:
 | B — std slice sort contract (1) | `std_sort::sort_pairs_by_index` (permutation in non-decreasing key order, nothing else touched) |
 | C — runtime guards (2) | `guard::check_precondition`, `guard::refuse` |
 | D — key model and hasher registrations (3) | `map::clone_key_exact`, `ExIndexHasher`, `ExFoldHasher` |
-| E — glue (3) | `sparse_set::values_equal` (unconstrained bool), `circular_list::debug_check_different_rings`, `list::white_box_head` |
+| E — glue (2) | `sparse_set::values_equal` (unconstrained bool), `list::white_box_head` |
 | F — diagnostics, levers, parallel dispatch (17) | `compression_stats` ×10 (`frame_stats`, `observe`, `observe_frame`, `shadow_enabled`, `shadow_emit`, `shadow_log_copy`, `shadow_log_full`, `run_count_writeorder`, `run_count_sorted`, `mode_name`), `compression_config::{env_compress_default,env_diff_store_kind}`, `diff_compress::choose_mode`, `sync_group::{mark_parallel,restore_parallel}` (rayon fan-out over the members' checked contracts, ledger 3.6d), `sync_group::checksum`, `parallel::par_sum_canary` |
 
 No default marker carries a postcondition about container contents; the only
@@ -101,19 +102,28 @@ nothing was served from cache; logs `/tmp/sp-d21-final-*.log`:
 | Release differential policy matrix | `PROPTEST_CASES=1024 cargo test -p containers-conformance --release --test three_tier_policy_matrix` | 4 passed |
 | Consumers (e-graph, SAT core) | `cargo test -p semi-persistent-satcore -p semi-persistent-egraph` | 1267 passed, 0 failed, 45 ignored |
 | Canary | `cargo test -p containers-verus-canary --features compat-all` | 2 passed |
-| Partial-API audit | `tools/check_partial_api.py` | 73 partial / 33 allowed / 40 unlisted / 0 unsafe — pre-existing, open (§5) |
+| Partial-API audit | `tools/check_partial_api.py` | 0 partial / 0 allowed / 0 unlisted / 0 unsafe — closed by extended goal 5 (§5); 73/33/40/0 at the final checkpoint |
 | Formatting, whitespace | `cargo fmt --all -- --check`, `git diff --check` | clean |
 | Legacy oracle unchanged | `git diff --quiet d191c4a -- containers` | unchanged |
-| Trust count (CI method) | grep of `#[verifier::external_body]` | 50 default + 5 gated (`EXPECTED_DEFAULT=50`) |
+| Trust count (CI method) | grep of `#[verifier::external_body]` | 49 default + 5 gated (`EXPECTED_DEFAULT=49`; 50 until the debug-only ring walk left with extended goal 5) |
 
 The 10 ignored feature tests and 45 ignored consumer tests are the suites'
 pre-existing ignores (feature-gated or long-running), unchanged by this branch.
 
-## 5. Partial-API discrepancy (open final-audit item)
+## 5. Partial-API discrepancy (closed by extended goal 5)
 
-`tools/check_partial_api.py` reports 73 public executable functions with a
-Verus `requires`, 33 allowlisted and 40 not, 0 public `unsafe`. The 40 were
-present before this proof drive and are unchanged by it. Exposure review:
+**Closed on 2026-09-17** (the total-API commit): `tools/check_partial_api.py`
+reports **0** public executable functions with a `requires` (beyond the
+receiver's own `wf`-class predicate) and the allowlist is empty; the CI
+partial-API check passes. How each class was handled is recorded in
+`doc/future/total-api-plan.md` ("Status") and in the progress document
+("Total public API"). The paragraphs below are the exposure review as it
+stood at the final checkpoint, kept as the record of what was open.
+
+At the final checkpoint the checker reported 73 public executable functions
+with a Verus `requires`, 33 allowlisted and 40 not, 0 public `unsafe`. The
+40 were present before this proof drive and were unchanged by it. Exposure
+review at that time:
 
 - All 40 live in modules declared `pub mod` in `lib.rs` (`cold_stack`,
   `compressed_stack`, `diff_compress`, `diff_store`, `gen_stamps`,
@@ -137,9 +147,13 @@ present before this proof drive and are unchanged by it. Exposure review:
   classes only if their modules stop being `pub mod` or their receivers stop
   being constructible externally, neither of which is true today.
 
-The goal document forbids bulk-allowlisting. No entries were added; the item
-remains open and CI's partial-API check does not pass on this branch, exactly
-as it did not at `d191c4a`.
+The goal document forbids bulk-allowlisting. No entries were ever added; the
+item stayed open (CI's partial-API check failing, exactly as at `d191c4a`)
+until extended goal 5 drained every entry through contract or exposure
+changes — `History::{mark, restore_to}` and the other production-reachable
+functions became total with refuse-guards, the `SyncMember` and store
+protocol methods moved behind crate-private surfaces, and the component
+internals took guards or conditional contracts.
 
 ## 6. Performance gate
 

@@ -189,6 +189,15 @@ where
         &&& self.dense.wf()
         &&& self.sparse.wf()
         &&& self.indices.wf()
+        // Archive (total `restore`): the three snapshot stacks move in lockstep
+        // and every archived triple is itself a valid sparse-set state, so a
+        // restore needs only per-column token validity plus equal frame
+        // indices — both runtime-checkable — to land in a `wf` state.
+        &&& self.sparse.snapshots_view().len() == self.dense.snapshots_view().len()
+        &&& self.indices.snapshots_view().len() == self.dense.snapshots_view().len()
+        &&& (forall|k: int| 0 <= k < self.dense.snapshots_view().len() ==>
+                sparse_set_snap_wf(#[trigger] self.dense.snapshots_view()[k],
+                    self.sparse.snapshots_view()[k], self.indices.snapshots_view()[k]))
         &&& indices.len() == cap
         &&& n <= cap
         // (1a) indices in range [0, cap)
@@ -978,16 +987,49 @@ where
         let dense = self.dense.mark(shrink);
         let sparse = self.sparse.mark(shrink);
         let indices = self.indices.mark(shrink);
+        proof { self.lemma_archive_after_push(old(self)); }
         SparseSetToken { dense, sparse, indices }
     }
 
+    /// Archive step shared by `mark` and `push_frames`: pushing the live triple
+    /// onto three lockstep stacks keeps every archived triple `snap_wf` (the
+    /// old entries are untouched, the new one is the old live state, which is
+    /// `snap_wf` by the old `wf`).
+    proof fn lemma_archive_after_push(&self, pre: &Self)
+        requires
+            pre.wf(),
+            self.dense.snapshots_view() == pre.dense.snapshots_view().push(pre.dense_view()),
+            self.sparse.snapshots_view() == pre.sparse.snapshots_view().push(pre.sparse_view()),
+            self.indices.snapshots_view() == pre.indices.snapshots_view().push(pre.indices_view()),
+        ensures
+            self.sparse.snapshots_view().len() == self.dense.snapshots_view().len(),
+            self.indices.snapshots_view().len() == self.dense.snapshots_view().len(),
+            forall|k: int| 0 <= k < self.dense.snapshots_view().len() ==>
+                sparse_set_snap_wf(#[trigger] self.dense.snapshots_view()[k],
+                    self.sparse.snapshots_view()[k], self.indices.snapshots_view()[k]),
+    {
+        let od = pre.dense.snapshots_view();
+        assert forall|k: int| 0 <= k < self.dense.snapshots_view().len() implies
+            sparse_set_snap_wf(#[trigger] self.dense.snapshots_view()[k],
+                self.sparse.snapshots_view()[k], self.indices.snapshots_view()[k]) by {
+            if k < od.len() {
+                assert(self.dense.snapshots_view()[k] == od[k]);
+                assert(self.sparse.snapshots_view()[k] == pre.sparse.snapshots_view()[k]);
+                assert(self.indices.snapshots_view()[k] == pre.indices.snapshots_view()[k]);
+            } else {
+                assert(self.dense.snapshots_view()[k] == pre.dense_view());
+                assert(self.sparse.snapshots_view()[k] == pre.sparse_view());
+                assert(self.indices.snapshots_view()[k] == pre.indices_view());
+                assert(sparse_set_snap_wf(pre.dense_view(), pre.sparse_view(), pre.indices_view()));
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
-    // Total-operation shell. `try_restore` is deliberately
-    // absent: `restore` carries a snapshot-wellformedness precondition that
-    // `is_valid_token` does not answer (it quantifies over archived snapshot
-    // contents). The structural fix is archiving snapshot-wf in `wf` the way
-    // `ListArena` archives `arena_model_wf`; without that archive a total
-    // restore would need an O(cap) runtime permutation check.
+    // Total-operation shell. `restore` itself is total (panic guard, below):
+    // the archive clauses of `wf` guarantee that the triple a valid token names
+    // is a valid sparse-set state, so the guard checks only what
+    // `is_valid_token` answers plus the agreement of the three frame indices.
     // ------------------------------------------------------------------
 
     /// Exec counterpart of `add`'s three-column capacity precondition.
@@ -1099,17 +1141,14 @@ where
             && self.indices.is_valid_token(&token.indices)
     }
 
+    /// Total restore (panic guard). Refuses a token any of whose three
+    /// components is invalid, foreign, stale, consumed or abandoned, or whose
+    /// frame indices disagree; the archive clauses of `wf` then make the
+    /// restored triple a valid sparse-set state without any O(cap) runtime
+    /// permutation check.
     pub fn restore(&mut self, token: SparseSetToken)
         where T: core::default::Default, Idx: core::default::Default
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).restore_pre_spec(token),
-            // the snapshots being restored form a valid sparse-set state
-            sparse_set_snap_wf(
-                old(self).snap_at(token).0,
-                old(self).snap_at(token).1,
-                old(self).snap_at(token).2),
+        requires old(self).wf(),
         ensures
             final(self).wf(),
             final(self).dense_view() == old(self).snap_at(token).0,
@@ -1125,11 +1164,26 @@ where
         // Prevalidate all constituent tokens before restoring any of them:
         // a partially restored sparse set
         // (dense rolled back, sparse/indices not) violates the permutation
-        // invariant unrecoverably. Provably-true no-op for verified callers.
-        crate::guard::check_precondition(
-            self.is_valid_token(&token),
-            "SparseSet::restore: invalid, foreign, stale, consumed, or abandoned token component",
-        );
+        // invariant unrecoverably. Both guards are the documented traps.
+        if !self.is_valid_token(&token) {
+            crate::guard::refuse(
+                "SparseSet::restore: invalid, foreign, stale, consumed, or abandoned token component",
+            );
+        }
+        if !(token.dense.frame_idx == token.sparse.frame_idx
+            && token.dense.frame_idx == token.indices.frame_idx)
+        {
+            crate::guard::refuse("SparseSet::restore: token frame indices disagree across columns");
+        }
+        proof {
+            // depth == archived snapshot count on every column; the archive
+            // clause of `wf` at the token's frame is the restored triple.
+            self.dense.lemma_partition_counts();
+            self.sparse.lemma_partition_counts();
+            self.indices.lemma_partition_counts();
+            assert(sparse_set_snap_wf(
+                self.snap_at(token).0, self.snap_at(token).1, self.snap_at(token).2));
+        }
         self.dense.restore(token.dense);
         self.sparse.restore(token.sparse);
         self.indices.restore(token.indices);
@@ -1170,6 +1224,7 @@ where
         self.dense.push_frame(shrink);
         self.sparse.push_frame(shrink);
         self.indices.push_frame(shrink);
+        proof { self.lemma_archive_after_push(old(self)); }
     }
 
     #[allow(dead_code)]

@@ -585,7 +585,7 @@ pub proof fn lemma_value_of_view(r: u32)
 /// composes through the store's `T: Tagged, I: IndexLike` bounds with one type
 /// filling both, exactly as production's `define_id31!` ids do.
 pub fn lemma_dense_id31_indexes_and_stores_itself() -> (s: InlineStore<DenseId31, DenseId31>)
-    ensures DiffStore::<DenseId31, DenseId31, true>::wf(&s),
+    ensures crate::diff_store_ops::DiffStoreOps::<DenseId31, DenseId31, true>::wf(&s),
 {
     InlineStore::<DenseId31, DenseId31>::new()
 }

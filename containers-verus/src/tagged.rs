@@ -82,29 +82,27 @@ pub trait Tagged: Sized + Copy + core::default::Default {
 
     /// Decode a `Repr` to its clean value, stripping the tag.
     fn from_repr(r: &Self::Repr) -> (v: Self)
-        requires Self::repr_wf(*r),
-        ensures v == Self::value_of(*r);
+        ensures Self::repr_wf(*r) ==> v == Self::value_of(*r);
 
     /// Read the tag bit.
     fn tag(r: &Self::Repr) -> (b: bool)
-        requires Self::repr_wf(*r),
-        ensures b == Self::tag_of(*r);
+        ensures Self::repr_wf(*r) ==> b == Self::tag_of(*r);
 
     /// Set the tag bit. Value, well-formedness preserved.
     fn set_tag(r: &mut Self::Repr)
-        requires Self::repr_wf(*old(r)),
-        ensures
-            Self::repr_wf(*final(r)),
-            Self::value_of(*final(r)) == Self::value_of(*old(r)),
-            Self::tag_of(*final(r)) == true;
+        ensures Self::repr_wf(*old(r)) ==> {
+            &&& Self::repr_wf(*final(r))
+            &&& Self::value_of(*final(r)) == Self::value_of(*old(r))
+            &&& Self::tag_of(*final(r)) == true
+        };
 
     /// Clear the tag bit. Value, well-formedness preserved.
     fn clear_tag(r: &mut Self::Repr)
-        requires Self::repr_wf(*old(r)),
-        ensures
-            Self::repr_wf(*final(r)),
-            Self::value_of(*final(r)) == Self::value_of(*old(r)),
-            Self::tag_of(*final(r)) == false;
+        ensures Self::repr_wf(*old(r)) ==> {
+            &&& Self::repr_wf(*final(r))
+            &&& Self::value_of(*final(r)) == Self::value_of(*old(r))
+            &&& Self::tag_of(*final(r)) == false
+        };
 }
 
 // ---------------------------------------------------------------------------

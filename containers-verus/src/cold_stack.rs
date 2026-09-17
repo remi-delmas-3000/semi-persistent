@@ -574,7 +574,7 @@ impl<T: Copy, I: IndexLike> ColdStack<T, I> {
     pub fn restore_frame_into(&self, f: usize, target: &mut Vec<T>, scratch: &mut Vec<T>)
         requires
             self.wf(),
-            f < self.frames@.len(),
+
         ensures
             final(target)@.len() == old(target)@.len(),
             self.frames@[f as int].mode is Plain ==> final(target)@
@@ -598,6 +598,10 @@ impl<T: Copy, I: IndexLike> ColdStack<T, I> {
                     f as int,
                     self.frames@[f as int].druns_len.as_nat() as int),
     {
+        // Total: a frame index past the stack is the documented trap.
+        if !(f < self.frames.len()) {
+            crate::guard::refuse("ColdStack::restore_frame_into: frame index out of range");
+        }
         let h = &self.frames[f];
         proof { assert(self.hdr_wf(f as int)); }
         match h.mode {
@@ -973,13 +977,25 @@ impl<T: Copy, I: IndexLike> ColdStack<T, I> {
     pub fn seal_plain(&mut self, stratum: &[(T, I)])
         requires
             old(self).wf(),
-            old(self).pairs@.len() + stratum@.len() < I::max_nat(),
-            old(self).starts@.len() < I::max_nat(),
-            old(self).frames@.len() < usize::MAX,
+
         ensures
             final(self).wf(),
             final(self).frames@.len() == old(self).frames@.len() + 1,
     {
+        // Total: the capacity bounds are checked, not assumed (each refusal
+        // is the documented trap).
+        if !(self.frames.len() < usize::MAX) {
+            crate::guard::refuse("ColdStack::seal_plain: frame stack at usize::MAX");
+        }
+        if !(<I as crate::index_like::IndexLike>::try_from_usize(self.starts.len()).is_some()) {
+            crate::guard::refuse("ColdStack::seal_plain: run table at the index word");
+        }
+        if !(stratum.len() <= usize::MAX - self.pairs.len()) {
+            crate::guard::refuse("ColdStack::seal_plain: pair pool would overflow usize");
+        }
+        if !(<I as crate::index_like::IndexLike>::try_from_usize(self.pairs.len() + stratum.len()).is_some()) {
+            crate::guard::refuse("ColdStack::seal_plain: pair pool at the index word");
+        }
         let off = self.pairs.len();
         let slen = stratum.len();
         // Append per element: verified, and off the hot path (sealing is the
@@ -1099,19 +1115,50 @@ impl<T: Copy, I: IndexLike> ColdStack<T, I> {
     pub fn seal_runs(&mut self, stratum: &Vec<(T, I)>)
         requires
             old(self).wf(),
-            stratum@.len() > 0,
-            crate::diff_compress::unique_idx(stratum@),
-            old(self).values@.len() + stratum@.len() < I::max_nat(),
-            old(self).starts@.len() + stratum@.len() + 1 < I::max_nat(),
-            old(self).frames@.len() < usize::MAX,
-            // Every landing index is representable one past itself (run
-            // coalescing compares idx + 1).
-            forall|k: int| 0 <= k < stratum@.len()
-                ==> (#[trigger] stratum@[k]).1.as_nat() + 1 < I::max_nat(),
+
         ensures
             final(self).wf(),
             final(self).frames@.len() == old(self).frames@.len() + 1,
     {
+        // Total: every bound the sealing needs is checked here, not assumed
+        // (each refusal is the documented trap); the uniqueness scan is one
+        // sort of the stratum, which the sealing performs anyway.
+        if stratum.len() == 0 {
+            crate::guard::refuse("ColdStack::seal_runs: empty stratum");
+        }
+        if !crate::diff_compress::is_unique_idx(stratum) {
+            crate::guard::refuse("ColdStack::seal_runs: stratum has duplicate indices");
+        }
+        if !(self.frames.len() < usize::MAX) {
+            crate::guard::refuse("ColdStack::seal_runs: frame stack at usize::MAX");
+        }
+        if !(stratum.len() <= usize::MAX - self.values.len()) {
+            crate::guard::refuse("ColdStack::seal_runs: value pool would overflow usize");
+        }
+        if !(<I as crate::index_like::IndexLike>::try_from_usize(self.values.len() + stratum.len()).is_some()) {
+            crate::guard::refuse("ColdStack::seal_runs: value pool at the index word");
+        }
+        if !(stratum.len() < usize::MAX - self.starts.len()) {
+            crate::guard::refuse("ColdStack::seal_runs: run table would overflow usize");
+        }
+        if !(<I as crate::index_like::IndexLike>::try_from_usize(self.starts.len() + stratum.len() + 1).is_some()) {
+            crate::guard::refuse("ColdStack::seal_runs: run table at the index word");
+        }
+        let slen = stratum.len();
+        let mut k: usize = 0;
+        while k < slen
+            invariant
+                k <= slen,
+                slen == stratum@.len(),
+                forall|j: int| 0 <= j < k ==> (#[trigger] stratum@[j]).1.as_nat() + 1 < I::max_nat(),
+            decreases slen - k,
+        {
+            let ix = stratum[k].1.as_usize();
+            if !(ix < usize::MAX) || !(<I as crate::index_like::IndexLike>::try_from_usize(ix + 1).is_some()) {
+                crate::guard::refuse("ColdStack::seal_runs: index plus one leaves the index word");
+            }
+            k += 1;
+        }
         let sorted = sort_frame_by_index(stratum);
         let n = sorted.len();
         let ghost pre = *self;
@@ -1566,11 +1613,15 @@ impl<T: Copy, I: IndexLike> ColdStack<T, I> {
     pub fn pop_frame(&mut self)
         requires
             old(self).wf(),
-            old(self).frames@.len() > 0,
+
         ensures
             final(self).wf(),
             final(self).frames@.len() == old(self).frames@.len() - 1,
     {
+        // Total: popping an empty stack is the documented trap.
+        if self.frames.len() == 0 {
+            crate::guard::refuse("ColdStack::pop_frame: empty stack");
+        }
         let ghost pre = *self;
         let h = match self.frames.pop() {
             Some(h) => h,
@@ -1712,20 +1763,62 @@ impl<T: IndexLike, I: IndexLike> ColdStack<T, I> {
     pub fn seal_runs_dict(&mut self, stratum: &Vec<(T, I)>)
         requires
             old(self).wf(),
-            stratum@.len() > 0,
-            crate::diff_compress::unique_idx(stratum@),
-            old(self).codes.view().len() + stratum@.len() < I::max_nat(),
-            old(self).dicts@.len() + stratum@.len() < I::max_nat(),
-            old(self).druns@.len() + stratum@.len() < I::max_nat(),
-            old(self).starts@.len() < I::max_nat(),
-            old(self).frames@.len() < usize::MAX,
-            stratum@.len() < I::max_nat(),
-            forall|k: int| 0 <= k < stratum@.len()
-                ==> (#[trigger] stratum@[k]).1.as_nat() + 1 < I::max_nat(),
+
         ensures
             final(self).wf(),
             final(self).frames@.len() == old(self).frames@.len() + 1,
     {
+        // Total: every bound the sealing needs is checked here, not assumed
+        // (each refusal is the documented trap); the uniqueness scan is one
+        // sort of the stratum, which the sealing performs anyway.
+        if stratum.len() == 0 {
+            crate::guard::refuse("ColdStack::seal_runs_dict: empty stratum");
+        }
+        if !crate::diff_compress::is_unique_idx(stratum) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: stratum has duplicate indices");
+        }
+        if !(self.frames.len() < usize::MAX) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: frame stack at usize::MAX");
+        }
+        if !(stratum.len() <= usize::MAX - self.codes.len()) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: code column would overflow usize");
+        }
+        if !(<I as crate::index_like::IndexLike>::try_from_usize(self.codes.len() + stratum.len()).is_some()) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: code column at the index word");
+        }
+        if !(stratum.len() <= usize::MAX - self.dicts.len()) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: dictionary pool would overflow usize");
+        }
+        if !(<I as crate::index_like::IndexLike>::try_from_usize(self.dicts.len() + stratum.len()).is_some()) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: dictionary pool at the index word");
+        }
+        if !(stratum.len() <= usize::MAX - self.druns.len()) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: dictionary runs would overflow usize");
+        }
+        if !(<I as crate::index_like::IndexLike>::try_from_usize(self.druns.len() + stratum.len()).is_some()) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: dictionary runs at the index word");
+        }
+        if !(<I as crate::index_like::IndexLike>::try_from_usize(self.starts.len()).is_some()) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: run table at the index word");
+        }
+        if !(<I as crate::index_like::IndexLike>::try_from_usize(stratum.len()).is_some()) {
+            crate::guard::refuse("ColdStack::seal_runs_dict: stratum at the index word");
+        }
+        let slen = stratum.len();
+        let mut k: usize = 0;
+        while k < slen
+            invariant
+                k <= slen,
+                slen == stratum@.len(),
+                forall|j: int| 0 <= j < k ==> (#[trigger] stratum@[j]).1.as_nat() + 1 < I::max_nat(),
+            decreases slen - k,
+        {
+            let ix = stratum[k].1.as_usize();
+            if !(ix < usize::MAX) || !(<I as crate::index_like::IndexLike>::try_from_usize(ix + 1).is_some()) {
+                crate::guard::refuse("ColdStack::seal_runs_dict: index plus one leaves the index word");
+            }
+            k += 1;
+        }
         let sorted = sort_frame_by_index(stratum);
         let n = sorted.len();
         // Value column of the sorted stratum, then dictionary + codes.

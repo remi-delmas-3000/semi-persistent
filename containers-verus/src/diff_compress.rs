@@ -93,15 +93,18 @@ impl Codes {
     pub fn get(&self, i: usize) -> (c: usize)
         requires
             self.wf(),
-            i < self.view().len(),
-        ensures c as nat == self.view()[i as int],
+        ensures i < self.view().len() ==> c as nat == self.view()[i as int],
     {
+        // Total: an out-of-range code index is the documented trap.
+        if !(i < self.len()) {
+            crate::guard::refuse("Codes::get: index out of bounds");
+        }
         match self {
             Codes::U8(v) => v[i] as usize,
             Codes::U16(v) => v[i] as usize,
             Codes::U32(v) => v[i] as usize,
             Codes::Usize(v) => v[i],
-            Codes::Packed { words, bits, .. } => packed_get(words, *bits, i),
+            Codes::Packed { words, bits, .. } => packed_get_core(words, *bits, i),
         }
     }
 
@@ -121,7 +124,7 @@ impl Codes {
     }
 
     /// Append one code to a byte-width pool.
-    pub fn push_code(&mut self, c: usize)
+    pub(crate) fn push_code(&mut self, c: usize)
         requires
             !((*old(self)) is Packed),
             (c as nat) < old(self).width_cap(),
@@ -143,7 +146,7 @@ impl Codes {
     }
 
     /// Truncate a byte-width pool to its first `n` codes.
-    pub fn truncate_codes(&mut self, n: usize)
+    pub(crate) fn truncate_codes(&mut self, n: usize)
         requires
             !((*old(self)) is Packed),
             n <= old(self).view().len(),
@@ -169,7 +172,7 @@ impl Codes {
     /// rewrite is a whole-pool copy, but the width only ever steps U8 -> U16
     /// -> U32 -> Usize, so at most three rewrites happen over the pool's
     /// lifetime - amortized O(1) per code.
-    pub fn widen_for(&mut self, dict_len: usize)
+    pub(crate) fn widen_for(&mut self, dict_len: usize)
         requires !((*old(self)) is Packed),
         ensures
             final(self).view() =~= old(self).view(),
@@ -288,12 +291,27 @@ impl Codes {
     /// Build the narrowest-width code column from `usize` codes, given the
     /// dictionary size they index into. `view()` reproduces the codes exactly.
     pub fn from_usize(codes: &Vec<usize>, dict_len: usize) -> (r: Codes)
-        requires forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < dict_len,
         ensures
             r.wf(),
             r.view().len() == codes@.len(),
             forall|t: int| 0 <= t < codes@.len() ==> #[trigger] r.view()[t] == codes@[t] as nat,
     {
+        // Total: every code must index the dictionary; a stray code is the
+        // documented trap (one pass, the column is built in another anyway).
+        let n = codes.len();
+        let mut t: usize = 0;
+        while t < n
+            invariant
+                t <= n,
+                n == codes@.len(),
+                forall|u: int| 0 <= u < t ==> #[trigger] codes@[u] < dict_len,
+            decreases n - t,
+        {
+            if !(codes[t] < dict_len) {
+                crate::guard::refuse("Codes::from_usize: code outside the dictionary");
+            }
+            t += 1;
+        }
         // Sub-byte bit-packing for small dictionaries: 1/2/4 bits per code covers
         // D <= 2/4/16, the value-major win below one byte per code. Each code fits
         // in `bits` because `codes[t] < dict_len <= 2^bits`.
@@ -301,17 +319,17 @@ impl Codes {
             assert(forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < (1usize << 1u8)) by {
                 assert((1usize << 1u8) == 2) by (bit_vector);
             }
-            pack_codes(codes, 1)
+            pack_codes_core(codes, 1)
         } else if dict_len <= 4 {
             assert(forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < (1usize << 2u8)) by {
                 assert((1usize << 2u8) == 4) by (bit_vector);
             }
-            pack_codes(codes, 2)
+            pack_codes_core(codes, 2)
         } else if dict_len <= 16 {
             assert(forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < (1usize << 4u8)) by {
                 assert((1usize << 4u8) == 16) by (bit_vector);
             }
-            pack_codes(codes, 4)
+            pack_codes_core(codes, 4)
         } else if dict_len <= 256 {
             let mut v: Vec<u8> = Vec::new();
             let mut t: usize = 0;
@@ -417,13 +435,42 @@ proof fn lemma_pack_field_other(w: u64, code: u64, bits: u64, shift: u64, shift2
 {
 }
 
+/// Total form of `pack_codes_core`: the width must be 1, 2 or 4 bits and
+/// every code must fit it; a violation is the documented trap (one pass).
+pub fn pack_codes(codes: &Vec<usize>, bits: u8) -> (r: Codes)
+    ensures
+        r.wf(),
+        r.view().len() == codes@.len(),
+        forall|t: int| 0 <= t < codes@.len() ==> #[trigger] r.view()[t] == codes@[t] as nat,
+{
+    if !(bits == 1 || bits == 2 || bits == 4) {
+        crate::guard::refuse("pack_codes: width must be 1, 2 or 4 bits");
+    }
+    let n = codes.len();
+    let mut t: usize = 0;
+    while t < n
+        invariant
+            t <= n,
+            n == codes@.len(),
+            bits == 1 || bits == 2 || bits == 4,
+            forall|u: int| 0 <= u < t ==> #[trigger] codes@[u] < (1usize << bits),
+        decreases n - t,
+    {
+        if !(codes[t] < (1usize << bits)) {
+            crate::guard::refuse("pack_codes: code does not fit the width");
+        }
+        t += 1;
+    }
+    pack_codes_core(codes, bits)
+}
+
 /// Bit-pack `codes` at `bits` bits each (1/2/4), `64/bits` per `u64` word with no
 /// cross-word straddle. VERIFIED: the loop invariant carries "every packed field
 /// below `t` reads back its code, every field at or above `t` is still zero",
 /// maintained by the two field lemmas above (aligned fields of one word are
 /// disjoint intervals). Discharged from the trust ledger 2026-09; the
 /// `packed_codes_roundtrip` proptest stays as a belt.
-pub fn pack_codes(codes: &Vec<usize>, bits: u8) -> (r: Codes)
+pub(crate) fn pack_codes_core(codes: &Vec<usize>, bits: u8) -> (r: Codes)
     requires
         bits == 1 || bits == 2 || bits == 4,
         forall|t: int| 0 <= t < codes@.len() ==> #[trigger] codes@[t] < (1usize << bits),
@@ -584,11 +631,32 @@ pub fn pack_codes(codes: &Vec<usize>, bits: u8) -> (r: Codes)
     r
 }
 
+/// Total form of `packed_get_core`: the width and the position are checked;
+/// a violation is the documented trap.
+pub fn packed_get(words: &Vec<u64>, bits: u8, i: usize) -> (c: usize)
+    ensures
+        (bits == 1 || bits == 2 || bits == 4) && (i as nat) < words@.len() * (64nat / (bits as nat))
+            ==> c as nat == packed_code_at(words@, bits as nat, i as int),
+{
+    if !(bits == 1 || bits == 2 || bits == 4) {
+        crate::guard::refuse("packed_get: width must be 1, 2 or 4 bits");
+    }
+    let per_word: usize = 64 / (bits as usize);
+    proof {
+        assert(per_word == 64 || per_word == 32 || per_word == 16);
+        assert(per_word as nat == 64nat / (bits as nat));
+    }
+    if !(words.len() <= usize::MAX / per_word) || !(i < words.len() * per_word) {
+        crate::guard::refuse("packed_get: position out of range");
+    }
+    packed_get_core(words, bits, i)
+}
+
 /// Extract the code at position `i` from bit-packed `words`. VERIFIED: the
 /// body is the spec expression (`packed_code_at`) rendered in exec operators;
 /// the coverage requires pins the word read in range and the shift below 64.
 /// Discharged from the trust ledger 2026-09.
-pub fn packed_get(words: &Vec<u64>, bits: u8, i: usize) -> (c: usize)
+pub(crate) fn packed_get_core(words: &Vec<u64>, bits: u8, i: usize) -> (c: usize)
     requires
         bits == 1 || bits == 2 || bits == 4,
         (i as nat) < words@.len() * (64nat / (bits as nat)),
@@ -669,9 +737,13 @@ impl<T: Copy> ValFrame<T> {
 
     /// The value at position `i` (dictionary lookup through the packed code).
     pub fn decode_at(&self, i: usize) -> (v: T)
-        requires self.wf(), i < self.decode().len(),
-        ensures v == self.decode()[i as int],
+        requires self.wf(),
+        ensures i < self.decode().len() ==> v == self.decode()[i as int],
     {
+        // Total: an out-of-range position is the documented trap.
+        if !(i < self.len()) {
+            crate::guard::refuse("ValFrame::decode_at: position out of range");
+        }
         let c = self.codes.get(i);
         self.dict[c]
     }
@@ -740,10 +812,14 @@ impl<T: Copy, I: IndexLike> DictFrame<T, I> {
 
     /// Random access to entry `i` (dictionary lookup through the packed code, plus the
     /// parallel index). The read a cold `Dict` frame needs for `DiffLog::index`.
-    pub fn decode_at(&self, i: usize) -> (r: (T, I))
-        requires self.wf(), i < self.decode().len(),
-        ensures r == self.decode()[i as int],
+    pub(crate) fn decode_at(&self, i: usize) -> (r: (T, I))
+        requires self.wf(),
+        ensures i < self.decode().len() ==> r == self.decode()[i as int],
     {
+        // Total: an out-of-range position is the documented trap.
+        if !(i < self.idxs.len()) {
+            crate::guard::refuse("DictFrame::decode_at: position out of range");
+        }
         let code = self.codes.get(i);
         (self.dict[code], self.idxs[i])
     }
@@ -1130,7 +1206,7 @@ impl<T: Copy> RunFrame<T> {
     /// 2026-09: formerly `external_body` with the `run_frame_roundtrip`
     /// proptest as its only check; the proptest stays as a belt.
     pub fn decode_exec_i<I: IndexFromNat>(&self) -> (r: Vec<(T, I)>)
-        requires self.wf(), self.fits::<I>(),
+        requires self.wf(),
         ensures r@ == self.decode_i::<I>(),
     {
         let ghost sn = self.starts_nat();
@@ -1142,7 +1218,6 @@ impl<T: Copy> RunFrame<T> {
         while r < nruns
             invariant
                 self.wf(),
-                self.fits::<I>(),
                 sn == self.starts_nat(),
                 vv == self.vals_seq(),
                 full == self.decode(),
@@ -1178,7 +1253,6 @@ impl<T: Copy> RunFrame<T> {
             while off < run.len()
                 invariant
                     self.wf(),
-                    self.fits::<I>(),
                     sn == self.starts_nat(),
                     vv == self.vals_seq(),
                     full == self.decode(),
@@ -1202,23 +1276,23 @@ impl<T: Copy> RunFrame<T> {
                             == (rest_head[o].0, I::from_nat(rest_head[o].1)),
                 decreases run@.len() - off,
             {
-                proof {
-                    // The global position of this entry inside the full decode
-                    // pins its index below max_nat (fits), which also bounds
-                    // the usize sum.
-                    let gpos = base.len() + off;
-                    assert(full[gpos as int] == rest_head[off as int]);
-                    assert(full[gpos as int].1 == (start + off) as nat);
-                    assert(((start + off) as nat) < I::max_nat());
-                    I::lemma_max_nat_fits_usize();
+                // Total: an index outside the index word is the documented
+                // trap; a frame whose indices fit never takes it, and the
+                // result then equals the index-mapped decode.
+                if !(off <= usize::MAX - start) {
+                    crate::guard::refuse("RunFrame::decode_exec_i: run index overflows usize");
                 }
                 let idx = match I::from_usize(start + off) {
                     Some(i) => i,
-                    None => {
-                        proof { assert(false); }
-                        crate::guard::refuse("run index fits I (established by fits)")
-                    }
+                    None => crate::guard::refuse(
+                        "RunFrame::decode_exec_i: run index leaves the index word"),
                 };
+                proof {
+                    // The global position of this entry inside the full decode.
+                    let gpos = base.len() + off;
+                    assert(full[gpos as int] == rest_head[off as int]);
+                    assert(full[gpos as int].1 == (start + off) as nat);
+                }
                 out.push((run[off], idx));
                 off += 1;
             }
@@ -1289,13 +1363,46 @@ pub proof fn lemma_mapped_push<T>(d: Seq<(T, usize)>, n: nat)
         =~= mapped_diffs(d, n) + seq![(d[n as int].0, d[n as int].1 as nat)]);
 }
 
+/// Total form of `compress_runs_core`: the strictly-increasing index
+/// precondition is checked in one pass; a violation is the documented trap.
+pub fn compress_runs<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFrame<T>)
+    ensures
+        r.wf(),
+        r.decode() == mapped_diffs(diffs@, diffs@.len()),
+{
+    let n = diffs.len();
+    let mut k: usize = 0;
+    while k < n
+        invariant
+            k <= n,
+            n == diffs@.len(),
+            forall|a: int, b: int| #![trigger diffs@[a].1, diffs@[b].1]
+                0 <= a < b < k ==> diffs@[a].1 < diffs@[b].1,
+        decreases n - k,
+    {
+        if k > 0 && !(diffs[k - 1].1 < diffs[k].1) {
+            crate::guard::refuse("compress_runs: indices are not strictly increasing");
+        }
+        proof {
+            assert forall|a: int, b: int| #![trigger diffs@[a].1, diffs@[b].1]
+                0 <= a < b < k + 1 implies diffs@[a].1 < diffs@[b].1 by {
+                if b == k && a < k - 1 {
+                    assert(diffs@[a].1 < diffs@[k - 1].1);
+                }
+            }
+        }
+        k += 1;
+    }
+    compress_runs_core(diffs)
+}
+
 /// Encode a finalized frame (sorted strictly ascending by index) as run-coalesced
-/// runs. The bijection: `decode(compress_runs(d)) == d` at the `nat` index level.
+/// runs. The bijection: `decode(compress_runs_core(d)) == d` at the `nat` index level.
 /// `rlimit` pinned: the run-coalescing invariant carries several `expand_*`
 /// sequence identities whose instantiation is near the default budget (z3-seed
 /// flaky otherwise).
 #[verifier::rlimit(800)]
-pub fn compress_runs<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFrame<T>)
+pub(crate) fn compress_runs_core<T: Copy>(diffs: &Vec<(T, usize)>) -> (r: RunFrame<T>)
     requires
         forall|a: int, b: int| #![trigger diffs@[a].1, diffs@[b].1]
             0 <= a < b < diffs@.len() ==> diffs@[a].1 < diffs@[b].1,
@@ -1919,6 +2026,22 @@ pub fn is_unique_idx<T: Copy, I: IndexLike>(diffs: &Vec<(T, I)>) -> (b: bool)
     true
 }
 
+/// Total form of `compress_runs_sorted_core`: index uniqueness is checked
+/// (one sort, which the sealing performs anyway); a violation is the
+/// documented trap.
+pub fn compress_runs_sorted<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) -> (r: RunFrame<T>)
+    ensures
+        r.wf(),
+        r.fits::<I>(),
+        r.decode_i::<I>().to_multiset() == diffs@.to_multiset(),
+        unique_idx(r.decode_i::<I>()),
+{
+    if !is_unique_idx(diffs) {
+        crate::guard::refuse("compress_runs_sorted: stratum has duplicate indices");
+    }
+    compress_runs_sorted_core(diffs)
+}
+
 /// Sort-first index-major encoding: sort the frame by index, then run-coalesce.
 /// Because sorting captures ALL index contiguity (not just capture-order runs),
 /// this is the strongest index-major compressor. It is a REORDERING codec, so it
@@ -1927,7 +2050,7 @@ pub fn is_unique_idx<T: Copy, I: IndexLike>(diffs: &Vec<(T, I)>) -> (b: bool)
 /// codec contract: `vec::lemma_multiset_eq_overlay` then gives identical restore.
 /// Requires the frame's indices be unique (first-write-wins), which is what makes
 /// the sort strictly ascending (so `compress_runs` applies) and the reorder sound.
-pub fn compress_runs_sorted<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) -> (r: RunFrame<T>)
+pub(crate) fn compress_runs_sorted_core<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) -> (r: RunFrame<T>)
     requires unique_idx(diffs@),
     ensures
         r.wf(),
@@ -1964,7 +2087,7 @@ pub fn compress_runs_sorted<T: IndexLike, I: IndexFromNat>(diffs: &Vec<(T, I)>) 
             assert(usized@[b].1 as nat == s@[b].1.as_nat());
         }
     }
-    let rf = compress_runs(&usized);
+    let rf = compress_runs_core(&usized);
     proof {
         // rf.decode() == mapped_diffs(usized@) == the (T, nat) projection of s;
         // decode_i maps each nat back via from_nat, recovering s exactly.
@@ -2192,7 +2315,7 @@ pub fn compress_frame<T: IndexLike, I: IndexFromNat>(
             // would let the permutation shadow a different write). Check at runtime;
             // fall back to the exact write-order encoder when it does not hold.
             if is_unique_idx(diffs) {
-                let rf = compress_runs_sorted(diffs);
+                let rf = compress_runs_sorted_core(diffs);
                 // FrameEncoding::Runs(rf).decode() == rf.decode_i(), multiset == diffs.
                 FrameEncoding::Runs(rf)
             } else {
@@ -2577,23 +2700,18 @@ impl<T: Copy, I: IndexLike> RunCol<T, I> {
         Seq::new(self.decode().len(), |j: int| self.decode()[j].1)
     }
 
-    /// Random access to just the index at position `i` (`decode_at(i).1`). The read
-    /// accessor an index-only cold frame needs.
-    pub fn idx_at(&self, i: usize) -> (r: I)
-        requires self.wf(), i < self.decode().len(),
-        ensures r == self.idx_seq()[i as int],
-    {
-        self.decode_at(i).1
-    }
-
     /// Random access to entry `i`, reconstructing its index from the run it lands in
     /// (`checked_add(run_start, offset)`). O(runs) walk to locate the run; the read
     /// accessor a cold `RunCol` frame needs so `DiffLog::index` can read a single
     /// entry without decoding the whole frame. `decode_at(i) == decode()[i]`.
     pub fn decode_at(&self, i: usize) -> (e: (T, I))
-        requires self.wf(), i < self.decode().len(),
-        ensures e == self.decode()[i as int],
+        requires self.wf(),
+        ensures i < self.decode().len() ==> e == self.decode()[i as int],
     {
+        // Total: an out-of-range position is the documented trap.
+        if !(i < self.len) {
+            crate::guard::refuse("RunCol::decode_at: position out of range");
+        }
         proof { reveal(run_seq); }
         // Walk runs, carrying the remaining within-frame offset `d == i - prefix_r`.
         let mut d: usize = i;
@@ -2649,14 +2767,32 @@ impl<T: Copy, I: IndexLike> RunCol<T, I> {
     /// run, dropping the index column. The minimal index-major encoder; multi-run
     /// coalescing generalizes it. `decode() == diffs@`.
     pub fn single_run(diffs: &Vec<(T, I)>) -> (r: RunCol<T, I>)
-        requires
-            diffs@.len() > 0,
-            forall|k: int| 0 <= k < diffs@.len()
-                ==> (#[trigger] diffs@[k]).1.as_nat() == diffs@[0].1.as_nat() + k,
         ensures
             r.wf(),
             r.decode() == diffs@,
     {
+        // Total: a stratum that is not one consecutive run is the documented
+        // trap (one pass).
+        if diffs.len() == 0 {
+            crate::guard::refuse("RunCol::single_run: empty stratum");
+        }
+        let start0 = diffs[0].1.as_usize();
+        let n = diffs.len();
+        let mut k: usize = 0;
+        while k < n
+            invariant
+                k <= n,
+                n == diffs@.len(),
+                start0 as nat == diffs@[0].1.as_nat(),
+                forall|j: int| 0 <= j < k
+                    ==> (#[trigger] diffs@[j]).1.as_nat() == diffs@[0].1.as_nat() + j,
+            decreases n - k,
+        {
+            if !(k <= usize::MAX - start0) || !(diffs[k].1.as_usize() == start0 + k) {
+                crate::guard::refuse("RunCol::single_run: stratum is not one consecutive run");
+            }
+            k += 1;
+        }
         proof { reveal(run_seq); }
         let start = diffs[0].1;
         let mut vals: Vec<T> = Vec::new();
@@ -2853,9 +2989,11 @@ pub trait CompressedFrame<T: Copy, I: IndexLike>: Sized {
         requires self.wf(),
         ensures n == self.decode().len();
 
+    /// Entry `i` of the write set. Total: every impl refuses (panics on) a
+    /// position past `entry_len()`, so the contract is conditional on range.
     fn decode_at(&self, i: usize) -> (e: (T, I))
-        requires self.wf(), i < self.decode().len(),
-        ensures e == self.decode()[i as int];
+        requires self.wf(),
+        ensures i < self.decode().len() ==> e == self.decode()[i as int];
 
     /// Write this frame's set back onto a live column (cold to live, no decode
     /// detour). Sliced or scattered is the impl's choice.
@@ -3143,9 +3281,13 @@ impl<T: IndexLike, I: IndexLike> DeltaFrame<T, I> {
     /// O(exceptions) scan; acceptable because the shape this frame targets has
     /// almost none.
     pub fn decode_at(&self, i: usize) -> (e: (T, I))
-        requires self.wf(), i < self.decode().len(),
-        ensures e == self.decode()[i as int],
+        requires self.wf(),
+        ensures i < self.decode().len() ==> e == self.decode()[i as int],
     {
+        // Total: an out-of-range position is the documented trap.
+        if !(i < self.idxs.len()) {
+            crate::guard::refuse("DeltaFrame::decode_at: position out of range");
+        }
         let idx = self.idxs[i];
         let m = self.exceptions.len();
         let mut k: usize = 0;
@@ -3381,9 +3523,13 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Col
 
     /// Random access to entry `i`, mode-agnostically (the read `DiffLog::index` needs).
     pub fn decode_at(&self, i: usize) -> (e: (T, I))
-        requires self.wf(), i < self.decode().len(),
-        ensures e == self.decode()[i as int],
+        requires self.wf(),
+        ensures i < self.decode().len() ==> e == self.decode()[i as int],
     {
+        // Total: an out-of-range position is the documented trap.
+        if !(i < self.entry_len()) {
+            crate::guard::refuse("ColdFrame::decode_at: position out of range");
+        }
         match self {
             ColdFrame::Plain(v) => v[i],
             ColdFrame::Dict(d) => d.decode_at(i),
@@ -3435,7 +3581,7 @@ impl<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>> Col
     /// the fallback whenever the codec does not pay. `byte_len` is
     /// diagnostic-only, so the CHOICE carries no proof weight: whichever
     /// frame wins, its own wf/decode contract is what restores.
-    pub fn select_layered(diffs: &Vec<(T, I)>, base: ColdFrame<T, I, VC>)
+    pub(crate) fn select_layered(diffs: &Vec<(T, I)>, base: ColdFrame<T, I, VC>)
         -> (r: ColdFrame<T, I, VC>)
         requires
             base.wf(),

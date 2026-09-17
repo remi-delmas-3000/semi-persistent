@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **50** (3 structs + 47 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
-| `literal-types` | **55** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **49** (3 structs + 46 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
+| `literal-types` | **54** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,8 +72,9 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current final checkpoint has 50 default-build markers:
-3 opaque structs and 47 functions. The permanent groups below remain the
+boundary. The current final checkpoint has 49 default-build markers:
+3 opaque structs and 46 functions (the debug-only ring walk left with the
+total public API on 2026-09-17; §4 row 15). The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -227,7 +228,8 @@ pushed) after every function it calls became checked. Its body is unchanged —
 the three guards, the checked `mark_with_options` and the checked
 `runtime_apply_adaptive` — and the contract now follows from theirs. One
 marker removed, no new trusted item: **50 default markers and 55 with
-`literal-types`**. Every remaining default marker is itemized in §4 or in the
+`literal-types`** at that checkpoint (49 and 54 since the total public API
+removed the debug-only ring walk). Every remaining default marker is itemized in §4 or in the
 frame-architecture ledger's diagnostics rows; none carries a semantic
 postcondition about container contents.
 
@@ -658,14 +660,13 @@ cost of closing the former SpMap performance exception. Unconditional (not
 `literal-types`-gated) because the
 index is core to `SpMap`.
 
-### Group E: unverified glue, 3 `external_body` items + ordinary-Rust shims
+### Group E: unverified glue, 2 `external_body` items + ordinary-Rust shims
 
 **`external_body` members:**
 
 | Item | Contract | Why trusted |
 |---|---|---|
 | `values_equal<T: PartialEq>` (sparse_set.rs) | NONE: result is an unconstrained bool, so nothing unsound is derivable; `remove_value` promises the structural change, not which value matched | avoids threading vstd's `obeys_eq_spec` plumbing; scan behavior pinned by ported production proptests |
-| `CircularList::debug_check_different_rings` (circular_list.rs) | `requires` the spec-side precondition; no ensures | debug-only runtime mirror of a spec-only precondition (O(ring) walk, gated to debug builds); the verified `splice` never depends on it |
 | `ListHead::white_box_head` (list.rs) | NONE: read-only test accessor with no `ensures` | unpacks the runtime niche for white-box differential tests; no proof depends on its result |
 
 **Ordinary-Rust items outside `verus!{}`** that delegate 1:1 to a verified
@@ -676,7 +677,6 @@ method with the converted argument":
 |---|---|---|
 | `Vec::get(impl Into<I>)` (vec.rs, bottom) | verified `get_index` | generic `Into` carries no Verus-visible input/output relation |
 | `Vec::set(impl Into<I>, T)` | verified `set_index` | same |
-| `guard::check_precondition_erased` | (panics) | callable from `external_body` diagnostics; no proof context |
 | std `Iterator` impls for `VecViewIter` / `ListIter` | verified inherent `next` | trait impls for unmodeled std traits (each is one delegation line) |
 | `white_box_*` read accessors (bplus.rs, list.rs, circular_list.rs) | immutable field borrows | `#[doc(hidden)]` oracle access for runtime property tests; read-only, cannot violate any invariant |
 | `next_id_from` (container_id.rs) | (atomic allocator) | the trusted allocator behind Group A's `new`; plain wrapping `fetch_add` over `u64`, optional fatal boundary behind `strict-id-exhaustion`, exhaustion unit-tested |
@@ -779,7 +779,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **50 default-build `external_body`
+The complete current source count is **49 default-build `external_body`
 markers plus 4 default-build axioms** (plus one generated `obeys_key_model`
 axiom per `define_id*!` id type in consumer crates); execution-first three-tier Vec markers not
 itemized here are enumerated in
@@ -812,7 +812,7 @@ additions are listed after the table.
 | 12 | `guard::check_precondition` | C | body `panic!` uses unmodeled format machinery (`requires cond` is checked) | no (same reason as `vstd::runtime_assert`) |
 | 13 | `clone_key_exact` | D | projects key-model requirement (3) out of vstd's prose-stated `obeys_key_model`; no new assumption | no (vstd provides no lemma) |
 | 14 | `values_equal` | E | no ensures: unconstrained bool, nothing derivable; avoids `obeys_eq_spec` plumbing | by threading vstd eq specs; declined for production shape |
-| 15 | `debug_check_different_rings` | E | debug-only mirror of a spec-only precondition | n/a (diagnostic) |
+| 15 | ~~`debug_check_different_rings`~~ | E | removed 2026-09-17: the public `splice`/`splice_absorb` now run a *verified* walk of the absorbed ring (`guard_different_rings`) in every build, and the e-graph's merge uses the crate-private walk-free cores whose precondition is a theorem | — |
 | 16 | `ListHead::white_box_head` | E | contract-free read-only test accessor (unpacks the niche for the white-box walkers; inside `verus!` so it needs the marker; its node-side counterpart `white_box_next` sits outside `verus!` and needs none) | n/a (no contract) |
 | 17 | `ExIndexHasher` registration | D | contract-free opaque registration; names `IndexHasher` in specs so the hasher axiom can trigger on it | n/a (no contract) |
 | 18 | `ExFoldHasher` registration | D | same: names foldhash's `FoldHasher` (`IndexHasher`'s associated `Hasher` type) so the `BuildHasher` impl type-checks under Verus | n/a (no contract) |

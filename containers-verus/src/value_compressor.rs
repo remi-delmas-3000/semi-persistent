@@ -65,8 +65,7 @@ pub trait ValueCompressor<T: Copy>: Sized {
     fn decode_at(c: &Self::Compressed, i: usize) -> (v: T)
         requires
             Self::cwf(c),
-            i < Self::decode(c).len(),
-        ensures v == Self::decode(c)[i as int];
+        ensures i < Self::decode(c).len() ==> v == Self::decode(c)[i as int];
 
     /// Length-based byte count (diagnostic; the selector costs candidates
     /// with it).
@@ -115,6 +114,10 @@ impl<T: Copy> ValueCompressor<T> for NoValueCompression {
     }
 
     fn decode_at(c: &Vec<T>, i: usize) -> (v: T) {
+        // Total: an out-of-range position is the documented trap.
+        if !(i < c.len()) {
+            crate::guard::refuse("NoValueCompression::decode_at: position out of range");
+        }
         c[i]
     }
 
@@ -244,9 +247,10 @@ impl<T: Copy> RleVals<T> {
     /// Sum of counts (the decoded length). The bound is what `ValueRle::cwf`
     /// carries: it makes the equality promise satisfiable.
     pub fn decoded_len(&self) -> (n: usize)
-        requires rle_decode(self.runs@).len() <= usize::MAX as nat,
         ensures n as nat == rle_decode(self.runs@).len(),
     {
+        // Total: a decoded length past `usize` is the documented trap (the
+        // running total is checked before every add).
         let m = self.runs.len();
         let mut total: usize = 0;
         let mut j: usize = 0;
@@ -258,14 +262,14 @@ impl<T: Copy> RleVals<T> {
             invariant
                 j <= m,
                 m == self.runs@.len(),
-                rle_decode(self.runs@).len() <= usize::MAX as nat,
                 total as nat == rle_decode(self.runs@.subrange(0, j as int)).len(),
-                rle_decode(self.runs@.subrange(0, j as int)).len()
-                    <= rle_decode(self.runs@).len(),
             decreases m - j,
         {
             proof {
                 lemma_rle_prefix_len(self.runs@, j as int);
+            }
+            if !(self.runs[j].1 <= usize::MAX - total) {
+                crate::guard::refuse("RleVals::decoded_len: decoded length past usize");
             }
             total = total + self.runs[j].1;
             j += 1;
@@ -276,9 +280,12 @@ impl<T: Copy> RleVals<T> {
 
     /// The value at decoded position `i`: linear scan with a running total.
     pub fn decode_at(&self, i: usize) -> (v: T)
-        requires (i as nat) < rle_decode(self.runs@).len(),
-        ensures v == rle_decode(self.runs@)[i as int],
+        ensures (i as nat) < rle_decode(self.runs@).len() ==> v == rle_decode(self.runs@)[i as int],
     {
+        // Total: an out-of-range position is the documented trap.
+        if !(i < self.decoded_len()) {
+            crate::guard::refuse("RleVals::decode_at: position out of range");
+        }
         let m = self.runs.len();
         let mut seen: usize = 0;
         let mut j: usize = 0;
@@ -558,6 +565,10 @@ impl<T: IndexLike> ValueCompressor<T> for ValueDelta {
     }
 
     fn decode_at(c: &DeltaVals<T>, i: usize) -> (v: T) {
+        // Total: an out-of-range position is the documented trap.
+        if !(i < Self::decoded_len(c)) {
+            crate::guard::refuse("ValueDelta::decode_at: position out of range");
+        }
         // Replay the steps up to `i`; each replayed value equals the model's,
         // so the arithmetic stays in `T`'s range by that equality.
         let mut cur = c.first[0];

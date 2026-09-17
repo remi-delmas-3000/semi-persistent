@@ -133,7 +133,7 @@ impl CaptureBits {
     /// first-write capture path, and the common case is a load/or/store. Keep
     /// or change the hint based on the Criterion mark/restore benchmark.
     #[inline(always)]
-    pub fn set_true(&mut self, i: usize, Ghost(len): Ghost<int>)
+    pub(crate) fn set_true(&mut self, i: usize, Ghost(len): Ghost<int>)
         requires
             (i as int) < len,
             tail_clear(old(self).words_view(), len),

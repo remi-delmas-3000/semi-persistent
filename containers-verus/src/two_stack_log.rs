@@ -242,7 +242,7 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
     /// (`Auto` for per-frame exact-size selection during calibration; a promoted
     /// default in steady state); the view is preserved for any mode, so the proof
     /// does not depend on the choice.
-    pub fn flush_cold(&mut self, k: usize, mode: crate::diff_compress::CompressionMode)
+    pub(crate) fn flush_cold(&mut self, k: usize, mode: crate::diff_compress::CompressionMode)
         requires
             old(self).wf(),
             k < old(self).hot_starts@.len(),
@@ -437,7 +437,10 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
     /// flat view becomes `cold@ ++ hot@[0..hot_n]`. Deeper backtracks into the
     /// compressed region first materialize the needed frames back to the top (a
     /// later addition; `CompressedStack::pop_frame` is the primitive).
-    pub fn truncate_hot(&mut self, hot_n: usize)
+    // Crate-private since the total-API pass; no in-crate caller yet (the
+    // hot-region restore path is reached through `CompressedStack::pop_frame`).
+    #[allow(dead_code)]
+    pub(crate) fn truncate_hot(&mut self, hot_n: usize)
         requires old(self).wf(), hot_n <= old(self).hot@.len(),
         ensures
             final(self).wf(),

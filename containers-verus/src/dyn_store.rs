@@ -52,9 +52,9 @@ where
     /// Empty store of the selected kind.
     pub fn new_kind<const TRACK: bool>(kind: StoreKind) -> (r: Self)
         ensures
-            <Self as DiffStore<T, I, TRACK>>::wf(&r),
-            <Self as DiffStore<T, I, TRACK>>::data(&r).len() == 0,
-            <Self as DiffStore<T, I, TRACK>>::unique_capture_spec(&r)
+            <Self as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&r),
+            <Self as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&r).len() == 0,
+            <Self as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::unique_capture_spec(&r)
                 == (kind != StoreKind::Trail),
     {
         match kind {
@@ -65,34 +65,297 @@ where
     }
 }
 
-impl<T, I, const TRACK: bool> DiffStore<T, I, TRACK> for DynStore<T, I>
+impl<T, I, const TRACK: bool> crate::diff_store_ops::DiffStoreOps<T, I, TRACK> for DynStore<T, I>
 where
     T: Tagged,
     I: IndexLike,
 {
     open spec fn data(&self) -> Seq<T> {
         match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::data(s),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::data(s),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::data(s),
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(s),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(s),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(s),
         }
     }
 
     open spec fn captured(&self) -> Seq<bool> {
         match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::captured(s),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::captured(s),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::captured(s),
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(s),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(s),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(s),
         }
     }
 
     open spec fn wf(&self) -> bool {
         match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::wf(s),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::wf(s),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::wf(s),
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(s),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(s),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(s),
         }
     }
+
+    open spec fn unique_capture_spec(&self) -> bool {
+        !(self is Trail)
+    }
+
+    open spec fn needs_replayed_indices_spec(&self) -> bool {
+        self is Inline
+    }
+
+    open spec fn restore_entries_clear_capture_spec(&self) -> bool {
+        self is Inline
+    }
+
+    #[inline(always)]
+    fn get(&self, i: I) -> T {
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::get(s, i),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::get(s, i),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::get(s, i),
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, value: T) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::push(s, value),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::push(s, value),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::push(s, value),
+        }
+    }
+
+    #[inline(always)]
+    fn set_raw(&mut self, i: I, value: T) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::set_raw(s, i, value),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::set_raw(s, i, value),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::set_raw(s, i, value),
+        }
+    }
+
+    fn truncate(&mut self, len: I) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::truncate(s, len),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::truncate(s, len),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::truncate(s, len),
+        }
+    }
+
+    #[inline(always)]
+    fn mark_captured(&mut self, i: I) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::mark_captured(s, i),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::mark_captured(s, i),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::mark_captured(s, i),
+        }
+    }
+
+    fn resize_default(&mut self, len: I)
+        where T: core::default::Default
+    {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::resize_default(s, len),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::resize_default(s, len),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::resize_default(s, len),
+        }
+    }
+
+    fn prepare_mark(&mut self, saved_len: I, prev_diffs: &[(T, I)]) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        let ghost pre = *self;
+        match self {
+            DynStore::Inline(s) => {
+                proof {
+                    assert(pre == DynStore::Inline(*s));
+                    assert(pre == *old(self));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&pre)
+                        == <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&pre)
+                        == <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&pre)
+                        == <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&*s));
+                }
+                <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::prepare_mark(s, saved_len, prev_diffs)
+            }
+            DynStore::Parallel(s) => {
+                proof {
+                    assert(pre == DynStore::Parallel(*s));
+                    assert(pre == *old(self));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&pre)
+                        == <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&pre)
+                        == <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&pre)
+                        == <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&*s));
+                }
+                <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::prepare_mark(s, saved_len, prev_diffs)
+            }
+            DynStore::Trail(s) => {
+                proof {
+                    assert(pre == DynStore::Trail(*s));
+                    assert(pre == *old(self));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&pre)
+                        == <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&pre)
+                        == <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&pre)
+                        == <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&*s));
+                }
+                <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::prepare_mark(s, saved_len, prev_diffs)
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn capture(
+        &mut self,
+        i: I,
+        saved_len: I,
+        diff_log: &mut Vec<(T, I)>,
+    ) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::capture(s, i, saved_len, diff_log),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::capture(s, i, saved_len, diff_log),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::capture(s, i, saved_len, diff_log),
+        }
+    }
+
+    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::force_capture(s, i, saved_len, diff_log),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::force_capture(s, i, saved_len, diff_log),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::force_capture(s, i, saved_len, diff_log),
+        }
+    }
+
+    fn begin_restore(&mut self, replayed_diffs: &[(T, I)]) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        let ghost pre = *self;
+        match self {
+            DynStore::Inline(s) => {
+                proof {
+                    assert(pre == DynStore::Inline(*s));
+                    assert(pre == *old(self));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&pre)
+                        == <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&pre)
+                        == <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&pre)
+                        == <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&*s));
+                }
+                <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::begin_restore(s, replayed_diffs)
+            }
+            DynStore::Parallel(s) => {
+                proof {
+                    assert(pre == DynStore::Parallel(*s));
+                    assert(pre == *old(self));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&pre)
+                        == <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&pre)
+                        == <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&pre)
+                        == <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&*s));
+                }
+                <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::begin_restore(s, replayed_diffs)
+            }
+            DynStore::Trail(s) => {
+                proof {
+                    assert(pre == DynStore::Trail(*s));
+                    assert(pre == *old(self));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&pre)
+                        == <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&pre)
+                        == <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&pre)
+                        == <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&*s));
+                }
+                <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::begin_restore(s, replayed_diffs)
+            }
+        }
+    }
+
+    fn restore_overlay(
+        &mut self,
+        diff_log: &Vec<(T, I)>,
+        lo: usize,
+        hi: usize,
+    ) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::restore_overlay(s, diff_log, lo, hi),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::restore_overlay(s, diff_log, lo, hi),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::restore_overlay(s, diff_log, lo, hi),
+        }
+    }
+
+    fn restore_entry(&mut self, index: I, old_value: &T, target_saved_len: I) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        match self {
+            DynStore::Inline(s) => <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::restore_entry(s, index, old_value, target_saved_len),
+            DynStore::Parallel(s) => <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::restore_entry(s, index, old_value, target_saved_len),
+            DynStore::Trail(s) => <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::restore_entry(s, index, old_value, target_saved_len),
+        }
+    }
+
+    fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], saved_len: I) {
+        broadcast use crate::diff_store::lemma_dyn_views;
+        let ghost pre = *self;
+        match self {
+            DynStore::Inline(s) => {
+                proof {
+                    assert(pre == DynStore::Inline(*s));
+                    assert(pre == *old(self));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&pre)
+                        == <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&pre)
+                        == <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&pre)
+                        == <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&*s));
+                }
+                <InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::finish_restore(s, current_frame_diffs, saved_len)
+            }
+            DynStore::Parallel(s) => {
+                proof {
+                    assert(pre == DynStore::Parallel(*s));
+                    assert(pre == *old(self));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&pre)
+                        == <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&pre)
+                        == <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&pre)
+                        == <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&*s));
+                }
+                <ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::finish_restore(s, current_frame_diffs, saved_len)
+            }
+            DynStore::Trail(s) => {
+                proof {
+                    assert(pre == DynStore::Trail(*s));
+                    assert(pre == *old(self));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&pre)
+                        == <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&pre)
+                        == <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(&*s));
+                    assert(<DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&pre)
+                        == <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(&*s));
+                }
+                <TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::finish_restore(s, current_frame_diffs, saved_len)
+            }
+        }
+    }
+}
+
+impl<T, I, const TRACK: bool> DiffStore<T, I, TRACK> for DynStore<T, I>
+where
+    T: Tagged,
+    I: IndexLike,
+{
 
     proof fn lemma_wf_captured_len(&self) {
         match self {
@@ -116,24 +379,12 @@ where
         }
     }
 
-    open spec fn unique_capture_spec(&self) -> bool {
-        !(self is Trail)
-    }
-
     fn unique_capture(&self) -> bool {
         !matches!(self, DynStore::Trail(_))
     }
 
-    open spec fn needs_replayed_indices_spec(&self) -> bool {
-        self is Inline
-    }
-
     fn needs_replayed_indices(&self) -> bool {
         matches!(self, DynStore::Inline(_))
-    }
-
-    open spec fn restore_entries_clear_capture_spec(&self) -> bool {
-        self is Inline
     }
 
     #[inline(always)]
@@ -179,256 +430,12 @@ where
     }
 
     #[inline(always)]
-    fn get(&self, i: I) -> T {
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::get(s, i),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::get(s, i),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::get(s, i),
-        }
-    }
-
-    #[inline(always)]
-    fn push(&mut self, value: T) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::push(s, value),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::push(s, value),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::push(s, value),
-        }
-    }
-
-    #[inline(always)]
     fn pop(&mut self) -> Option<T> {
         broadcast use crate::diff_store::lemma_dyn_views;
         match self {
             DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::pop(s),
             DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::pop(s),
             DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::pop(s),
-        }
-    }
-
-    #[inline(always)]
-    fn set_raw(&mut self, i: I, value: T) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::set_raw(s, i, value),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::set_raw(s, i, value),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::set_raw(s, i, value),
-        }
-    }
-
-    fn truncate(&mut self, len: I) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::truncate(s, len),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::truncate(s, len),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::truncate(s, len),
-        }
-    }
-
-    #[inline(always)]
-    fn mark_captured(&mut self, i: I) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::mark_captured(s, i),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::mark_captured(s, i),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::mark_captured(s, i),
-        }
-    }
-
-    fn resize_default(&mut self, len: I)
-        where T: core::default::Default
-    {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::resize_default(s, len),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::resize_default(s, len),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::resize_default(s, len),
-        }
-    }
-
-    fn prepare_mark(&mut self, saved_len: I, prev_diffs: &[(T, I)]) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        let ghost pre = *self;
-        match self {
-            DynStore::Inline(s) => {
-                proof {
-                    assert(pre == DynStore::Inline(*s));
-                    assert(pre == *old(self));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(&pre)
-                        == <InlineStore<T, I> as DiffStore<T, I, TRACK>>::captured(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::data(&pre)
-                        == <InlineStore<T, I> as DiffStore<T, I, TRACK>>::data(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(&pre)
-                        == <InlineStore<T, I> as DiffStore<T, I, TRACK>>::wf(&*s));
-                }
-                <InlineStore<T, I> as DiffStore<T, I, TRACK>>::prepare_mark(s, saved_len, prev_diffs)
-            }
-            DynStore::Parallel(s) => {
-                proof {
-                    assert(pre == DynStore::Parallel(*s));
-                    assert(pre == *old(self));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(&pre)
-                        == <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::captured(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::data(&pre)
-                        == <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::data(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(&pre)
-                        == <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::wf(&*s));
-                }
-                <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::prepare_mark(s, saved_len, prev_diffs)
-            }
-            DynStore::Trail(s) => {
-                proof {
-                    assert(pre == DynStore::Trail(*s));
-                    assert(pre == *old(self));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(&pre)
-                        == <TrailStore<T, I> as DiffStore<T, I, TRACK>>::captured(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::data(&pre)
-                        == <TrailStore<T, I> as DiffStore<T, I, TRACK>>::data(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(&pre)
-                        == <TrailStore<T, I> as DiffStore<T, I, TRACK>>::wf(&*s));
-                }
-                <TrailStore<T, I> as DiffStore<T, I, TRACK>>::prepare_mark(s, saved_len, prev_diffs)
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn capture(
-        &mut self,
-        i: I,
-        saved_len: I,
-        diff_log: &mut Vec<(T, I)>,
-    ) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::capture(s, i, saved_len, diff_log),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::capture(s, i, saved_len, diff_log),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::capture(s, i, saved_len, diff_log),
-        }
-    }
-
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::force_capture(s, i, saved_len, diff_log),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::force_capture(s, i, saved_len, diff_log),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::force_capture(s, i, saved_len, diff_log),
-        }
-    }
-
-    fn begin_restore(&mut self, replayed_diffs: &[(T, I)]) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        let ghost pre = *self;
-        match self {
-            DynStore::Inline(s) => {
-                proof {
-                    assert(pre == DynStore::Inline(*s));
-                    assert(pre == *old(self));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(&pre)
-                        == <InlineStore<T, I> as DiffStore<T, I, TRACK>>::captured(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::data(&pre)
-                        == <InlineStore<T, I> as DiffStore<T, I, TRACK>>::data(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(&pre)
-                        == <InlineStore<T, I> as DiffStore<T, I, TRACK>>::wf(&*s));
-                }
-                <InlineStore<T, I> as DiffStore<T, I, TRACK>>::begin_restore(s, replayed_diffs)
-            }
-            DynStore::Parallel(s) => {
-                proof {
-                    assert(pre == DynStore::Parallel(*s));
-                    assert(pre == *old(self));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(&pre)
-                        == <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::captured(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::data(&pre)
-                        == <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::data(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(&pre)
-                        == <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::wf(&*s));
-                }
-                <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::begin_restore(s, replayed_diffs)
-            }
-            DynStore::Trail(s) => {
-                proof {
-                    assert(pre == DynStore::Trail(*s));
-                    assert(pre == *old(self));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(&pre)
-                        == <TrailStore<T, I> as DiffStore<T, I, TRACK>>::captured(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::data(&pre)
-                        == <TrailStore<T, I> as DiffStore<T, I, TRACK>>::data(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(&pre)
-                        == <TrailStore<T, I> as DiffStore<T, I, TRACK>>::wf(&*s));
-                }
-                <TrailStore<T, I> as DiffStore<T, I, TRACK>>::begin_restore(s, replayed_diffs)
-            }
-        }
-    }
-
-    fn restore_overlay(
-        &mut self,
-        diff_log: &Vec<(T, I)>,
-        lo: usize,
-        hi: usize,
-    ) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::restore_overlay(s, diff_log, lo, hi),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::restore_overlay(s, diff_log, lo, hi),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::restore_overlay(s, diff_log, lo, hi),
-        }
-    }
-
-    fn restore_entry(&mut self, index: I, old_value: &T, target_saved_len: I) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        match self {
-            DynStore::Inline(s) => <InlineStore<T, I> as DiffStore<T, I, TRACK>>::restore_entry(s, index, old_value, target_saved_len),
-            DynStore::Parallel(s) => <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::restore_entry(s, index, old_value, target_saved_len),
-            DynStore::Trail(s) => <TrailStore<T, I> as DiffStore<T, I, TRACK>>::restore_entry(s, index, old_value, target_saved_len),
-        }
-    }
-
-    fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], saved_len: I) {
-        broadcast use crate::diff_store::lemma_dyn_views;
-        let ghost pre = *self;
-        match self {
-            DynStore::Inline(s) => {
-                proof {
-                    assert(pre == DynStore::Inline(*s));
-                    assert(pre == *old(self));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(&pre)
-                        == <InlineStore<T, I> as DiffStore<T, I, TRACK>>::captured(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::data(&pre)
-                        == <InlineStore<T, I> as DiffStore<T, I, TRACK>>::data(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(&pre)
-                        == <InlineStore<T, I> as DiffStore<T, I, TRACK>>::wf(&*s));
-                }
-                <InlineStore<T, I> as DiffStore<T, I, TRACK>>::finish_restore(s, current_frame_diffs, saved_len)
-            }
-            DynStore::Parallel(s) => {
-                proof {
-                    assert(pre == DynStore::Parallel(*s));
-                    assert(pre == *old(self));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(&pre)
-                        == <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::captured(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::data(&pre)
-                        == <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::data(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(&pre)
-                        == <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::wf(&*s));
-                }
-                <ParallelStore<T, I> as DiffStore<T, I, TRACK>>::finish_restore(s, current_frame_diffs, saved_len)
-            }
-            DynStore::Trail(s) => {
-                proof {
-                    assert(pre == DynStore::Trail(*s));
-                    assert(pre == *old(self));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::captured(&pre)
-                        == <TrailStore<T, I> as DiffStore<T, I, TRACK>>::captured(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::data(&pre)
-                        == <TrailStore<T, I> as DiffStore<T, I, TRACK>>::data(&*s));
-                    assert(<DynStore<T, I> as DiffStore<T, I, TRACK>>::wf(&pre)
-                        == <TrailStore<T, I> as DiffStore<T, I, TRACK>>::wf(&*s));
-                }
-                <TrailStore<T, I> as DiffStore<T, I, TRACK>>::finish_restore(s, current_frame_diffs, saved_len)
-            }
         }
     }
 

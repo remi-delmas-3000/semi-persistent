@@ -56,8 +56,12 @@ method's preconditions; an ordinary Rust caller does not, and the erased
 wrap. The overflow/capacity preconditions are therefore also enforced at
 runtime: such a call panics with a descriptive message instead of corrupting
 the container. The fork-history headroom is queryable via
-`restores_remaining()`. The remaining public functions whose `requires` have
-no runtime check are enumerated in `partial-api-allowlist.txt`.
+`restores_remaining()`. Every public function is total: the only
+precondition it may state is the container's own well-formedness, which every
+constructor and operation upholds; anything else is either checked at runtime
+(a `Result` for operational refusal, a documented panic for a contract
+violation) or stated as a conditional postcondition. `partial-api-allowlist.txt`
+is empty and `tools/check_partial_api.py` keeps it so.
 
 ## Architecture
 

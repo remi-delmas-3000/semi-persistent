@@ -75,9 +75,12 @@ impl GenStamps {
 
     /// Mint: the current generation at `depth`, to store in a token.
     pub fn stamp(&self, depth: usize) -> (g: u64)
-        requires depth < self.levels@.len(),
-        ensures g == self.levels@[depth as int],
+        ensures depth < self.levels@.len() ==> g == self.levels@[depth as int],
     {
+        // Total: an unreached depth is the documented trap.
+        if !(depth < self.levels.len()) {
+            crate::guard::refuse("GenStamps::stamp: depth has no stamp yet");
+        }
         self.levels[depth]
     }
 
@@ -87,7 +90,6 @@ impl GenStamps {
     /// is the "mark" side of the reclaimed fork history (`cut` = `bump_from` is
     /// the "restore" side); `GenStamps` IS the fork history, no wrapper needed.
     pub fn stamp_at(&mut self, depth: usize) -> (g: u64)
-        requires depth < usize::MAX,
         ensures
             final(self).levels@.len() >= old(self).levels@.len(),
             depth < final(self).levels@.len(),
@@ -96,6 +98,10 @@ impl GenStamps {
             g == final(self).levels@[depth as int],
             final(self).valid(depth as nat, g),
     {
+        // Total: the depth ceiling is the documented trap.
+        if !(depth < usize::MAX) {
+            crate::guard::refuse("GenStamps::stamp_at: depth at the usize ceiling");
+        }
         // Grow to cover `depth` (a depth reached for the first time may be beyond
         // the current array, e.g. after a member used the genealogy-free
         // `push_frame` without minting through this array).

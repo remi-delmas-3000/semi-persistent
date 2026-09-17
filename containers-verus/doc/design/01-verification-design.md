@@ -637,9 +637,11 @@ The payoff is the guarantees the borrow checker can no longer give, as theorems:
 the list arena's `prepend`/`append`/`splice` each refine the obvious sequence
 operation while preserving disjointness of all other lists; given nodes in
 distinct rings, the circular class list's pointer-swap `splice` merges them
-into one ring whose node set is their union. The release pointer work is
-constant (and allocation-free); debug builds first validate distinctness by
-walking one ring, O(ring size). The sparse set is a genuine bijection between
+into one ring whose node set is their union. The pointer work is constant
+(and allocation-free); the public `splice` first establishes distinctness by
+a verified walk of the absorbed ring, O(ring size), and refuses otherwise,
+while the e-graph's merge calls the crate-private core, where distinctness
+is a theorem. The sparse set is a genuine bijection between
 its dense and sparse halves. [Chapter 9](09-arena-aliasing-dynamic-frames.md)
 develops the dynamic-frames connection and the frame/anti-frame mechanics in full;
 the B+tree, the one recursive case, is [Chapter 10](10-bplus-tree.md).

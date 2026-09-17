@@ -75,7 +75,7 @@ where
     }
 }
 
-impl<T, I, const TRACK: bool> DiffStore<T, I, TRACK> for TrailStore<T, I>
+impl<T, I, const TRACK: bool> crate::diff_store_ops::DiffStoreOps<T, I, TRACK> for TrailStore<T, I>
 where
     T: Sized + Copy,
     I: IndexLike,
@@ -84,28 +84,7 @@ where
     open spec fn captured(&self) -> Seq<bool> { self.captured_spec() }
     open spec fn wf(&self) -> bool { self.wf_spec() }
 
-    proof fn lemma_wf_captured_len(&self) {}
-
-    proof fn lemma_wf_data_len(&self) {}
-
     open spec fn unique_capture_spec(&self) -> bool { false }
-
-    fn unique_capture(&self) -> bool { false }
-
-    #[inline(always)]
-    fn is_empty(&self) -> bool {
-        self.data.len() == 0
-    }
-
-    #[inline(always)]
-    fn raw_len(&self) -> (n: usize) {
-        self.data.len()
-    }
-
-    #[inline(always)]
-    fn len(&self) -> I {
-        I::try_from_usize(self.data.len()).expect("len overflow")
-    }
 
     #[inline(always)]
     fn get(&self, i: I) -> T {
@@ -119,18 +98,6 @@ where
         proof {
             self.captured@ = self.captured@.push(false);
         }
-    }
-
-    #[inline(always)]
-    fn pop(&mut self) -> Option<T> {
-        broadcast use crate::diff_store::lemma_trail_discipline;
-        let r = self.data.pop();
-        proof {
-            if r is Some {
-                self.captured@ = self.captured@.drop_last();
-            }
-        }
-        r
     }
 
     #[inline(always)]
@@ -248,11 +215,6 @@ where
 
     open spec fn restore_entries_clear_capture_spec(&self) -> bool { false }
 
-    fn needs_replayed_indices(&self) -> bool { false }
-
-    #[inline(always)]
-    fn restore_entries_clear_capture(&self) -> bool { false }
-
     fn begin_restore(&mut self, _replayed_diffs: &[(T, I)]) {
         broadcast use crate::diff_store::lemma_trail_discipline;
         // Exec no-op (ghost clear only).
@@ -328,6 +290,51 @@ where
             });
         }
     }
+}
+
+impl<T, I, const TRACK: bool> DiffStore<T, I, TRACK> for TrailStore<T, I>
+where
+    T: Sized + Copy,
+    I: IndexLike,
+{
+
+    proof fn lemma_wf_captured_len(&self) {}
+
+    proof fn lemma_wf_data_len(&self) {}
+
+    fn unique_capture(&self) -> bool { false }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.data.len() == 0
+    }
+
+    #[inline(always)]
+    fn raw_len(&self) -> (n: usize) {
+        self.data.len()
+    }
+
+    #[inline(always)]
+    fn len(&self) -> I {
+        I::try_from_usize(self.data.len()).expect("len overflow")
+    }
+
+    #[inline(always)]
+    fn pop(&mut self) -> Option<T> {
+        broadcast use crate::diff_store::lemma_trail_discipline;
+        let r = self.data.pop();
+        proof {
+            if r is Some {
+                self.captured@ = self.captured@.drop_last();
+            }
+        }
+        r
+    }
+
+    fn needs_replayed_indices(&self) -> bool { false }
+
+    #[inline(always)]
+    fn restore_entries_clear_capture(&self) -> bool { false }
 
 
     /// Raw data column: one clamped copy_from_slice per run, straight through

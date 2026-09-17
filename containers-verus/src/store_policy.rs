@@ -32,6 +32,7 @@ use vstd::prelude::*;
 verus! {
 
 use crate::diff_store::DiffStore;
+use crate::diff_store_ops::DiffStoreOps;
 use crate::index_like::IndexLike;
 use crate::tagged::Tagged;
 

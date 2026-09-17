@@ -8293,7 +8293,8 @@ where
     }
 
     /// The new Cold frame's coverage is capture in the source frame, and each
-    /// covered cell holds the captured value.
+    /// covered cell holds the captured value. Decomposed into its two halves
+    /// (coverage, values) so each stays inside the solver budget.
     #[verifier::spinoff_prover]
     proof fn lemma_hot_frame_encoded_new(
         &self, mid: Self, pre: Self, f: int, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>,
@@ -8321,12 +8322,101 @@ where
                         pre.phys_hot_start(f), pre.phys_hot_end(f), j)
         }),
     {
+        self.lemma_hot_frame_encoded_new_covered(mid, pre, f, entries, cold);
+        self.lemma_hot_frame_encoded_new_value(mid, pre, f, entries, cold);
+    }
+
+    /// The facts both halves of `lemma_hot_frame_encoded_new` need from the
+    /// migration invariant, gathered once so the halves can hide it (the
+    /// invariant's Cold-side clauses over every earlier frame are what put
+    /// them over the solver budget).
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encoded_new_facts(mid: Self, pre: Self, f: int)
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+        ensures
+            f < pre.hot_stack@.len(),
+            mid.cold_stack@.len() == pre.cold_stack@.len() + f,
+            pre.phys_hot_start(f) == pre.hot_stack@[f].start as int,
+            pre.phys_hot_end(f) == pre.hot_stack@[f].end as int,
+            pre.hot_stack@[f].start <= pre.hot_stack@[f].end <= mid.hot_value_pool@.len(),
+            stratum_unique::<T, I>(mid.hot_value_pool@,
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int),
+            forall|j: nat| #[trigger] range_saved_value::<T, I>(mid.hot_value_pool@,
+                    pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int, j)
+                == range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int, j),
+    {
+        hide(Vec::wf);
+        hide(stratum_unique);
+        hide(range_saved_value);
+        hide(Vec::cold_payload_ok);
+        reveal(Vec::hot_migrating);
+        reveal(Vec::hot_migrating_hot);
+        reveal(Vec::hot_migrating_cold);
+        pre.lemma_closed_hot_frame_end(f);
+    }
+
+    /// Coverage half of `lemma_hot_frame_encoded_new`: the two directions are
+    /// separate lemmas (each direction alone fits the solver budget).
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encoded_new_covered(
+        &self, mid: Self, pre: Self, f: int, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>,
+    )
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            entries == mid.hot_value_pool@.subrange(
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int),
+            self.cold_stack@ == mid.cold_stack@.push(cold),
+            self.cold_value_pool@.len() == mid.cold_value_pool@.len() + entries.len(),
+            forall|q: int| 0 <= q < entries.len() ==>
+                #[trigger] self.cold_value_pool@[mid.cold_value_pool@.len() + q] == entries[q].0,
+            cold.runs_start == mid.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                mid.cold_index_runs@.len() as int, mid.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+        ensures ({
+            let k = pre.cold_stack@.len() + f;
+            forall|j: nat| #[trigger] self.cold_covered(k, j)
+                <==> range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(f), pre.phys_hot_end(f), j) is Some
+        }),
+    {
+        self.lemma_hot_frame_encoded_new_covered_fwd(mid, pre, f, entries, cold);
+        self.lemma_hot_frame_encoded_new_covered_bwd(mid, pre, f, entries, cold);
+    }
+
+    /// Covered ⟹ captured in the source frame.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encoded_new_covered_fwd(
+        &self, mid: Self, pre: Self, f: int, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>,
+    )
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            entries == mid.hot_value_pool@.subrange(
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int),
+            self.cold_stack@ == mid.cold_stack@.push(cold),
+            self.cold_value_pool@.len() == mid.cold_value_pool@.len() + entries.len(),
+            forall|q: int| 0 <= q < entries.len() ==>
+                #[trigger] self.cold_value_pool@[mid.cold_value_pool@.len() + q] == entries[q].0,
+            cold.runs_start == mid.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                mid.cold_index_runs@.len() as int, mid.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+        ensures ({
+            let k = pre.cold_stack@.len() + f;
+            forall|j: nat| #[trigger] self.cold_covered(k, j)
+                ==> range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(f), pre.phys_hot_end(f), j) is Some
+        }),
+    {
         hide(Vec::wf);
         hide(stratum_unique);
         hide(crate::cold_encode::run_prefix);
-        reveal(Vec::hot_migrating);
-        reveal(Vec::hot_migrating_hot);
-        pre.lemma_closed_hot_frame_end(f);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::cold_payload_ok);
+        Self::lemma_hot_frame_encoded_new_facts(mid, pre, f);
         let cc = pre.cold_stack@.len() as int;
         let start = pre.hot_stack@[f].start as int;
         let end = pre.hot_stack@[f].end as int;
@@ -8343,9 +8433,8 @@ where
         assert(stratum_unique::<T, I>(mid.hot_value_pool@, start, end));
         crate::cold_encode::lemma_run_prefix_layout(runs, rs, vs, entries, n, limit);
         assert forall|j: nat| #[trigger] self.cold_covered(k, j)
-            <==> range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j) is Some by {
+            implies range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j) is Some by {
             lemma_unique_range_saved_value::<T, I>(mid.hot_value_pool@, start, end, j);
-            if self.cold_covered(k, j) {
                 let r = choose|r: int|
                     self.cold_stack@[k].runs_start <= r
                         < self.cold_stack@[k].runs_start + self.cold_stack@[k].runs_len
@@ -8358,8 +8447,59 @@ where
                 assert(mid.hot_value_pool@[start + o].1.as_nat() == j);
                 assert(range_saved_value::<T, I>(mid.hot_value_pool@, start, end, j)
                     == Some(mid.hot_value_pool@[start + o].0));
-            }
-            if range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j) is Some {
+        }
+    }
+
+    /// Captured in the source frame ⟹ covered.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encoded_new_covered_bwd(
+        &self, mid: Self, pre: Self, f: int, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>,
+    )
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            entries == mid.hot_value_pool@.subrange(
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int),
+            self.cold_stack@ == mid.cold_stack@.push(cold),
+            self.cold_value_pool@.len() == mid.cold_value_pool@.len() + entries.len(),
+            forall|q: int| 0 <= q < entries.len() ==>
+                #[trigger] self.cold_value_pool@[mid.cold_value_pool@.len() + q] == entries[q].0,
+            cold.runs_start == mid.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                mid.cold_index_runs@.len() as int, mid.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+        ensures ({
+            let k = pre.cold_stack@.len() + f;
+            forall|j: nat| range_saved_value::<T, I>(pre.hot_value_pool@,
+                    pre.phys_hot_start(f), pre.phys_hot_end(f), j) is Some
+                ==> #[trigger] self.cold_covered(k, j)
+        }),
+    {
+        hide(Vec::wf);
+        hide(stratum_unique);
+        hide(crate::cold_encode::run_prefix);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::cold_payload_ok);
+        Self::lemma_hot_frame_encoded_new_facts(mid, pre, f);
+        let cc = pre.cold_stack@.len() as int;
+        let start = pre.hot_stack@[f].start as int;
+        let end = pre.hot_stack@[f].end as int;
+        let rs = mid.cold_index_runs@.len() as int;
+        let vs = mid.cold_value_pool@.len() as int;
+        let n = entries.len() as int;
+        let runs = self.cold_index_runs@;
+        let limit = cold.saved_len.as_nat();
+        let k = cc + f;
+        assert(mid.cold_stack@.len() == k);
+        assert(self.cold_stack@[k] == cold);
+        assert(pre.phys_hot_start(f) == start);
+        assert(pre.phys_hot_end(f) == end);
+        assert(stratum_unique::<T, I>(mid.hot_value_pool@, start, end));
+        crate::cold_encode::lemma_run_prefix_layout(runs, rs, vs, entries, n, limit);
+        assert forall|j: nat| range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j) is Some
+            implies #[trigger] self.cold_covered(k, j) by {
+            lemma_unique_range_saved_value::<T, I>(mid.hot_value_pool@, start, end, j);
                 assert(range_saved_value::<T, I>(mid.hot_value_pool@, start, end, j) is Some);
                 assert(captured_in_range::<T, I>(mid.hot_value_pool@, start, end, j));
                 let k0 = choose|k0: int| start <= k0 < end && 0 <= k0 < mid.hot_value_pool@.len()
@@ -8374,8 +8514,57 @@ where
                 assert(self.cold_stack@[k].runs_start <= r
                     < self.cold_stack@[k].runs_start + self.cold_stack@[k].runs_len);
                 assert(self.cold_covered(k, j));
-            }
         }
+    }
+
+    /// Value half of `lemma_hot_frame_encoded_new`.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_frame_encoded_new_value(
+        &self, mid: Self, pre: Self, f: int, entries: Seq<(T, I)>, cold: crate::frame::ColdFrameHdr<I>,
+    )
+        requires mid.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+            entries == mid.hot_value_pool@.subrange(
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int),
+            self.cold_stack@ == mid.cold_stack@.push(cold),
+            self.cold_value_pool@.len() == mid.cold_value_pool@.len() + entries.len(),
+            forall|q: int| 0 <= q < entries.len() ==>
+                #[trigger] self.cold_value_pool@[mid.cold_value_pool@.len() + q] == entries[q].0,
+            cold.runs_start == mid.cold_index_runs@.len(),
+            cold.runs_start + cold.runs_len == self.cold_index_runs@.len(),
+            crate::cold_encode::run_prefix(self.cold_index_runs@,
+                mid.cold_index_runs@.len() as int, mid.cold_value_pool@.len() as int,
+                entries, entries.len() as int, cold.saved_len.as_nat()),
+        ensures ({
+            let k = pre.cold_stack@.len() + f;
+            forall|j: nat| self.cold_covered(k, j) ==>
+                Some(#[trigger] self.cold_value(k, j))
+                    == range_saved_value::<T, I>(pre.hot_value_pool@,
+                        pre.phys_hot_start(f), pre.phys_hot_end(f), j)
+        }),
+    {
+        hide(Vec::wf);
+        hide(stratum_unique);
+        hide(crate::cold_encode::run_prefix);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
+        hide(Vec::hot_migrating_cold);
+        hide(Vec::cold_payload_ok);
+        Self::lemma_hot_frame_encoded_new_facts(mid, pre, f);
+        let cc = pre.cold_stack@.len() as int;
+        let start = pre.hot_stack@[f].start as int;
+        let end = pre.hot_stack@[f].end as int;
+        let rs = mid.cold_index_runs@.len() as int;
+        let vs = mid.cold_value_pool@.len() as int;
+        let n = entries.len() as int;
+        let runs = self.cold_index_runs@;
+        let limit = cold.saved_len.as_nat();
+        let k = cc + f;
+        assert(mid.cold_stack@.len() == k);
+        assert(self.cold_stack@[k] == cold);
+        assert(pre.phys_hot_start(f) == start);
+        assert(pre.phys_hot_end(f) == end);
+        assert(stratum_unique::<T, I>(mid.hot_value_pool@, start, end));
+        crate::cold_encode::lemma_run_prefix_layout(runs, rs, vs, entries, n, limit);
         assert forall|j: nat| self.cold_covered(k, j) implies
             Some(#[trigger] self.cold_value(k, j))
                 == range_saved_value::<T, I>(pre.hot_value_pool@, start, end, j) by {
@@ -15896,7 +16085,7 @@ where
     /// caller carries only the structural bounds.
     #[verifier::rlimit(600)]
     #[verifier::spinoff_prover]
-    pub fn seal_frame(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
+    pub(crate) fn seal_frame(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
         requires
             old(self).wf(),
             TRACK,

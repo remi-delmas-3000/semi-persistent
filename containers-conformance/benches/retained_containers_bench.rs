@@ -453,12 +453,18 @@ fn verus_ring_merge_all<const TRACK: bool>(ring: &mut VerusRing<TRACK>) {
 fn bench_class_ring_splice(c: &mut Criterion) {
     let mut g = c.benchmark_group("class_ring/splice_untracked");
 
+    // The merged structure must be OBSERVED, or the untracked pointer swaps
+    // are dead stores into a buffer the batch drops right after and LLVM
+    // elides them (measured: ~0.6 ns per splice on both sides, physically
+    // impossible for two loads and two stores). One ring walk from a
+    // black-boxed node keeps every swap alive on both sides at O(ring) cost.
     g.bench_function("legacy", |b| {
         b.iter_batched_ref(
             prod_ring_build::<false>,
             |ring| {
                 prod_ring_merge_all(ring);
-                black_box(ring.len())
+                let probe = prod_ring_ids(black_box(RING_MERGES / 2)).0;
+                black_box((ring.len(), pring::walk(ring, probe)))
             },
             BatchSize::LargeInput,
         )
@@ -469,7 +475,8 @@ fn bench_class_ring_splice(c: &mut Criterion) {
             verus_ring_build::<false>,
             |ring| {
                 verus_ring_merge_all(ring);
-                black_box(ring.len())
+                let probe = verus_ring_ids(black_box(RING_MERGES / 2)).0;
+                black_box((ring.len(), ring.iter_class(probe).count()))
             },
             BatchSize::LargeInput,
         )

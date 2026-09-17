@@ -1,6 +1,6 @@
 # Handoff to Claude — verified semi-persistence
 
-Updated 2026-09-16. This is a continuation handoff, **not a completion report**.
+Updated 2026-09-17. This is a continuation handoff, **not a completion report**.
 Inspect the current worktree and logs before relying on the snapshot below.
 
 ## Objective and non-negotiable constraints
@@ -143,20 +143,43 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    "Extended goal 4". The policy bound is stated on about 140 generic sites
    of the e-graph; the rule is one line, `Cfg::Policy: StorePolicy<Cfg,
    TRACK>`, on every item that names the engine generically.
-5. Status after the extended goal (all five steps committed, each with the
+5. Done: the public API is total (user's rule of 2026-09-17: "no
+   preconditions; a partial function becomes total through a `Result` or a
+   panic, panics for the heavily used ones"). The partial-API audit went
+   from 73 public functions with a `requires` (33 listed, 40 unlisted) to
+   **0**, and the allowlist is empty. How (details in
+   `doc/future/total-api-plan.md`, "Status"): 14 internal primitives
+   narrowed to `pub(crate)`; refuse-guards (`guard::refuse`, the documented
+   trap) on `History::{mark, restore_to}`, `GenStamps`, `HintedArena`, the
+   cold/compressed stacks, every frame's `decode_at`, `Codes`, the run
+   compressors and `SparseSet::restore` (whose snapshot archive is now part
+   of `wf`, so validity plus equal frame indices suffice);
+   `CircularList::{splice, splice_absorb}` guarded by a verified walk of the
+   absorbed ring with crate-private walk-free cores for `EClasses`; the
+   `DiffStore` protocol sealed on the crate-private supertrait
+   `diff_store_ops::DiffStoreOps` (consumers keep naming `DiffStore`);
+   `NodeLayout`'s primitives, `Tagged`, `SpMap::new` and the frame trait as
+   requires-free conditional contracts. The checker now reads module
+   visibility from `lib.rs`. The class-ring benchmark's verified side now
+   includes the same-ring guard (one load for a singleton absorb, the
+   fast path; a walk otherwise) — see the performance report, "Extended
+   goal 5".
+6. Status after the extended goal (all six steps committed, each with the
    full gate battery, its affected benchmarks against the previous commit,
    and a signed local commit; nothing pushed): trust 50 default + 5 literal
-   throughout, partial-API discrepancy at the baseline 40 unlisted functions
-   (73/33/40/0), verified crate at 2621 functions on both feature sets.
-   Open, for the user: the ForkHistory group property test (offered, not
-   answered); the legacy gaps attributed to code placement rather than
-   algorithm — `aov/log` (1.07–1.12) and, new in this build,
-   `class_ring/splice_untracked` (1.10 paired on both trees, 0.945 in the
-   `f304bc7` build); the ascending-order singleton-frame trade-off of the
-   hash-set dedupe (1.33 vs the checkpoint); and the write/unique ratio of
-   the e-graph caches, which was not instrumented (the timing under the
-   three disciplines decided instead, and a config-level policy remains
-   possible through one alias bound if a workload ever shows a difference).
+   throughout (one external_body diagnostic, the debug ring walk, removed),
+   partial-API audit 0/0/0/0, verified crate above 2620 functions on both
+   feature sets. Open, for the user: the ForkHistory group property test
+   (offered, not answered); the legacy gaps attributed to code placement
+   rather than algorithm — `aov/log` (1.07–1.12); `class_ring/splice_untracked`
+   is now within 3 % of legacy paired in the same binary, its guard's
+   singleton fast path costing ≈ 0.6 ns on a 0.7 ns operation (1.08–1.09
+   vs the previous commit, at the τ edge); the
+   ascending-order singleton-frame trade-off of the hash-set dedupe (1.33 vs
+   the checkpoint); the write/unique ratio of the e-graph caches, which was
+   not instrumented; and the `obeys_key_model` type law, which is no longer
+   a precondition but remains the one uninterpreted assumption a custom key
+   type must satisfy for `SpMap`'s contract (`doc/future/key-model-tcb.md`).
 
 ## Existing proof architecture to reuse
 
@@ -197,15 +220,17 @@ DenseSpanMap. Review `proofs/top_down/derived-contract-audit.md`; exact componen
 archive/depth contracts and error framing matter, not just primary contents.
 
 Current trust inventory: **50 default + 5 literal external_body** (CI
-`EXPECTED_DEFAULT=50`; the session started at 74 + 5); default axioms are the
+`EXPECTED_DEFAULT=49` since extended goal 5 removed the debug-only ring walk;
+50 before; the session started at 74 + 5); default axioms are the
 hasher axioms plus the per-index-type `obeys_key_model` axioms
 (`axiom_key_model_*`), and the one trusted std contract is
 `std_sort::sort_pairs_by_index`. Reaudit on final source, and do not mislabel
 semantic fallbacks as allocator/diagnostic trust.
 
-Known partial-API CI discrepancy remains open: 73 partial public APIs, 33 allowed,
-40 unlisted, zero unsafe-public at the baseline. Review contracts/exposure instead
-of bulk allowlisting. Do not claim all CI passes while this remains.
+The partial-API CI discrepancy (73 partial public APIs, 33 allowed, 40
+unlisted, zero unsafe-public at the baseline) was closed on 2026-09-17 by
+extended goal 5 through contract/exposure review, never by allowlisting: the
+checker reports 0/0/0/0 and the allowlist is empty (see "Next actions" 5).
 
 No final conformance benchmarks have run and no parity claim is justified.
 Follow `doc/tasks/conformance-performance-inventory.md` and the acceptance protocol:
