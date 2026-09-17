@@ -1064,6 +1064,41 @@ fn bench_rollover_action(
     );
 }
 
+/// Per-mark rollover of small Trail frames: every mark migrates the 8-write
+/// frame it closes, so the Trail-to-Hot dedupe runs once per mark. This is
+/// the shape where the dedupe set's allocation is comparable to the dedupe
+/// itself (the other rollover cases migrate one 512-write frame).
+fn small_frames_fixture() -> V {
+    let policy = TierPolicy {
+        trail: TierLimit::Frames(0),
+        hot: TierLimit::Unbounded,
+        cold_reclaim: ReclaimPolicy::RetainCapacity,
+    };
+    let mut v = build_verus(StoreKind::Trail, policy);
+    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+        .expect("fixture depth is bounded");
+    v
+}
+
+fn bench_rollover_small_frames(b: &mut criterion::Bencher<'_>) {
+    b.iter_batched_ref(
+        small_frames_fixture,
+        |v| {
+            for k in 0..64usize {
+                write_verus(v, 8, 8, k);
+                black_box(
+                    v.try_mark_with(MarkOptions::new(
+                        ShrinkPolicy::Never,
+                        RolloverPolicy::ApplyConfigured,
+                    ))
+                    .expect("fixture depth is bounded"),
+                );
+            }
+        },
+        BatchSize::LargeInput,
+    );
+}
+
 fn bench_rollover_compatible(b: &mut criterion::Bencher<'_>, fixture: fn() -> V) {
     b.iter_batched_ref(
         fixture,
@@ -1091,6 +1126,10 @@ fn bench_v1_rollover(c: &mut Criterion) {
         )
     });
     trail.finish();
+
+    let mut small = c.benchmark_group("three_tier_v1/rollover/trail_to_hot_small_frames_per_mark");
+    small.bench_function("apply_configured_x64", |b| bench_rollover_small_frames(b));
+    small.finish();
 
     let mut hot = c.benchmark_group("three_tier_v1/rollover/hot_to_cold_contiguous");
     hot.bench_function("defer", |b| {

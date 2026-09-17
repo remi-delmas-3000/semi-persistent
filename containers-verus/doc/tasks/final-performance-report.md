@@ -259,6 +259,21 @@ is redundant, all are verified under the same contracts. The dynamic store
 types on the same workload (`dyn_inline` 76.8 µs vs `static_veci` 29.8 µs on
 the SMT trace); consumers with a fixed store kind should use the static type.
 
+## Extended goal 1(a): cached Trail-to-Hot dedupe set (after `45fc132`)
+
+The dedupe `HashSet` is now owned by the vector (`Vec::trail_seen`), taken out
+for a migration pass and put back, so its table survives across rollovers.
+Against the `f304bc7` run A/B baselines, the 37 affected tier-specific cases
+(Trail-to-Hot rollover, conversion, adaptive decisions and passes, the
+256-frame budgets) are unchanged: 32 pass, 5 nanosecond-scale/wide-interval
+inconclusives, no regression (`--save-baseline seen1`). The case the cache is
+for — rollover on *every* mark with small frames — did not exist in the
+inventory; `three_tier_v1/rollover/trail_to_hot_small_frames_per_mark/apply_configured_x64`
+(64 marks × 8 writes on a Trail store with `trail: Frames(0)`) was added and
+measured on both revisions with the same bench source: `f304bc7` 9.83 µs,
+now 9.01 µs — **1.09×** (interval [0.915, 0.920]), i.e. ~13 ns per mark, the
+allocation plus free the pass used to pay.
+
 ## Results (revision `f304bc7`, runs A and B on 2026-09-16 17:05–18:45, reruns 18:50–19:10)
 
 Bench binaries: `/tmp/sp-d21-bench-binaries-f304bc7.md5`; driver log

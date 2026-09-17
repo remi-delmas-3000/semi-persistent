@@ -2120,3 +2120,41 @@ oracle and reference-e-graph property tests **31 passed**
 (`/tmp/sp-d21-final3-canary.log`); partial-API audit at the unchanged baseline
 (73/33/40/0). Formatting, whitespace and the unchanged-legacy check passed;
 trust **50 default + 5 literal**.
+
+
+## 2026-09-16 — Cached Trail-to-Hot dedupe set (extended goal, item a)
+
+The dedupe set for the Trail-to-Hot conversion is now owned by the vector
+(`Vec::trail_seen: Option<HashSet<I, IndexHasher>>`): each migration pass
+takes it out (`Option::take`), clears and reserves it per frame as before, and
+puts it back, so its table survives across passes instead of being allocated
+and freed per rollover; `ShrinkToFit` reclamation drops it. The field has no
+spec content; it is named, like the tier vectors, in every framing predicate
+of the Trail pass (`trail_migrating`, `trail_tentative`,
+`trail_retained_effect`, `lemma_trail_migration_wf`'s framing, the
+`runtime_migrate_trail*`/`adaptive_trail_stage_checked` and
+`trail_migration_finish_checked` contracts, `tiers_only_changed`). One more
+struct field made five proofs that were at the solver's edge exceed it; per
+convention none had its limit raised: `lemma_persistence_saved_len` hides
+`wf` (its named parts suffice), `lemma_push_preserves` delegates the Cold
+representation to `lemma_push_cold_repr`/`lemma_push_cold_reconstructs`,
+`lemma_survivor_top_bounds` is split by tier arm, `lemma_hot_migration_hot_frame`
+hides its target predicate until the end, and `maybe_shrink` re-establishes
+`wf` through the same named-parts transfer recipe as tier reclamation instead
+of a full `wf` reveal (which had begun to hang the solver).
+
+Targeted evidence: Trail family **41 verified** (`/tmp/sp-d21-seen4.log`),
+decomposed lemmas and `maybe_shrink` **verified individually**
+(`/tmp/sp-d21-rl*.log`); `vec` module **436 verified, zero errors**.
+
+Gate evidence (fresh, run in a worktree holding exactly this commit's files,
+`/tmp/sp-d21-1a-*.log`): full default **2606 verified, zero errors**
+(four more functions than `f304bc7`: the decomposed lemmas); literal-types
+**2606 verified, zero errors**; conditional composition **80 verified**;
+`au-verus` **29 verified**; feature suite **277 passed, 10 ignored**; release
+differential policy matrix with `PROPTEST_CASES=1024` **4 passed**; B+ tree,
+oracle and reference-e-graph property tests **31 passed**; e-graph/SAT
+consumers **1267 passed, 45 ignored**; canary **2 passed**; partial-API audit
+at the unchanged baseline (73/33/40/0); formatting, whitespace and the
+unchanged-legacy check passed; trust **50 default + 5 literal**. Benchmarks:
+`doc/tasks/final-performance-report.md`, "Extended goal 1(a)".
