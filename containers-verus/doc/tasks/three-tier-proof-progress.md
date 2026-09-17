@@ -2266,3 +2266,35 @@ unchanged baseline (73/33/40/0); formatting, whitespace and the
 unchanged-legacy check passed; trust **50 default + 5 literal**. Design:
 `doc/design/18-store-policy.md`. Benchmarks:
 `doc/tasks/final-performance-report.md`, "Extended goal 2".
+
+## 2026-09-16 — HintedArena::note_hint pushes into its bucket in place (extended goal, item 1(d))
+
+`note_hint`'s existing-key arm rebuilt the fingerprint's bucket by copying
+it element by element into a fresh vector, pushing, and storing the copy
+back (`Vec::set`), because the code predated vstd's specifications of
+`core::mem::swap` and `&mut vec[i]`. It now swaps the bucket out against an
+empty vector (no allocation), pushes, and swaps it back: destination
+passing, no copy. The proof is unchanged in structure — the two swaps leave
+`spill@` equal to the old sequence updated at the slot with the pushed
+bucket, which is what the previous copy established — and the module drops
+one loop. No consumer uses `HintedArena` today, so there is no benchmark to
+re-run; the change is recorded for the allocation tour's completeness.
+
+Item 1(c) (`diff_compress::sort_frame_by_index` in place) needs no change:
+its copy is reached only from the cold-stack sealing paths, whose sole
+caller is the cold-stack differential test, and from the legacy compression
+cadence that production does not enable.
+
+Targeted evidence: `hinted_arena` module **13 verified, zero errors**
+(`scratchpad/hinted_verify2.log`).
+
+Gate evidence (fresh, run in a worktree holding exactly this commit's file,
+`/tmp/sp-d21-1d-*.log`): full default **2621 verified, zero errors**;
+literal-types **2621 verified, zero errors**; conditional composition **80
+verified**; `au-verus` **29 verified**; feature suite **277 passed, 10
+ignored**; release differential policy matrix with `PROPTEST_CASES=1024`
+**4 passed**; B+ tree, oracle and reference-e-graph property tests **31
+passed**; e-graph/SAT consumers **1267 passed, 45 ignored**; canary **2
+passed**; partial-API audit at the unchanged baseline (73/33/40/0);
+formatting, whitespace and the unchanged-legacy check passed; trust **50
+default + 5 literal**.

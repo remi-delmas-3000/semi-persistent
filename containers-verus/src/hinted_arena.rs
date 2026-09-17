@@ -549,26 +549,13 @@ where
                     assert(slot < self.spill@.len());
                 }
                 let ghost old_bucket = self.spill@[slot as int]@;
-                // Push into the bucket in place (no take/swap: Verus models
-                // neither; `Vec::set` with a rebuilt bucket would copy).
+                // Push into the bucket in place: swap it out against an empty
+                // vector (no allocation), push, swap it back. Destination
+                // passing, no copy of the bucket.
                 let mut b: Vec<I> = Vec::new();
-                let src_len = self.spill[slot].len();
-                let mut q: usize = 0;
-                while q < src_len
-                    invariant
-                        q <= src_len,
-                        slot < self.spill@.len(),
-                        src_len == self.spill@[slot as int]@.len(),
-                        old_bucket == self.spill@[slot as int]@,
-                        b@ =~= old_bucket.subrange(0, q as int),
-                    decreases src_len - q,
-                {
-                    b.push(self.spill[slot][q]);
-                    q += 1;
-                }
-                proof { assert(b@ =~= old_bucket); }
+                core::mem::swap(&mut self.spill[slot], &mut b);
                 b.push(id);
-                self.spill.set(slot, b);
+                core::mem::swap(&mut self.spill[slot], &mut b);
                 proof {
                     // wf: log untouched; spill length unchanged, so every
                     // stored slot still addresses the table.

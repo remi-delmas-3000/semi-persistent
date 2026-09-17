@@ -125,9 +125,9 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    `containers-conformance/tests/cold_stack_differential.rs`, and from the
    legacy compression cadence (`compress_frame`, `CompressionMode` other
    than `None`) that production does not enable; no production path pays the
-   copy. Remaining, low value: `HintedArena::note_hint` via
-   `core::mem::swap` instead of a bucket copy (no consumer today; vstd now
-   specifies `core::mem::swap` and `&mut vec[i]`, so it is feasible).
+   copy. Done: `HintedArena::note_hint` pushes into its bucket through two
+   `core::mem::swap`s against an empty vector instead of copying the bucket
+   (no consumer today; vstd specifies `core::mem::swap` and `&mut vec[i]`).
 3. Done: store policy for every composite (`doc/design/18-store-policy.md`):
    `TaggedFamily`/`PlainFamily` with `HotFirst` (the default, today's
    choices) and `TrailFirst`; `P = HotFirst` on `UnionFind`, `SparseSet`,

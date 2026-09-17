@@ -25,7 +25,8 @@ containers`).
 | `45fc132` | final two-run benchmark results appended to the performance report; goal extended with the caching, store-policy and `VecD` work (handoff "Next actions") |
 | `987a964` | Extended goal 1(a): the Trail-to-Hot dedupe set cached on the vector (`trail_seen`), five edge-of-budget proofs decomposed, per-mark small-frame rollover benchmark (1.09×) |
 | `54563da` | Extended goal 1(b): `SpMap::restore` unwinds the index over the discarded suffix through a previous-occurrence column (`prev`), rebuild kept as the fallback; restore-after-small-frame 970×/206× |
-| (this commit) | Extended goal 2: store policy for every composite (`store_policy::{TaggedFamily, PlainFamily, HotFirst, TrailFirst}`, `P = HotFirst` on `UnionFind`, `SparseSet`, `CircularList`, `ListArena`, `BPlusTreeSet`, `EClasses`), `DiffStore::lemma_wf_data_len` |
+| `f9ffab0` | Extended goal 2: store policy for every composite (`store_policy::{TaggedFamily, PlainFamily, HotFirst, TrailFirst}`, `P = HotFirst` on `UnionFind`, `SparseSet`, `CircularList`, `ListArena`, `BPlusTreeSet`, `EClasses`), `DiffStore::lemma_wf_data_len` |
+| (this commit) | Extended goal 1(d): `HintedArena::note_hint` pushes into its bucket through two `core::mem::swap`s against an empty vector instead of copying the bucket |
 
 ## 2. Per-container contract / verification matrix
 
