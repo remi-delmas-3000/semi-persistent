@@ -214,15 +214,8 @@ pub(crate) fn dedupe_trail_range<T: Copy, I: IndexLike>(
     broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
     let ghost base = out@;
     let ghost lo = base.len() as int;
-    seen.clear();
-    // Size both buffers for the frame up front: the set otherwise grows from
-    // empty through a chain of rehashes on every pass.
-    seen.reserve(end - start);
     out.reserve(end - start);
     proof {
-        assert(seen_prefix::<T, I>(pool@, start as int, start as int, seen@)) by {
-            reveal(seen_prefix);
-        }
         assert(dedupe_prefix::<T, I>(pool@, start as int, start as int, out@, lo)) by {
             reveal(dedupe_prefix);
         }
@@ -230,39 +223,107 @@ pub(crate) fn dedupe_trail_range<T: Copy, I: IndexLike>(
             reveal(crate::vec::stratum_unique);
         }
     }
-    let mut q = start;
-    while q < end
+    // Fast path: a strictly ascending frame (the sweep/append write pattern)
+    // holds no index twice, so every entry is its own first hitter and the
+    // frame copies straight through — no set, no hashing. The scan is one
+    // compare per entry and stops at the first descent.
+    let mut asc = true;
+    let mut r = start;
+    while asc && end - r > 1
         invariant
-            start <= q <= end <= pool@.len(),
-            vstd::std_specs::hash::obeys_key_model::<I>(),
-            vstd::std_specs::hash::builds_valid_hashers::<crate::hasher_spec::IndexHasher>(),
-            lo == base.len(), lo <= out@.len(), out@.len() <= lo + (q - start),
-            out@.subrange(0, lo) == base,
-            seen_prefix::<T, I>(pool@, start as int, q as int, seen@),
-            crate::vec::stratum_unique::<T, I>(out@, lo, out@.len() as int),
-            dedupe_prefix::<T, I>(pool@, start as int, q as int, out@, lo),
-        decreases end - q,
+            start <= r <= end <= pool@.len(),
+            r < end || start == end,
+            asc ==> forall|a: int, b: int| start <= a < b <= r
+                ==> (#[trigger] pool@[a]).1.as_nat() < (#[trigger] pool@[b]).1.as_nat(),
+        decreases end - r + (if asc { 1int } else { 0int }),
     {
-        let entry = pool[q];
-        let index = entry.1;
-        let ghost pre_out = out@;
-        let ghost pre_seen = seen@;
-        let fresh = seen.insert(index);
-        proof { lemma_seen_step::<T, I>(pool@, start as int, q as int, pre_seen); }
-        if fresh {
-            proof { lemma_dedupe_fresh::<T, I>(pool@, start as int, q as int, pre_seen); }
+        if pool[r].1.as_usize() < pool[r + 1].1.as_usize() {
+            r += 1;
+        } else {
+            asc = false;
+        }
+    }
+    if asc {
+        // `[start, end)` is strictly ascending: the scan reached the last
+        // entry (`end - r <= 1`), or the frame has at most one entry.
+        proof {
+            assert forall|a: int, b: int| start <= a < b < end
+                implies (#[trigger] pool@[a]).1.as_nat() < (#[trigger] pool@[b]).1.as_nat() by {
+                assert(b <= r);
+            }
+        }
+        let mut q = start;
+        while q < end
+            invariant
+                start <= q <= end <= pool@.len(),
+                lo == base.len(), lo <= out@.len(), out@.len() <= lo + (q - start),
+                out@.subrange(0, lo) == base,
+                forall|a: int, b: int| start <= a < b < end
+                    ==> (#[trigger] pool@[a]).1.as_nat() < (#[trigger] pool@[b]).1.as_nat(),
+                crate::vec::stratum_unique::<T, I>(out@, lo, out@.len() as int),
+                dedupe_prefix::<T, I>(pool@, start as int, q as int, out@, lo),
+            decreases end - q,
+        {
+            let entry = pool[q];
+            let ghost pre_out = out@;
+            proof {
+                // Ascending ⟹ no earlier entry shares this index: q is a first hitter.
+                assert(crate::vec::first_hitter::<T, I>(
+                    pool@, start as int, q as int, pool@[q as int].1.as_nat())) by {
+                    reveal(crate::vec::first_hitter);
+                }
+            }
             out.push(entry);
             proof {
                 lemma_dedupe_push::<T, I>(pool@, start as int, q as int, pre_out, lo);
                 assert(out@.subrange(0, lo) =~= base);
             }
-        } else {
-            proof {
-                lemma_dedupe_dup::<T, I>(pool@, start as int, q as int, pre_seen);
-                lemma_dedupe_skip::<T, I>(pool@, start as int, q as int, out@, lo);
+            q += 1;
+        }
+    } else {
+        seen.clear();
+        // Size the set for the frame up front: it otherwise grows from empty
+        // through a chain of rehashes on every pass.
+        seen.reserve(end - start);
+        proof {
+            assert(seen_prefix::<T, I>(pool@, start as int, start as int, seen@)) by {
+                reveal(seen_prefix);
             }
         }
-        q += 1;
+        let mut q = start;
+        while q < end
+            invariant
+                start <= q <= end <= pool@.len(),
+                vstd::std_specs::hash::obeys_key_model::<I>(),
+                vstd::std_specs::hash::builds_valid_hashers::<crate::hasher_spec::IndexHasher>(),
+                lo == base.len(), lo <= out@.len(), out@.len() <= lo + (q - start),
+                out@.subrange(0, lo) == base,
+                seen_prefix::<T, I>(pool@, start as int, q as int, seen@),
+                crate::vec::stratum_unique::<T, I>(out@, lo, out@.len() as int),
+                dedupe_prefix::<T, I>(pool@, start as int, q as int, out@, lo),
+            decreases end - q,
+        {
+            let entry = pool[q];
+            let index = entry.1;
+            let ghost pre_out = out@;
+            let ghost pre_seen = seen@;
+            let fresh = seen.insert(index);
+            proof { lemma_seen_step::<T, I>(pool@, start as int, q as int, pre_seen); }
+            if fresh {
+                proof { lemma_dedupe_fresh::<T, I>(pool@, start as int, q as int, pre_seen); }
+                out.push(entry);
+                proof {
+                    lemma_dedupe_push::<T, I>(pool@, start as int, q as int, pre_out, lo);
+                    assert(out@.subrange(0, lo) =~= base);
+                }
+            } else {
+                proof {
+                    lemma_dedupe_dup::<T, I>(pool@, start as int, q as int, pre_seen);
+                    lemma_dedupe_skip::<T, I>(pool@, start as int, q as int, out@, lo);
+                }
+            }
+            q += 1;
+        }
     }
     proof {
         assert forall|j: nat| #[trigger] crate::vec::range_saved_value::<T, I>(out@, lo, out@.len() as int, j)
