@@ -555,6 +555,7 @@ where
     M: crate::lit_model::LitModel<Value = L>,
     Q: crate::ematch::MatchView<Cfg> + ?Sized,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     Ok(match op {
         RhsOp::FetchNode(node) => eg.find(env.node(*node)),
@@ -653,6 +654,7 @@ where
     M: crate::lit_model::LitModel<Value = L>,
     Q: crate::ematch::MatchView<Cfg> + ?Sized,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     use crate::registry::AssocDir;
     let last = args.len().saturating_sub(1);
@@ -690,6 +692,7 @@ where
     M: crate::lit_model::LitModel<Value = L>,
     Q: crate::ematch::MatchView<Cfg> + ?Sized,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     match arg {
         // A bound node used directly as a child needs no canonicalization here:
@@ -812,6 +815,7 @@ where
     M: crate::lit_model::LitModel<Value = L>,
     Q: crate::ematch::MatchView<Cfg> + ?Sized,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if let Some(filter) = filter {
         let value = eval(filter, env, eg, model, globals)?;
@@ -839,6 +843,7 @@ where
     M: crate::lit_model::LitModel<Value = L>,
     Q: crate::ematch::MatchView<Cfg> + ?Sized,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if let Some(filter) = filter {
         let value = eval(filter, env, eg, model, globals)?;
@@ -1039,6 +1044,7 @@ where
     L: LitVal,
     M: crate::lit_model::LitModel<Value = L>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let value = eg
         .get_lit_val(id)
@@ -1059,6 +1065,7 @@ where
     M: crate::lit_model::LitModel<Value = L>,
     Q: crate::ematch::MatchView<Cfg> + ?Sized,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     Ok(match action {
         CompiledAction::Union(rule_id, a, b) => {
@@ -1112,6 +1119,7 @@ where
     M: crate::lit_model::LitModel<Value = L>,
     Q: crate::ematch::MatchView<Cfg> + ?Sized,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut env = RhsEnv::new(query, rule.rhs_locals);
     // Actions are applied in order and an error stops at the one that faulted:
@@ -1154,6 +1162,7 @@ where
     L: LitVal,
     M: crate::lit_model::LitModel<Value = L>,
     crate::canon::MSetCanon: crate::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     apply_rule_pooled(
         rule,
@@ -1186,6 +1195,7 @@ where
     L: LitVal,
     M: crate::lit_model::LitModel<Value = L>,
     crate::canon::MSetCanon: crate::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let vindex = crate::index::VariantIndex::naive(index);
     let sampler = crate::index::IndexSampler::new(eg, vindex);
@@ -1220,6 +1230,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     fault.in_rule(eg.rules().name(rule.rule_id)).at(rule.span)
 }

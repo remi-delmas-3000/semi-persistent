@@ -28,6 +28,7 @@ containers`).
 | `f9ffab0` | Extended goal 2: store policy for every composite (`store_policy::{TaggedFamily, PlainFamily, HotFirst, TrailFirst}`, `P = HotFirst` on `UnionFind`, `SparseSet`, `CircularList`, `ListArena`, `BPlusTreeSet`, `EClasses`), `DiffStore::lemma_wf_data_len` |
 | `08dc0d5` | Extended goal 1(d): `HintedArena::note_hint` pushes into its bucket through two `core::mem::swap`s against an empty vector instead of copying the bucket; 1(c) settled by inspection |
 | `ec1dd5e` | Extended goal 3: the e-graph's ten cache columns static `VecI` after measuring the three disciplines (all within 2.2 %); `VecD` sites and the `SEMPER_DIFF`/`--diff-mode` lever removed from the e-graph; new `store_bench` (push/pop workload); verified crate untouched |
+| (this commit) | Extended goal 4: `EGraphConfig::Policy` with `EqSat32`/`EqSat64` (Hot-first) and `Smt32`/`Smt64` (Trail-first) configurations; the class layer and the node caches follow the policy; `store_policy::{tagged_vec, plain_vec}` public total constructors; family stores declared `Send` |
 
 ## 2. Per-container contract / verification matrix
 

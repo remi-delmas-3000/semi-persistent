@@ -439,6 +439,77 @@ which is where the enum dispatch sat). The 2.5× dispatch cost measured on
 the three-tier micro-benchmarks is diluted here by everything else a
 transaction does.
 
+## Extended goal 4: e-graph configurations for saturation and for SMT (after `ec1dd5e`)
+
+The Trail-first policy exists for the Sundance SMT integration, so the
+engine now selects its store discipline per configuration
+(`EGraphConfig::Policy`, reaching the class layer and the ten node-cache
+columns): `EqSat32`/`EqSat64` keep the Hot-first stores, `Smt32`/`Smt64`
+take Trail-first, and the SAT core's `Euf31`/`Euf63` wrap the SMT pair.
+This supersedes the static `VecI` caches of goal 3 (whose measurement, on
+the cache columns alone, found the disciplines within 2.2 % of each other);
+the policy is static per configuration, so there is still no runtime
+dispatch. Two questions were measured: whether the saturation configuration
+kept its speed (its stores are the same types as before, so the generated
+code should be identical), and what the SMT configuration does on the
+push/pop workload it was chosen for, now with every tracked column under
+Trail-first rather than the caches alone.
+
+**Saturation configuration.** `EqSat32` against the static-cache tree
+(`cfg_a`/`cfg_b` vs `static_a`/`static_b`, `saturate_bench`): 8 cases, 8
+pass, every ratio within 1 % of one (plain 1.001/0.996 and 1.004/1.001, AC
+1.005/1.003 to 1.008/1.002, AC completion 1.003/0.996 and 0.990/1.010,
+AC10 1.001/1.003 and 1.001/0.999). The policy is a compile-time selection of
+the same store types, and the generated code behaves as such.
+
+**Push/pop programs, saturation configuration against the previous
+commit.** The default-sample runs were inconclusive (run A 1.07–1.08, run B
+1.01–1.03), so both trees were rerun at `--sample-size 100 --warm-up-time 3
+--measurement-time 10`, twice each (`prev_rerun`/`prev_rerun2` on a
+worktree of `ec1dd5e`, `cfg_rerun`/`cfg_rerun2` here); ratio = `EqSat32`
+now ÷ static caches before:
+
+| Program | Before (two reruns) | `EqSat32` now (two reruns) | Ratio | Status |
+|---|---|---|---|---|
+| `sp-t880.base` | 4.532 ms / 4.513 ms | 4.681 ms / 4.672 ms | 1.033 / 1.035 | pass |
+| `sp-t880.cycles` | 25.21 ms / 25.02 ms | 25.70 ms / 25.73 ms | 1.020 / 1.028 | pass |
+| `sp-t880.empty` | 4.648 ms / 4.639 ms | 4.802 ms / 4.776 ms | 1.033 / 1.030 | pass |
+| `sp-t880.empty20k` | 16.24 ms / 16.35 ms | 16.67 ms / 16.65 ms | 1.026 / 1.018 | pass |
+| `sp-t880.norun` | 7.149 ms / 7.166 ms | 7.311 ms / 7.300 ms | 1.023 / 1.019 | pass |
+| `sp-t880.rerun` | 5.582 ms / 5.570 ms | 5.750 ms / 5.740 ms | 1.030 / 1.031 | pass |
+| `sp-t880.rerunnorun` | 4.552 ms / 4.543 ms | 4.696 ms / 4.699 ms | 1.032 / 1.034 | pass |
+
+A consistent 2–3.5 % on this bench, inside τ, and absent from the
+saturation bench (which runs the concrete default configuration, as before).
+The push/pop bench's runner became generic over the configuration and the
+binary now carries two instantiations of the interpreter; the saturation
+result says the engine's own code did not change, so this is attributed to
+the bench binary's layout rather than to the policy.
+
+**Push/pop programs, SMT configuration against saturation.** Same binary,
+same reruns; ratio = `Smt32` ÷ `EqSat32`:
+
+| Program | `EqSat32` | `Smt32` | Ratio (two reruns) | Status |
+|---|---|---|---|---|
+| `sp-t880.base` | 4.68 ms | 4.59 ms | 0.980 / 0.982 | pass |
+| `sp-t880.cycles` | 25.7 ms | 25.4 ms | 0.987 / 0.994 | pass |
+| `sp-t880.empty` | 4.79 ms | 4.70 ms | 0.979 / 0.985 | pass |
+| `sp-t880.empty20k` | 16.66 ms | 17.99 ms | 1.076 / 1.084 | **inconclusive** |
+| `sp-t880.norun` | 7.31 ms | 7.18 ms | 0.979 / 0.986 | pass |
+| `sp-t880.rerun` | 5.75 ms | 5.64 ms | 0.980 / 0.983 | pass |
+| `sp-t880.rerunnorun` | 4.70 ms | 4.61 ms | 0.981 / 0.982 | pass |
+
+With every tracked column under Trail-first, the SMT configuration is
+1.5–2 % faster than saturation's stores on the six programs whose frames
+carry writes (the default-sample runs showed 2–7 %), and 7.6–8.4 % slower
+on the 20 000-empty-frame program, where a frame costs only its mark and
+restore and the Trail store's per-frame bookkeeping is the whole price.
+That is the expected shape of the trade: append-only ingress pays per
+write, frame bookkeeping per frame. The Sundance workloads carry writes
+per level, so `Smt32`/`Smt64` are the configurations the SAT core wraps;
+the saturation configurations are unchanged. Whether the empty-frame cost
+matters is a question for the integration's own traces.
+
 ## Results (revision `f304bc7`, runs A and B on 2026-09-16 17:05–18:45, reruns 18:50–19:10)
 
 Bench binaries: `/tmp/sp-d21-bench-binaries-f304bc7.md5`; driver log

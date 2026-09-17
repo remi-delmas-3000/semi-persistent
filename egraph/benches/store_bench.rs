@@ -8,12 +8,10 @@
 //! checked and interpreted in process, fresh per sample, exactly as
 //! `corpus.rs` does; `push`/`pop` need `TRACK`.
 //!
-//! It was written for the store-discipline measurement behind the e-graph's
-//! cache store selection (`containers-verus/doc/tasks/final-performance-report.md`,
-//! "Extended goal 3"): the node caches were run under the three disciplines
-//! through the since-removed `SEMPER_DIFF` lever, and the workload here is
-//! the one where the Trail discipline was expected to pay. It stays as the
-//! regression guard for that workload.
+//! Every program runs under the two 31-bit configurations, `EqSat32`
+//! (Hot-first stores) and `Smt32` (Trail-first stores), so the store
+//! discipline the SMT integration selects is measured against the
+//! saturation default on the workload it was chosen for.
 //!
 //! ```text
 //! cargo bench -p semi-persistent-egraph --bench store_bench
@@ -23,9 +21,10 @@ use std::hint::black_box;
 use std::path::PathBuf;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use semi_persistent_egraph::config::{EGraphConfig, StorePolicy};
 use semi_persistent_egraph::interpret::Interpreter;
 use semi_persistent_egraph::model::{MachineLit, MachineModel};
-use semi_persistent_egraph::nodes::DefaultConfig;
+use semi_persistent_egraph::nodes::{EqSat32, Smt32};
 use semi_persistent_egraph::saturate::SaturationStrategy;
 
 /// The program families, all `;; TYPES: machine`.
@@ -46,11 +45,17 @@ fn program_path(name: &str) -> PathBuf {
 }
 
 /// One timed run: parse, sort check, interpret to completion (the corpus
-/// bench's recipe, machine literals).
-fn run_once(source: &str) -> usize {
+/// bench's recipe, machine literals), under the configuration `Cfg`.
+fn run_once<Cfg>(source: &str) -> usize
+where
+    Cfg: EGraphConfig,
+    Cfg::O: std::hash::Hash,
+    semi_persistent_egraph::canon::MSetCanon:
+        semi_persistent_egraph::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: StorePolicy<Cfg, true>,
+{
     let cmds = semi_persistent_egraph::parser::parse_program_v2(source).expect("program parses");
-    let mut interp =
-        Interpreter::<DefaultConfig, MachineLit, MachineModel, true, false>::new(MachineModel);
+    let mut interp = Interpreter::<Cfg, MachineLit, MachineModel, true, false>::new(MachineModel);
     interp.set_strategy(SaturationStrategy::SemiNaive);
     let mut globals = semi_persistent_egraph::resolve::GlobalCtx::new();
     let checked = semi_persistent_egraph::sortcheck::sortcheck_program(
@@ -67,9 +72,12 @@ fn run_once(source: &str) -> usize {
 fn bench_store(c: &mut Criterion) {
     for name in PROGRAMS {
         let source = std::fs::read_to_string(program_path(name)).expect("cannot read program");
-        let mut group = c.benchmark_group("store");
-        group.bench_function(*name, |b| {
-            b.iter(|| black_box(run_once(&source)));
+        let mut group = c.benchmark_group(format!("store/{name}"));
+        group.bench_function("eqsat32", |b| {
+            b.iter(|| black_box(run_once::<EqSat32>(&source)));
+        });
+        group.bench_function("smt32", |b| {
+            b.iter(|| black_box(run_once::<Smt32>(&source)));
         });
         group.finish();
     }

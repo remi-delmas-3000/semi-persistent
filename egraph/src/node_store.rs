@@ -71,41 +71,47 @@ pub struct NodeStore<
     I: NodeIds,
     const TRACK: bool = true,
     const PROOFS: bool = false,
-> {
+    P = crate::containers::HotFirst,
+> where
+    P: crate::config::CacheFamilies<G, O, V, C, I, TRACK>,
+{
     routing: TypedRouting<G, I, TRACK>,
-    pub plain0: FixedArityCache<G, O, I::L0, 0, TRACK, PROOFS>,
-    pub plain1: FixedArityCache<G, O, I::L1, 1, TRACK, PROOFS>,
-    pub plain2: FixedArityCache<G, O, I::L2, 2, TRACK, PROOFS>,
-    pub plain3: FixedArityCache<G, O, I::L3, 3, TRACK, PROOFS>,
-    pub spair: FixedArityCache<G, O, I::LSPair, 2, TRACK, PROOFS>,
-    pub plain_n: VariableArityCache<G, O, G, I::LN, TRACK, PROOFS>,
-    pub seq: VariableArityCache<G, O, G, I::LSeq, TRACK, PROOFS>,
-    pub mset: VariableArityCache<G, O, C, I::LMSet, TRACK, PROOFS>,
-    pub set: VariableArityCache<G, O, G, I::LSet, TRACK, PROOFS>,
-    pub lit: LitCache<G, O, V, I::LLit, TRACK>,
+    pub plain0: FixedArityCache<G, O, I::L0, 0, TRACK, PROOFS, P>,
+    pub plain1: FixedArityCache<G, O, I::L1, 1, TRACK, PROOFS, P>,
+    pub plain2: FixedArityCache<G, O, I::L2, 2, TRACK, PROOFS, P>,
+    pub plain3: FixedArityCache<G, O, I::L3, 3, TRACK, PROOFS, P>,
+    pub spair: FixedArityCache<G, O, I::LSPair, 2, TRACK, PROOFS, P>,
+    pub plain_n: VariableArityCache<G, O, G, I::LN, TRACK, PROOFS, P>,
+    pub seq: VariableArityCache<G, O, G, I::LSeq, TRACK, PROOFS, P>,
+    pub mset: VariableArityCache<G, O, C, I::LMSet, TRACK, PROOFS, P>,
+    pub set: VariableArityCache<G, O, G, I::LSet, TRACK, PROOFS, P>,
+    pub lit: LitCache<G, O, V, I::LLit, TRACK, P>,
 }
 
-impl<G, O, V, C, I, const TRACK: bool, const PROOFS: bool> Default
-    for NodeStore<G, O, V, C, I, TRACK, PROOFS>
+impl<G, O, V, C, I, const TRACK: bool, const PROOFS: bool, P> Default
+    for NodeStore<G, O, V, C, I, TRACK, PROOFS, P>
 where
     G: DenseId<Index = I::Index> + Hash,
     O: DenseId + Hash,
     V: DenseId + Hash,
     C: Tagged + Clone + Copy + Hash + Eq + core::fmt::Debug,
     I: NodeIds,
+    P: crate::config::CacheFamilies<G, O, V, C, I, TRACK>,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<G, O, V, C, I, const TRACK: bool, const PROOFS: bool> NodeStore<G, O, V, C, I, TRACK, PROOFS>
+impl<G, O, V, C, I, const TRACK: bool, const PROOFS: bool, P>
+    NodeStore<G, O, V, C, I, TRACK, PROOFS, P>
 where
     G: DenseId<Index = I::Index> + Hash,
     O: DenseId + Hash,
     V: DenseId + Hash,
     C: Tagged + Clone + Copy + Hash + Eq + core::fmt::Debug,
     I: NodeIds,
+    P: crate::config::CacheFamilies<G, O, V, C, I, TRACK>,
 {
     pub fn new() -> Self {
         Self {

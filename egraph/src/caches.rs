@@ -12,7 +12,7 @@ use crate::canon::{FixedCanon, VarCanon};
 use crate::containers::DenseId;
 use crate::containers::IndexLike; // prod-parity: L::min() (was L::MIN)
 use crate::containers::Tagged;
-use crate::containers::{ShrinkPolicy, VecI, VecToken};
+use crate::containers::{DiffStore, ShrinkPolicy, TaggedFamily, VecI, VecToken};
 use crate::node_types::{FixedArityNode, LitNode, VariableArityNode};
 
 // ---------------------------------------------------------------------------
@@ -195,17 +195,28 @@ pub struct FixedArityCache<
     const K: usize,
     const TRACK: bool = true,
     const PROOFS: bool = false,
-> {
+    P = crate::containers::HotFirst,
+> where
+    P: TaggedFamily<FixedArityNode<G, O, K>, L, TRACK>,
+{
     /// One entry per node, so `L` (a local node id) is the index width.
     // Value layer: NoValueCompression by measurement (F2.4): the layered RLE
     // candidates cost 7.28/6.84 MB against 5.06 MB plain and 4.62 MB sorted
     // runs on the corpus, zero wins in 39,272 frames. Revisit at EqSat scale.
-    // Store: the static Hot-first inline store, by measurement (extended goal
-    // 3 in `containers-verus/doc/tasks/final-performance-report.md`): the
-    // three disciplines were within 2 % of each other on both the saturation
-    // and the push/pop workloads, so the caches take the one without runtime
-    // dispatch; the same applies to every cache column below.
-    nodes: crate::containers::VecI<FixedArityNode<G, O, K>, L, TRACK>,
+    // Store: chosen by the config's policy (`EGraphConfig::Policy`, a
+    // `TaggedFamily` per column): `HotFirst` for equality saturation,
+    // `TrailFirst` for SMT-style mark/backtrack use. The three disciplines
+    // measured within 2 % of each other on the saturation and push/pop
+    // benchmarks (extended goal 3 in
+    // `containers-verus/doc/tasks/final-performance-report.md`); the policy
+    // is static per config, so there is no runtime dispatch either way. The
+    // same applies to every cache column below.
+    nodes: crate::containers::vec::Vec<
+        FixedArityNode<G, O, K>,
+        L,
+        <P as TaggedFamily<FixedArityNode<G, O, K>, L, TRACK>>::Store,
+        TRACK,
+    >,
     /// Hint index: fingerprint -> local ids that at some point held content
     /// with that fingerprint. The arena is the source of truth; a probe
     /// validates every candidate against current node content, so restore
@@ -234,7 +245,8 @@ impl<
     const K: usize,
     const TRACK: bool,
     const PROOFS: bool,
-> Default for FixedArityCache<G, O, L, K, TRACK, PROOFS>
+    P: TaggedFamily<FixedArityNode<G, O, K>, L, TRACK>,
+> Default for FixedArityCache<G, O, L, K, TRACK, PROOFS, P>
 {
     fn default() -> Self {
         Self::new()
@@ -248,11 +260,17 @@ impl<
     const K: usize,
     const TRACK: bool,
     const PROOFS: bool,
-> FixedArityCache<G, O, L, K, TRACK, PROOFS>
+    P: TaggedFamily<FixedArityNode<G, O, K>, L, TRACK>,
+> FixedArityCache<G, O, L, K, TRACK, PROOFS, P>
 {
     pub fn new() -> Self {
         Self {
-            nodes: crate::containers::VecI::new(),
+            nodes: crate::containers::store_policy::tagged_vec::<
+                FixedArityNode<G, O, K>,
+                L,
+                TRACK,
+                P,
+            >(),
             index: hashbrown::HashMap::with_hasher(PassthroughBuildHasher),
             spill: Vec::new(),
             history: if PROOFS { Some(VecI::new()) } else { None },
@@ -646,16 +664,25 @@ pub struct VariableArityCache<
     L: DenseId,
     const TRACK: bool = true,
     const PROOFS: bool = false,
-> {
+    P = crate::containers::HotFirst,
+> where
+    P: TaggedFamily<VariableArityNode<G, O>, L, TRACK> + TaggedFamily<C, usize, TRACK>,
+{
     /// One entry per node, so `L` (a local node id) is the index width.
     // Same measured demotion as the fixed-arity cache (46.9/42.8 KB layered
     // RLE vs 35.0 KB plain, 33.8 KB sorted runs, zero wins in 537 frames).
-    nodes: crate::containers::VecI<VariableArityNode<G, O>, L, TRACK>,
+    nodes: crate::containers::vec::Vec<
+        VariableArityNode<G, O>,
+        L,
+        <P as TaggedFamily<VariableArityNode<G, O>, L, TRACK>>::Store,
+        TRACK,
+    >,
     /// The shared child pool the nodes' spans address. Indexed at `usize`, matching the
     /// `start`/`end` words in [`VariableArityNode`]: its population is `Σ arity` over the
     /// nodes, which neither `L`'s nor `G`'s capacity bounds, so an id-width index here would
     /// be a new cap rather than a narrowing. See [`VariableArityNode::start`].
-    children: crate::containers::VecI<C, usize, TRACK>,
+    children:
+        crate::containers::vec::Vec<C, usize, <P as TaggedFamily<C, usize, TRACK>>::Store, TRACK>,
     /// Hint index over (op, span contents); see [`FixedArityCache::index`].
     index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
     /// Spilled hint buckets; `HintSlot` values with the spill tag index here.
@@ -677,7 +704,8 @@ impl<
     L: DenseId,
     const TRACK: bool,
     const PROOFS: bool,
-> Default for VariableArityCache<G, O, C, L, TRACK, PROOFS>
+    P: TaggedFamily<VariableArityNode<G, O>, L, TRACK> + TaggedFamily<C, usize, TRACK>,
+> Default for VariableArityCache<G, O, C, L, TRACK, PROOFS, P>
 {
     fn default() -> Self {
         Self::new()
@@ -691,12 +719,18 @@ impl<
     L: DenseId,
     const TRACK: bool,
     const PROOFS: bool,
-> VariableArityCache<G, O, C, L, TRACK, PROOFS>
+    P: TaggedFamily<VariableArityNode<G, O>, L, TRACK> + TaggedFamily<C, usize, TRACK>,
+> VariableArityCache<G, O, C, L, TRACK, PROOFS, P>
 {
     pub fn new() -> Self {
         Self {
-            nodes: crate::containers::VecI::new(),
-            children: crate::containers::VecI::new(),
+            nodes: crate::containers::store_policy::tagged_vec::<
+                VariableArityNode<G, O>,
+                L,
+                TRACK,
+                P,
+            >(),
+            children: crate::containers::store_policy::tagged_vec::<C, usize, TRACK, P>(),
             index: hashbrown::HashMap::with_hasher(PassthroughBuildHasher),
             spill: Vec::new(),
             history_nodes: if PROOFS { Some(VecI::new()) } else { None },
@@ -1072,8 +1106,8 @@ impl<
 /// under a split borrow of the pool and the node arena. Matches
 /// `VariableArityCache::fingerprint` on the same content: a slice hash is a
 /// length prefix followed by the elements.
-fn var_children_fingerprint<G, O, C, const TRACK: bool>(
-    children: &crate::containers::VecI<C, usize, TRACK>,
+fn var_children_fingerprint<G, O, C, S: DiffStore<C, usize, TRACK>, const TRACK: bool>(
+    children: &crate::containers::vec::Vec<C, usize, S, TRACK>,
     node: &VariableArityNode<G, O>,
 ) -> Fingerprint
 where
@@ -1095,8 +1129,22 @@ where
 // LitCache<G, O, V, L, TRACK>
 // ---------------------------------------------------------------------------
 
-pub struct LitCache<G: DenseId, O: DenseId, V: DenseId, L: DenseId, const TRACK: bool = true> {
-    nodes: crate::containers::VecI<LitNode<G, O, V>, L, TRACK>,
+pub struct LitCache<
+    G: DenseId,
+    O: DenseId,
+    V: DenseId,
+    L: DenseId,
+    const TRACK: bool = true,
+    P = crate::containers::HotFirst,
+> where
+    P: TaggedFamily<LitNode<G, O, V>, L, TRACK>,
+{
+    nodes: crate::containers::vec::Vec<
+        LitNode<G, O, V>,
+        L,
+        <P as TaggedFamily<LitNode<G, O, V>, L, TRACK>>::Store,
+        TRACK,
+    >,
     /// Hint index; see [`FixedArityCache::index`]. Literal content never
     /// changes, so the only staleness here is truncated ids after a restore.
     index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
@@ -1105,20 +1153,24 @@ pub struct LitCache<G: DenseId, O: DenseId, V: DenseId, L: DenseId, const TRACK:
     frames: Vec<CacheFrame>,
 }
 
-impl<G: DenseId + Hash, O: DenseId + Hash, V: DenseId + Hash, L: DenseId, const TRACK: bool> Default
-    for LitCache<G, O, V, L, TRACK>
+impl<G: DenseId + Hash, O: DenseId + Hash, V: DenseId + Hash, L: DenseId, const TRACK: bool, P>
+    Default for LitCache<G, O, V, L, TRACK, P>
+where
+    P: TaggedFamily<LitNode<G, O, V>, L, TRACK>,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<G: DenseId + Hash, O: DenseId + Hash, V: DenseId + Hash, L: DenseId, const TRACK: bool>
-    LitCache<G, O, V, L, TRACK>
+impl<G: DenseId + Hash, O: DenseId + Hash, V: DenseId + Hash, L: DenseId, const TRACK: bool, P>
+    LitCache<G, O, V, L, TRACK, P>
+where
+    P: TaggedFamily<LitNode<G, O, V>, L, TRACK>,
 {
     pub fn new() -> Self {
         Self {
-            nodes: crate::containers::VecI::new(),
+            nodes: crate::containers::store_policy::tagged_vec::<LitNode<G, O, V>, L, TRACK, P>(),
             index: hashbrown::HashMap::with_hasher(PassthroughBuildHasher),
             spill: Vec::new(),
             frames: Vec::new(),

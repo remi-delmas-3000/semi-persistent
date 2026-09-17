@@ -505,6 +505,7 @@ pub(crate) fn evaluate_generalize_action<
 ) -> <Cfg::Au as AuIds>::Term
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if l == r {
         return build_best_term(snap, pool, l);
@@ -537,6 +538,7 @@ pub fn build_best_term<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: boo
 ) -> <Cfg::Au as AuIds>::Term
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     struct Frame<O, C, M, Term> {
         /// The class this frame extracts, cached when the frame completes.

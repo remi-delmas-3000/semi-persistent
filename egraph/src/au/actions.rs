@@ -190,6 +190,7 @@ pub fn generate_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
     r: ClassOf<Cfg>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if cache.get(l, r).is_some() {
         return;
@@ -479,6 +480,7 @@ fn generate_ordered_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     for &(_, l_id) in l_nodes {
         let l_arity = eg.for_each_child(l_id, |_, _| {});
@@ -520,6 +522,7 @@ fn generate_seq_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     // Same logic as ordered: positional zip only when lengths match.
     generate_ordered_actions(snap, eg, op, l_nodes, r_nodes, actions);
@@ -536,6 +539,7 @@ fn generate_spair_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: 
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     for &(_, l_id) in l_nodes {
         let mut l_children = [<ClassOf<Cfg>>::default(); 2];
@@ -608,6 +612,7 @@ fn generate_mset_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: b
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let identity_class = snap.op_identity_class(op);
     let mut l_mset_buf: Vec<(Cfg::G, Cfg::M)> = Vec::new();
@@ -663,6 +668,7 @@ fn generate_set_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let identity_class = snap.op_identity_class(op);
 
@@ -710,6 +716,7 @@ fn generate_lit_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     for &(_, l_id) in l_nodes {
         let l_val = eg.get_lit_val_id(l_id);
@@ -745,6 +752,7 @@ fn mset_counts<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> Option<(Vec<(ClassOf<Cfg>, Cfg::M)>, Cfg::M)>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut out: Vec<(ClassOf<Cfg>, Cfg::M)> = Vec::with_capacity(buf.len());
     let mut total = Cfg::M::ZERO;

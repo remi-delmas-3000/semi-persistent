@@ -1730,6 +1730,7 @@ pub fn run_mcgs<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 >
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut space: SearchSpace<Cfg::Au> = SearchSpace::new(config.cycle_mode);
     let mut pool = TermPool::new();
@@ -1770,6 +1771,7 @@ pub(crate) fn run_mcgs_in<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: 
 ) -> Result<(<Cfg::Au as AuIds>::Term, super::session::Completion), super::AuError>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     snap.validate_finite_from(l_root)?;
     snap.validate_finite_from(r_root)?;
@@ -1970,6 +1972,7 @@ fn close_completed_dag<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: boo
     root_idx: <Cfg::Au as AuIds>::OrStats,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     for &or_idx in &or_postorder(state, root_idx) {
         let edges: Vec<<Cfg::Au as AuIds>::AndStats> = state
@@ -2097,6 +2100,7 @@ fn try_close_and<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> Option<<Cfg::Au as AuIds>::OrStats>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if state.and_closed(and_idx) || state.and_stats.open_children(and_idx) != 0 {
         return None;
@@ -2166,6 +2170,7 @@ fn propagate_or_closures<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: b
     config: &McgsConfig,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     while let Some(or_idx) = pending.pop() {
         let mut entry = state.or_stats.parent_head(or_idx);
@@ -2211,6 +2216,7 @@ pub(crate) fn transport_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, con
 ) -> Vec<TransportActionDesc<Cfg::O, ClassOf<Cfg>>>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut out = Vec::new();
     for op in ac_repr::common_ac_ops(snap, l, r) {
@@ -2272,6 +2278,7 @@ fn structural_action_dominated<Cfg: EGraphConfig, L: LitVal, const T: bool, cons
 ) -> bool
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     structural_action_bound(snap, action) > u64::from(gen_size)
 }
@@ -2286,6 +2293,7 @@ fn structural_action_bound<Cfg: EGraphConfig, L: LitVal, const T: bool, const P:
 ) -> u64
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut bound: u64 = 1;
     for pair in &action.pairs {
@@ -2409,6 +2417,7 @@ fn solve_hybrid<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
     config: &McgsConfig,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     // Two-part admission: the rectangle and entry action count are
     // complementary workload estimates, not hard bounds.
@@ -2476,6 +2485,7 @@ fn ensure_or_stats<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> <Cfg::Au as AuIds>::OrStats
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if let Some(log_idx) = state.or_stats_map.id_of(&or_id) {
         return *state.or_stats_map.get_val(log_idx);
@@ -2635,6 +2645,7 @@ fn playout<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
     config: &McgsConfig,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     // The traversed path: AND stats ids, root-side first.
     let mut path: Vec<<Cfg::Au as AuIds>::AndStats> = Vec::new();
@@ -3135,6 +3146,7 @@ fn compose_and_offer<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>
     and_idx: <Cfg::Au as AuIds>::AndStats,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let and = state.and_stat(and_idx);
     let is_transport = !and.transport_rows.is_empty();
@@ -3221,6 +3233,7 @@ fn expand_action<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> <Cfg::Au as AuIds>::AndStats
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let dominance = config.dominance_pruning;
     let or_id = state.or_id(or_idx);
@@ -3432,6 +3445,7 @@ fn initial_rollout<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> <Cfg::Au as AuIds>::Term
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     struct Frame<Cfg: EGraphConfig> {
         or_id: <Cfg::Au as AuIds>::Or,

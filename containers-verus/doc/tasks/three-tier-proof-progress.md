@@ -2331,3 +2331,39 @@ unchanged-legacy check passed; trust **50 default + 5 literal**. Static
 inline against the dynamic store: AC saturation 1.06–1.08×, plain
 rewriting 1.00×, push/pop 1.01–1.02×, the 20 000-empty-frame program 1.08×
 (15 cases, all pass).
+
+## 2026-09-17 — E-graph configurations for saturation and for SMT (extended goal, item 4)
+
+The Trail-first policy was designed for the Sundance SMT integration, so the
+e-graph now chooses its store discipline per configuration:
+`EGraphConfig::Policy`, threaded through the class layer (`EClasses<…, P>`)
+and the ten node-cache columns (`NodeStore`/`caches.rs`, built through the
+verified crate's new public constructors `store_policy::{tagged_vec,
+plain_vec}`, the total forms of `Vec::with_store(P::empty())`). Four
+configurations: `EqSat32`/`EqSat64` (`DefaultConfig`/`Config64`, `HotFirst`)
+and `Smt32`/`Smt64` (the same id families, `TrailFirst`); the SAT core's
+`Euf31`/`Euf63` now wrap the SMT ones, with `EufEqSat31`/`EufEqSat63` for
+the saturation stores. Because an abstract policy is not covered by the
+blanket family implementations, the engine states one bound,
+`Cfg::Policy: StorePolicy<Cfg, TRACK>` (a blanket-implemented alias for the
+class-layer and cache families in `egraph/src/config.rs`), on its struct, on
+`Interpreter`, `NodeStore` and the wrapper types that hold an e-graph
+reference, and on every generic item naming them — about a hundred and
+forty sites, added by a script over the item headers. The families' stores
+are now declared `Send` (they always were), which the engine's threaded
+mark/restore requires of the abstract store. The verified crate's change is
+confined to `store_policy.rs` (`store_policy` **6 verified**); every proof
+is unchanged.
+
+Gate evidence (fresh, `/tmp/sp-d21-4-*.log`, run on the tree that becomes
+this commit): full default **2623 verified, zero errors** (two more
+functions than `ec1dd5e`: the public constructors); literal-types **2623
+verified, zero errors**; conditional composition **80 verified**; `au-verus`
+**29 verified**; feature suite **277 passed, 10 ignored**; release
+differential policy matrix with `PROPTEST_CASES=1024` **4 passed**; B+ tree,
+oracle and reference-e-graph property tests **31 passed**; e-graph/SAT
+consumers **1267 passed, 45 ignored** (the SAT core now runs on `Smt32`);
+canary **2 passed**; partial-API audit at the unchanged baseline
+(73/33/40/0); formatting, whitespace and the unchanged-legacy check passed;
+trust **50 default + 5 literal**. Benchmarks:
+`doc/tasks/final-performance-report.md`, "Extended goal 4".

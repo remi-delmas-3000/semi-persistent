@@ -37,8 +37,9 @@ use crate::tagged::Tagged;
 
 /// Chooses the store of a column whose element type is [`Tagged`].
 pub trait TaggedFamily<T: Tagged, I: IndexLike, const TRACK: bool> {
-    /// The store this policy builds for such a column.
-    type Store: DiffStore<T, I, TRACK>;
+    /// The store this policy builds for such a column. `Send`, like every
+    /// concrete store, because consumers fan mark/restore out across threads.
+    type Store: DiffStore<T, I, TRACK> + Send;
 
     /// An empty store, ready for `Vec::with_store`.
     fn empty() -> (s: Self::Store)
@@ -49,8 +50,8 @@ pub trait TaggedFamily<T: Tagged, I: IndexLike, const TRACK: bool> {
 
 /// Chooses the store of a column with any `Copy` element type.
 pub trait PlainFamily<T: Sized + Copy, I: IndexLike, const TRACK: bool> {
-    /// The store this policy builds for such a column.
-    type Store: DiffStore<T, I, TRACK>;
+    /// The store this policy builds for such a column (`Send`, as above).
+    type Store: DiffStore<T, I, TRACK> + Send;
 
     /// An empty store, ready for `Vec::with_store`.
     fn empty() -> (s: Self::Store)
@@ -76,7 +77,7 @@ impl<T: Tagged, I: IndexLike, const TRACK: bool> TaggedFamily<T, I, TRACK> for H
     }
 }
 
-impl<T: Sized + Copy, I: IndexLike, const TRACK: bool> PlainFamily<T, I, TRACK> for HotFirst {
+impl<T: Sized + Copy + Send, I: IndexLike, const TRACK: bool> PlainFamily<T, I, TRACK> for HotFirst {
     type Store = crate::parallel_store::ParallelStore<T, I>;
 
     fn empty() -> (s: Self::Store) {
@@ -84,7 +85,7 @@ impl<T: Sized + Copy, I: IndexLike, const TRACK: bool> PlainFamily<T, I, TRACK> 
     }
 }
 
-impl<T: Tagged, I: IndexLike, const TRACK: bool> TaggedFamily<T, I, TRACK> for TrailFirst {
+impl<T: Tagged + Send, I: IndexLike, const TRACK: bool> TaggedFamily<T, I, TRACK> for TrailFirst {
     type Store = crate::trail_store::TrailStore<T, I>;
 
     fn empty() -> (s: Self::Store) {
@@ -92,12 +93,37 @@ impl<T: Tagged, I: IndexLike, const TRACK: bool> TaggedFamily<T, I, TRACK> for T
     }
 }
 
-impl<T: Sized + Copy, I: IndexLike, const TRACK: bool> PlainFamily<T, I, TRACK> for TrailFirst {
+impl<T: Sized + Copy + Send, I: IndexLike, const TRACK: bool> PlainFamily<T, I, TRACK> for TrailFirst {
     type Store = crate::trail_store::TrailStore<T, I>;
 
     fn empty() -> (s: Self::Store) {
         crate::trail_store::TrailStore::new()
     }
+}
+
+/// An empty tracked vector over the store the policy `P` chooses for a
+/// tagged column: the public, total form of `Vec::with_store(P::empty())`
+/// for consumers that build their own policy-parameterized columns.
+pub fn tagged_vec<T: Tagged, I: IndexLike, const TRACK: bool, P: TaggedFamily<T, I, TRACK>>()
+    -> (v: crate::vec::Vec<T, I, P::Store, TRACK>)
+    ensures
+        v.wf(),
+        v.view().len() == 0,
+        v.snapshots_view().len() == 0,
+{
+    crate::vec::Vec::with_store(P::empty())
+}
+
+/// An empty tracked vector over the store the policy `P` chooses for a plain
+/// column.
+pub fn plain_vec<T: Sized + Copy, I: IndexLike, const TRACK: bool, P: PlainFamily<T, I, TRACK>>()
+    -> (v: crate::vec::Vec<T, I, P::Store, TRACK>)
+    ensures
+        v.wf(),
+        v.view().len() == 0,
+        v.snapshots_view().len() == 0,
+{
+    crate::vec::Vec::with_store(P::empty())
 }
 
 } // verus!

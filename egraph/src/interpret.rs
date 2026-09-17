@@ -130,7 +130,9 @@ pub struct Interpreter<
     M: LitModel<Value = L>,
     const TRACK: bool,
     const PROOFS: bool,
-> {
+> where
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+{
     pub eg: EGraph<Cfg, L, TRACK, PROOFS>,
     pub model: M,
     rules: Vec<PreparedRule<Cfg::O, Cfg::S, L>>,
@@ -169,6 +171,7 @@ impl<Cfg: EGraphConfig, L: LitVal, M: LitModel<Value = L>, const TRACK: bool, co
 where
     Cfg::O: std::hash::Hash,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     pub fn new(model: M) -> Self {
         let eg = EGraph::from_model(&model);

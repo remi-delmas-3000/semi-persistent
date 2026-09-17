@@ -146,14 +146,16 @@ pub struct EGraph<
     L: LitVal,
     const TRACK: bool = true,
     const PROOFS: bool = false,
-> {
+> where
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+{
     sorts: SortRegistry<Cfg::S, TRACK>,
     ops: OpRegistry<Cfg::O, Cfg::S, TRACK>,
     rules: RuleRegistry<TRACK>,
     axioms: AxiomRegistry<Cfg::G, TRACK>,
     lits: LitValStore<L, Cfg::V, TRACK>,
-    classes: EClasses<Cfg::G, Cfg::ClassKey, Cfg::UL, Cfg::UN, TRACK, PROOFS>,
-    nodes: NodeStore<Cfg::G, Cfg::O, Cfg::V, Cfg::C, Cfg::Ids, TRACK, PROOFS>,
+    classes: EClasses<Cfg::G, Cfg::ClassKey, Cfg::UL, Cfg::UN, TRACK, PROOFS, Cfg::Policy>,
+    nodes: NodeStore<Cfg::G, Cfg::O, Cfg::V, Cfg::C, Cfg::Ids, TRACK, PROOFS, Cfg::Policy>,
     /// The ONE genealogy for the whole synchronized member set (doc 10): a
     /// group token's validity and the branch cuts are recorded here once,
     /// instead of once per member vector. Sole authority for restore validity.
@@ -342,6 +344,7 @@ impl<Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool> Defaul
     for EGraph<Cfg, L, TRACK, PROOFS>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     fn default() -> Self {
         Self::new()
@@ -352,6 +355,7 @@ impl<Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
     EGraph<Cfg, L, TRACK, PROOFS>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     pub fn new() -> Self {
         Self {
@@ -5096,6 +5100,7 @@ mod dual_config_tests {
     -> (EGraph<Cfg, NiraLitVal, T, P>, Th<Cfg>)
     where
         MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+        Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
     {
         let mut eg = EGraph::new();
         let int = eg.intern_sort("Int");
@@ -5120,7 +5125,7 @@ mod dual_config_tests {
         ($(fn $name:ident<$Cfg:ident>() $body:block)*) => {$(
             mod $name {
                 use super::*;
-                fn run<$Cfg: EGraphConfig>() where MSetCanon: VarCanon<$Cfg::G, $Cfg::C> $body
+                fn run<$Cfg: EGraphConfig>() where MSetCanon: VarCanon<$Cfg::G, $Cfg::C>, $Cfg::Policy: crate::config::StorePolicy<$Cfg, false>, $Cfg::Policy: crate::config::StorePolicy<$Cfg, true> $body
                 #[test] fn bits31() { run::<crate::nodes::DefaultConfig>(); }
                 #[test] fn bits63() { run::<crate::nodes::Config64>(); }
             }

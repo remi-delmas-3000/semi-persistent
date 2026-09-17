@@ -35,7 +35,7 @@ use semi_persistent_egraph::canon::{MSetCanon, VarCanon};
 use semi_persistent_egraph::containers::ShrinkPolicy;
 use semi_persistent_egraph::id;
 use semi_persistent_egraph::literal::LitVal;
-use semi_persistent_egraph::nodes::{Config64, ConfigM16, DefaultConfig};
+use semi_persistent_egraph::nodes::{Config64, ConfigM16, DefaultConfig, Smt32, Smt64};
 use semi_persistent_egraph::union_find::{Justification, ProofBuf};
 use semi_persistent_egraph::{DenseId, EGraph, EGraphConfig, EGraphToken, IndexLike};
 
@@ -64,6 +64,12 @@ impl EufConfig for DefaultConfig {
     type Atom = AtomId;
 }
 impl EufConfig for Config64 {
+    type Atom = AtomId64;
+}
+impl EufConfig for Smt32 {
+    type Atom = AtomId;
+}
+impl EufConfig for Smt64 {
     type Atom = AtomId64;
 }
 impl EufConfig for ConfigM16 {
@@ -149,7 +155,10 @@ pub struct EufToken {
 
 /// Ground EUF solver over a proof-tracking e-graph (`PROOFS = true` is
 /// required: conflict explanation walks the justification forest).
-pub struct Euf<Cfg: EufConfig, L: LitVal> {
+pub struct Euf<Cfg: EufConfig, L: LitVal>
+where
+    Cfg::Policy: semi_persistent_egraph::config::StorePolicy<Cfg, true>,
+{
     eg: EGraph<Cfg, L, true, true>,
     term_sort: Cfg::S,
     eq_op: Cfg::O,
@@ -161,14 +170,21 @@ pub struct Euf<Cfg: EufConfig, L: LitVal> {
     buf: ProofBuf<Cfg::G>,
 }
 
-/// The default 31-bit configuration, mirroring `EGraph31`.
-pub type Euf31<L> = Euf<DefaultConfig, L>;
-/// The 63-bit configuration, mirroring `EGraph63`.
-pub type Euf63<L> = Euf<Config64, L>;
+/// The 31-bit SMT configuration (`Smt32`: `DefaultConfig`'s id family over
+/// Trail-first stores, the discipline for the mark/backtrack cycle a solver
+/// drives).
+pub type Euf31<L> = Euf<Smt32, L>;
+/// The 63-bit SMT configuration (`Smt64`, `Config64`'s id family).
+pub type Euf63<L> = Euf<Smt64, L>;
+/// The equality-saturation configurations under the solver wrapper, for
+/// callers that want the Hot-first stores (mirroring `EGraph31`/`EGraph63`).
+pub type EufEqSat31<L> = Euf<DefaultConfig, L>;
+pub type EufEqSat63<L> = Euf<Config64, L>;
 
 impl<Cfg: EufConfig, L: LitVal> Default for Euf<Cfg, L>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: semi_persistent_egraph::config::StorePolicy<Cfg, true>,
 {
     fn default() -> Self {
         Self::new()
@@ -178,6 +194,7 @@ where
 impl<Cfg: EufConfig, L: LitVal> Euf<Cfg, L>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: semi_persistent_egraph::config::StorePolicy<Cfg, true>,
 {
     pub fn new() -> Self {
         let mut eg = EGraph::new();

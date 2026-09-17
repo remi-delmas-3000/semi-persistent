@@ -77,3 +77,26 @@ and its `RingIter`; `ListArena<T, L, N, TRACK, P>` and its `ListIter`;
 composites and gives its min-monomial pool (an `Opt<T>` column, which owns
 its niche bit and cannot be tagged) the plain family. Consumers that name
 these types with the old argument lists compile unchanged.
+
+## 5. The e-graph's configurations
+
+The e-graph selects its policy through its configuration trait:
+`EGraphConfig::Policy`. Every tracked column the engine owns follows it —
+the class layer (`EClasses<…, P>`) and the ten node-cache columns of
+`NodeStore` (built through the public constructors `store_policy::tagged_vec`
+and `plain_vec`, the total forms of `Vec::with_store(P::empty())`). Four
+configurations ship: `EqSat32`/`EqSat64` (`DefaultConfig`/`Config64` under
+their own names, `HotFirst`) for equality saturation, and `Smt32`/`Smt64`
+(the same id families, `TrailFirst`) for the SMT integration; the SAT core's
+`Euf31`/`Euf63` wrap the SMT ones.
+
+An abstract policy needs its family bounds stated wherever the e-graph type
+is used generically, because the blanket family implementations that make a
+concrete policy free do not cover an associated type. The engine states one
+bound, `Cfg::Policy: StorePolicy<Cfg, TRACK>`, on its struct and on each
+generic item that names it; `StorePolicy` is a blanket-implemented alias for
+the class-layer families (`ClassFamilies`) and the cache families
+(`CacheFamilies`), both in `egraph/src/config.rs`, so `HotFirst` and
+`TrailFirst` satisfy it for every configuration without further code.
+The family stores are `Send`, as every concrete store is, because the
+engine's mark/restore fans the columns out across threads.

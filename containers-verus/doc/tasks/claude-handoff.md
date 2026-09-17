@@ -133,15 +133,16 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    choices) and `TrailFirst`; `P = HotFirst` on `UnionFind`, `SparseSet`,
    `CircularList`, `ListArena`, `BPlusTreeSet`, `EClasses`, plus
    `DiffStore::lemma_wf_data_len` for the abstract store's length bound.
-4. Done: the e-graph's ten cache columns are static `VecI` (the four `VecD`
-   sites and the `SEMPER_DIFF`/`--diff-mode` lever are gone). Measured
-   first under all three disciplines on saturation and on push/pop
-   workloads (`egraph/benches/store_bench.rs` is the new push/pop bench):
-   every ratio within 2.2 % of one, so no consumer gains from choosing, and
-   a config-level policy would have cost a family bound on ~55 generic
-   sites of the e-graph (the report's "Extended goal 3" records the
-   numbers and the reasoning). `env_diff_store_kind` stays in the verified
-   crate for `VecD`'s own users.
+4. Done: the e-graph's cache columns and class layer take their stores from
+   `EGraphConfig::Policy`; four configurations ship — `EqSat32`/`EqSat64`
+   (`HotFirst`) and `Smt32`/`Smt64` (`TrailFirst`, designed for the Sundance
+   integration; the SAT core's `Euf31`/`Euf63` wrap them). The `VecD` sites
+   and the `SEMPER_DIFF`/`--diff-mode` lever are gone. The three disciplines
+   measured within 2.2 % of each other on the cache columns alone (report,
+   "Extended goal 3"); the per-config measurement of the whole engine is in
+   "Extended goal 4". The policy bound is stated on about 140 generic sites
+   of the e-graph; the rule is one line, `Cfg::Policy: StorePolicy<Cfg,
+   TRACK>`, on every item that names the engine generically.
 5. Status after the extended goal (all five steps committed, each with the
    full gate battery, its affected benchmarks against the previous commit,
    and a signed local commit; nothing pushed): trust 50 default + 5 literal

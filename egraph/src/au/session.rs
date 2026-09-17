@@ -298,6 +298,7 @@ pub fn anti_unify<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> Result<AuResult<Cfg>, super::AuError>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let l = snap
         .class_of(left)
@@ -390,6 +391,7 @@ pub fn compression_ratio<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: b
 ) -> f64
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let best_l = snap.best_size(left) as f64;
     let best_r = snap.best_size(right) as f64;
@@ -425,6 +427,7 @@ pub struct SearchToken {
 pub struct SearchSession<'eg, Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     pub(crate) snap: &'eg AuSnapshot<'eg, Cfg, L, T, P>,
     pub(crate) space: SearchSpace<Cfg::Au>,
@@ -438,6 +441,7 @@ impl<'eg, Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>
     SearchSession<'eg, Cfg, L, T, P>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     /// Create a new session from a snapshot. The snapshot must outlive the session.
     pub fn new(snap: &'eg AuSnapshot<'eg, Cfg, L, T, P>, cycle_mode: CycleMode) -> Self {
