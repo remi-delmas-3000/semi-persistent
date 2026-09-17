@@ -93,3 +93,7 @@ harness = false
 [[bench]]
 name = "extract_bench"
 harness = false
+
+[[bench]]
+name = "store_bench"
+harness = false

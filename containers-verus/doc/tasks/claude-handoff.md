@@ -133,13 +133,29 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    choices) and `TrailFirst`; `P = HotFirst` on `UnionFind`, `SparseSet`,
    `CircularList`, `ListArena`, `BPlusTreeSet`, `EClasses`, plus
    `DiffStore::lemma_wf_data_len` for the abstract store's length bound.
-4. E-graph: an `EGraphConfig` associated store for the caches; remove the four
-   `VecD` sites and the `env_diff_store_kind` lever (≈2.5× dispatch cost).
-   Guidance from the traces: Hot-first (VecI/VecP) for equality saturation,
-   VecT for SMT-style mark/backtrack use.
-5. Final audits (trust ledger is current; partial-API discrepancy is the
-   baseline 40 unlisted functions) and the final handoff report, re-running
-   the affected benchmarks after each performance change.
+4. Done: the e-graph's ten cache columns are static `VecI` (the four `VecD`
+   sites and the `SEMPER_DIFF`/`--diff-mode` lever are gone). Measured
+   first under all three disciplines on saturation and on push/pop
+   workloads (`egraph/benches/store_bench.rs` is the new push/pop bench):
+   every ratio within 2.2 % of one, so no consumer gains from choosing, and
+   a config-level policy would have cost a family bound on ~55 generic
+   sites of the e-graph (the report's "Extended goal 3" records the
+   numbers and the reasoning). `env_diff_store_kind` stays in the verified
+   crate for `VecD`'s own users.
+5. Status after the extended goal (all five steps committed, each with the
+   full gate battery, its affected benchmarks against the previous commit,
+   and a signed local commit; nothing pushed): trust 50 default + 5 literal
+   throughout, partial-API discrepancy at the baseline 40 unlisted functions
+   (73/33/40/0), verified crate at 2621 functions on both feature sets.
+   Open, for the user: the ForkHistory group property test (offered, not
+   answered); the legacy gaps attributed to code placement rather than
+   algorithm — `aov/log` (1.07–1.12) and, new in this build,
+   `class_ring/splice_untracked` (1.10 paired on both trees, 0.945 in the
+   `f304bc7` build); the ascending-order singleton-frame trade-off of the
+   hash-set dedupe (1.33 vs the checkpoint); and the write/unique ratio of
+   the e-graph caches, which was not instrumented (the timing under the
+   three disciplines decided instead, and a config-level policy remains
+   possible through one alias bound if a workload ever shows a difference).
 
 ## Existing proof architecture to reuse
 

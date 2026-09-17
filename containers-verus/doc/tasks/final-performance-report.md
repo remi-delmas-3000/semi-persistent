@@ -356,6 +356,89 @@ investigated for `f304bc7`. `vec/mark_set_restore/legacy` moved 1.10/1.16
 against its `f304bc7` measurement (an oracle arm, unchanged code) and is
 listed as machine drift.
 
+## Extended goal 3: the e-graph's cache stores (after `08dc0d5`)
+
+The e-graph's ten node caches (`egraph/src/node_store.rs`: five fixed-arity,
+four variable-arity with their children columns, the literal cache) were
+`VecD` columns, a runtime-dispatched store selected once per process by the
+`SEMPER_DIFF` lever (`--diff-mode` on the CLI). The goal asked for the
+store to be chosen per consumer after measuring the disciplines per
+collection. Measured first, with the lever, on the two workload classes:
+equality saturation (`saturate_bench`: plain rewriting, AC rewriting, AC
+completion, naive and semi-naive drivers) and SMT-style mark/backtrack (the
+new in-process `store_bench` over the `sp-t880` push/pop programs, 880 base
+terms, machine literals). Baselines `store_inline`, `store_parallel`,
+`store_trail`; ratio = discipline time ÷ inline time, one run each, τ 1.08:
+
+| Case | Inline | Parallel ÷ inline | Trail ÷ inline |
+|---|---|---|---|
+| `saturate/plain7/naive` | 10.18 ms | 1.001 | 0.998 |
+| `saturate/plain7/semi` | 5.76 ms | 1.004 | 1.000 |
+| `saturate/ac6/naive` | 1.51 ms | 0.982 | 0.985 |
+| `saturate/ac6/semi` | 775 µs | 0.991 | 0.995 |
+| `saturate/ac10/naive` | 41.9 ms | 1.001 | 1.002 |
+| `saturate/ac10/semi` | 27.4 ms | 1.003 | 1.006 |
+| `saturate/accompl32` | 923 µs | 1.001 | 0.999 |
+| `saturate/accompl64` | 2.34 ms | 1.000 | 0.991 |
+| `store/sp-t880.base` | 4.53 ms | 1.000 | 0.999 |
+| `store/sp-t880.cycles` | 25.4 ms | 1.000 | 0.991 |
+| `store/sp-t880.empty` | 4.68 ms | 0.999 | 0.998 |
+| `store/sp-t880.empty20k` | 17.5 ms | 0.995 | 1.022 |
+| `store/sp-t880.norun` | 7.17 ms | 1.002 | 1.005 |
+| `store/sp-t880.rerun` | 5.61 ms | 1.001 | 0.986 |
+| `store/sp-t880.rerunnorun` | 4.58 ms | 0.998 | 0.988 |
+
+The discipline does not matter for these columns: every ratio is within
+2.2 % of one, on both workload classes and in both directions (Trail is
+1–1.4 % faster on the push/pop cycles and reruns and 2.2 % slower on the
+20 000-empty-frame case). The cache columns are not where an e-graph
+transaction spends its time — the hash index, the spill table and the
+class layer are — so the store's ingress discipline is invisible at this
+scale. A per-config choice would therefore buy nothing measurable, and it
+is not free: with the policy an associated type of `EGraphConfig`, Rust
+needs the family bound (which mentions `TRACK`) on `NodeStore`, on the
+`EGraph` struct and on the 51 generic functions that name
+`EGraph<Cfg, L, TRACK, PROOFS>` (29 of them in `ematch.rs`), because a
+policy that is abstract at a use site is not covered by the blanket
+implementations that make a concrete policy free. The caches therefore
+take the static Hot-first inline store (`VecI`, what `inline` selected),
+which removes the enum dispatch and the lever; the `--diff-mode` flag is
+gone. Consumers keep the choice where it is expressible without bounds:
+the composites' policy parameter (goal 2), and a config-level policy can be
+threaded later through that one alias bound if a workload ever shows a
+difference.
+
+What the removal of the dispatch is worth, on the same tree with the
+caches static (`static_a`/`static_b`, two runs) against the dynamic inline
+baseline (`store_inline`); ratio = static ÷ dynamic, speed multiplier =
+dynamic time ÷ static time:
+
+| Case | Dynamic inline | Static inline (runs A/B) | Ratio A / B | Multiplier |
+|---|---|---|---|---|
+| `saturate/ac10/naive` | 41.90 ms | 39.33 ms / 39.28 ms | 0.939 / 0.937 | 1.07× |
+| `saturate/ac10/semi` | 27.42 ms | 25.61 ms / 25.67 ms | 0.934 / 0.936 | 1.07× |
+| `saturate/ac6/naive` | 1.511 ms | 1.406 ms / 1.405 ms | 0.930 / 0.930 | 1.08× |
+| `saturate/ac6/semi` | 775 µs | 728 µs / 730 µs | 0.938 / 0.941 | 1.06× |
+| `saturate/accompl32` | 923 µs | 904 µs / 902 µs | 0.979 / 0.977 | 1.02× |
+| `saturate/accompl64` | 2.344 ms | 2.301 ms / 2.288 ms | 0.982 / 0.976 | 1.02× |
+| `saturate/plain7/naive` | 10.18 ms | 10.19 ms / 10.23 ms | 1.001 / 1.005 | 1.00× |
+| `saturate/plain7/semi` | 5.76 ms | 5.72 ms / 5.74 ms | 0.994 / 0.997 | 1.00× |
+| `store/sp-t880.base` | 4.53 ms | 4.50 ms / 4.49 ms | 0.994 / 0.991 | 1.01× |
+| `store/sp-t880.cycles` | 25.38 ms | 25.01 ms / 24.98 ms | 0.985 / 0.984 | 1.02× |
+| `store/sp-t880.empty` | 4.68 ms | 4.62 ms / 4.62 ms | 0.987 / 0.986 | 1.01× |
+| `store/sp-t880.empty20k` | 17.54 ms | 16.18 ms / 16.18 ms | 0.923 / 0.923 | 1.08× |
+| `store/sp-t880.norun` | 7.17 ms | 7.13 ms / 7.13 ms | 0.994 / 0.995 | 1.01× |
+| `store/sp-t880.rerun` | 5.61 ms | 5.54 ms / 5.55 ms | 0.987 / 0.990 | 1.01× |
+| `store/sp-t880.rerunnorun` | 4.58 ms | 4.53 ms / 4.52 ms | 0.990 / 0.986 | 1.01× |
+
+Frozen-rule verdict: 15 pass, no inconclusive, no regression. The AC
+saturation cases, whose rewrite rounds touch the caches most, gain 6–8 %;
+plain rewriting and the push/pop programs 0–2 %, and the 20 000-empty-frame
+program 8 % (its cost is the per-frame mark/restore of the cache columns,
+which is where the enum dispatch sat). The 2.5× dispatch cost measured on
+the three-tier micro-benchmarks is diluted here by everything else a
+transaction does.
+
 ## Results (revision `f304bc7`, runs A and B on 2026-09-16 17:05–18:45, reruns 18:50–19:10)
 
 Bench binaries: `/tmp/sp-d21-bench-binaries-f304bc7.md5`; driver log

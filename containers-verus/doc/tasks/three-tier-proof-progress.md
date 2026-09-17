@@ -2298,3 +2298,36 @@ passed**; e-graph/SAT consumers **1267 passed, 45 ignored**; canary **2
 passed**; partial-API audit at the unchanged baseline (73/33/40/0);
 formatting, whitespace and the unchanged-legacy check passed; trust **50
 default + 5 literal**.
+
+## 2026-09-16 — E-graph cache stores made static (extended goal, item 3)
+
+The e-graph's ten node-cache columns (`egraph/src/node_store.rs`) were
+`VecD` columns whose store was selected once per process by the
+`SEMPER_DIFF` lever. Before choosing, the three disciplines were measured
+on both workload classes — equality saturation (`saturate_bench`) and
+SMT-style mark/backtrack (the new in-process `egraph/benches/store_bench.rs`
+over the `sp-t880` push/pop programs) — and every ratio landed within
+2.2 % of one: the cache columns are not where the e-graph's time goes. A
+per-config policy would buy nothing measurable and would cost the family
+bound (which names `TRACK`) on `NodeStore`, the `EGraph` struct and 51
+generic functions, because an abstract policy is not covered by the blanket
+family implementations that make a concrete one free. The caches therefore
+take the static Hot-first inline store (`VecI`), which removes the enum
+dispatch and the lever (`--diff-mode` on the CLI is gone); the verified
+crate is untouched, so no proof changes. Numbers, the dispatch-removal
+comparison and the reasoning: `doc/tasks/final-performance-report.md`,
+"Extended goal 3".
+
+Gate evidence (fresh, run in a worktree holding exactly this commit's
+files, `/tmp/sp-d21-3-*.log`): full default **2621 verified, zero errors**
+(unchanged: the verified crate is untouched); literal-types **2621 verified,
+zero errors**; conditional composition **80 verified**; `au-verus` **29
+verified**; feature suite **277 passed, 10 ignored**; release differential
+policy matrix with `PROPTEST_CASES=1024` **4 passed**; B+ tree, oracle and
+reference-e-graph property tests **31 passed**; e-graph/SAT consumers
+**1267 passed, 45 ignored**; canary **2 passed**; partial-API audit at the
+unchanged baseline (73/33/40/0); formatting, whitespace and the
+unchanged-legacy check passed; trust **50 default + 5 literal**. Static
+inline against the dynamic store: AC saturation 1.06–1.08×, plain
+rewriting 1.00×, push/pop 1.01–1.02×, the 20 000-empty-frame program 1.08×
+(15 cases, all pass).
