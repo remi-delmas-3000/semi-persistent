@@ -531,11 +531,11 @@ pub struct ListArenaToken {
 impl ListArenaToken {
     /// Reconstruction coordinates of the two components (spec counterparts).
     pub open(crate) spec fn heads_frame_idx_spec(self) -> nat {
-        self.heads.frame_idx as nat
+        self.heads.depth as nat
     }
 
     pub open(crate) spec fn nodes_frame_idx_spec(self) -> nat {
-        self.nodes.frame_idx as nat
+        self.nodes.depth as nat
     }
 }
 
@@ -2189,7 +2189,7 @@ where
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
     {
         if self.is_valid_token(&token)
-            && token.heads.frame_idx == token.nodes.frame_idx
+            && token.heads.depth == token.nodes.depth
         {
             self.restore(token);
             Ok(())
@@ -2246,20 +2246,20 @@ where
             "ListArena::restore: invalid, foreign, stale, consumed, or abandoned token component",
         );
         crate::guard::check_precondition(
-            token.heads.frame_idx == token.nodes.frame_idx,
+            token.heads.depth == token.nodes.depth,
             "ListArena::restore: token components name different marks",
         );
-        let ghost snap_model = self.model_snapshots@[token.heads.frame_idx as int];
+        let ghost snap_model = self.model_snapshots@[token.heads.depth as int];
         self.heads.restore(token.heads);
         self.nodes.restore(token.nodes);
         self.model = Ghost(snap_model);
         // Truncate the archive in lockstep with the vec snapshot stacks
         // (restore leaves frames@.len() == frame_idx on both).
         self.model_snapshots =
-            Ghost(self.model_snapshots@.subrange(0, token.heads.frame_idx as int));
+            Ghost(self.model_snapshots@.subrange(0, token.heads.depth as int));
         proof {
             reveal(arena_archive_agrees);
-            let f = token.heads.frame_idx as int;
+            let f = token.heads.depth as int;
             // Old-frame agreement (reveal the old(self) instance).
             assert(arena_archive_agrees(old(self).model_snapshots@,
                 old(self).heads.snapshots_view(), old(self).nodes.snapshots_view()));

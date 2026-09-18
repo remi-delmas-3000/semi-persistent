@@ -194,44 +194,19 @@ mod oracle {
                 depth: t.depth,
             });
             self.cur_branch = self.origins.len() as u32;
-            // gen model: bump every level strictly below the restored depth
-            // (invalidating the abandoned future, matching verus bump_from(d+1)).
-            let mut i = (t.depth as usize) + 1;
+            // gen model: bump the restored depth and every deeper level
+            // (the consumed token and the abandoned future die, matching the
+            // verified cut, which starts at the token's own depth).
+            let mut i = t.depth as usize;
             while i < self.gen_levels.len() {
                 self.gen_levels[i] += 1;
                 i += 1;
             }
         }
 
-        /// Restorable now: the frame is still live AND the token's branch is on
-        /// the current path within its depth bound. This is the *verus*
-        /// `is_valid_token` meaning.
-        ///
-        /// Frame liveness is a separate condition from genealogy: a consumed
-        /// token's branch can still be on-path while its frame is gone. That
-        /// gap is exactly where the two implementations' `is_valid_token`
-        /// deliberately differ -- see `on_branch` below.
-        pub fn is_restorable(&self, t: Tok) -> bool {
-            if (t.frame as usize) >= self.snaps.len() {
-                return false;
-            }
-            self.on_current_path(t)
-        }
-
-        /// Restorable-now under the STRUCTURAL model (verus's post-H2 meaning
-        /// for a RAW container): the frame index is still live. Genealogy
-        /// (generation stamps) moved to the owning group's `History` in H2, so
-        /// a standalone container's `is_valid_token` deliberately accepts a
-        /// sibling-branch token whose frame index is live again — restoring
-        /// reconstructs the frame NOW at that index, which is the documented
-        /// contract (`structural_vec_restore_is_frame_liveness_only`).
-        pub fn is_restorable_structural(&self, t: Tok) -> bool {
-            (t.frame as usize) < self.snaps.len()
-        }
-
-        /// The retired paired meaning (frame live AND depth generation
-        /// matches), kept for harnesses that pair a container with a History.
-        #[allow(dead_code)]
+        /// The verified `is_valid_token` meaning for every container: the frame
+        /// is live AND the token's generation is still the live stamp at its
+        /// depth (the container's own genealogy — a group of one).
         pub fn is_restorable_gen(&self, t: Tok) -> bool {
             if (t.frame as usize) >= self.snaps.len() {
                 return false;
@@ -269,7 +244,7 @@ mod oracle {
         /// mistake can only be made once.
         pub fn pick_restorable(&self, toks: &[Tok], ratio: u16) -> Option<usize> {
             let live: Vec<usize> = (0..toks.len())
-                .filter(|&i| self.is_restorable(toks[i]))
+                .filter(|&i| self.is_restorable_gen(toks[i]))
                 .collect();
             if live.is_empty() {
                 return None;
@@ -585,24 +560,22 @@ macro_rules! vec_property {
                     );
                     prop_assert_eq!(
                         vv,
-                        o.is_restorable_structural(*to),
-                        "step {}: token {} verus validity={} vs oracle structural",
+                        o.is_restorable_gen(*to),
+                        "step {}: token {} verus validity={} vs oracle generation model",
                         step,
                         j,
                         vv
                     );
-                    // Where the contracts coincide (live frame), they must agree.
-                    if o.is_restorable(*to) {
-                        prop_assert_eq!(
-                            vp,
-                            vv,
-                            "step {}: token {} restorable but prod={} verus={}",
-                            step,
-                            j,
-                            vp,
-                            vv
-                        );
-                    }
+                    // The verified meaning is the stricter one (a consumed token and the
+                    // abandoned future die for good; production keeps a token at the fork
+                    // depth on-branch): every token the verified side accepts, production
+                    // accepts too.
+                    prop_assert!(
+                        !vv || vp,
+                        "step {}: token {} verus-valid but prod-invalid",
+                        step,
+                        j
+                    );
                 }
             }
             Ok(())
@@ -807,12 +780,12 @@ macro_rules! aov_property {
                             "step {}: aov token {} prod validity vs oracle on-branch", step, j
                         );
                         prop_assert_eq!(
-                            vv, o.is_restorable_structural(*to),
-                            "step {}: aov token {} verus validity vs oracle structural", step, j
+                            vv, o.is_restorable_gen(*to),
+                            "step {}: aov token {} verus validity vs oracle generation model", step, j
                         );
-                        if o.is_restorable(*to) {
-                            prop_assert_eq!(vp, vv, "step {}: aov token {} restorable disagreement", step, j);
-                        }
+                        // Verified meaning is the stricter one (consumed tokens die);
+                        // every token the verified side accepts, production accepts too.
+                        prop_assert!(!vv || vp, "step {}: aov token {} verus-valid but prod-invalid", step, j);
                     }
                 }
             }
@@ -969,12 +942,11 @@ macro_rules! map_property {
                             "step {}: map token {} prod validity vs oracle on-branch", step, j
                         );
                         prop_assert_eq!(
-                            vv, o.is_restorable_structural(*to),
-                            "step {}: map token {} verus validity vs oracle structural", step, j
+                            vv, o.is_restorable_gen(*to),
+                            "step {}: map token {} verus validity vs oracle generation model", step, j
                         );
-                        if o.is_restorable(*to) {
-                            prop_assert_eq!(vp, vv, "step {}: map token {} restorable disagreement", step, j);
-                        }
+                        // Same rule as the vec/aov arms: verified ⊆ production.
+                        prop_assert!(!vv || vp, "step {}: map token {} verus-valid but prod-invalid", step, j);
                     }
                 }
             }

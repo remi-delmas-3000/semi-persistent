@@ -34,6 +34,9 @@ struct Origin {
 #[derive(Clone, Copy, Debug)]
 struct OracleToken {
     branch: u32,
+    /// The generation stamp at the mark depth (the verified container's own
+    /// genealogy: a standalone vec is a group of one).
+    generation: u64,
     depth: u32,
     frame: u32,
 }
@@ -44,6 +47,9 @@ struct SnapshotOracle {
     snapshots: Vec<Vec<u32>>,
     branch: u32,
     origins: Vec<Origin>,
+    /// Per-depth generation stamps, mirroring the verified `Genealogy`: a
+    /// restore to depth `d` bumps `d` and deeper (the consumed token dies).
+    gen_levels: Vec<u64>,
 }
 
 impl SnapshotOracle {
@@ -53,6 +59,7 @@ impl SnapshotOracle {
             snapshots: Vec::new(),
             branch: 0,
             origins: Vec::new(),
+            gen_levels: Vec::new(),
         }
     }
 
@@ -62,8 +69,12 @@ impl SnapshotOracle {
 
     fn mark(&mut self) -> OracleToken {
         let depth = self.snapshots.len() as u32;
+        while self.gen_levels.len() <= depth as usize {
+            self.gen_levels.push(1);
+        }
         let token = OracleToken {
             branch: self.branch,
+            generation: self.gen_levels[depth as usize],
             depth,
             frame: depth,
         };
@@ -81,10 +92,24 @@ impl SnapshotOracle {
             depth: token.depth,
         });
         self.branch = self.origins.len() as u32;
+        // The verified cut starts AT the restored depth.
+        let mut i = token.depth as usize;
+        while i < self.gen_levels.len() {
+            self.gen_levels[i] += 1;
+            i += 1;
+        }
     }
 
     fn structurally_live(&self, token: OracleToken) -> bool {
         (token.frame as usize) < self.snapshots.len()
+    }
+
+    /// The verified `is_valid_token` meaning: the frame is live AND the
+    /// token's generation is still the live stamp at its depth.
+    fn verified_live(&self, token: OracleToken) -> bool {
+        self.structurally_live(token)
+            && (token.depth as usize) < self.gen_levels.len()
+            && self.gen_levels[token.depth as usize] == token.generation
     }
 
     fn is_restorable(&self, token: OracleToken) -> bool {
@@ -636,7 +661,10 @@ impl Harness {
             .tokens
             .iter()
             .enumerate()
-            .filter_map(|(index, (_, _, token))| self.oracle.is_restorable(*token).then_some(index))
+            .filter_map(|(index, (_, _, token))| {
+                (self.oracle.is_restorable(*token) && self.oracle.verified_live(*token))
+                    .then_some(index)
+            })
             .collect();
         scale(which, live.len()).map(|index| live[index])
     }
@@ -757,7 +785,9 @@ impl Harness {
                     .tokens
                     .iter()
                     .enumerate()
-                    .filter(|(_, (_, _, token))| self.oracle.is_restorable(*token))
+                    .filter(|(_, (_, _, token))| {
+                        self.oracle.is_restorable(*token) && self.oracle.verified_live(*token)
+                    })
                     .max_by_key(|(_, (_, _, token))| token.frame)
                     .map(|(index, _)| index)
                 {
@@ -846,7 +876,7 @@ impl Harness {
             );
             prop_assert_eq!(
                 self.verified.is_valid_token(verified),
-                self.oracle.structurally_live(*oracle),
+                self.oracle.verified_live(*oracle),
                 "{}: verified token {}",
                 context,
                 index

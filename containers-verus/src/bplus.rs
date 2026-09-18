@@ -10382,7 +10382,7 @@ pub struct BPlusToken {
 impl BPlusToken {
     /// Reconstruction coordinate of the inner arena token (spec counterpart).
     pub open(crate) spec fn frame_idx_spec(self) -> nat {
-        self.nodes.frame_idx as nat
+        self.nodes.depth as nat
     }
 
     /// The token's (inert) root header copy.
@@ -10562,7 +10562,7 @@ impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
             // header_archive.len() (agreement), so the indexing is in-bounds;
             // the guard above pins it for unverified callers too.
             crate::guard::check_precondition(
-                token.nodes.frame_idx < self.header_archive.len(),
+                (token.nodes.depth as usize) < self.header_archive.len(),
                 "BPlusTreeSet::restore: token frame beyond header archive",
             );
             // The archive stores both indices at their own type, so recovering
@@ -10570,7 +10570,7 @@ impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
             // two unreachable `try_from_usize` arms this replaced each needed an
             // `assert(false)` to discharge.
             let (saved_root, saved_nkeys, saved_last_leaf) =
-                self.header_archive[token.nodes.frame_idx];
+                self.header_archive[token.nodes.depth as usize];
             self.nodes.restore(token.nodes);
             self.root = saved_root;
             self.nkeys = saved_nkeys;
@@ -10580,7 +10580,7 @@ impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
             self.last_leaf = saved_last_leaf;
             self.tree = Ghost(snap_tree);
             // Truncate the archives in lockstep with the vec snapshot stack.
-            self.header_archive.truncate(token.nodes.frame_idx);
+            self.header_archive.truncate(token.nodes.depth as usize);
             self.tree_snapshots =
                 Ghost(self.tree_snapshots@.subrange(0, token.nodes.frame_idx_spec() as int));
             proof {

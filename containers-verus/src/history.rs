@@ -20,11 +20,14 @@ use vstd::prelude::*;
 
 verus! {
 
-/// A version token for a synced group: the generation stamp minted at mark time
-/// and the mark depth. Drops `VecToken`'s per-vector `container_id` — one token
-/// names the whole group's version, validated once by `History`.
+/// A version token for a synced group: the identity of the `History` that
+/// minted it (its provenance), the generation stamp minted at mark time and the
+/// mark depth. One token names the whole group's version, validated once by
+/// the history that minted it: a token presented to any other history is
+/// foreign and refused, whatever its numbers.
 #[derive(Clone, Copy, Debug)]
 pub struct GroupToken {
+    pub(crate) history: crate::container_id::ContainerId,
     pub(crate) generation: u64,
     pub(crate) depth: u32,
 }
@@ -34,6 +37,17 @@ impl GroupToken {
     /// crate-private so a token cannot be forged field-by-field outside).
     pub open(crate) spec fn depth_spec(&self) -> nat {
         self.depth as nat
+    }
+
+    /// The same quantity under its container-side name: for a standalone
+    /// container the depth of the mark IS the index of the frame it opened.
+    pub open(crate) spec fn frame_idx_spec(self) -> nat {
+        self.depth as nat
+    }
+
+    /// The minting manager's identity (spec accessor; the field is `pub(crate)`).
+    pub open(crate) spec fn history_spec(self) -> nat {
+        self.history.id()
     }
 
     /// Exec twin of `depth_spec`: the consumer restores every member to this
@@ -52,15 +66,113 @@ impl GroupToken {
 /// (doc 10). A token minted at depth `d` carries `stamps.stamp_at(d)`; a restore
 /// diverging at `d` bumps the deeper levels, O(1)-invalidating the abandoned
 /// future via `lemma_bump_invalidates`.
-pub struct History {
+/// What a manager mints tokens from: its identity and the per-depth generation
+/// stamps. The group `History` wraps one together with the group depth; a
+/// standalone container embeds one and uses its own frame count as the depth,
+/// so it is a group of one with the same token, the same validation (minting
+/// manager, generation, liveness) and the same cut on restore.
+pub struct Genealogy {
+    /// The minting manager's identity: every token carries it, and validation
+    /// refuses a token minted elsewhere.
+    pub(crate) id: crate::container_id::ContainerId,
     pub(crate) stamps: crate::gen_stamps::GenStamps,
+}
+
+impl Genealogy {
+    /// The minting manager's identity (spec accessor; the field is `pub(crate)`).
+    pub open(crate) spec fn id_spec(&self) -> nat {
+        self.id.id()
+    }
+
+    /// Number of stamp levels held (spec accessor).
+    pub open(crate) spec fn levels_len(&self) -> nat {
+        self.stamps.levels@.len()
+    }
+
+    /// `t` was minted here and its generation is still the live stamp at its
+    /// depth (O(1)).
+    pub open(crate) spec fn valid_spec(self, t: GroupToken) -> bool {
+        &&& t.history.id() == self.id.id()
+        &&& self.stamps.valid(t.depth as nat, t.generation)
+    }
+
+    pub fn new() -> (r: Genealogy)
+        ensures r.levels_len() == 0,
+    {
+        Genealogy {
+            id: crate::container_id::ContainerId::new(),
+            stamps: crate::gen_stamps::GenStamps::new(0),
+        }
+    }
+
+    /// Mint the token naming the frame at `depth` (growing the stamp array the
+    /// first time a depth is reached). The token is immediately valid, and
+    /// every token that was valid stays valid (existing stamps are untouched).
+    pub(crate) fn mint(&mut self, depth: usize) -> (t: GroupToken)
+        requires depth < u32::MAX,
+        ensures
+            t.depth_spec() == depth as nat,
+            t.history_spec() == old(self).id_spec(),
+            final(self).id_spec() == old(self).id_spec(),
+            final(self).valid_spec(t),
+            forall|u: GroupToken| old(self).valid_spec(u) ==> final(self).valid_spec(u),
+            final(self).levels_len() >= old(self).levels_len(),
+            final(self).levels_len() > depth,
+    {
+        let g = self.stamps.stamp_at(depth);
+        GroupToken { history: self.id, generation: g, depth: depth as u32 }
+    }
+
+    pub fn is_valid(&self, t: &GroupToken) -> (b: bool)
+        ensures b == self.valid_spec(*t),
+    {
+        self.id.eq(t.history) && self.stamps.is_valid(t.depth as usize, t.generation)
+    }
+
+    /// The cut of a restore: every token at `depth` or deeper that is valid now
+    /// is dead for good (its stamp changes; stamps never return), tokens above
+    /// the cut are untouched.
+    pub fn cut_from(&mut self, depth: usize)
+        ensures
+            final(self).id_spec() == old(self).id_spec(),
+            final(self).levels_len() == old(self).levels_len(),
+            forall|u: GroupToken| u.depth_spec() >= depth as nat && old(self).valid_spec(u)
+                ==> !final(self).valid_spec(u),
+            forall|u: GroupToken| u.depth_spec() < depth as nat
+                ==> final(self).valid_spec(u) == old(self).valid_spec(u),
+    {
+        let ghost pre = self.stamps;
+        let n = self.stamps.depth_capacity();
+        self.stamps.bump_from(depth);
+        proof {
+            if depth <= n {
+                crate::gen_stamps::lemma_bump_invalidates(pre, self.stamps, depth as nat);
+            } else {
+                // No level at or beyond `depth` exists (the bump touched
+                // nothing): tokens there were never valid, and every level
+                // below `depth` is a level below `n`, left unchanged.
+                assert forall|u: GroupToken| u.depth_spec() < depth as nat
+                    implies self.stamps.valid(u.depth as nat, u.generation)
+                        == pre.valid(u.depth as nat, u.generation) by {
+                    if u.depth_spec() < n as nat {
+                        assert(self.stamps.levels@[u.depth as int] == pre.levels@[u.depth as int]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The group manager: a `Genealogy` plus the group depth.
+pub struct History {
+    pub(crate) genealogy: Genealogy,
     pub(crate) depth: u32,
 }
 
 impl History {
     /// Every live depth has a stamp level (so a live token's depth is in range).
     pub open(crate) spec fn wf(self) -> bool {
-        self.stamps.levels@.len() >= self.depth as nat
+        self.genealogy.levels_len() >= self.depth as nat
     }
 
     pub open(crate) spec fn depth_spec(self) -> nat {
@@ -71,7 +183,7 @@ impl History {
     /// (O(1)). The shared analogue of `Vec::is_token_valid_spec`, minus the
     /// container check (one history, one group).
     pub open(crate) spec fn valid_spec(self, t: GroupToken) -> bool {
-        self.stamps.valid(t.depth as nat, t.generation)
+        self.genealogy.valid_spec(t)
     }
 
     pub fn new() -> (r: History)
@@ -79,7 +191,7 @@ impl History {
             r.wf(),
             r.depth_spec() == 0,
     {
-        History { stamps: crate::gen_stamps::GenStamps::new(0), depth: 0 }
+        History { genealogy: Genealogy::new(), depth: 0 }
     }
 
     pub fn depth(&self) -> (d: u32)
@@ -107,9 +219,9 @@ impl History {
             crate::guard::refuse("History::mark: frame depth at u32 ceiling");
         }
         let d = self.depth;
-        let g = self.stamps.stamp_at(d as usize);
+        let t = self.genealogy.mint(d as usize);
         self.depth = d + 1;
-        GroupToken { generation: g, depth: d }
+        t
     }
 
     /// Is `t` valid — does its generation still match the live stamp at its depth?
@@ -118,7 +230,7 @@ impl History {
         requires self.wf(),
         ensures r == self.valid_spec(t),
     {
-        self.stamps.is_valid(t.depth as usize, t.generation)
+        self.genealogy.is_valid(&t)
     }
 
     /// Restore to `t`: bump the levels strictly below `t.depth` (invalidating the
@@ -141,7 +253,12 @@ impl History {
         if !(t.depth < self.depth) {
             crate::guard::refuse("History::restore_to: token depth is not below the live depth");
         }
-        self.stamps.bump_from((t.depth + 1) as usize);
+        // The cut starts AT the target depth: this restore removes frame
+        // `t.depth` itself, so the token that named it is consumed for good
+        // (a later mark at that depth mints a fresh generation) and every
+        // deeper token is the abandoned future. Bumping from `t.depth + 1`
+        // would let the consumed token alias the next frame at its depth.
+        self.genealogy.cut_from(t.depth as usize);
         self.depth = t.depth;
     }
 }
@@ -299,6 +416,19 @@ where
 impl History {
     /// Heap bytes of the generation-stamp array (read-only).
     pub fn heap_bytes(&self) -> usize {
-        crate::diagnostics::HeapBytes::heap_bytes(&self.stamps)
+        crate::diagnostics::HeapBytes::heap_bytes(&self.genealogy.stamps)
     }
 }
+
+// Value equality on the whole token (minting manager, generation, depth):
+// what tests compare. Outside `verus!` (trait impl on a verified struct; the
+// verifier does not need it).
+impl PartialEq for GroupToken {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.history == other.history
+            && self.generation == other.generation
+            && self.depth == other.depth
+    }
+}
+impl Eq for GroupToken {}

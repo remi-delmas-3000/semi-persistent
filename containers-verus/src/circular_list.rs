@@ -171,7 +171,7 @@ pub struct CircularListToken {
 impl CircularListToken {
     /// Reconstruction coordinate (spec counterpart).
     pub open(crate) spec fn frame_idx_spec(self) -> nat {
-        self.entries.frame_idx as nat
+        self.entries.depth as nat
     }
 }
 

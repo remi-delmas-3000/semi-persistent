@@ -105,19 +105,11 @@ impl Default for MarkOptions {
 /// genealogy (H2). A caller that restores through a raw `VecToken` without a
 /// `History` gets exactly the structural guarantee `is_restorable_spec`
 /// states: the frame exists and reconstruction lands on its snapshot.
-#[derive(Copy, Clone)]
-pub struct VecToken {
-    pub(crate) frame_idx: usize,
-}
-
-impl VecToken {
-    /// The reconstruction coordinate (spec view; the exec field is
-    /// `pub(crate)` — privacy closeout). Public contracts phrase frame
-    /// positions through this.
-    pub open(crate) spec fn frame_idx_spec(self) -> nat {
-        self.frame_idx as nat
-    }
-}
+/// A standalone vector's version token is the group token minted by its own
+/// genealogy: the vector is a group of one. `depth` is the index of the frame
+/// the mark opened; validation checks the minting manager, the generation
+/// and the frame's liveness.
+pub type VecToken = crate::history::GroupToken;
 
 /// Spec helper: there is some entry in `diffs` pointing at index `j`.
 ///
@@ -2421,6 +2413,11 @@ where
     pub(crate) full_trail: Ghost<Seq<(T, I)>>,
     /// Stratum start offsets into full_trail, one per mark.
     #[allow(dead_code)]
+    /// The vector's own token manager (a group of one): identity and
+    /// per-frame generation stamps. Minted on `mark`, consulted on
+    /// validation, cut on every `restore_frame`.
+    pub(crate) genealogy: crate::history::Genealogy,
+    #[allow(dead_code)] // ghost: read only by specs
     pub(crate) trail_frames: Ghost<Seq<nat>>,
     /// The saved_len of the topmost (active) frame, cached for the hot path.
     /// `I::min()` when the stack is empty. Mirrors production.
@@ -2503,7 +2500,8 @@ where
     /// validity reduces to frame liveness. Kept under its historical name so
     /// composite validity chains read unchanged.
     pub open(crate) spec fn is_token_valid_spec(&self, token: VecToken) -> bool {
-        token.frame_idx < self.trail_frames@.len()
+        &&& self.genealogy.valid_spec(token)
+        &&& token.depth < self.trail_frames@.len()
     }
 
     /// The mark-depth quantity the depth-headroom contracts are phrased over.
@@ -2520,7 +2518,8 @@ where
     /// every member instead of once per member.
     pub open(crate) spec fn is_restorable_spec(&self, token: VecToken) -> bool {
         &&& TRACK
-        &&& token.frame_idx < self.trail_frames@.len()
+        &&& self.genealogy.valid_spec(token)
+        &&& token.depth < self.trail_frames@.len()
         &&& self.trail_frames@.len() < u32::MAX
     }
 
@@ -3708,6 +3707,7 @@ where
                 legacy_batch_rollover,
             ),
             full_trail: Ghost(Seq::empty()),
+            genealogy: crate::history::Genealogy::new(),
             trail_frames: Ghost(Seq::empty()),
             active_saved_len: <I as IndexLike>::min(),
             phantom: core::marker::PhantomData,
@@ -4258,11 +4258,14 @@ where
         assert(self.open_ingress_ok());
     }
 
+    /// Snapshot-side parts of `wf` after an ingress capture: the frame
+    /// partition and the canonical history are untouched by a capture that
+    /// only marks a flag and appends to a tier pool.
     #[verifier::spinoff_prover]
-    proof fn lemma_ingress_capture_preserves(&self, pre: Self, index: I)
+    proof fn lemma_ingress_capture_snap(&self, pre: Self, index: I)
         requires pre.wf(), self.ingress_capture_effect(pre, index),
             index.as_nat() < pre.view().len(), index.as_nat() < pre.active_saved_len.as_nat(),
-        ensures self.wf(),
+        ensures self.frame_partition_ok(), self.wf_for_snap(), self.proof_compat_ok(),
     {
         hide(Vec::wf);
         hide(Vec::wf_for_snap);
@@ -4271,17 +4274,43 @@ where
         reveal(Vec::frame_partition_ok);
         assert(self.frame_partition_ok());
         self.lemma_canonical_history_repartition(pre);
-        self.lemma_ingress_capture_trail_repr(pre, index);
-        self.lemma_ingress_capture_hot_repr(pre, index);
-        self.lemma_ingress_capture_flags(pre, index);
+        reveal(Vec::proof_compat_ok);
+        assert(self.proof_compat_ok());
+    }
+
+    /// Cold-side part of `wf` after an ingress capture: no Cold cell moves, so
+    /// every Cold frame still reconstructs its snapshot.
+    #[verifier::spinoff_prover]
+    proof fn lemma_ingress_capture_cold(&self, pre: Self, index: I)
+        requires pre.wf(), self.ingress_capture_effect(pre, index),
+            index.as_nat() < pre.view().len(), index.as_nat() < pre.active_saved_len.as_nat(),
+        ensures self.cold_repr_ok(),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::ingress_capture_effect);
+        reveal(Vec::frame_partition_ok);
         reveal(Vec::cold_repr_ok);
         assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
             #[trigger] self.cold_reconstructs(f) by {
             self.lemma_cold_reconstructs_transfer(pre, f);
         }
-        assert(self.cold_repr_ok());
-        reveal(Vec::proof_compat_ok);
-        assert(self.proof_compat_ok());
+    }
+
+    #[verifier::spinoff_prover]
+    proof fn lemma_ingress_capture_preserves(&self, pre: Self, index: I)
+        requires pre.wf(), self.ingress_capture_effect(pre, index),
+            index.as_nat() < pre.view().len(), index.as_nat() < pre.active_saved_len.as_nat(),
+        ensures self.wf(),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        self.lemma_ingress_capture_snap(pre, index);
+        self.lemma_ingress_capture_trail_repr(pre, index);
+        self.lemma_ingress_capture_hot_repr(pre, index);
+        self.lemma_ingress_capture_flags(pre, index);
+        self.lemma_ingress_capture_cold(pre, index);
         reveal(Vec::wf);
     }
 
@@ -4318,6 +4347,90 @@ where
             #[trigger] self.cold_reconstructs(f) by {
             self.lemma_cold_reconstructs_transfer(physical, f);
         }
+    }
+
+    /// The token manager is absent from every physical, ghost-trail and
+    /// snapshot predicate: a change confined to `genealogy` (a mint on `mark`,
+    /// a cut on `restore`) preserves `wf` and every observable the callers
+    /// state, without re-unfolding `wf` across the update.
+    #[verifier::spinoff_prover]
+    proof fn lemma_genealogy_framing(&self, physical: Self)
+        requires physical.wf(), *self == (Self { genealogy: self.genealogy, ..physical }),
+        ensures self.wf(),
+            self.view() == physical.view(),
+            self.depth_spec() == physical.depth_spec(),
+            self.snapshots_view() == physical.snapshots_view(),
+            self.trail_frames@ == physical.trail_frames@,
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        self.lemma_genealogy_physical_framing(physical);
+        self.lemma_genealogy_snap_framing(physical);
+        reveal(Vec::wf);
+    }
+
+    /// Every physical tier, ownership and capture part of `wf` under a
+    /// genealogy-only change: the exact twin of
+    /// `lemma_full_trail_physical_framing` for the other non-physical field.
+    #[verifier::spinoff_prover]
+    proof fn lemma_genealogy_physical_framing(&self, physical: Self)
+        requires physical.wf(), *self == (Self { genealogy: self.genealogy, ..physical }),
+        ensures self.frame_partition_ok(), self.hot_repr_ok(), self.trail_repr_ok(),
+            self.cold_repr_ok(), self.open_ingress_ok(), self.proof_compat_ok(),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        hide(Vec::cold_reconstructs);
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        physical.lemma_wf_named_parts();
+        reveal(Vec::frame_partition_ok);
+        reveal(Vec::hot_repr_ok);
+        reveal(Vec::trail_repr_ok);
+        reveal(Vec::cold_repr_ok);
+        reveal(Vec::cold_payload_ok);
+        reveal(Vec::open_ingress_ok);
+        reveal(Vec::proof_compat_ok);
+        assert forall|f: int| 0 <= f < self.depth_spec() implies
+            #[trigger] self.layer_above_at(f) == physical.layer_above_at(f) by {}
+        assert(self.frame_partition_ok());
+        assert(self.hot_repr_ok());
+        assert(self.trail_repr_ok());
+        assert(self.open_ingress_ok());
+        assert(self.proof_compat_ok());
+        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
+            #[trigger] self.cold_reconstructs(f) by {
+            self.lemma_cold_reconstructs_transfer(physical, f);
+        }
+    }
+
+    /// Snapshot part of `wf` under a genealogy-only change: the ghost trail,
+    /// the frame boundaries and every canonical frame contract read fields
+    /// the genealogy is not among.
+    #[verifier::spinoff_prover]
+    proof fn lemma_genealogy_snap_framing(&self, physical: Self)
+        requires physical.wf(), *self == (Self { genealogy: self.genealogy, ..physical }),
+            self.frame_partition_ok(),
+        ensures self.wf_for_snap(),
+    {
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        hide(Vec::repr_ok);
+        hide(Vec::cold_runs_disjoint);
+        hide(Vec::wf);
+        hide(Vec::cold_reconstructs);
+        hide(Vec::cold_repr_ok);
+        hide(Vec::hot_repr_ok);
+        hide(Vec::trail_repr_ok);
+        hide(Vec::open_ingress_ok);
+        hide(Vec::proof_compat_ok);
+        hide(Vec::frame_partition_ok);
+        physical.lemma_wf_named_parts();
+        assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
+            #[trigger] self.layer_above_at(k) == physical.layer_above_at(k)
+            && self.g_start(k) == physical.g_start(k)
+            && self.g_end(k) == physical.g_end(k) by {}
+        reveal(Vec::wf_for_snap);
     }
 
     /// Appending a canonical event does not change any physical representation.
@@ -8031,6 +8144,29 @@ where
         reveal(Vec::frame_partition_ok);
     }
 
+    /// The physical range of closed Hot frame `f` during a migration: the
+    /// sealed header bounds of `pre`, the same in `self` (headers and pool
+    /// length are untouched), and unique in `self`'s pool.
+    #[verifier::spinoff_prover]
+    proof fn lemma_hot_migrating_frame_range(&self, pre: Self, f: int)
+        requires self.hot_migrating(pre, f as nat), 0 <= f < pre.hot_closed_count(),
+        ensures
+            self.phys_hot_start(f) == pre.hot_stack@[f].start as int,
+            self.phys_hot_end(f) == pre.hot_stack@[f].end as int,
+            pre.hot_stack@[f].start <= pre.hot_stack@[f].end <= self.hot_value_pool@.len(),
+            stratum_unique::<T, I>(self.hot_value_pool@,
+                pre.hot_stack@[f].start as int, pre.hot_stack@[f].end as int),
+    {
+        hide(Vec::wf);
+        hide(Vec::hot_migrating_cold);
+        hide(stratum_unique);
+        reveal(Vec::hot_migrating);
+        reveal(Vec::hot_migrating_hot);
+        pre.lemma_closed_hot_frame_end(f);
+        assert(self.phys_hot_start(f) == pre.phys_hot_start(f));
+        assert(self.phys_hot_end(f) == pre.phys_hot_end(f));
+    }
+
     /// A sorted unique closed frame is strictly increasing.
     #[verifier::spinoff_prover]
     proof fn lemma_hot_frame_strict(&self, pre: Self, f: int)
@@ -8045,18 +8181,13 @@ where
             pre.hot_stack@[f].start <= pre.hot_stack@[f].end <= self.hot_value_pool@.len(),
     {
         hide(Vec::wf);
+        hide(Vec::hot_migrating);
+        hide(Vec::hot_migrating_hot);
         hide(Vec::hot_migrating_cold);
-        reveal(Vec::hot_migrating);
-        reveal(Vec::hot_migrating_hot);
-        pre.lemma_closed_hot_frame_end(f);
+        self.lemma_hot_migrating_frame_range(pre, f);
         let start = pre.hot_stack@[f].start as int;
         let end = pre.hot_stack@[f].end as int;
         let entries = self.hot_value_pool@.subrange(start, end);
-        assert(self.phys_hot_start(f) == start);
-        assert(self.phys_hot_end(f) == end);
-        assert(pre.phys_hot_start(f) == start);
-        assert(pre.phys_hot_end(f) == end);
-        assert(stratum_unique::<T, I>(self.hot_value_pool@, start, end));
         assert forall|a: int, b: int| 0 <= a < b < entries.len() implies
             (#[trigger] entries[a]).1.as_nat() < (#[trigger] entries[b]).1.as_nat() by {
             assert(entries[a] == self.hot_value_pool@[start + a]);
@@ -14146,7 +14277,7 @@ where
         let cold = self.cold_stack.len();
         let hot = self.hot_stack.len();
         let trail = self.trail_stack.len();
-        let tok = token.frame_idx;
+        let tok = token.depth as usize;
         let mut out: std::vec::Vec<I> = std::vec::Vec::new();
 
         let cold_lo = if tok < cold { tok } else { cold };
@@ -14234,11 +14365,13 @@ where
         if !TRACK {
             return false;
         }
-        // Frame liveness: a consumed token's frame is gone (design doc 08).
-        if token.frame_idx >= self.depth_exec() {
+        // Provenance: minted by this vector's own manager, and not cut since.
+        if !self.genealogy.is_valid(token) {
             return false;
         }
-        // Headroom (tf.len() < u32::MAX).
+        if token.depth as usize >= self.depth_exec() {
+            return false;
+        }
         if self.depth_exec() >= u32::MAX as usize {
             return false;
         }
@@ -15637,15 +15770,18 @@ where
             final(self).wf(),
             final(self).view() == old(self).view(),
             token.frame_idx_spec() == old(self).depth_spec(),
+            final(self).is_token_valid_spec(token),
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
         self.evict_cold_frame();
         self.seal_open_frame_copy();
         self.push_frame_with_options(options);
-        VecToken {
-            frame_idx: self.depth_exec() - 1,
-        }
+        let idx = self.depth_exec() - 1;
+        let ghost physical = *self;
+        let token = self.genealogy.mint(idx);
+        proof { self.lemma_genealogy_framing(physical); }
+        token
     }
 
     /// Open a mark, returning a token that names this version. Existing
@@ -15660,15 +15796,18 @@ where
             final(self).wf(),
             final(self).view() == old(self).view(),
             token.frame_idx_spec() == old(self).depth_spec(),
+            final(self).is_token_valid_spec(token),
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
         self.evict_cold_frame();
         self.seal_open_frame_copy();
         self.push_frame(shrink);
-        VecToken {
-            frame_idx: self.depth_exec() - 1,
-        }
+        let idx = self.depth_exec() - 1;
+        let ghost physical = *self;
+        let token = self.genealogy.mint(idx);
+        proof { self.lemma_genealogy_framing(physical); }
+        token
     }
 
     /// The eviction buffer: how many closed hot strata a column keeps
@@ -15754,6 +15893,12 @@ where
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target_index as int),
     {
         self.runtime_restore_frame(target_index);
+        // The cut: every token at `target_index` or deeper is dead for good,
+        // whether the restore came through this vector's own token or through
+        // a group that drives it structurally.
+        let ghost physical = *self;
+        self.genealogy.cut_from(target_index);
+        proof { self.lemma_genealogy_framing(physical); }
     }
 
 
@@ -15777,15 +15922,19 @@ where
     {
         // Structural guards — the parts `restore_frame` deliberately omits.
         crate::guard::check_precondition(TRACK, "restore() called on untracked vec");
+        // Provenance: minted by this vector's own manager, and not cut since.
+        if !self.genealogy.is_valid(&token) {
+            crate::guard::refuse("Vec::restore: token is foreign, stale or consumed");
+        }
         crate::guard::check_precondition(
-            token.frame_idx < self.depth_exec(),
+            (token.depth as usize) < self.depth_exec(),
             "token points beyond frame stack",
         );
         crate::guard::check_precondition(
             self.depth_exec() < u32::MAX as usize,
             "Vec::restore: frame-stack depth would overflow u32",
         );
-        self.restore_frame(token.frame_idx);
+        self.restore_frame(token.depth as usize);
     }
 }
 
@@ -16211,13 +16360,6 @@ where
 // consumer needs it (structs holding tokens derive `Debug`, and the caches'
 // method bounds require `Debug` transitively). Manual because deriving inside
 // `verus!{}` is unsupported. Mirrors production's field layout.
-impl core::fmt::Debug for VecToken {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("VecToken")
-            .field("frame_idx", &self.frame_idx)
-            .finish()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Production-shaped trusted glue (trust group E).
@@ -16808,7 +16950,10 @@ mod forged_token_tests {
         let genuine = v.mark(ShrinkPolicy::Never);
         v.push(100);
 
-        let forged = VecToken { frame_idx: 999 };
+        let forged = VecToken {
+            depth: 999,
+            ..genuine
+        };
         assert!(
             !v.is_valid_token(&forged),
             "forged frame index must be invalid"
@@ -16889,7 +17034,8 @@ mod forged_token_tests {
         let genuine = v.mark(ShrinkPolicy::Never);
         v.push(2);
         let forged = VecToken {
-            frame_idx: genuine.frame_idx + 100,
+            depth: genuine.depth + 100,
+            ..genuine
         };
         assert!(
             !v.is_valid_token(&forged),
@@ -17000,14 +17146,6 @@ where
         Self::new()
     }
 }
-
-impl PartialEq for VecToken {
-    #[inline(always)]
-    fn eq(&self, other: &Self) -> bool {
-        self.frame_idx == other.frame_idx
-    }
-}
-impl Eq for VecToken {}
 
 impl<'a, T, I, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>>
     ExactSizeIterator for VecViewIter<'a, T, I, S, TRACK, VC>

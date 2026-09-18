@@ -83,7 +83,7 @@ pub struct MapToken {
 impl MapToken {
     /// Reconstruction coordinate (spec counterpart; the field is `pub(crate)`).
     pub open(crate) spec fn frame_idx_spec(self) -> nat {
-        self.inner.frame_idx as nat
+        self.inner.depth as nat
     }
 }
 
@@ -571,7 +571,7 @@ where
         let ghost old_log = self.log_view();
         let ghost old_prev = self.prev@;
         // The target frame's saved length: what the log restore truncates to.
-        let target = token.inner.frame_idx;
+        let target = token.inner.depth as usize;
         let saved_len = self.log.frames[target].as_usize();
         let n = self.log.len().as_usize();
         proof {

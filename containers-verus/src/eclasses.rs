@@ -2881,7 +2881,7 @@ pub struct EClassesToken {
 
 impl EClassesToken {
     pub open(crate) spec fn frame_idx_spec(self) -> nat {
-        self.pool.frame_idx as nat
+        self.pool.depth as nat
     }
 }
 
@@ -3215,15 +3215,15 @@ where
             &&& token.uses.nodes_frame_idx_spec() == token.frame_idx_spec()
         }),
     {
-        let f = token.pool.frame_idx;
-        token.entries.entries.frame_idx == f
-            && token.reprs.dense.frame_idx == f
-            && token.reprs.sparse.frame_idx == f
-            && token.reprs.indices.frame_idx == f
-            && token.uf.parent.frame_idx == f
-            && token.uf.rank.frame_idx == f
-            && token.uses.heads.frame_idx == f
-            && token.uses.nodes.frame_idx == f
+        let f = token.pool.depth;
+        token.entries.entries.depth == f
+            && token.reprs.dense.depth == f
+            && token.reprs.sparse.depth == f
+            && token.reprs.indices.depth == f
+            && token.uf.parent.depth == f
+            && token.uf.rank.depth == f
+            && token.uses.heads.depth == f
+            && token.uses.nodes.depth == f
     }
 
     /// Restore the aggregate to the marked frame. Refuses an invalid,
@@ -3268,7 +3268,7 @@ where
                 "EClasses::restore: invalid, foreign, stale, consumed, abandoned, or mixed-mark token");
         }
         let ghost o = *old(self);
-        let ghost f = token.pool.frame_idx as int;
+        let ghost f = token.pool.depth as int;
         proof {
             reveal(eg_archive_agrees);
             assert(eg_archive_agrees::<T, K, L, N>(

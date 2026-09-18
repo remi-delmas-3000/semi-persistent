@@ -34,6 +34,8 @@ pub struct AppendOnlyVec<T, I: IndexLike = usize, const TRACK: bool = true> {
     /// Ghost snapshot stack: `snapshots[k]` is `data@` as of frame `k`'s mark,
     /// i.e. the length-`frames[k]` prefix. Parallel to `frames`.
     pub(crate) snapshots: Ghost<Seq<Seq<T>>>,
+    /// The vector's own token manager (a group of one).
+    pub(crate) genealogy: crate::history::Genealogy,
 }
 
 impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
@@ -85,7 +87,8 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     /// validity reduces to frame liveness. Kept under its historical name so
     /// composite validity chains read unchanged.
     pub open(crate) spec fn is_token_valid_spec(&self, token: VecToken) -> bool {
-        token.frame_idx < self.frames@.len()
+        &&& self.genealogy.valid_spec(token)
+        &&& token.depth < self.frames@.len()
     }
 
     /// The mark-depth quantity the depth-headroom contracts are phrased over.
@@ -99,7 +102,8 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     /// public `is_valid_token` answers.
     pub open(crate) spec fn is_restorable_spec(&self, token: VecToken) -> bool {
         &&& TRACK
-        &&& token.frame_idx < self.frames@.len()
+        &&& self.genealogy.valid_spec(token)
+        &&& token.depth < self.frames@.len()
         &&& self.frames@.len() < u32::MAX
     }
 
@@ -112,6 +116,7 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             data: std::vec::Vec::new(),
             frames: std::vec::Vec::new(),
             snapshots: Ghost(Seq::empty()),
+            genealogy: crate::history::Genealogy::new(),
         }
     }
 
@@ -287,7 +292,8 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             }
         }
 
-        VecToken { frame_idx: self.frames.len() - 1 }
+        let idx = self.frames.len() - 1;
+        self.genealogy.mint(idx)
     }
 
     // ------------------------------------------------------------------
@@ -388,7 +394,10 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         if !TRACK {
             return false;
         }
-        if token.frame_idx >= self.frames.len() {
+        if !self.genealogy.is_valid(token) {
+            return false;
+        }
+        if token.depth as usize >= self.frames.len() {
             return false;
         }
         if self.frames.len() >= u32::MAX as usize {
@@ -417,15 +426,18 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         // frames[token.frame_idx] or mutating anything. Production message
         // parity for the token cases.
         crate::guard::check_precondition(TRACK, "restore() called on untracked AppendOnlyVec");
+        if !self.genealogy.is_valid(&token) {
+            crate::guard::refuse("AppendOnlyVec::restore: token is foreign, stale or consumed");
+        }
         crate::guard::check_precondition(
-            token.frame_idx < self.frames.len(),
+            (token.depth as usize) < self.frames.len(),
             "token points beyond frame stack",
         );
         crate::guard::check_precondition(
             self.frames.len() < u32::MAX as usize,
             "AppendOnlyVec::restore: frame-stack depth would overflow u32",
         );
-        let target = token.frame_idx;
+        let target = token.depth as usize;
         let saved_len = self.frames[target].as_usize();
 
         let ghost old_data = self.data@;
@@ -472,6 +484,8 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
                     =~= old_data.subrange(0, frames[k].as_nat() as int));
             }
         }
+        // The cut: the consumed token and every deeper one are dead for good.
+        self.genealogy.cut_from(target);
     }
 }
 

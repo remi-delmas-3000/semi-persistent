@@ -179,12 +179,11 @@ fn abandoned_future_rejected_by_paired_history() {
 }
 
 #[test]
-fn structural_vec_restore_is_frame_liveness_only() {
-    // The complement of the paired test above: the raw vec token surface no
-    // longer carries a genealogy, so a token whose frame index is live again
-    // IS structurally restorable — restoring lands on the frame now at that
-    // index (documented in `Vec::is_restorable_spec`). Owners that need
-    // branch protection pair the vec with a `History`.
+fn standalone_vec_refuses_abandoned_branch_token() {
+    // A standalone vec is a group of one: it owns its genealogy, so a token
+    // from an abandoned branch is refused even when a frame is live again at
+    // its index (the restore cut bumped that depth's generation), and the
+    // consumed token itself stays refused after a re-mark at its depth.
     let mut v = V::new();
     v.try_push(1).expect("push: within index word");
     let base = v
@@ -196,20 +195,37 @@ fn structural_vec_restore_is_frame_liveness_only() {
         .expect("mark: depth bounded by this harness");
     v.try_push(3).expect("push: within index word");
     v.try_restore(base).expect("restore: own token");
+    assert!(!v.is_valid_token(&base), "the consumed token is spent");
     v.try_push(20).expect("push: within index word");
     let _f1 = v
         .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness");
+        .expect("mark: depth bounded by this harness"); // depth 0 again
     let _f2 = v
         .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness"); // frame_idx=1 live again
+        .expect("mark: depth bounded by this harness"); // depth 1 live again
     assert!(
-        v.is_valid_token(&abandoned),
-        "a live frame index is structurally restorable post-H2"
+        !v.is_valid_token(&abandoned),
+        "abandoned-branch token must be refused"
     );
-    v.try_restore(abandoned)
-        .expect("restore: structurally valid frame handle");
-    assert_eq!(v.len(), 2, "restore lands on the frame now at index 1");
+    assert!(
+        !v.is_valid_token(&base),
+        "the consumed token stays refused after a re-mark"
+    );
+    let len_before = v.len();
+    assert!(v.try_restore(abandoned).is_err(), "refused restore");
+    assert_eq!(v.len(), len_before, "a refused restore does not mutate");
+    // Provenance: a token minted by another vec is foreign, whatever its numbers.
+    let mut other = V::new();
+    other.try_push(1).expect("push");
+    let foreign = other.try_mark(ShrinkPolicy::Never).expect("mark");
+    assert!(
+        !v.is_valid_token(&foreign),
+        "a foreign vec's token is refused"
+    );
+    assert!(
+        other.is_valid_token(&foreign),
+        "and still validates on its own vec"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -73,11 +73,11 @@ pub struct UnionFindToken {
 
 impl UnionFindToken {
     pub open(crate) spec fn parent_frame_idx_spec(self) -> nat {
-        self.parent.frame_idx as nat
+        self.parent.depth as nat
     }
 
     pub open(crate) spec fn rank_frame_idx_spec(self) -> nat {
-        self.rank.frame_idx as nat
+        self.rank.depth as nat
     }
 }
 
@@ -1411,8 +1411,8 @@ where
                 .is_restorable_spec(token.parent_proof->Some_0)
             &&& self.justification->Some_0
                 .is_restorable_spec(token.justification->Some_0)
-            &&& token.parent_proof->Some_0.frame_idx == token.parent.frame_idx
-            &&& token.justification->Some_0.frame_idx == token.parent.frame_idx
+            &&& token.parent_proof->Some_0.depth == token.parent.depth
+            &&& token.justification->Some_0.depth == token.parent.depth
         },
     {
         match (&self.parent_proof, &token.parent_proof, &self.justification, &token.justification)
@@ -1420,8 +1420,8 @@ where
             (Some(pp), Some(pt), Some(j), Some(jt)) => {
                 pp.is_valid_token(pt)
                     && j.is_valid_token(jt)
-                    && pt.frame_idx == token.parent.frame_idx
-                    && jt.frame_idx == token.parent.frame_idx
+                    && pt.depth == token.parent.depth
+                    && jt.depth == token.parent.depth
             }
             (None, None, None, None) => true,
             _ => false,
@@ -1456,10 +1456,10 @@ where
             "UnionFind::restore: invalid, foreign, stale, consumed, or abandoned token component",
         );
         crate::guard::check_precondition(
-            token.parent.frame_idx == token.rank.frame_idx,
+            token.parent.depth == token.rank.depth,
             "UnionFind::restore: token components name different marks",
         );
-        let ghost f = token.parent.frame_idx as int;
+        let ghost f = token.parent.depth as int;
         let ghost snap_roots = self.roots_snapshots@[f];
         let ghost snap_dist = self.dist_snapshots@[f];
         proof {
@@ -1678,7 +1678,7 @@ where
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
     {
         if self.is_valid_token(&token)
-            && token.parent.frame_idx == token.rank.frame_idx
+            && token.parent.depth == token.rank.depth
         {
             self.restore(token);
             Ok(())

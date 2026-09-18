@@ -54,15 +54,15 @@ pub struct SparseSetToken {
 
 impl SparseSetToken {
     pub open(crate) spec fn dense_frame_idx_spec(self) -> nat {
-        self.dense.frame_idx as nat
+        self.dense.depth as nat
     }
 
     pub open(crate) spec fn sparse_frame_idx_spec(self) -> nat {
-        self.sparse.frame_idx as nat
+        self.sparse.depth as nat
     }
 
     pub open(crate) spec fn indices_frame_idx_spec(self) -> nat {
-        self.indices.frame_idx as nat
+        self.indices.depth as nat
     }
 }
 
@@ -1170,8 +1170,8 @@ where
                 "SparseSet::restore: invalid, foreign, stale, consumed, or abandoned token component",
             );
         }
-        if !(token.dense.frame_idx == token.sparse.frame_idx
-            && token.dense.frame_idx == token.indices.frame_idx)
+        if !(token.dense.depth == token.sparse.depth
+            && token.dense.depth == token.indices.depth)
         {
             crate::guard::refuse("SparseSet::restore: token frame indices disagree across columns");
         }
