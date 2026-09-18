@@ -152,14 +152,18 @@ pub enum InsertResult<G, L> {
 struct CacheFrame;
 
 /// Restore rebuilds an append-only value index once the incremental deletions
-/// would exceed `1 / REBUILD_RATIO` of a rebuild. Used by the literal value
-/// interner (`crate::literal::LitValStore`), whose entries never re-key; the
-/// node caches' hint index has no rebuild path at all.
+/// would exceed `1 / REBUILD_RATIO` of a rebuild. The literal value interner
+/// (`crate::literal::LitValStore`) used this policy until it moved onto the
+/// verified `SpMap`, whose restore carries its own rebuild fallback; the node
+/// caches' hint index has no rebuild path at all. Kept (with its test) as the
+/// documented policy for a future append-only index.
+#[allow(dead_code)]
 pub(crate) const REBUILD_RATIO: usize = 4;
 
 /// Whether a suffix-only restore can fix an append-only index in place rather
 /// than rebuilding it. See [`REBUILD_RATIO`].
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn restore_incrementally(
     suffix_len: usize,
     pending_len: usize,
