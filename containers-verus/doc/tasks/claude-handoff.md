@@ -226,6 +226,50 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    open benchmark gaps (`aov/log` 0.92×, `store/*/smt32` 1.06–1.08) and the
    two-step id-mint verification, is written up as an autonomous goal:
    `doc/tasks/nightshift-external-manager-goal.md`.
+8. External-manager wave (2026-09-18, six signed local commits
+   `a0b6d57`..`67900d4` on top of `0dd629c` — rebuilt from the twelve that
+   were built and lean-gated, which stay on the local branch
+   `d21-exec-wave-full`; full battery on the final source; progress doc,
+   "The external-manager wave"): the manager is provided from the
+   outside as `group::ForkHistory<M: Member>`, one `History` plus one typed
+   member, with a token-free structural member protocol
+   (`push_frame`, `reset_frame`, `restore_frame`, `pop_frame`,
+   `depth_exec`). Every container in the crate implements `Member`;
+   `Pair<A, B>` forwards to two and nests; `Deref`/`DerefMut` keep typed
+   access; `mint_pushed` adopts a structurally pushed frame for the
+   adaptive and explicit-rollover paths. The lockstep theorem is stated
+   once on the group rather than once per composite, and
+   `History::*_member` carries it over a borrowed `&mut M`, which is what
+   lets the e-graph keep its members as separate fields: its nine
+   synchronized members now run on one `History` through `EGraphMembers`,
+   nine per-member token stacks deleted, store traces 0.97–1.00× and
+   `empty20k` 0.79–0.80× of `f676208`. Harnesses, benches and all 22
+   in-crate test files drive groups of one.
+   The fifth commit deleted the old surface (about 5,500 lines):
+   the seven composites' `mark`/`restore`/`try_*`/`pop_scope`/
+   `is_valid_token`, their token types and token-only predicates,
+   `sync_group`, `Solo`/`SyncPair`, and the e-graph wrappers' token layer
+   (the director pool moved to the frame protocol; the per-column restore
+   profiling was rewired into `NodeStore::reset_frame`). Verification
+   **2726 verified, 0 errors**.
+   **Next actions, in order:** (a) put the anti-unification search layer
+   (`egraph/src/au`, eight token structs: action cache, search, best
+   results, exact memo, term pool, context store, or-arena, space) on one
+   group — its members are already marked and restored together, so it
+   wants a forwarding member view like `EGraphMembers`. That is what keeps
+   `SpMap::MapToken` and the columns' token API alive; with it done, delete
+   those too (the `Vec` half needs `lemma_genealogy_framing` and the cuts
+   inside `restore_frame`/`reset_frame` reworked, plus the canary, the
+   policy matrix and the `vec.rs` unit tests migrated).
+   (b) the two open benchmark gaps and the dyn-store residuals (goal doc
+   outcome 3), (c) Trail-first literal cost (outcome 4), (d) two-step
+   id-mint verification (outcome 5), (e) node caches on `SpMap`, only with
+   the user's go-ahead (outcome 6). Affine tokens and `reset_to(&t)`
+   (doc 08 §4, §6) remain open design questions.
+   Deletion method that worked, for whoever does (a): cut each item from its
+   doc comment to the start of the next sibling item, rather than by brace
+   counting, which stops early on an `ensures ... ({ ... })` clause
+   (`scratchpad/cut_items.py` in the session that did it).
 
 ## Existing proof architecture to reuse
 

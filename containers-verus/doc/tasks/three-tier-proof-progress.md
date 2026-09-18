@@ -2655,6 +2655,79 @@ formatting, whitespace and the unchanged-legacy check passed, trust **37
 default + 5 literal**. Benchmarks against each commit's predecessor:
 `doc/tasks/final-performance-report.md`, "Wave after extended goal 5".
 
+## The external-manager wave (2026-09-18): one manager, provided from outside
+
+Ten commits put every container and the e-graph on one externally provided
+history manager, `group::ForkHistory<M: Member>` (design doc 10, "Shipped: the
+typed external manager"; goal doc outcome 1).
+
+| Commit | What it adds | Feature suite |
+| --- | --- | --- |
+| `a0b6d57` | `group.rs`: the `Member` protocol, `ForkHistory<M>`, `Pair<A, B>`, `Vec`/`AppendOnlyVec` impls, `tests/typed_group.rs` | 289 |
+| `20f2ac4` | every composite a member: sparse set, ring, list arena, union-find, map, B+ tree, e-classes (token-free frame cores) | 296 |
+| `f7b036c` | `History::*_member` over a borrowed member, and the e-graph's nine members on one `History` via `EGraphMembers` | 296 |
+| `3675afd` | harnesses, benches and all 22 in-crate test files on groups of one; `mint_pushed`, `Deref`, `try_push_frame_with/_adaptive`; `HintedArena` a member | 296 |
+| `1c601af` | delete the containers' and e-graph wrappers' token surface | 291 |
+| `67900d4` | this documentation | — |
+
+History note: the wave was built as twelve commits and rebuilt as these six
+at the user's request, each on a tree one of the twelve already had (the
+twelve stay on the local branch `d21-exec-wave-full`; the two heads have
+identical trees). The gate evidence below is per built commit, so it maps onto
+the six by tree: `3538cb0` → `a0b6d57`, `9c29a7e`/`0222bfd`/`534cced`/
+`e87df23`/`4cb12a3` → `20f2ac4`, `10ed6d9`/`e26623e` → `f7b036c`,
+`ae16efe`/`0e94c16` → `3675afd`, `778cdcf` → `1c601af`.
+
+Every built commit passed the lean per-commit gate (goal doc outcome 7):
+verification with 0 errors, the feature suite (289 → 296 as the members
+landed), release policy matrix **4**, conformance **31**, consumers **1268
+passed, 45 skipped** under cargo-nextest, canary **2**, partial-API
+**0/0/0/0**, fmt, whitespace, unchanged legacy, trust **37 + 5** (**34 + 5**
+after the deletion). Logs:
+`scratchpad/lean_{a1,a2a,a2b,a3a,a3b,a3c,b0,b1,c,d1,d2a}.log`. The member wave
+verified at **2806 verified, 0 errors** and the deletion at **2726 verified, 0
+errors**. One flake seen once (`egraph/tests/par_fanout.rs`, which asserts two
+rayon workers under load) passed on rerun.
+
+Benchmarks, the e-graph commit against `f676208` (its own measurement): store
+traces **0.97–1.00×**, `empty20k` **0.79–0.80×** (the per-column provenance
+constant is gone), saturation at parity.
+
+**The deletion (eleventh commit).** With the callers gone, the old surface
+went: seven composites (`SparseSet`, `CircularList`, `ListArena`, `UnionFind`,
+`BPlusTreeSet`, `EClasses`, `HintedArena`) lost `mark`/`restore`/`try_*`/
+`pop_scope`/`is_valid_token`, their token types and the token-only predicates;
+`sync_group` (the dyn group) and `history.rs`'s `Solo`/`SyncPair` wrappers were
+deleted; the e-graph's wrapper token layer went too (`CacheToken`,
+`PoolCacheToken`, `NodeStoreToken`, `RoutingToken`, `LitValStoreToken`, the
+four registry tokens), with the director pool moved to the frame protocol and
+the per-column restore profiling (`SEMPER_RESTORE_PROF`, `NODE_PROF_PARTS`)
+rewired into `NodeStore::reset_frame` so the diagnostic still reports. Four
+harnesses moved to groups of one on the way: the e-classes conformance trace,
+the list-arena and e-graph-reference differentials, and the e-classes and
+use-list proptests. About 5,500 lines deleted; verification **2726 verified, 0
+errors** (80 proof functions fewer). Two surfaces stay, on purpose: `Vec` and
+`AppendOnlyVec` (the columns a group of one wraps; the `Vec` half also needs
+`lemma_genealogy_framing` and the `restore_frame`/`reset_frame` cuts reworked),
+and `SpMap`'s `MapToken`, because the anti-unification search layer
+(`egraph/src/au`, eight token structs of its own) still checkpoints maps and
+columns directly. That layer is the next consumer to put on a group.
+
+Gate for the deletion commit (lean per-commit gate, log
+`scratchpad/lean_d2a.log`): literal verify **2726 verified, 0 errors**,
+feature suite **291 passed, 10 ignored** (the dyn group's six tests and the
+frankentoken case go, the two new typed-group tests arrive), release policy
+matrix **4**, conformance **31**, consumers **1268 passed, 45 skipped**,
+canary **2**, partial-API **0/0/0/0**, fmt, whitespace, unchanged legacy,
+trust **34 + 5** (three `external_body` items fewer).
+
+Method note: the first attempt at this deletion was scripted with brace
+counting and mis-cut function bodies in seven verified files (an
+`ensures ... ({ ... })` clause balances early). It was reverted and redone with
+a cutter that finds each item's end by the next sibling item's start, which
+needs no brace matching; that pass compiled with four stale imports as the only
+fallout.
+
 Known pre-existing flake, unrelated: `egraph/tests/au_exact_anytime.rs`
 (`exact_deadline_returns_anytime_incumbent`) asserts a 5 ms deadline is hit;
 in `--release` on this machine the exact solve finishes first (fails at

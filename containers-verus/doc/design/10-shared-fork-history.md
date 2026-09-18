@@ -377,20 +377,86 @@ are unchanged, only the field read is `depth`. Grouped members under
 `ForkHistory` are driven structurally (`push_frame`/`restore_frame`), and
 their own manager is inert (never minted, cut along with the frames).
 
-## Next: one external manager (planned)
+## Shipped: the typed external manager (2026-09-18)
 
-The standalone path is a convenience the group path does not need. The
-planned uniform shape, agreed on 2026-09-17: columns carry no manager and no
-tokens — their whole versioning surface is the member protocol
-(`push_frame`, `restore_frame(depth)`, `depth`); composites implement the same
-protocol by fanning out to their columns and doing their own restore work; a
-typed `ForkHistory<M: SyncMember>` owns the history and exactly one member
-`M` (a consumer's forwarding struct of columns), so `mark`/`restore` act on
-the whole state at once and typed access is `group.member.field`. A
-standalone container is then `ForkHistory::new(Vec::new())`, a group of one
-set up by hand. Misuse (calling `push_frame` on a member directly) makes the
-member's depth drift and the next group operation refuses. Ownership, not a
-shared handle, is what keeps the manager verifiable: a handle would put
-interior mutability and a permission token on every mark and restore.
-The execution plan with acceptance criteria is
-`doc/tasks/nightshift-external-manager-goal.md`.
+The manager is now always provided from the outside, as one type:
+`group::ForkHistory<M: Member>` owns a `History` and exactly one typed member
+`M`. The member protocol is structural and carries no tokens —
+`push_frame(shrink)`, `restore_frame(depth)`, `reset_frame(depth)`,
+`pop_frame()`, `depth_exec()`, with the spec side `wf`, `depth_spec`,
+`can_push`, `model`, `archive` and one lemma `lemma_archive_depth`. Every
+operation is total: a member that cannot take another frame, or whose depth has
+drifted, is refused rather than trusted.
+
+The group is the only token authority. `mark` returns `Option<GroupToken>`,
+`restore`/`restore_and_pop`/`pop_scope` return `bool`, `mint_pushed` adopts a
+frame the caller pushed structurally (the adaptive and explicit-rollover
+paths), `is_valid` answers provenance, `depth` reports the shared depth, and
+`in_lockstep` is the invariant as a runtime question. `Deref`/`DerefMut` give
+typed access, so `group.field` and `group.method()` read like the container
+itself while `group.member` is the explicit spelling.
+
+Who is a member. Every container in the crate: `Vec`, `AppendOnlyVec`,
+`SparseSet`, `CircularList`, `ListArena`, `UnionFind`, `SpMap`,
+`BPlusTreeSet`, `EClasses`, `HintedArena`, plus `Pair<A, B>`, the verified
+two-member forwarder, which nests (a group of three columns is
+`Pair<Pair<A, B>, C>`). Composites got token-free cores for the work they used
+to do inside their own `restore`: `push_frames`, `reset_frames(target)`,
+`restore_frames(target)`. A standalone container is
+`ForkHistory::new(Vec::new())`, a group of one.
+
+The lockstep theorem is stated once, on the group, instead of once per
+composite: after `mark` the member's depth is the history depth; after
+`restore(t)` the member sits at `t.depth + 1` with its model equal to its
+archived model at `t.depth`. `History::{mark,restore,restore_and_pop,pop,
+mint_pushed}_member` carry it over a borrowed `&mut M`, which is what lets a
+consumer hold its members as separate fields and still have one history.
+
+The e-graph is the first consumer on the new shape (commit `e26623e`):
+`EGraphMembers<'a, Cfg, L, TRACK, PROOFS>` is a borrowed forwarding view of
+its nine synchronized members plus the parallel flag, and it implements
+`Member` by fanning out (above the fan-out threshold, over a `rayon::scope`).
+`EGraph::{mark_with, restore_with, restore_and_pop_with, pop_scope}` are each
+one call into `History::*_member` plus their own bookkeeping. Nine
+depth-indexed per-member token stacks are gone, and with them the per-column
+provenance constant: the `empty20k` store trace runs at 0.79–0.80× of the
+previous commit, the other store traces at 0.97–1.00×, and saturation is at
+parity.
+
+Misuse is refused, not undefined. A frame pushed or popped on a member behind
+the group's back drifts the member's depth away from the history's, and the
+next group `mark` returns `None` while `restore`/`restore_and_pop`/`pop_scope`
+return `false` and change nothing; repairing the drift makes the group answer
+again. Adopting a member that already has open frames, or pairing members at
+different depths, refuses at construction. Ownership, not a shared handle, is
+what keeps this verifiable: a handle would put interior mutability and a
+permission token on every mark and restore.
+
+The old surface is gone. Seven composites (`SparseSet`, `CircularList`,
+`ListArena`, `UnionFind`, `BPlusTreeSet`, `EClasses`, `HintedArena`) have no
+`mark`, `restore`, `try_*`, `pop_scope` or `is_valid_token` of their own and no
+token type; the token-only predicates (`is_token_valid_spec`,
+`is_restorable_spec`, `restore_pre_spec`, `snap_at`, `frames_agree`) went with
+them. So did the predecessor dyn group (`sync_group`, `Box<dyn SyncMember>`
+members) and the `Solo`/`SyncPair` migration wrappers in `history.rs`. In the
+e-graph, the wrappers' token layer went the same way: `CacheToken`,
+`PoolCacheToken`, `NodeStoreToken`, `RoutingToken`, `LitValStoreToken` and the
+four registry tokens, with the director pool switched to the frame protocol.
+That is about 5,500 lines deleted, and the crate verifies at **2726 verified,
+0 errors** (80 proof functions fewer than before the deletion).
+
+Two token surfaces stay, each for a reason. `Vec` and `AppendOnlyVec` keep
+theirs because the columns are what a group of one wraps, and because the
+`Vec` half cannot be deleted without reworking `lemma_genealogy_framing` and
+the cuts inside `restore_frame`/`reset_frame`. `SpMap` keeps its `MapToken`
+because the anti-unification search layer (`egraph/src/au`) still checkpoints
+maps and columns directly, through eight token structs of its own
+(`ActionCacheToken`, `SearchToken`, `BestResultsToken`, `ExactMemoToken`,
+`TermPoolToken`, `ContextStoreToken`, `OrArenaToken`, `SpaceToken`). That
+layer is the next consumer to put on a group: its members are already marked
+and restored together, so it wants one forwarding member view like
+`EGraphMembers`, after which the last two token surfaces can go too.
+
+The typed-group tests (`tests/typed_group.rs`) are the acceptance evidence for
+the shape: a group of one per container, a nested `Pair` of three columns under
+one history driven by a randomized lockstep proptest, and the refusals above.

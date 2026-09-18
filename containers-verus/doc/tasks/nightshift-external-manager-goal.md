@@ -312,3 +312,41 @@ benchmark verdicts and the exact remaining dependency if any, in the progress
 doc and the handoff's "Next actions". Do not label an outcome complete
 because the night ends: an outcome without its evidence is open, and an
 inconclusive benchmark is not a pass.
+
+## Status at the wave's close (2026-09-18, wrapped up at the user's request)
+
+**Outcome 1 — the typed external manager: shipped, with two token surfaces
+left standing for a named reason.** Six commits, `a0b6d57` through `67900d4`
+(rebuilt from the twelve that were actually built and gated, which stay on the
+local branch `d21-exec-wave-full`; logs `scratchpad/lean_*.log`, and the
+progress doc carries the table plus the tree-by-tree mapping).
+`ForkHistory<M: Member>` owns one `History` and one typed member; every
+container in the crate is a `Member`; `Pair<A, B>` nests; the e-graph's nine
+members run on one `History` through `EGraphMembers` (store traces
+0.97–1.00×, `empty20k` 0.79–0.80×, saturation parity); the harnesses, the
+benches and all 22 in-crate test files drive groups of one;
+`tests/typed_group.rs` is the acceptance suite, including a randomized
+lockstep proptest over a nested `Pair` of three columns. The deletion took
+the seven composites' token API and token types, the token-only predicates,
+`sync_group`, `Solo`/`SyncPair` and the e-graph wrappers' token layer: about
+5,500 lines, verification **2726 verified, 0 errors**.
+**Open, and why:** `Vec`/`AppendOnlyVec` keep their token API (the columns a
+group of one wraps; deleting the `Vec` half needs `lemma_genealogy_framing`
+and the `restore_frame`/`reset_frame` cuts reworked, plus the canary, the
+policy matrix and the `vec.rs` unit tests migrated), and `SpMap` keeps
+`MapToken` because the anti-unification search layer (`egraph/src/au`) still
+checkpoints maps and columns through eight token structs of its own. Putting
+that layer on one group is the next step, and it unblocks the rest.
+
+**Outcome 2 — restore semantics B: done** (`0b1200e`, `486fcb0`, `f676208`;
+the fused `restore_and_pop` is the SMT-LIB `pop`). Outcome 2b (a true
+in-place B core) stays a milestone, not started.
+
+**Outcome 7 — the lean per-commit gate: done and used for all ten commits**
+(literal verify, the four suites, consumers under cargo-nextest, the source
+checks); the full battery ran once on the final source.
+
+**Outcomes 3, 4, 5, 6: open**, in that order, as recorded in the handoff's
+"Next actions" item 8. Outcome 3's `empty20k` provenance constant was
+removed by the e-graph commit as a side effect; the `aov/log` 0.92× gap and the
+dyn-store residuals are untouched.
