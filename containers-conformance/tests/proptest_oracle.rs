@@ -85,6 +85,7 @@
 use proptest::prelude::*;
 use semi_persistent_containers as prod;
 use semi_persistent_containers_verus as verus;
+use verus::group::ForkHistory;
 
 // ---------------------------------------------------------------------------
 // The independent oracle
@@ -426,7 +427,7 @@ macro_rules! vec_property {
     ($name:ident, $prod:ty, $verus:ty, $ix:ty) => {
         fn $name(ops: &[Op]) -> Result<(), TestCaseError> {
             let mut p: $prod = <$prod>::new();
-            let mut v: $verus = <$verus>::new();
+            let mut v: ForkHistory<$verus> = ForkHistory::new(<$verus>::new());
             let mut o: SnapStack<Vec<u32>> = SnapStack::new();
             let mut toks: Toks = Vec::new();
 
@@ -472,7 +473,7 @@ macro_rules! vec_property {
                         }
                         let (pp, vp) = policy(shrink);
                         let tp = p.mark(pp);
-                        let tv = v.try_mark(vp).expect("mark: depth bounded by this harness");
+                        let tv = v.mark(vp).expect("mark: depth bounded by this harness");
                         let to = o.mark();
                         toks.push((tp, tv, to));
                     }
@@ -497,16 +498,16 @@ macro_rules! vec_property {
                             step
                         );
                         prop_assert!(
-                            v.is_valid_token(&tv),
+                            v.is_valid(tv),
                             "step {}: verus rejects a token the oracle deems live",
                             step
                         );
 
                         p.restore(tp);
-                        v.try_restore(tv).expect("restore: own token");
+                        assert!(v.restore(tv), "restore: own token");
                         // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
-                        assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
-                        v.pop_scope();
+                        assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                        assert!(v.pop_scope(), "pop: an open scope");
                         o.restore(to);
                     }
                 }
@@ -552,7 +553,7 @@ macro_rules! vec_property {
                 // every token whose frame is still live.
                 for (j, (tp, tv, to)) in toks.iter().enumerate() {
                     let vp = p.is_valid_token(tp);
-                    let vv = v.is_valid_token(tv);
+                    let vv = v.is_valid(*tv);
                     prop_assert_eq!(
                         vp,
                         o.on_branch(*to),
@@ -659,7 +660,7 @@ proptest! {
         type P = prod::VecI<u32, u32, false>;
         type V = verus::vec::Vec<u32, u32, verus::inline_store::InlineStore<u32, u32>, false>;
         let mut p: P = P::new();
-        let mut v: V = V::new();
+        let mut v: ForkHistory<V> = ForkHistory::new(V::new());
         let mut plain: Vec<u32> = Vec::new();
 
         for (step, op) in ops.iter().enumerate() {
@@ -733,7 +734,7 @@ macro_rules! aov_property {
                 )
             ) {
                 let mut p: prod::AppendOnlyVec<u32, $I, true> = prod::AppendOnlyVec::new();
-                let mut v: verus::AppendOnlyVec<u32, $I, true> = verus::AppendOnlyVec::new();
+                let mut v: ForkHistory<verus::AppendOnlyVec<u32, $I, true>> = ForkHistory::new(verus::AppendOnlyVec::new());
                 let mut o: SnapStack<Vec<u32>> = SnapStack::new();
                 let mut toks: Vec<(prod::VecToken, verus::vec::VecToken, oracle::Tok)> = Vec::new();
 
@@ -750,7 +751,7 @@ macro_rules! aov_property {
                             if o.depth() >= 8 { continue; }
                             let (pp, vp) = policy(shrink);
                             let tp = p.mark(pp);
-                            let tv = v.try_mark(vp).expect("mark: depth bounded by this harness");
+                            let tv = v.mark(vp).expect("mark: depth bounded by this harness");
                             let to = o.mark();
                             toks.push((tp, tv, to));
                         }
@@ -759,12 +760,12 @@ macro_rules! aov_property {
                             let Some(pick) = o.pick_restorable(&all, which) else { continue };
                             let (tp, tv, to) = toks[pick];
                             prop_assert!(p.is_valid_token(&tp), "step {}: prod rejects live token", step);
-                            prop_assert!(v.is_valid_token(&tv), "step {}: verus rejects live token", step);
+                            prop_assert!(v.is_valid(tv), "step {}: verus rejects live token", step);
                             p.restore(tp);
-                            v.try_restore(tv).expect("restore: own token");
+                            assert!(v.restore(tv), "restore: own token");
                             // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
-                            assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
-                            v.pop_scope();
+                            assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                            assert!(v.pop_scope(), "pop: an open scope");
                             o.restore(to);
                         }
                     }
@@ -780,7 +781,7 @@ macro_rules! aov_property {
                     }
                     for (j, (tp, tv, to)) in toks.iter().enumerate() {
                         let vp = p.is_valid_token(tp);
-                        let vv = v.is_valid_token(tv);
+                        let vv = v.is_valid(*tv);
                         prop_assert_eq!(
                             vp, o.on_branch(*to),
                             "step {}: aov token {} prod validity vs oracle on-branch", step, j
@@ -858,10 +859,10 @@ macro_rules! map_property {
                 const KEYS: u32 = 24;
 
                 let mut p: prod::Map<u32, u32, $I, true> = prod::Map::new();
-                let mut v: verus::SpMap<u32, u32, $I, true> = verus::SpMap::new();
+                let mut v: ForkHistory<verus::SpMap<u32, u32, $I, true>> = ForkHistory::new(verus::SpMap::new());
                 // Same genealogy model as the vectors, over the map's log as the state.
                 let mut o: SnapStack<Vec<(u32, u32)>> = SnapStack::new();
-                let mut toks: Vec<(prod::MapToken, verus::map::MapToken, oracle::Tok)> = Vec::new();
+                let mut toks: Vec<(prod::MapToken, verus::history::GroupToken, oracle::Tok)> = Vec::new();
 
                 for (step, op) in ops.iter().enumerate() {
                     match *op {
@@ -896,7 +897,7 @@ macro_rules! map_property {
                             if o.depth() >= 8 { continue; }
                             let (pp, vp) = policy(shrink);
                             let tp = p.mark(pp);
-                            let tv = v.try_mark(vp).expect("mark: depth bounded by this harness");
+                            let tv = v.mark(vp).expect("mark: depth bounded by this harness");
                             let to = o.mark();
                             toks.push((tp, tv, to));
                         }
@@ -905,12 +906,12 @@ macro_rules! map_property {
                             let Some(pick) = o.pick_restorable(&all, which) else { continue };
                             let (tp, tv, to) = toks[pick];
                             prop_assert!(p.is_valid_token(&tp), "step {}: prod rejects live map token", step);
-                            prop_assert!(v.is_valid_token(&tv), "step {}: verus rejects live map token", step);
+                            prop_assert!(v.is_valid(tv), "step {}: verus rejects live map token", step);
                             p.restore(tp);
-                            v.try_restore(tv).expect("restore: own token");
+                            assert!(v.restore(tv), "restore: own token");
                             // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
-                            assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
-                            v.pop_scope();
+                            assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                            assert!(v.pop_scope(), "pop: an open scope");
                             o.restore(to);
                         }
                     }
@@ -945,7 +946,7 @@ macro_rules! map_property {
                     }
                     for (j, (tp, tv, to)) in toks.iter().enumerate() {
                         let vp = p.is_valid_token(tp);
-                        let vv = v.is_valid_token(tv);
+                        let vv = v.is_valid(*tv);
                         prop_assert_eq!(
                             vp, o.on_branch(*to),
                             "step {}: map token {} prod validity vs oracle on-branch", step, j
@@ -1026,15 +1027,14 @@ macro_rules! sparse_set_property {
             ) {
                 let mut p: prod::SparseSet<u32, $I, prod::ParallelStore<u32, $I>, true> =
                     prod::SparseSet::new();
-                let mut v: verus::SparseSet<u32, $I, verus::ParallelStore<u32, $I>, true> =
-                    verus::SparseSet::new();
+                let mut v: ForkHistory<verus::SparseSet<u32, $I, verus::ParallelStore<u32, $I>, true>> = ForkHistory::new(verus::SparseSet::new());
                 // Oracle: live id -> value, under the same genealogy model as the other
                 // containers. No dense array, no swap-remove, no pool order. BTreeMap
                 // (not HashMap) so `which` picks deterministically. Keyed at `$I` so the
                 // oracle never widens an id behind the implementations' backs -- if the two
                 // sides disagree about which id was issued, the key is what shows it.
                 let mut o: SnapStack<std::collections::BTreeMap<$I, u32>> = SnapStack::new();
-                let mut toks: Vec<(prod::SparseSetToken, verus::SparseSetToken, oracle::Tok)> = Vec::new();
+                let mut toks: Vec<(prod::SparseSetToken, verus::history::GroupToken, oracle::Tok)> = Vec::new();
 
                 for (step, op) in ops.iter().enumerate() {
                     match *op {
@@ -1073,7 +1073,7 @@ macro_rules! sparse_set_property {
                             if o.depth() >= 8 { continue; }
                             let (pp, vp) = policy(shrink);
                             let tp = p.mark(pp);
-                            let tv = v.try_mark(vp).expect("mark: depth bounded by this harness");
+                            let tv = v.mark(vp).expect("mark: depth bounded by this harness");
                             let to = o.mark();
                             toks.push((tp, tv, to));
                         }
@@ -1082,14 +1082,14 @@ macro_rules! sparse_set_property {
                             let Some(pick) = o.pick_restorable(&all, which) else { continue };
                             let (tp, tv, to) = toks[pick];
                             prop_assert!(
-                                v.is_valid_token(&tv),
+                                v.is_valid(tv),
                                 "step {}: verus rejects a live sparse-set token", step
                             );
                             p.restore(tp);
                             v.restore(tv);
                             // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
-                            assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
-                            v.pop_scope();
+                            assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                            assert!(v.pop_scope(), "pop: an open scope");
                             o.restore(to);
                         }
                     }

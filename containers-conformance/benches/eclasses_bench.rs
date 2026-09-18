@@ -17,6 +17,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use semi_persistent_containers as retained;
 use semi_persistent_containers_verus as verified;
 use std::hint::black_box;
+use verified::group::ForkHistory;
 
 retained::define_id31! { pub struct RetainedE / StoredRetainedE, "re"; }
 retained::define_id31! { pub struct RetainedK / StoredRetainedK, "rk"; }
@@ -36,14 +37,16 @@ type RetainedEC = retained::eclasses::EClasses<
     true,
     false,
 >;
-type VerifiedEC = verified::eclasses::EClasses<
-    VerifiedE,
-    VerifiedK,
-    VerifiedL,
-    VerifiedN,
-    verified::union_find::NoJust,
-    true,
-    false,
+type VerifiedEC = ForkHistory<
+    verified::eclasses::EClasses<
+        VerifiedE,
+        VerifiedK,
+        VerifiedL,
+        VerifiedN,
+        verified::union_find::NoJust,
+        true,
+        false,
+    >,
 >;
 
 const N: usize = 4096;
@@ -64,7 +67,15 @@ fn build_retained() -> (RetainedEC, Vec<RetainedE>) {
 
 /// Fresh verified aggregate with the same classes and uses.
 fn build_verified() -> (VerifiedEC, Vec<VerifiedE>) {
-    let mut ec = VerifiedEC::new();
+    let mut ec = ForkHistory::new(verified::eclasses::EClasses::<
+        VerifiedE,
+        VerifiedK,
+        VerifiedL,
+        VerifiedN,
+        verified::union_find::NoJust,
+        true,
+        false,
+    >::new());
     let mut ids = Vec::with_capacity(N);
     for _ in 0..N {
         let (id, key) = ec.try_add_singleton();
@@ -88,7 +99,8 @@ fn bench_merge_cascade(c: &mut Criterion) {
                     while i + stride < N {
                         if let Some(mi) = ec.merge(ids[i], ids[i + stride]) {
                             let sk = ec.repr_id(mi.survivor).unwrap();
-                            ec.splice_uses(ec.use_list_id(sk), mi.absorbed_uses);
+                            let uses = ec.use_list_id(sk);
+                            ec.splice_uses(uses, mi.absorbed_uses);
                         }
                         i += stride * 2;
                     }
@@ -110,7 +122,8 @@ fn bench_merge_cascade(c: &mut Criterion) {
                     while i + stride < N {
                         if let Some(mi) = ec.merge(ids[i], ids[i + stride]) {
                             let sk = ec.repr_id(mi.survivor).unwrap();
-                            ec.splice_uses(ec.use_list_id(sk), mi.absorbed_uses);
+                            let uses = ec.use_list_id(sk);
+                            ec.splice_uses(uses, mi.absorbed_uses);
                         }
                         i += stride * 2;
                     }
@@ -200,12 +213,14 @@ fn bench_mark_merge_restore(c: &mut Criterion) {
         b.iter_batched(
             build_verified,
             |(mut ec, ids)| {
-                let tok = ec.mark(verified::ShrinkPolicy::Never);
+                let tok = ec
+                    .mark(verified::ShrinkPolicy::Never)
+                    .expect("mark: bounded depth");
                 for i in 1..256 {
                     ec.merge(ids[0], ids[i]);
                 }
                 // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
-                ec.try_restore_and_pop(tok).expect("own token");
+                assert!(ec.restore_and_pop(tok), "own token");
                 black_box(ec.num_classes())
             },
             BatchSize::LargeInput,

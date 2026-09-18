@@ -14,11 +14,12 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use verus::group::ForkHistory;
 use verus::{
     MarkOptions, ReclaimPolicy, RolloverPolicy, ShrinkPolicy, StoreKind, TierLimit, TierPolicy,
 };
 
-type V = verus::VecD<u64, u32, true>;
+type V = ForkHistory<verus::VecD<u64, u32, true>>;
 type P = prod::VecP<u64, u32, true>;
 
 const N: usize = 8_192;
@@ -163,7 +164,9 @@ fn finite_all_tiers_policy() -> TierPolicy {
 }
 
 fn build_verus(kind: StoreKind, policy: TierPolicy) -> V {
-    let mut v = verus::VecD::<u64, u32, true>::new_kind_with_policy(kind, policy);
+    let mut v = ForkHistory::new(verus::VecD::<u64, u32, true>::new_kind_with_policy(
+        kind, policy,
+    ));
     for i in 0..N {
         v.try_push(i as u64).expect("fixture fits u32 index");
     }
@@ -200,7 +203,7 @@ fn write_prod(v: &mut P, writes: usize, distinct: usize, frame: usize) {
 }
 
 fn mark_verus(v: &mut V) -> verus::vec::VecToken {
-    v.try_mark(ShrinkPolicy::Never)
+    v.mark(ShrinkPolicy::Never)
         .expect("fixture depth is bounded")
 }
 
@@ -341,7 +344,7 @@ fn report_tier_diagnostics() {
     );
 
     let (mut promoted, token) = promotion_fixture();
-    promoted.try_restore(token).expect("own ancestor token");
+    assert!(promoted.restore(token), "own ancestor token");
     report_one("promotion_after_restore", &promoted);
 }
 
@@ -355,17 +358,15 @@ fn report_allocation_diagnostics() {
     report_allocation("hot_to_cold", window);
 
     let (mut all, root) = all_tiers_restore_fixture();
-    let window = allocation_window(|| all.try_restore(root).expect("own root token"));
+    let window = allocation_window(|| assert!(all.restore(root), "own root token"));
     report_allocation("restore_all", window);
 
     let (mut promoted, ancestor) = promotion_fixture();
     let window = allocation_window(|| {
-        promoted.try_restore(ancestor).expect("own ancestor token");
+        assert!(promoted.restore(ancestor), "own ancestor token");
         let inner = mark_verus(&mut promoted);
         write_verus(&mut promoted, WRITES, 64, 17);
-        promoted
-            .try_restore(inner)
-            .expect("new token after promotion");
+        assert!(promoted.restore(inner), "new token after promotion");
     });
     report_allocation("promotion", window);
 }
@@ -430,10 +431,13 @@ fn bench_mark(c: &mut Criterion) {
                 v
             },
             |v| {
-                black_box(
-                    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
-                        .expect("fixture remains within mark limits"),
-                )
+                v.member
+                    .try_push_frame_with(MarkOptions::new(
+                        ShrinkPolicy::Never,
+                        RolloverPolicy::Defer,
+                    ))
+                    .expect("fixture remains within mark limits");
+                black_box(v.mint_pushed().expect("the member is one frame ahead"))
             },
             BatchSize::LargeInput,
         )
@@ -489,7 +493,7 @@ fn bench_restore(c: &mut Criterion) {
             trail_restore_fixture,
             |(v, token)| {
                 // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
-                v.try_restore_and_pop(*token).expect("own token");
+                assert!(v.restore_and_pop(*token), "own token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -499,7 +503,7 @@ fn bench_restore(c: &mut Criterion) {
         b.iter_batched_ref(
             hot_restore_fixture,
             |(v, token)| {
-                v.try_restore_and_pop(*token).expect("own token");
+                assert!(v.restore_and_pop(*token), "own token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -509,7 +513,7 @@ fn bench_restore(c: &mut Criterion) {
         b.iter_batched_ref(
             cold_restore_fixture,
             |(v, token)| {
-                v.try_restore_and_pop(*token).expect("own token");
+                assert!(v.restore_and_pop(*token), "own token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -519,7 +523,7 @@ fn bench_restore(c: &mut Criterion) {
         b.iter_batched_ref(
             all_tiers_restore_fixture,
             |(v, token)| {
-                v.try_restore_and_pop(*token).expect("own root token");
+                assert!(v.restore_and_pop(*token), "own root token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -531,7 +535,7 @@ fn bench_restore(c: &mut Criterion) {
         b.iter_batched_ref(
             hot_restore_fixture,
             |(v, token)| {
-                v.try_restore(*token).expect("own token");
+                assert!(v.restore(*token), "own token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -541,7 +545,7 @@ fn bench_restore(c: &mut Criterion) {
         b.iter_batched_ref(
             cold_restore_fixture,
             |(v, token)| {
-                v.try_restore(*token).expect("own token");
+                assert!(v.restore(*token), "own token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -591,12 +595,10 @@ fn bench_promotion(c: &mut Criterion) {
         b.iter_batched_ref(
             promotion_fixture,
             |(v, ancestor)| {
-                v.try_restore_and_pop(*ancestor)
-                    .expect("own ancestor token");
+                assert!(v.restore_and_pop(*ancestor), "own ancestor token");
                 let inner = mark_verus(v);
                 write_verus(v, WRITES, 64, 17);
-                v.try_restore_and_pop(inner)
-                    .expect("new token after promotion");
+                assert!(v.restore_and_pop(inner), "new token after promotion");
                 black_box(v.diff_log_len())
             },
             BatchSize::LargeInput,
@@ -632,7 +634,7 @@ fn run_smt_backtrack() -> usize {
     for frame in 0..64 {
         let token = mark_verus(&mut v);
         write_verus(&mut v, TRACE_WRITES, 8, frame);
-        v.try_restore_and_pop(token).expect("own token");
+        assert!(v.restore_and_pop(token), "own token");
     }
     v.len() as usize
 }
@@ -654,7 +656,7 @@ fn run_nested(kind: StoreKind, policy: TierPolicy) -> usize {
         write_verus(&mut v, TRACE_WRITES, 16, frame);
         mark_verus(&mut v);
     }
-    v.try_restore_and_pop(root).expect("own root token");
+    assert!(v.restore_and_pop(root), "own root token");
     v.len() as usize
 }
 
@@ -708,9 +710,9 @@ const V1_DEEP_FRAMES: usize = 64;
 const V1_LARGE_FRAMES: usize = 256;
 const V1_TRACE_WRITES: usize = 64;
 
-type VI = verus::VecI<u64, u32, true>;
-type VP = verus::VecP<u64, u32, true>;
-type VT = verus::VecT<u64, u32, true>;
+type VI = ForkHistory<verus::VecI<u64, u32, true>>;
+type VP = ForkHistory<verus::VecP<u64, u32, true>>;
+type VT = ForkHistory<verus::VecT<u64, u32, true>>;
 type PI = prod::VecI<u64, u32, true>;
 
 fn unbounded_policy() -> TierPolicy {
@@ -767,15 +769,13 @@ macro_rules! verified_matrix_column {
             #[inline]
             fn mark(&mut self) -> Self::Token {
                 self.0
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("matrix fixture depth is bounded")
             }
 
             #[inline]
             fn restore(&mut self, token: Self::Token) {
-                self.0
-                    .try_restore_and_pop(token)
-                    .expect("own live matrix token");
+                assert!(self.0.restore_and_pop(token), "own live matrix token");
             }
 
             #[inline]
@@ -788,8 +788,10 @@ macro_rules! verified_matrix_column {
             #[inline]
             fn mark_with(&mut self, rollover: RolloverPolicy) -> Self::Token {
                 self.0
-                    .try_mark_with(MarkOptions::new(ShrinkPolicy::Never, rollover))
-                    .expect("matrix fixture depth is bounded")
+                    .member
+                    .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, rollover))
+                    .expect("matrix fixture depth is bounded");
+                self.0.mint_pushed().expect("the member is one frame ahead")
             }
 
             #[inline]
@@ -815,21 +817,41 @@ macro_rules! verified_matrix_column {
     };
 }
 
-verified_matrix_column!(DynInline, V, |policy| V::new_kind_with_policy(
-    StoreKind::Inline,
-    policy
+verified_matrix_column!(DynInline, V, |policy| ForkHistory::new(
+    verus::VecD::<u64, u32, true>::new_kind_with_policy(StoreKind::Inline, policy)
 ));
-verified_matrix_column!(DynParallel, V, |policy| V::new_kind_with_policy(
-    StoreKind::Parallel,
-    policy
+verified_matrix_column!(DynParallel, V, |policy| ForkHistory::new(
+    verus::VecD::<u64, u32, true>::new_kind_with_policy(StoreKind::Parallel, policy)
 ));
-verified_matrix_column!(DynTrail, V, |policy| V::new_kind_with_policy(
+verified_matrix_column!(DynTrail, V, |policy| ForkHistory::new(verus::VecD::<
+    u64,
+    u32,
+    true,
+>::new_kind_with_policy(
     StoreKind::Trail,
     policy
-));
-verified_matrix_column!(StaticVecI, VI, VI::new_with_policy);
-verified_matrix_column!(StaticVecP, VP, VP::new_with_policy);
-verified_matrix_column!(StaticVecT, VT, VT::new_with_policy);
+)));
+verified_matrix_column!(StaticVecI, VI, |policy| ForkHistory::new(verus::VecI::<
+    u64,
+    u32,
+    true,
+>::new_with_policy(
+    policy
+)));
+verified_matrix_column!(StaticVecP, VP, |policy| ForkHistory::new(verus::VecP::<
+    u64,
+    u32,
+    true,
+>::new_with_policy(
+    policy
+)));
+verified_matrix_column!(StaticVecT, VT, |policy| ForkHistory::new(verus::VecT::<
+    u64,
+    u32,
+    true,
+>::new_with_policy(
+    policy
+)));
 
 macro_rules! production_matrix_column {
     ($wrapper:ident, $inner:ty) => {
@@ -1026,8 +1048,12 @@ fn trail_rollover_fixture() -> V {
         cold_reclaim: ReclaimPolicy::RetainCapacity,
     };
     let mut v = build_verus(StoreKind::Trail, policy);
-    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
-        .expect("fixture depth is bounded");
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+            .expect("fixture depth is bounded");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     write_verus(&mut v, WRITES, 32, 0);
     v
 }
@@ -1039,8 +1065,12 @@ fn hot_rollover_fixture() -> V {
         cold_reclaim: ReclaimPolicy::RetainCapacity,
     };
     let mut v = build_verus(StoreKind::Parallel, policy);
-    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
-        .expect("fixture depth is bounded");
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+            .expect("fixture depth is bounded");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     write_verus(&mut v, WRITES, WRITES, 0);
     v
 }
@@ -1052,8 +1082,12 @@ fn hot_singleton_rollover_fixture() -> V {
         cold_reclaim: ReclaimPolicy::RetainCapacity,
     };
     let mut v = build_verus(StoreKind::Parallel, policy);
-    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
-        .expect("fixture depth is bounded");
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+            .expect("fixture depth is bounded");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     for write in 0..WRITES {
         let index = (write * 2) as u32;
         v.set_index(index, 0x51A6_1E70 ^ write as u64);
@@ -1068,8 +1102,12 @@ fn both_rollover_fixture() -> V {
         cold_reclaim: ReclaimPolicy::RetainCapacity,
     };
     let mut v = build_verus(StoreKind::Trail, policy);
-    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
-        .expect("fixture depth is bounded");
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+            .expect("fixture depth is bounded");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     write_verus(&mut v, WRITES, 32, 0);
     v
 }
@@ -1082,10 +1120,12 @@ fn bench_rollover_action(
     b.iter_batched_ref(
         fixture,
         |v| {
-            black_box(
-                v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, rollover))
-                    .expect("fixture depth is bounded"),
-            )
+            black_box({
+                v.member
+                    .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, rollover))
+                    .expect("fixture depth is bounded");
+                v.mint_pushed().expect("the member is one frame ahead")
+            })
         },
         BatchSize::LargeInput,
     );
@@ -1102,8 +1142,12 @@ fn small_frames_fixture() -> V {
         cold_reclaim: ReclaimPolicy::RetainCapacity,
     };
     let mut v = build_verus(StoreKind::Trail, policy);
-    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
-        .expect("fixture depth is bounded");
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+            .expect("fixture depth is bounded");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     v
 }
 
@@ -1113,13 +1157,15 @@ fn bench_rollover_small_frames(b: &mut criterion::Bencher<'_>) {
         |v| {
             for k in 0..64usize {
                 write_verus(v, 8, 8, k);
-                black_box(
-                    v.try_mark_with(MarkOptions::new(
-                        ShrinkPolicy::Never,
-                        RolloverPolicy::ApplyConfigured,
-                    ))
-                    .expect("fixture depth is bounded"),
-                );
+                black_box({
+                    v.member
+                        .try_push_frame_with(MarkOptions::new(
+                            ShrinkPolicy::Never,
+                            RolloverPolicy::ApplyConfigured,
+                        ))
+                        .expect("fixture depth is bounded");
+                    v.mint_pushed().expect("the member is one frame ahead")
+                });
             }
         },
         BatchSize::LargeInput,
@@ -1129,7 +1175,7 @@ fn bench_rollover_small_frames(b: &mut criterion::Bencher<'_>) {
 fn bench_rollover_compatible(b: &mut criterion::Bencher<'_>, fixture: fn() -> V) {
     b.iter_batched_ref(
         fixture,
-        |v| black_box(v.try_mark(ShrinkPolicy::Never).expect("fixture is bounded")),
+        |v| black_box(v.mark(ShrinkPolicy::Never).expect("fixture is bounded")),
         BatchSize::LargeInput,
     );
 }
@@ -1382,8 +1428,12 @@ fn report_rollover_window(label: &str, mut v: V, rollover: RolloverPolicy) {
     let before_tracking = v.tracking_bytes();
     let before_total = v.total_bytes();
     let window = allocation_window(|| {
-        v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, rollover))
-            .expect("diagnostic fixture depth is bounded");
+        {
+            v.member
+                .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, rollover))
+                .expect("diagnostic fixture depth is bounded");
+            v.mint_pushed().expect("the member is one frame ahead")
+        };
     });
     let after_stats = v.tier_stats();
     let after_logical = logical_tier_bytes(after_stats);

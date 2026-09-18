@@ -61,7 +61,7 @@ fn group_of_one_marks_restores_and_pops_in_lockstep() {
     assert_eq!(vals(&g.member), vec![9, 1, 2, 3]);
 
     // The pop drops that frame and kills its token; the ancestor survives.
-    assert!(g.pop());
+    assert!(g.pop_scope());
     assert_eq!(g.depth(), 1);
     assert!(!g.is_valid(t1));
     assert!(g.is_valid(t0));
@@ -75,7 +75,7 @@ fn group_of_one_marks_restores_and_pops_in_lockstep() {
     assert!(!g.is_valid(t0));
     assert!(!g.restore(t0));
     assert!(!g.restore_and_pop(t0));
-    assert!(!g.pop(), "nothing to pop");
+    assert!(!g.pop_scope(), "nothing to pop");
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn a_frame_pushed_behind_the_groups_back_is_refused_until_repaired() {
     assert!(g.mark(ShrinkPolicy::Never).is_none());
     assert!(!g.restore(t0));
     assert!(!g.restore_and_pop(t0));
-    assert!(!g.pop());
+    assert!(!g.pop_scope());
     assert_eq!(vals(&g.member), vec![5, 1], "a refusal changes nothing");
     // Repair the drift and the group answers again.
     g.member.pop_frame();
@@ -237,7 +237,7 @@ fn a_list_arena_is_a_member() {
     assert_eq!(g.member.len(l).as_usize(), 2);
     assert_eq!(g.depth(), 1);
 
-    assert!(g.pop());
+    assert!(g.pop_scope());
     assert_eq!(g.member.len(l).as_usize(), 2);
     assert_eq!(g.depth(), 0);
     assert!(!g.is_valid(t0));

@@ -8,6 +8,7 @@
 //! `HashMap<id, value>` respectively), including the mark/restore rollback that
 //! is the crate's reason for existing.
 
+use semi_persistent_containers_verus::group::ForkHistory;
 use std::collections::HashMap;
 
 use semi_persistent_containers_verus::dense_id::DenseId31;
@@ -86,7 +87,7 @@ fn map_ops_match_oracle() {
 #[test]
 fn map_mark_restore() {
     for seed in 0..10u64 {
-        let mut m = MapT::new();
+        let mut m = ForkHistory::new(MapT::new());
         let mut oracle: HashMap<u32, u64> = HashMap::new();
         let mut rng = Lcg::new(seed ^ 0x9F9F);
         // (token, oracle snapshot), LIFO.
@@ -96,13 +97,13 @@ fn map_mark_restore() {
             match rng.below(8) {
                 0 => {
                     let token = m
-                        .try_mark(ShrinkPolicy::Never)
+                        .mark(ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness");
                     frames.push((token, oracle.clone()));
                 }
                 1 if !frames.is_empty() => {
                     let (tok, snap) = frames.pop().unwrap();
-                    m.try_restore(tok).expect("restore: own token");
+                    assert!(m.restore(tok), "restore: own token");
                     oracle = snap;
                 }
                 _ => {
@@ -217,7 +218,7 @@ fn sparse_set_ops_match_oracle() {
 #[test]
 fn sparse_set_mark_restore() {
     for seed in 0..10u64 {
-        let mut s: SetT = empty_set();
+        let mut s: ForkHistory<SetT> = ForkHistory::new(empty_set());
         let mut live: HashMap<u32, u32> = HashMap::new();
         let mut ids: Vec<u32> = Vec::new();
         let mut rng = Lcg::new(seed ^ 0x1234);
@@ -227,7 +228,7 @@ fn sparse_set_mark_restore() {
             match rng.below(8) {
                 0 => {
                     let token = s
-                        .try_mark(ShrinkPolicy::Never)
+                        .mark(ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness");
                     frames.push((token, live.clone(), ids.clone()));
                 }

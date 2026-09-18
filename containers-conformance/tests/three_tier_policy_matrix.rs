@@ -14,6 +14,7 @@ use semi_persistent_containers as prod;
 use semi_persistent_containers_verus as verus;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use verus::error::ContainerError;
+use verus::group::ForkHistory;
 use verus::{
     AdaptiveInput, AdaptiveReport, MarkOptions, Ratio, ReclaimPolicy, RolloverPolicy, ShrinkPolicy,
     StoreKind, TierLimit, TierPolicy, VecD, VecI, VecP, VecT,
@@ -288,27 +289,31 @@ impl ProductionVec {
 }
 
 enum VerifiedVec {
-    Inline(VecI<u32, u32, true>),
-    Parallel(VecP<u32, u32, true>),
-    Trail(VecT<u32, u32, true>),
-    Dynamic(VecD<u32, u32, true>),
+    Inline(ForkHistory<VecI<u32, u32, true>>),
+    Parallel(ForkHistory<VecP<u32, u32, true>>),
+    Trail(ForkHistory<VecT<u32, u32, true>>),
+    Dynamic(ForkHistory<VecD<u32, u32, true>>),
 }
 
 impl VerifiedVec {
     fn new(backend: Backend, policy: TierPolicy) -> Self {
         match backend {
-            Backend::StaticInline => Self::Inline(VecI::new_with_policy(policy)),
-            Backend::StaticParallel => Self::Parallel(VecP::new_with_policy(policy)),
-            Backend::StaticTrail => Self::Trail(VecT::new_with_policy(policy)),
-            Backend::DynamicInline => {
-                Self::Dynamic(VecD::new_kind_with_policy(StoreKind::Inline, policy))
+            Backend::StaticInline => Self::Inline(ForkHistory::new(VecI::new_with_policy(policy))),
+            Backend::StaticParallel => {
+                Self::Parallel(ForkHistory::new(VecP::new_with_policy(policy)))
             }
-            Backend::DynamicParallel => {
-                Self::Dynamic(VecD::new_kind_with_policy(StoreKind::Parallel, policy))
-            }
-            Backend::DynamicTrail => {
-                Self::Dynamic(VecD::new_kind_with_policy(StoreKind::Trail, policy))
-            }
+            Backend::StaticTrail => Self::Trail(ForkHistory::new(VecT::new_with_policy(policy))),
+            Backend::DynamicInline => Self::Dynamic(ForkHistory::new(VecD::new_kind_with_policy(
+                StoreKind::Inline,
+                policy,
+            ))),
+            Backend::DynamicParallel => Self::Dynamic(ForkHistory::new(
+                VecD::new_kind_with_policy(StoreKind::Parallel, policy),
+            )),
+            Backend::DynamicTrail => Self::Dynamic(ForkHistory::new(VecD::new_kind_with_policy(
+                StoreKind::Trail,
+                policy,
+            ))),
         }
     }
 
@@ -376,19 +381,24 @@ impl VerifiedVec {
 
     fn mark(&mut self) -> verus::vec::VecToken {
         match self {
-            Self::Inline(vec) => vec.try_mark(ShrinkPolicy::Never).expect("depth is bounded"),
-            Self::Parallel(vec) => vec.try_mark(ShrinkPolicy::Never).expect("depth is bounded"),
-            Self::Trail(vec) => vec.try_mark(ShrinkPolicy::Never).expect("depth is bounded"),
-            Self::Dynamic(vec) => vec.try_mark(ShrinkPolicy::Never).expect("depth is bounded"),
+            Self::Inline(vec) => vec.mark(ShrinkPolicy::Never).expect("depth is bounded"),
+            Self::Parallel(vec) => vec.mark(ShrinkPolicy::Never).expect("depth is bounded"),
+            Self::Trail(vec) => vec.mark(ShrinkPolicy::Never).expect("depth is bounded"),
+            Self::Dynamic(vec) => vec.mark(ShrinkPolicy::Never).expect("depth is bounded"),
         }
     }
 
     fn try_restore(&mut self, token: verus::vec::VecToken) -> Result<(), ContainerError> {
-        match self {
-            Self::Inline(vec) => vec.try_restore(token),
-            Self::Parallel(vec) => vec.try_restore(token),
-            Self::Trail(vec) => vec.try_restore(token),
-            Self::Dynamic(vec) => vec.try_restore(token),
+        let ok = match self {
+            Self::Inline(vec) => vec.restore(token),
+            Self::Parallel(vec) => vec.restore(token),
+            Self::Trail(vec) => vec.restore(token),
+            Self::Dynamic(vec) => vec.restore(token),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(ContainerError::InvalidToken)
         }
     }
 
@@ -396,20 +406,25 @@ impl VerifiedVec {
     /// the checkpoint open (semantics B, design doc 08 §1) while production
     /// pops it, so the paired discipline pops after every verified restore.
     fn pop_scope(&mut self) {
-        match self {
+        let ok = match self {
             Self::Inline(vec) => vec.pop_scope(),
             Self::Parallel(vec) => vec.pop_scope(),
             Self::Trail(vec) => vec.pop_scope(),
             Self::Dynamic(vec) => vec.pop_scope(),
+        };
+        assert!(ok, "pop: an open scope");
+        #[allow(clippy::match_single_binding)]
+        match () {
+            () => {}
         }
     }
 
     fn is_valid_token(&self, token: &verus::vec::VecToken) -> bool {
         match self {
-            Self::Inline(vec) => vec.is_valid_token(token),
-            Self::Parallel(vec) => vec.is_valid_token(token),
-            Self::Trail(vec) => vec.is_valid_token(token),
-            Self::Dynamic(vec) => vec.is_valid_token(token),
+            Self::Inline(vec) => vec.is_valid(*token),
+            Self::Parallel(vec) => vec.is_valid(*token),
+            Self::Trail(vec) => vec.is_valid(*token),
+            Self::Dynamic(vec) => vec.is_valid(*token),
         }
     }
 
@@ -441,20 +456,33 @@ impl VerifiedVec {
     }
 
     fn mark_adaptive(&mut self, input: AdaptiveInput) -> (verus::vec::VecToken, AdaptiveReport) {
-        match self {
+        // The member pushes its frame by the adaptive variant; the group mints.
+        let report = match self {
             Self::Inline(vec) => vec
-                .try_mark_adaptive(ShrinkPolicy::Never, input)
+                .member
+                .try_push_frame_adaptive(ShrinkPolicy::Never, input)
                 .expect("depth is bounded"),
             Self::Parallel(vec) => vec
-                .try_mark_adaptive(ShrinkPolicy::Never, input)
+                .member
+                .try_push_frame_adaptive(ShrinkPolicy::Never, input)
                 .expect("depth is bounded"),
             Self::Trail(vec) => vec
-                .try_mark_adaptive(ShrinkPolicy::Never, input)
+                .member
+                .try_push_frame_adaptive(ShrinkPolicy::Never, input)
                 .expect("depth is bounded"),
             Self::Dynamic(vec) => vec
-                .try_mark_adaptive(ShrinkPolicy::Never, input)
+                .member
+                .try_push_frame_adaptive(ShrinkPolicy::Never, input)
                 .expect("depth is bounded"),
+        };
+        let token = match self {
+            Self::Inline(vec) => vec.mint_pushed(),
+            Self::Parallel(vec) => vec.mint_pushed(),
+            Self::Trail(vec) => vec.mint_pushed(),
+            Self::Dynamic(vec) => vec.mint_pushed(),
         }
+        .expect("the member is exactly one frame ahead");
+        (token, report)
     }
 
     fn flush_trail(&mut self) {
@@ -998,28 +1026,29 @@ fn restore_targets_deliberately_span_every_populated_tier() {
 #[test]
 fn repeated_restore_failure_matches_each_documented_api() {
     let mut production: prod::VecP<u32, u32, true> = prod::VecP::new();
-    let mut verified: VecP<u32, u32, true> = VecP::new_with_policy(TierPolicy::smt());
+    let mut verified: ForkHistory<VecP<u32, u32, true>> =
+        ForkHistory::new(VecP::new_with_policy(TierPolicy::smt()));
     production.push(1);
     verified.try_push(1).unwrap();
     let production_token = production.mark(prod::ShrinkPolicy::Never);
-    let verified_token = verified.try_mark(ShrinkPolicy::Never).unwrap();
+    let verified_token = verified.mark(ShrinkPolicy::Never).unwrap();
 
     production.restore(production_token);
-    verified.try_restore(verified_token).unwrap();
+    assert!(verified.restore(verified_token));
     // Semantics B: the verified checkpoint stays open and valid; the paired
     // discipline pops it to match production's pop.
-    assert!(verified.is_valid_token(&verified_token));
-    assert_eq!(verified.try_restore(verified_token), Ok(()));
-    verified.pop_scope();
+    assert!(verified.is_valid(verified_token));
+    assert!(verified.restore(verified_token));
+    assert!(verified.pop_scope());
 
     assert!(
         production.is_valid_token(&production_token),
         "production validity is genealogy-only"
     );
-    assert!(!verified.is_valid_token(&verified_token));
-    assert_eq!(
-        verified.try_restore(verified_token),
-        Err(ContainerError::InvalidToken)
+    assert!(!verified.is_valid(verified_token));
+    assert!(
+        !verified.restore(verified_token),
+        "the group refuses the consumed token without mutating"
     );
     assert!(
         catch_unwind(AssertUnwindSafe(|| production.restore(production_token))).is_err(),
@@ -1044,37 +1073,43 @@ fn static_aliases_execute_native_capture_rollover_and_restore_paths() {
         },
     );
 
-    let mut parallel: VecP<u32, u32> = VecP::new();
+    // Explicit-rollover marks are the member's own structural push followed
+    // by the group's mint (the group cannot spell the rollover choice).
+    let mut parallel: ForkHistory<VecP<u32, u32>> = ForkHistory::new(VecP::new());
     parallel.try_push(1).unwrap();
-    let parallel_root = parallel.try_mark(ShrinkPolicy::Never).unwrap();
+    let parallel_root = parallel.mark(ShrinkPolicy::Never).unwrap();
     parallel.set(0u32, 2);
     parallel.set(0u32, 3);
-    parallel.try_mark_with(force_hot).unwrap();
+    parallel.member.try_push_frame_with(force_hot).unwrap();
+    parallel.mint_pushed().unwrap();
     assert_eq!(parallel.tier_stats().cold_frames, 1);
     assert_eq!(parallel.tier_stats().cold_values, 1);
-    parallel.try_restore(parallel_root).unwrap();
+    assert!(parallel.restore(parallel_root));
     assert_eq!(parallel.get(0u32), 1);
 
-    let mut inline: VecI<u32, u32> = VecI::new();
+    let mut inline: ForkHistory<VecI<u32, u32>> = ForkHistory::new(VecI::new());
     inline.try_push(4).unwrap();
-    let inline_root = inline.try_mark(ShrinkPolicy::Never).unwrap();
+    let inline_root = inline.mark(ShrinkPolicy::Never).unwrap();
     inline.set(0u32, 5);
     inline.set(0u32, 6);
     inline
-        .try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+        .member
+        .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
         .unwrap();
+    inline.mint_pushed().unwrap();
     assert_eq!(inline.tier_stats().hot_entries, 1);
-    inline.try_restore(inline_root).unwrap();
+    assert!(inline.restore(inline_root));
     assert_eq!(inline.get(0u32), 4);
 
-    let mut trail: VecT<u32, u32> = VecT::new();
+    let mut trail: ForkHistory<VecT<u32, u32>> = ForkHistory::new(VecT::new());
     trail.try_push(7).unwrap();
-    let trail_root = trail.try_mark(ShrinkPolicy::Never).unwrap();
+    let trail_root = trail.mark(ShrinkPolicy::Never).unwrap();
     trail.set(0u32, 8);
     trail.set(0u32, 9);
-    trail.try_mark_with(force_both).unwrap();
+    trail.member.try_push_frame_with(force_both).unwrap();
+    trail.mint_pushed().unwrap();
     assert_eq!(trail.tier_stats().cold_frames, 1);
     assert_eq!(trail.tier_stats().cold_values, 1);
-    trail.try_restore(trail_root).unwrap();
+    assert!(trail.restore(trail_root));
     assert_eq!(trail.get(0u32), 7);
 }

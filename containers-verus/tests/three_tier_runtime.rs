@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Focused execution-first tests for the policy-driven three-tier Vec runtime.
 
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::{
     CompressionMode, DiffStore, MarkOptions, ParallelStore, ReclaimPolicy, RolloverPolicy,
     ShrinkPolicy, StoreKind, TierLimit, TierPolicy, Vec as SpVec, VecD, VecI, VecP, VecT,
@@ -26,23 +27,25 @@ where
 
 #[test]
 fn unbounded_protocols_preserve_duplicate_semantics_and_arbitrary_frames() {
-    let mut trail = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
-    let mut unique =
-        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    let mut trail = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
+    let mut unique = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::fully_buffered_unique(),
+    ));
     for i in 0..4 {
         trail.try_push(i).unwrap();
         unique.try_push(i).unwrap();
     }
-    let trail_token = trail.try_mark(ShrinkPolicy::Never).unwrap();
-    let unique_token = unique.try_mark(ShrinkPolicy::Never).unwrap();
+    let trail_token = trail.mark(ShrinkPolicy::Never).unwrap();
+    let unique_token = unique.mark(ShrinkPolicy::Never).unwrap();
     for frame in 0..12u32 {
         for write in 0..10u32 {
             trail.set(1u32, frame * 100 + write);
             unique.set(1u32, frame * 100 + write);
         }
         if frame != 11 {
-            trail.try_mark(ShrinkPolicy::Never).unwrap();
-            unique.try_mark(ShrinkPolicy::Never).unwrap();
+            trail.mark(ShrinkPolicy::Never).unwrap();
+            unique.mark(ShrinkPolicy::Never).unwrap();
         }
     }
 
@@ -55,21 +58,21 @@ fn unbounded_protocols_preserve_duplicate_semantics_and_arbitrary_frames() {
     assert_eq!(us.trail_frames + us.cold_frames, 0);
     assert_eq!(us.hot_entries, 12);
 
-    trail.try_restore(trail_token).unwrap();
-    unique.try_restore(unique_token).unwrap();
+    assert!(trail.restore(trail_token), "restore: own token");
+    assert!(unique.restore(unique_token), "restore: own token");
     assert_eq!(values(&trail), vec![0, 1, 2, 3]);
     assert_eq!(values(&unique), vec![0, 1, 2, 3]);
 }
 
 #[test]
 fn zero_and_finite_trail_budgets_migrate_only_closed_oldest_prefixes() {
-    let mut zero = V::new_kind_with_policy(
+    let mut zero = ForkHistory::new(V::new_kind_with_policy(
         StoreKind::Trail,
         policy(TierLimit::Frames(0), TierLimit::Frames(0)),
-    );
+    ));
     zero.try_push(0).unwrap();
     for n in 0..5u32 {
-        zero.try_mark(ShrinkPolicy::Never).unwrap();
+        zero.mark(ShrinkPolicy::Never).unwrap();
         zero.set(0u32, n + 1);
     }
     let zs = zero.tier_stats();
@@ -80,13 +83,13 @@ fn zero_and_finite_trail_budgets_migrate_only_closed_oldest_prefixes() {
     assert_eq!(zs.hot_frames, 0);
     assert_eq!(zs.cold_frames, 4);
 
-    let mut entries = V::new_kind_with_policy(
+    let mut entries = ForkHistory::new(V::new_kind_with_policy(
         StoreKind::Trail,
         policy(TierLimit::Entries(2), TierLimit::Unbounded),
-    );
+    ));
     entries.try_push(0).unwrap();
     for n in 0..4u32 {
-        entries.try_mark(ShrinkPolicy::Never).unwrap();
+        entries.mark(ShrinkPolicy::Never).unwrap();
         entries.set(0u32, n + 1);
     }
     let es = entries.tier_stats();
@@ -103,68 +106,71 @@ fn zero_and_finite_trail_budgets_migrate_only_closed_oldest_prefixes() {
 
 #[test]
 fn restore_targets_trail_hot_and_cold_with_nonmonotone_lengths() {
-    let mut v = V::new_kind_with_policy(
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
         StoreKind::Trail,
         policy(TierLimit::Frames(1), TierLimit::Frames(1)),
-    );
+    ));
     for i in 0..6u32 {
         v.try_push(i).unwrap();
     }
-    let t0 = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let t0 = v.mark(ShrinkPolicy::Never).unwrap();
     v.set(0u32, 10);
-    let t1 = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let t1 = v.mark(ShrinkPolicy::Never).unwrap();
     v.pop();
     v.pop();
     v.set(0u32, 20);
-    let t2 = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let t2 = v.mark(ShrinkPolicy::Never).unwrap();
     v.try_push(60).unwrap();
     v.set(1u32, 30);
-    let t3 = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let t3 = v.mark(ShrinkPolicy::Never).unwrap();
     v.set(2u32, 40);
 
     let s = v.tier_stats();
     assert_eq!((s.cold_frames, s.hot_frames, s.trail_frames), (1, 1, 2));
 
-    v.try_restore(t3).unwrap();
+    assert!(v.restore(t3), "restore: own token");
 
-    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+    assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![20, 30, 2, 3, 60]);
-    v.try_restore(t2).unwrap();
-    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+    assert!(v.restore(t2), "restore: own token");
+    assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![20, 1, 2, 3]);
     assert_eq!(
         v.tier_stats().trail_frames,
         1,
         "hot survivor promoted to trail ingress"
     );
-    v.try_restore(t1).unwrap();
-    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+    assert!(v.restore(t1), "restore: own token");
+    assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![10, 1, 2, 3, 4, 5]);
     assert_eq!(
         v.tier_stats().trail_frames,
         1,
         "cold survivor promoted to trail ingress"
     );
-    v.try_restore(t0).unwrap();
-    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+    assert!(v.restore(t0), "restore: own token");
+    assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(v.depth(), 0);
 }
 
 #[test]
 fn first_capture_zero_hot_budget_restores_direct_cold_runs() {
-    let mut v = V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::restore_optimized());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::restore_optimized(),
+    ));
     for i in 0..8u32 {
         v.try_push(i).unwrap();
     }
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     for frame in 0..4u32 {
         for i in 1..6u32 {
             v.set(i, frame * 100 + i);
             v.set(i, frame * 1000 + i); // duplicate suppressed online
         }
         if frame != 3 {
-            v.try_mark(ShrinkPolicy::Never).unwrap();
+            v.mark(ShrinkPolicy::Never).unwrap();
         }
     }
     let s = v.tier_stats();
@@ -175,23 +181,26 @@ fn first_capture_zero_hot_budget_restores_direct_cold_runs() {
         s.cold_runs, 3,
         "each clustered frame becomes one direct run"
     );
-    v.try_restore(root).unwrap();
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), (0..8).collect::<Vec<_>>());
 }
 
 #[test]
 fn adaptive_policy_dedupes_trail_but_requires_explicit_cold_conversion() {
-    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::adaptive());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Trail,
+        TierPolicy::adaptive(),
+    ));
     for i in 0..8u32 {
         v.try_push(i).unwrap();
     }
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
     for round in 0..4u32 {
         for i in 2..6u32 {
             v.set(i, 100 * round + i);
         }
     }
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
     let s = v.tier_stats();
     assert_eq!(s.trail_frames, 1);
     assert_eq!(s.hot_frames, 1, "duplicate-dense trail dedupes to hot");
@@ -207,22 +216,22 @@ fn adaptive_policy_dedupes_trail_but_requires_explicit_cold_conversion() {
 
 #[test]
 fn promote_write_remigrate_and_restore_older_history() {
-    let mut v = V::new_kind_with_policy(
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
         StoreKind::Trail,
         policy(TierLimit::Frames(0), TierLimit::Frames(0)),
-    );
+    ));
     for i in 0..5u32 {
         v.try_push(i).unwrap();
     }
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     v.set(0u32, 10);
-    let into_cold = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let into_cold = v.mark(ShrinkPolicy::Never).unwrap();
     v.set(1u32, 20);
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
     v.set(2u32, 30);
     assert!(v.tier_stats().cold_frames >= 2);
 
-    v.try_restore(into_cold).unwrap();
+    assert!(v.restore(into_cold), "restore: own token");
     assert_eq!(values(&v), vec![10, 1, 2, 3, 4]);
     assert_eq!(
         v.tier_stats().trail_frames,
@@ -233,26 +242,26 @@ fn promote_write_remigrate_and_restore_older_history() {
     );
 
     v.set(3u32, 99);
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
     v.set(4u32, 77);
     assert!(
         v.tier_stats().cold_frames >= 1,
         "promoted frame remigrated without orphan payload"
     );
 
-    v.try_restore(root).unwrap();
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), vec![0, 1, 2, 3, 4]);
 }
 
 #[test]
 fn explicit_flush_and_compress_preserve_empty_frame_identity() {
-    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     v.try_push(7).unwrap();
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
-    v.try_mark(ShrinkPolicy::Never).unwrap(); // close an empty logical frame
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap(); // close an empty logical frame
     v.set(0u32, 8);
     v.set(0u32, 9);
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
 
     assert_eq!(v.diff_log_len(), 2);
     v.flush_trail();
@@ -271,42 +280,48 @@ fn explicit_flush_and_compress_preserve_empty_frame_identity() {
         (2, 1, 1)
     );
     assert_eq!(v.diff_log_len(), 0);
-    assert!(v.pending_restore_indices(&root).is_some());
+    assert!(
+        v.pending_restore_indices_at(root.depth() as usize)
+            .is_some()
+    );
 
-    v.try_restore(root).unwrap();
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), vec![7]);
 }
 
 #[test]
 fn scattered_cold_runs_promote_unique_survivor_and_keep_tokens_live() {
-    let mut v = V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::restore_optimized());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::restore_optimized(),
+    ));
     for i in 0..8u32 {
         v.try_push(i).unwrap();
     }
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     v.set(1u32, 10);
     v.set(3u32, 30);
     v.set(6u32, 60);
-    let middle = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let middle = v.mark(ShrinkPolicy::Never).unwrap();
     v.set(0u32, 99);
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
 
     let cold = v.tier_stats();
     assert_eq!(cold.cold_frames, 2);
     assert_eq!(cold.cold_runs, 4, "three scattered runs plus one singleton");
     assert_eq!(cold.cold_values, 4);
-    let mut pending: Vec<u32> = v.pending_restore_indices(&root).unwrap();
+    let mut pending: Vec<u32> = v.pending_restore_indices_at(root.depth() as usize).unwrap();
     pending.sort_unstable();
     assert_eq!(pending, vec![0, 1, 3, 6]);
-    assert!(v.is_valid_token(&root));
-    assert!(v.is_valid_token(&middle));
+    assert!(v.is_valid(root));
+    assert!(v.is_valid(middle));
 
-    v.try_restore(middle).unwrap();
+    assert!(v.restore(middle), "restore: own token");
 
-    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+    assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![0, 10, 2, 30, 4, 5, 60, 7]);
-    assert!(v.is_valid_token(&root));
-    assert!(!v.is_valid_token(&middle));
+    assert!(v.is_valid(root));
+    assert!(!v.is_valid(middle));
     assert_eq!(
         v.tier_stats().hot_frames,
         1,
@@ -314,28 +329,31 @@ fn scattered_cold_runs_promote_unique_survivor_and_keep_tokens_live() {
     );
 
     v.set(2u32, 20);
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
     assert_eq!(
         v.tier_stats().cold_frames,
         1,
         "promoted survivor remigrates"
     );
-    v.try_restore(root).unwrap();
-    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+    assert!(v.restore(root), "restore: own token");
+    assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), (0..8).collect::<Vec<_>>());
-    assert!(!v.is_valid_token(&root));
+    assert!(!v.is_valid(root));
 }
 
 #[test]
 fn hot_entry_and_byte_limits_and_reclamation_apply_to_closed_suffixes() {
-    let mut v = V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::fully_buffered_unique(),
+    ));
     for i in 0..4u32 {
         v.try_push(i).unwrap();
     }
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     for frame in 0..3u32 {
         v.set(frame, 10 + frame);
-        v.try_mark(ShrinkPolicy::Never).unwrap();
+        v.mark(ShrinkPolicy::Never).unwrap();
     }
 
     v.set_tier_policy(policy(TierLimit::Frames(0), TierLimit::Entries(2)));
@@ -364,7 +382,7 @@ fn hot_entry_and_byte_limits_and_reclamation_apply_to_closed_suffixes() {
         (v.tier_stats().cold_frames, v.tier_stats().hot_frames),
         (3, 1)
     );
-    v.try_restore(root).unwrap();
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), vec![0, 1, 2, 3]);
     assert!(v.tracking_bytes() <= before_restore);
 }
@@ -377,26 +395,26 @@ fn legacy_vec_modes_and_trail_store_preserve_whole_batch_rollover() {
         CompressionMode::IndexRunsSorted,
         CompressionMode::Auto,
     ] {
-        let mut v = VecP::<u32, u32>::new_with_mode(mode);
+        let mut v = ForkHistory::new(VecP::<u32, u32>::new_with_mode(mode));
         v.try_push(0).unwrap();
-        let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+        let root = v.mark(ShrinkPolicy::Never).unwrap();
         for n in 0..9u32 {
             v.set(0u32, n + 1);
-            v.try_mark(ShrinkPolicy::Never).unwrap();
+            v.mark(ShrinkPolicy::Never).unwrap();
         }
         let stats = v.tier_stats();
         assert_eq!((stats.cold_frames, stats.hot_frames), (9, 1));
         assert_eq!(v.diff_log_len(), 0, "the whole closed batch migrated");
-        v.try_restore(root).unwrap();
+        assert!(v.restore(root), "restore: own token");
         assert_eq!(values(&v), vec![0]);
     }
 
-    let mut trail: VecT<u32, u32> = VecT::new();
+    let mut trail: ForkHistory<VecT<u32, u32>> = ForkHistory::new(VecT::new());
     trail.try_push(0).unwrap();
-    let root = trail.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = trail.mark(ShrinkPolicy::Never).unwrap();
     for n in 0..8u32 {
         trail.set(0u32, n + 1);
-        trail.try_mark(ShrinkPolicy::Never).unwrap();
+        trail.mark(ShrinkPolicy::Never).unwrap();
     }
     assert_eq!(
         (
@@ -406,7 +424,7 @@ fn legacy_vec_modes_and_trail_store_preserve_whole_batch_rollover() {
         (0, 9)
     );
     trail.set(0u32, 9);
-    trail.try_mark(ShrinkPolicy::Never).unwrap();
+    trail.mark(ShrinkPolicy::Never).unwrap();
     assert_eq!(
         (
             trail.tier_stats().cold_frames,
@@ -415,50 +433,52 @@ fn legacy_vec_modes_and_trail_store_preserve_whole_batch_rollover() {
         (9, 1)
     );
     assert_eq!(trail.diff_log_len(), 0);
-    trail.try_restore(root).unwrap();
+    assert!(trail.restore(root), "restore: own token");
     assert_eq!(trail.get(0u32), 0);
 }
 
 #[test]
 fn explicit_policy_replaces_legacy_rollover_cadence() {
-    let mut v = VecP::<u32, u32>::new_with_mode(CompressionMode::Auto);
+    let mut v = ForkHistory::new(VecP::<u32, u32>::new_with_mode(CompressionMode::Auto));
     v.try_push(0).unwrap();
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     for n in 0..8u32 {
         v.set(0u32, n + 1);
-        v.try_mark(ShrinkPolicy::Never).unwrap();
+        v.mark(ShrinkPolicy::Never).unwrap();
     }
 
     v.set_tier_policy(TierPolicy::fully_buffered_unique());
     v.set(0u32, 9);
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
 
     let stats = v.tier_stats();
     assert_eq!((stats.cold_frames, stats.hot_frames), (0, 10));
     assert_eq!(v.diff_log_len(), 9);
-    v.try_restore(root).unwrap();
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), vec![0]);
 }
 
 #[test]
 fn dynamic_store_protocols_cover_pop_regrow_and_cold_restore() {
     for kind in [StoreKind::Inline, StoreKind::Parallel, StoreKind::Trail] {
-        let mut v: VecD<u32, u32> =
-            VecD::new_kind_with_policy(kind, TierPolicy::restore_optimized());
+        let mut v: ForkHistory<VecD<u32, u32>> = ForkHistory::new(VecD::new_kind_with_policy(
+            kind,
+            TierPolicy::restore_optimized(),
+        ));
         for i in 10..14u32 {
             v.try_push(i).unwrap();
         }
-        let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+        let root = v.mark(ShrinkPolicy::Never).unwrap();
         assert_eq!(v.pop(), Some(13));
         v.try_push(99).unwrap();
         v.set(3u32, 100);
-        v.try_mark(ShrinkPolicy::Never).unwrap();
+        v.mark(ShrinkPolicy::Never).unwrap();
         assert_eq!(v.tier_stats().cold_frames, 1);
 
         assert_eq!(v.pop(), Some(100));
         v.try_push(77).unwrap();
         v.set(3u32, 88);
-        v.try_restore(root).unwrap();
+        assert!(v.restore(root), "restore: own token");
         assert_eq!(
             (0..v.len()).map(|i| v.get(i)).collect::<Vec<_>>(),
             vec![10, 11, 12, 13]
@@ -477,35 +497,41 @@ fn pending_indices_derive_the_open_ingress_end_from_the_pool() {
         } else {
             TierPolicy::fully_buffered_unique()
         };
-        let mut v = V::new_kind_with_policy(kind, tier_policy);
+        let mut v = ForkHistory::new(V::new_kind_with_policy(kind, tier_policy));
         for i in 0..4 {
             v.try_push(i).unwrap();
         }
-        let token = v.try_mark(ShrinkPolicy::Never).unwrap();
+        let token = v.mark(ShrinkPolicy::Never).unwrap();
         v.set(1u32, 10);
         v.set(1u32, 11);
         v.set(2u32, 20);
 
-        let pending = v.pending_restore_indices(&token).unwrap();
+        let pending = v
+            .pending_restore_indices_at(token.depth() as usize)
+            .unwrap();
         assert_eq!(pending, expected);
 
-        v.try_restore(token).unwrap();
+        assert!(v.restore(token), "restore: own token");
         assert_eq!(values(&v), vec![0, 1, 2, 3]);
     }
 }
 
 #[test]
 fn mark_rollover_defer_and_apply_configured_are_per_mark() {
-    let mut v = V::new_kind_with_policy(
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
         StoreKind::Trail,
         policy(TierLimit::Frames(0), TierLimit::Frames(0)),
-    );
+    ));
     v.try_push(0).unwrap();
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     v.set(0u32, 1);
 
-    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
-        .unwrap();
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+            .expect("options push");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     assert_eq!(
         (
             v.tier_stats().cold_frames,
@@ -517,11 +543,15 @@ fn mark_rollover_defer_and_apply_configured_are_per_mark() {
     );
 
     v.set(0u32, 2);
-    v.try_mark_with(MarkOptions::new(
-        ShrinkPolicy::Never,
-        RolloverPolicy::ApplyConfigured,
-    ))
-    .unwrap();
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(
+                ShrinkPolicy::Never,
+                RolloverPolicy::ApplyConfigured,
+            ))
+            .expect("options push");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     assert_eq!(
         (
             v.tier_stats().cold_frames,
@@ -531,25 +561,29 @@ fn mark_rollover_defer_and_apply_configured_are_per_mark() {
         (2, 0, 1),
         "configured zero limits apply to all closed prefixes"
     );
-    v.try_restore(root).unwrap();
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), vec![0]);
 }
 
 #[test]
 fn mark_rollover_force_trail_to_hot_only() {
-    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     v.try_push(7).unwrap();
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     v.set(0u32, 8);
     v.set(0u32, 9);
-    v.try_mark_with(MarkOptions::new(
-        ShrinkPolicy::Never,
-        RolloverPolicy::ForceClosed {
-            trail_to_hot: true,
-            hot_to_cold: false,
-        },
-    ))
-    .unwrap();
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(
+                ShrinkPolicy::Never,
+                RolloverPolicy::ForceClosed {
+                    trail_to_hot: true,
+                    hot_to_cold: false,
+                },
+            ))
+            .expect("options push");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     assert_eq!(
         (
             v.tier_stats().cold_frames,
@@ -559,27 +593,34 @@ fn mark_rollover_force_trail_to_hot_only() {
         (0, 1, 1)
     );
     assert_eq!(v.tier_stats().hot_entries, 1);
-    v.try_restore(root).unwrap();
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), vec![7]);
 }
 
 #[test]
 fn mark_rollover_force_hot_to_cold_only() {
-    let mut v = V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::fully_buffered_unique(),
+    ));
     for i in 0..4u32 {
         v.try_push(i).unwrap();
     }
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     v.set(1u32, 10);
     v.set(2u32, 20);
-    v.try_mark_with(MarkOptions::new(
-        ShrinkPolicy::Never,
-        RolloverPolicy::ForceClosed {
-            trail_to_hot: false,
-            hot_to_cold: true,
-        },
-    ))
-    .unwrap();
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(
+                ShrinkPolicy::Never,
+                RolloverPolicy::ForceClosed {
+                    trail_to_hot: false,
+                    hot_to_cold: true,
+                },
+            ))
+            .expect("options push");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     assert_eq!(
         (
             v.tier_stats().cold_frames,
@@ -589,15 +630,15 @@ fn mark_rollover_force_hot_to_cold_only() {
         (1, 1, 0)
     );
     assert_eq!(v.tier_stats().cold_runs, 1);
-    v.try_restore(root).unwrap();
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), vec![0, 1, 2, 3]);
 }
 
 #[test]
 fn mark_rollover_force_both_preserves_empty_frames_and_restore() {
-    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     v.try_push(5).unwrap();
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     let force_both = MarkOptions::new(
         ShrinkPolicy::Never,
         RolloverPolicy::ForceClosed {
@@ -606,7 +647,12 @@ fn mark_rollover_force_both_preserves_empty_frames_and_restore() {
         },
     );
 
-    v.try_mark_with(force_both).unwrap();
+    {
+        v.member
+            .try_push_frame_with(force_both)
+            .expect("options push");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     assert_eq!(
         (
             v.tier_stats().cold_frames,
@@ -617,7 +663,12 @@ fn mark_rollover_force_both_preserves_empty_frames_and_restore() {
         "an empty closed frame remains a cold token boundary"
     );
     v.set(0u32, 6);
-    v.try_mark_with(force_both).unwrap();
+    {
+        v.member
+            .try_push_frame_with(force_both)
+            .expect("options push");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     assert_eq!(
         (
             v.tier_stats().cold_frames,
@@ -628,10 +679,10 @@ fn mark_rollover_force_both_preserves_empty_frames_and_restore() {
         "forced cascade runs Trail -> Hot before Hot -> Cold"
     );
     assert_eq!(v.depth(), 3);
-    v.try_restore(root).unwrap();
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), vec![5]);
     assert_eq!(v.depth(), 1, "semantics B: the root's frame stays open");
-    v.pop_scope();
+    assert!(v.pop_scope());
     assert_eq!(v.depth(), 0);
 }
 
@@ -673,7 +724,7 @@ fn static_aliases_and_legacy_direct_types_compile() {
 
 #[test]
 fn mark_options_preserve_thresholded_shrink_policy() {
-    let mut v = V::new_kind(StoreKind::Parallel);
+    let mut v = ForkHistory::new(V::new_kind(StoreKind::Parallel));
     for i in 0..1024u32 {
         v.try_push(i).unwrap();
     }
@@ -681,21 +732,24 @@ fn mark_options_preserve_thresholded_shrink_policy() {
         v.pop();
     }
     let before = v.total_bytes();
-    let token = v
-        .try_mark_with(MarkOptions::new(
-            ShrinkPolicy::IfOverallocated {
-                factor: 2,
-                headroom: 0,
-            },
-            RolloverPolicy::Defer,
-        ))
-        .unwrap();
+    let token = {
+        v.member
+            .try_push_frame_with(MarkOptions::new(
+                ShrinkPolicy::IfOverallocated {
+                    factor: 2,
+                    headroom: 0,
+                },
+                RolloverPolicy::Defer,
+            ))
+            .expect("options push");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
     assert!(
         v.total_bytes() < before,
         "store capacity should honor shrink thresholds"
     );
     assert_eq!(values(&v), vec![0]);
-    v.try_restore(token).unwrap();
+    assert!(v.restore(token), "restore: own token");
 }
 
 fn adaptive_input(
@@ -708,20 +762,24 @@ fn adaptive_input(
     }
 }
 
-fn close_deferred(v: &mut V) {
-    v.try_mark_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
-        .unwrap();
+fn close_deferred(v: &mut ForkHistory<V>) {
+    {
+        v.member
+            .try_push_frame_with(MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer))
+            .expect("options push");
+        v.mint_pushed().expect("the member is one frame ahead")
+    };
 }
 
-fn adaptive_reclaim_fixture(kind: StoreKind, reclaim: ReclaimPolicy) -> V {
-    let mut v = V::new_kind_with_policy(
+fn adaptive_reclaim_fixture(kind: StoreKind, reclaim: ReclaimPolicy) -> ForkHistory<V> {
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
         kind,
         TierPolicy {
             trail: TierLimit::Unbounded,
             hot: TierLimit::Unbounded,
             cold_reclaim: reclaim,
         },
-    );
+    ));
     for i in 0..64u32 {
         v.try_push(i).unwrap();
     }
@@ -781,11 +839,11 @@ fn adaptive_ratio_validation_and_budget_boundaries_are_exact() {
     assert_eq!(Ratio::new(6, 3).unwrap().numerator(), 6);
     assert_eq!(Ratio::new(6, 3).unwrap().denominator(), 3);
 
-    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     for i in 0..4u32 {
         v.try_push(i).unwrap();
     }
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
     for round in 0..4u32 {
         v.set(1u32, 10 + round);
     }
@@ -807,11 +865,11 @@ fn adaptive_ratio_validation_and_budget_boundaries_are_exact() {
 
 #[test]
 fn adaptive_duplicate_threshold_passes_and_fails_without_skipping() {
-    let mut pass = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut pass = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     for i in 0..4u32 {
         pass.try_push(i).unwrap();
     }
-    pass.try_mark(ShrinkPolicy::Never).unwrap();
+    pass.mark(ShrinkPolicy::Never).unwrap();
     for round in 0..4u32 {
         pass.set(1u32, 20 + round);
     }
@@ -827,11 +885,12 @@ fn adaptive_duplicate_threshold_passes_and_fails_without_skipping() {
         (1, 1)
     );
 
-    let mut blocked = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut blocked =
+        ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     for i in 0..4u32 {
         blocked.try_push(i).unwrap();
     }
-    blocked.try_mark(ShrinkPolicy::Never).unwrap();
+    blocked.mark(ShrinkPolicy::Never).unwrap();
     blocked.set(0u32, 10);
     blocked.set(1u32, 11); // W/U = 1: oldest blocker
     close_deferred(&mut blocked);
@@ -854,12 +913,14 @@ fn adaptive_duplicate_threshold_passes_and_fails_without_skipping() {
 
 #[test]
 fn adaptive_locality_accepts_contiguous_and_rejects_singletons() {
-    let mut contiguous =
-        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    let mut contiguous = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::fully_buffered_unique(),
+    ));
     for i in 0..16u32 {
         contiguous.try_push(i).unwrap();
     }
-    contiguous.try_mark(ShrinkPolicy::Never).unwrap();
+    contiguous.mark(ShrinkPolicy::Never).unwrap();
     for i in 2..10u32 {
         contiguous.set(i, 100 + i);
     }
@@ -878,12 +939,14 @@ fn adaptive_locality_accepts_contiguous_and_rejects_singletons() {
         (1, 1)
     );
 
-    let mut singleton =
-        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    let mut singleton = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::fully_buffered_unique(),
+    ));
     for i in 0..32u32 {
         singleton.try_push(i).unwrap();
     }
-    singleton.try_mark(ShrinkPolicy::Never).unwrap();
+    singleton.mark(ShrinkPolicy::Never).unwrap();
     for i in 0..8u32 {
         singleton.set(i * 2, 200 + i);
     }
@@ -902,12 +965,14 @@ fn adaptive_locality_accepts_contiguous_and_rejects_singletons() {
         min_writes_per_unique: semi_persistent_containers_verus::Ratio::new(2, 1).unwrap(),
         min_uniques_per_run: semi_persistent_containers_verus::Ratio::new(3, 1).unwrap(),
     };
-    let mut ratio_blocked =
-        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    let mut ratio_blocked = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::fully_buffered_unique(),
+    ));
     for i in 0..4u32 {
         ratio_blocked.try_push(i).unwrap();
     }
-    ratio_blocked.try_mark(ShrinkPolicy::Never).unwrap();
+    ratio_blocked.mark(ShrinkPolicy::Never).unwrap();
     ratio_blocked.set(0u32, 9);
     ratio_blocked.set(1u32, 8);
     close_deferred(&mut ratio_blocked);
@@ -920,9 +985,9 @@ fn adaptive_locality_accepts_contiguous_and_rejects_singletons() {
 
 #[test]
 fn adaptive_empty_frames_preserve_identity_and_cascade_in_order() {
-    let mut empty = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut empty = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     empty.try_push(7).unwrap();
-    let root = empty.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = empty.mark(ShrinkPolicy::Never).unwrap();
     close_deferred(&mut empty);
     let report = empty.apply_adaptive(adaptive_input(0));
     assert_eq!((report.writes, report.uniques, report.runs), (0, 0, 0));
@@ -938,15 +1003,16 @@ fn adaptive_empty_frames_preserve_identity_and_cascade_in_order() {
         (1, 1)
     );
     assert_eq!(empty.depth(), 2);
-    assert!(empty.is_valid_token(&root));
-    empty.try_restore(root).unwrap();
+    assert!(empty.is_valid(root));
+    assert!(empty.restore(root), "restore: own token");
     assert_eq!(values(&empty), vec![7]);
 
-    let mut cascade = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut cascade =
+        ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     for i in 0..16u32 {
         cascade.try_push(i).unwrap();
     }
-    let root = cascade.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = cascade.mark(ShrinkPolicy::Never).unwrap();
     for round in 0..4u32 {
         for i in 2..10u32 {
             cascade.set(i, round * 100 + i);
@@ -968,17 +1034,17 @@ fn adaptive_empty_frames_preserve_identity_and_cascade_in_order() {
         (1, 0, 1)
     );
     assert_eq!(report.budget_unmet_bytes, report.logical_bytes_after);
-    cascade.try_restore(root).unwrap();
+    assert!(cascade.restore(root), "restore: own token");
     assert_eq!(values(&cascade), (0..16).collect::<Vec<_>>());
 }
 
 #[test]
 fn try_mark_adaptive_opens_replacement_first_and_preserves_token_semantics() {
-    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     for i in 0..8u32 {
         v.try_push(i).unwrap();
     }
-    let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+    let root = v.mark(ShrinkPolicy::Never).unwrap();
     for round in 0..4u32 {
         for i in 2..6u32 {
             v.set(i, round * 10 + i);
@@ -986,12 +1052,19 @@ fn try_mark_adaptive_opens_replacement_first_and_preserves_token_semantics() {
     }
     let after_writes = values(&v);
     let depth_before = v.depth();
-    let (token, report) = v
-        .try_mark_adaptive(ShrinkPolicy::Never, adaptive_input(0))
-        .unwrap();
+    let (token, report) = {
+        let report = v
+            .member
+            .try_push_frame_adaptive(ShrinkPolicy::Never, adaptive_input(0))
+            .expect("adaptive push");
+        (
+            v.mint_pushed().expect("the member is one frame ahead"),
+            report,
+        )
+    };
     assert_eq!(v.depth(), depth_before + 1);
-    assert!(v.is_valid_token(&token));
-    assert!(v.is_valid_token(&root));
+    assert!(v.is_valid(token));
+    assert!(v.is_valid(root));
     assert_eq!(report.migrated_trail_frames, 1);
     assert_eq!(
         v.tier_stats().trail_frames,
@@ -1000,14 +1073,14 @@ fn try_mark_adaptive_opens_replacement_first_and_preserves_token_semantics() {
     );
 
     v.set(0u32, 999);
-    v.try_restore(token).unwrap();
+    assert!(v.restore(token), "restore: own token");
     assert_eq!(values(&v), after_writes);
     assert!(
-        v.is_valid_token(&token),
+        v.is_valid(token),
         "semantics B: the restored checkpoint stays valid"
     );
-    assert!(v.is_valid_token(&root));
-    v.try_restore(root).unwrap();
+    assert!(v.is_valid(root));
+    assert!(v.restore(root), "restore: own token");
     assert_eq!(values(&v), (0..8).collect::<Vec<_>>());
 }
 
@@ -1019,11 +1092,11 @@ fn adaptive_handles_nonmonotone_lengths_promotion_and_every_ingress_store() {
         } else {
             TierPolicy::fully_buffered_unique()
         };
-        let mut v = V::new_kind_with_policy(kind, policy);
+        let mut v = ForkHistory::new(V::new_kind_with_policy(kind, policy));
         for i in 0..12u32 {
             v.try_push(i).unwrap();
         }
-        let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+        let root = v.mark(ShrinkPolicy::Never).unwrap();
         for round in 0..4u32 {
             for i in 2..8u32 {
                 v.set(i, round * 100 + i);
@@ -1033,16 +1106,23 @@ fn adaptive_handles_nonmonotone_lengths_promotion_and_every_ingress_store() {
         v.pop();
         v.pop();
         v.set(2u32, 777);
-        let middle = v
-            .try_mark_adaptive(ShrinkPolicy::Never, adaptive_input(0))
-            .unwrap()
-            .0;
+        let middle = {
+            let report = v
+                .member
+                .try_push_frame_adaptive(ShrinkPolicy::Never, adaptive_input(0))
+                .expect("adaptive push");
+            (
+                v.mint_pushed().expect("the member is one frame ahead"),
+                report,
+            )
+        }
+        .0;
         v.try_push(90).unwrap();
         v.set(3u32, 888);
         close_deferred(&mut v);
         v.apply_adaptive(adaptive_input(0));
 
-        v.try_restore(middle).unwrap();
+        assert!(v.restore(middle), "restore: own token");
         assert_eq!(v.len(), 10);
         v.set(4u32, 444); // write through the original immutable ingress protocol
         close_deferred(&mut v);
@@ -1059,7 +1139,7 @@ fn adaptive_handles_nonmonotone_lengths_promotion_and_every_ingress_store() {
                 "unique ingress retains its writable Hot frame"
             );
         }
-        v.try_restore(root).unwrap();
+        assert!(v.restore(root), "restore: own token");
         assert_eq!(values(&v), (0..12).collect::<Vec<_>>(), "kind {kind:?}");
     }
 }
@@ -1102,11 +1182,14 @@ fn cold_frame_bytes(values: usize, runs: usize) -> usize {
 
 #[test]
 fn adaptive_hot_blocker_prevents_newer_frame_leapfrog() {
-    let mut v = V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::fully_buffered_unique(),
+    ));
     for i in 0..16u32 {
         v.try_push(i).unwrap();
     }
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
 
     for i in [0u32, 2, 4, 6] {
         v.set(i, 100 + i);
@@ -1133,11 +1216,11 @@ fn adaptive_hot_blocker_prevents_newer_frame_leapfrog() {
 #[test]
 fn adaptive_projected_byte_gates_are_ratio_independent() {
     assert_eq!(trail_frame_bytes(2), hot_frame_bytes(2));
-    let mut trail = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut trail = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     for i in 0..8u32 {
         trail.try_push(i).unwrap();
     }
-    trail.try_mark(ShrinkPolicy::Never).unwrap();
+    trail.mark(ShrinkPolicy::Never).unwrap();
     trail.set(0u32, 10);
     trail.set(1u32, 11);
     close_deferred(&mut trail);
@@ -1146,12 +1229,14 @@ fn adaptive_projected_byte_gates_are_ratio_independent() {
     assert_eq!(report.migrated_trail_frames, 0);
 
     assert!(cold_frame_bytes(2, 1) > hot_frame_bytes(2));
-    let mut growing_hot =
-        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    let mut growing_hot = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::fully_buffered_unique(),
+    ));
     for i in 0..8u32 {
         growing_hot.try_push(i).unwrap();
     }
-    growing_hot.try_mark(ShrinkPolicy::Never).unwrap();
+    growing_hot.mark(ShrinkPolicy::Never).unwrap();
     growing_hot.set(0u32, 10);
     growing_hot.set(1u32, 11);
     close_deferred(&mut growing_hot);
@@ -1160,12 +1245,14 @@ fn adaptive_projected_byte_gates_are_ratio_independent() {
     assert_eq!(report.migrated_hot_frames, 0);
 
     assert_eq!(cold_frame_bytes(6, 1), hot_frame_bytes(6));
-    let mut equal_hot =
-        V::new_kind_with_policy(StoreKind::Parallel, TierPolicy::fully_buffered_unique());
+    let mut equal_hot = ForkHistory::new(V::new_kind_with_policy(
+        StoreKind::Parallel,
+        TierPolicy::fully_buffered_unique(),
+    ));
     for i in 0..12u32 {
         equal_hot.try_push(i).unwrap();
     }
-    equal_hot.try_mark(ShrinkPolicy::Never).unwrap();
+    equal_hot.mark(ShrinkPolicy::Never).unwrap();
     for i in 2..8u32 {
         equal_hot.set(i, 100 + i);
     }
@@ -1177,11 +1264,11 @@ fn adaptive_projected_byte_gates_are_ratio_independent() {
 
 #[test]
 fn adaptive_closed_accounting_and_mixed_cascade_report_are_exact() {
-    let mut v = V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt());
+    let mut v = ForkHistory::new(V::new_kind_with_policy(StoreKind::Trail, TierPolicy::smt()));
     for i in 0..32u32 {
         v.try_push(i).unwrap();
     }
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.mark(ShrinkPolicy::Never).unwrap();
 
     for i in 0..6u32 {
         v.set(i, 100 + i);
@@ -1264,22 +1351,37 @@ fn adaptive_closed_accounting_and_mixed_cascade_report_are_exact() {
 #[test]
 fn unique_defer_restores_surviving_prefix_and_zero() {
     for kind in [StoreKind::Inline, StoreKind::Parallel] {
-        let mut v = V::new_kind_with_policy(kind, TierPolicy::restore_optimized());
+        let mut v = ForkHistory::new(V::new_kind_with_policy(
+            kind,
+            TierPolicy::restore_optimized(),
+        ));
         for i in 0..4u32 {
             v.try_push(i).unwrap();
         }
 
         let defer = MarkOptions::new(ShrinkPolicy::Never, RolloverPolicy::Defer);
-        let root = v.try_mark_with(defer).unwrap();
+        let root = {
+            v.member.try_push_frame_with(defer).expect("options push");
+            v.mint_pushed().expect("the member is one frame ahead")
+        };
         v.set(1u32, 10);
         v.set(1u32, 11); // repeated unique capture is a physical no-op
         v.pop();
         v.pop();
-        let middle = v.try_mark_with(defer).unwrap();
+        let middle = {
+            v.member.try_push_frame_with(defer).expect("options push");
+            v.mint_pushed().expect("the member is one frame ahead")
+        };
         v.try_push(20).unwrap();
         v.set(0u32, 9);
-        let empty = v.try_mark_with(defer).unwrap();
-        let newest = v.try_mark_with(defer).unwrap(); // closes an empty Hot frame
+        let empty = {
+            v.member.try_push_frame_with(defer).expect("options push");
+            v.mint_pushed().expect("the member is one frame ahead")
+        };
+        let newest = {
+            v.member.try_push_frame_with(defer).expect("options push");
+            v.mint_pushed().expect("the member is one frame ahead")
+        }; // closes an empty Hot frame
         v.set(2u32, 30);
 
         let hot = v.tier_stats();
@@ -1290,27 +1392,27 @@ fn unique_defer_restores_surviving_prefix_and_zero() {
         );
         assert_eq!(hot.hot_entries, 5, "{kind:?}");
 
-        v.try_restore(newest).unwrap();
+        assert!(v.restore(newest), "restore: own token");
 
-        v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+        assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
         assert_eq!(values(&v), vec![9, 11, 20], "{kind:?}");
         assert_eq!(v.depth(), 3, "{kind:?}");
 
-        v.try_restore(empty).unwrap();
+        assert!(v.restore(empty), "restore: own token");
 
-        v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+        assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
         assert_eq!(values(&v), vec![9, 11, 20], "{kind:?}");
         assert_eq!(v.depth(), 2, "{kind:?}");
 
-        v.try_restore(middle).unwrap();
+        assert!(v.restore(middle), "restore: own token");
 
-        v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+        assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
         assert_eq!(values(&v), vec![0, 11], "{kind:?}");
         assert_eq!(v.depth(), 1, "{kind:?}");
 
-        v.try_restore(root).unwrap();
+        assert!(v.restore(root), "restore: own token");
 
-        v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
+        assert!(v.pop_scope()); // pop parity: this test pins the tier mechanics of the pop path
         assert_eq!(values(&v), vec![0, 1, 2, 3], "{kind:?}");
         assert_eq!(v.depth(), 0, "{kind:?}");
         let physical = v.tier_stats();
@@ -1338,22 +1440,22 @@ fn hot_survivor_promotion_copies_values_without_calling_clone() {
     }
 
     for populated in [false, true] {
-        let mut v = VecT::<CopyOnly, u32>::new_with_policy(TierPolicy::smt());
+        let mut v = ForkHistory::new(VecT::<CopyOnly, u32>::new_with_policy(TierPolicy::smt()));
         for i in 0..3 {
             v.try_push(CopyOnly(i)).unwrap();
         }
-        let root = v.try_mark(ShrinkPolicy::Never).unwrap();
+        let root = v.mark(ShrinkPolicy::Never).unwrap();
         if populated {
             v.set(0u32, CopyOnly(10));
             v.set(1u32, CopyOnly(11));
         }
-        let newer = v.try_mark(ShrinkPolicy::Never).unwrap();
+        let newer = v.mark(ShrinkPolicy::Never).unwrap();
         v.flush_trail();
         assert_eq!(
             (v.tier_stats().hot_frames, v.tier_stats().trail_frames),
             (1, 1)
         );
-        v.try_restore(newer).unwrap();
+        assert!(v.restore(newer), "restore: own token");
         assert_eq!(
             (v.tier_stats().hot_frames, v.tier_stats().trail_frames),
             (0, 2),
@@ -1361,7 +1463,7 @@ fn hot_survivor_promotion_copies_values_without_calling_clone() {
         );
         assert_eq!(v.get(0u32), CopyOnly(if populated { 10 } else { 0 }));
         v.set(0u32, CopyOnly(20));
-        v.try_restore(root).unwrap();
+        assert!(v.restore(root), "restore: own token");
         for i in 0..3 {
             assert_eq!(v.get(i), CopyOnly(i));
         }

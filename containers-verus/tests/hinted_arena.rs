@@ -9,6 +9,7 @@
 //! (a cell rewritten to new content and then rolled BACK to the old one, with
 //! another cell holding that same old content), plus deep restores past
 //! several marks.
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::hinted_arena::HintedArena;
 use semi_persistent_containers_verus::{ShrinkPolicy, StoreKind};
 
@@ -54,7 +55,7 @@ fn check(arena: &HintedArena<Node, u32, true>, live: &[Node], ctx: &str) {
 #[test]
 fn probe_matches_scan_through_marks_and_restores() {
     for kind in [StoreKind::Inline, StoreKind::Parallel, StoreKind::Trail] {
-        let mut arena = HintedArena::<Node, u32, true>::new_kind(kind);
+        let mut arena = ForkHistory::new(HintedArena::<Node, u32, true>::new_kind(kind));
         let mut live: Vec<Node> = Vec::new();
         let mut marks: Vec<(semi_persistent_containers_verus::VecToken, Vec<Node>)> = Vec::new();
 
@@ -90,7 +91,7 @@ fn probe_matches_scan_through_marks_and_restores() {
         // Deep restore past four marks: the index does no work, so this is
         // exactly where a missed collision would show.
         let (tok, snap) = marks[1].clone();
-        arena.restore(tok).expect("restore");
+        assert!(arena.restore(tok), "restore");
         live = snap;
         check(&arena, &live, "after deep restore");
 

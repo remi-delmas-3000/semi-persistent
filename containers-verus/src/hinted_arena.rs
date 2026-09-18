@@ -779,4 +779,157 @@ impl HintContent for crate::tagged::Pair<u32, u32> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Typed-group member: the column moves, the hint index is not touched (the
+// zero-maintenance property `restore` proves, restated per structural
+// operation). Completeness survives every operation because the live view
+// after it is a covered snapshot or the view the index already covered, and
+// the surviving snapshot stack is a prefix (or the old stack plus that view).
+// ---------------------------------------------------------------------------
+
+impl<T, I, const TRACK: bool> crate::group::Member for HintedArena<T, I, TRACK>
+where
+    T: Sized + Copy + Tagged + HintContent + core::default::Default,
+    I: IndexLike,
+{
+    type Model = Seq<T>;
+
+    open spec fn wf(&self) -> bool {
+        &&& HintedArena::wf(self)
+        &&& self.complete()
+        &&& TRACK
+    }
+
+    open spec fn depth_spec(&self) -> nat {
+        self.snapshots_view().len()
+    }
+
+    open spec fn can_push(&self) -> bool {
+        &&& self.snapshots_view().len() < u32::MAX as nat
+        &&& self.view().len() < I::max_nat()
+    }
+
+    open spec fn model(&self) -> Seq<T> {
+        self.view()
+    }
+
+    open spec fn archive(&self) -> Seq<Seq<T>> {
+        self.snapshots_view()
+    }
+
+    proof fn lemma_archive_depth(&self) {
+    }
+
+    fn can_push_now(&self) -> (b: bool) {
+        proof { self.col.lemma_snapshots_len(); }
+        <crate::VecD<T, I, TRACK> as crate::group::Member>::can_push_now(&self.col)
+    }
+
+    fn depth_exec(&self) -> (d: usize) {
+        proof { self.col.lemma_snapshots_len(); }
+        <crate::VecD<T, I, TRACK> as crate::group::Member>::depth_exec(&self.col)
+    }
+
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        if !self.can_push_now() {
+            crate::guard::refuse("Member::push_frame: the hinted arena cannot open another frame");
+        }
+        let ghost pre = *self;
+        <crate::VecD<T, I, TRACK> as crate::group::Member>::push_frame(&mut self.col, shrink);
+        proof {
+            assert(self.index == pre.index && self.spill == pre.spill);
+            assert forall|f2: u32, j2: nat| pre.hinted(f2, j2)
+                implies #[trigger] self.hinted(f2, j2) by {
+                assert(self.bucket_spec(f2) == pre.bucket_spec(f2));
+            }
+            assert forall|j: int| 0 <= j < self.view().len()
+                implies self.hinted((#[trigger] self.view()[j]).fp_spec(), j as nat) by {
+                assert(pre.hinted(pre.view()[j].fp_spec(), j as nat));
+            }
+            assert forall|k: int, j: int|
+                0 <= k < self.snapshots_view().len()
+                    && 0 <= j < self.snapshots_view()[k].len()
+                implies self.hinted((#[trigger] self.snapshots_view()[k][j]).fp_spec(),
+                    j as nat) by {
+                if k < pre.snapshots_view().len() {
+                    assert(self.snapshots_view()[k] == pre.snapshots_view()[k]);
+                    assert(pre.hinted(pre.snapshots_view()[k][j].fp_spec(), j as nat));
+                } else {
+                    assert(self.snapshots_view()[k] == pre.view());
+                    assert(pre.hinted(pre.view()[j].fp_spec(), j as nat));
+                }
+            }
+        }
+    }
+
+    fn restore_frame(&mut self, depth: usize) {
+        if !(depth < self.depth_exec()) {
+            crate::guard::refuse("Member::restore_frame: depth is not below the hinted arena's");
+        }
+        let ghost pre = *self;
+        <crate::VecD<T, I, TRACK> as crate::group::Member>::restore_frame(&mut self.col, depth);
+        proof { self.lemma_complete_after_cut(pre, depth as int, depth as int); }
+    }
+
+    fn reset_frame(&mut self, depth: usize) {
+        if !(depth < self.depth_exec()) {
+            crate::guard::refuse("Member::reset_frame: depth is not below the hinted arena's");
+        }
+        if !(self.depth_exec() < u32::MAX as usize) {
+            crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
+        }
+        let ghost pre = *self;
+        <crate::VecD<T, I, TRACK> as crate::group::Member>::reset_frame(&mut self.col, depth);
+        proof { self.lemma_complete_after_cut(pre, depth as int, depth as int + 1); }
+    }
+
+    fn pop_frame(&mut self) {
+        let d = self.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("Member::pop_frame: no open frame");
+        }
+        let ghost pre = *self;
+        <crate::VecD<T, I, TRACK> as crate::group::Member>::pop_frame(&mut self.col);
+        proof { self.lemma_complete_after_cut(pre, d as int - 1, d as int - 1); }
+    }
+}
+
+impl<T, I, const TRACK: bool> HintedArena<T, I, TRACK>
+where
+    T: Sized + Copy + Tagged + HintContent,
+    I: IndexLike,
+{
+    /// The zero-maintenance argument, once: after a column move that lands
+    /// the view on `pre`'s archived snapshot `ti` and leaves the first `keep`
+    /// snapshots, the untouched index still covers everything.
+    proof fn lemma_complete_after_cut(&self, pre: Self, ti: int, keep: int)
+        requires
+            pre.complete(),
+            self.index == pre.index,
+            self.spill == pre.spill,
+            0 <= ti < pre.snapshots_view().len(),
+            self.view() == pre.snapshots_view()[ti],
+            self.snapshots_view() == pre.snapshots_view().subrange(0, keep),
+            0 <= keep <= pre.snapshots_view().len(),
+        ensures
+            self.complete(),
+    {
+        assert forall|f2: u32, j2: nat| pre.hinted(f2, j2)
+            implies #[trigger] self.hinted(f2, j2) by {
+            assert(self.bucket_spec(f2) == pre.bucket_spec(f2));
+        }
+        assert forall|j: int| 0 <= j < self.view().len()
+            implies self.hinted((#[trigger] self.view()[j]).fp_spec(), j as nat) by {
+            assert(pre.hinted(pre.snapshots_view()[ti][j].fp_spec(), j as nat));
+        }
+        assert forall|k: int, j: int|
+            0 <= k < self.snapshots_view().len()
+                && 0 <= j < self.snapshots_view()[k].len()
+            implies self.hinted((#[trigger] self.snapshots_view()[k][j]).fp_spec(), j as nat) by {
+            assert(self.snapshots_view()[k] == pre.snapshots_view()[k]);
+            assert(pre.hinted(pre.snapshots_view()[k][j].fp_spec(), j as nat));
+        }
+    }
+}
+
 } // verus!

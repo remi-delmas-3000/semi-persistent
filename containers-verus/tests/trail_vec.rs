@@ -10,6 +10,7 @@
 //! the same operations through both columns and compares the full contents at
 //! every step, including after deep (multi-frame) restores.
 use proptest::prelude::*;
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::{ShrinkPolicy, VecP, VecT, VecToken};
 
 fn assert_twins_match(t: &VecT<u32, u32, true>, p: &VecP<u32, u32, true>, ctx: &str) {
@@ -24,14 +25,14 @@ fn assert_twins_match(t: &VecT<u32, u32, true>, p: &VecP<u32, u32, true>, ctx: &
 /// trail's later duplicates are inert under first-entry-wins).
 #[test]
 fn duplicate_writes_restore_to_first_capture() {
-    let mut t = VecT::<u32, u32, true>::new();
-    let mut p = VecP::<u32, u32, true>::new();
+    let mut t = ForkHistory::new(VecT::<u32, u32, true>::new());
+    let mut p = ForkHistory::new(VecP::<u32, u32, true>::new());
     for v in 0..8u32 {
         t.try_push(v).unwrap();
         p.try_push(v).unwrap();
     }
-    let tk_t = t.try_mark(ShrinkPolicy::Never).unwrap();
-    let tk_p = p.try_mark(ShrinkPolicy::Never).unwrap();
+    let tk_t = t.mark(ShrinkPolicy::Never).unwrap();
+    let tk_p = p.mark(ShrinkPolicy::Never).unwrap();
     // 100 writes to the same two slots: 200 trail entries, 2 parallel entries.
     for round in 0..100u32 {
         t.set(3u32, round * 7 + 1);
@@ -40,8 +41,8 @@ fn duplicate_writes_restore_to_first_capture() {
         p.set(5u32, round * 11 + 2);
     }
     assert_twins_match(&t, &p, "pre-restore");
-    t.try_restore(tk_t).unwrap();
-    p.try_restore(tk_p).unwrap();
+    assert!(t.restore(tk_t), "restore: own token");
+    assert!(p.restore(tk_p), "restore: own token");
     assert_twins_match(&t, &p, "post-restore");
     for i in 0..8u32 {
         assert_eq!(t.get(i), i, "restored value at {i}");
@@ -51,16 +52,16 @@ fn duplicate_writes_restore_to_first_capture() {
 /// Deep restore across nested frames with duplicate writes in every stratum.
 #[test]
 fn deep_restore_across_duplicated_strata() {
-    let mut t = VecT::<u32, u32, true>::new();
-    let mut p = VecP::<u32, u32, true>::new();
+    let mut t = ForkHistory::new(VecT::<u32, u32, true>::new());
+    let mut p = ForkHistory::new(VecP::<u32, u32, true>::new());
     for v in 0..16u32 {
         t.try_push(v * 10).unwrap();
         p.try_push(v * 10).unwrap();
     }
     let mut marks: Vec<(VecToken, VecToken, Vec<u32>)> = Vec::new();
     for depth in 0..6u32 {
-        let tk_t = t.try_mark(ShrinkPolicy::Never).unwrap();
-        let tk_p = p.try_mark(ShrinkPolicy::Never).unwrap();
+        let tk_t = t.mark(ShrinkPolicy::Never).unwrap();
+        let tk_p = p.mark(ShrinkPolicy::Never).unwrap();
         let snapshot: Vec<u32> = (0..t.len()).map(|i| t.get(i)).collect();
         marks.push((tk_t, tk_p, snapshot));
         for w in 0..10u32 {
@@ -75,8 +76,8 @@ fn deep_restore_across_duplicated_strata() {
     }
     // Restore straight past four levels to depth 1's mark.
     let (tk_t, tk_p, snapshot) = marks[1].clone();
-    t.try_restore(tk_t).unwrap();
-    p.try_restore(tk_p).unwrap();
+    assert!(t.restore(tk_t), "restore: own token");
+    assert!(p.restore(tk_p), "restore: own token");
     assert_twins_match(&t, &p, "deep restore");
     for (i, expected) in snapshot.iter().enumerate() {
         assert_eq!(t.get(i as u32), *expected, "deep-restored value at {i}");
@@ -87,14 +88,14 @@ fn deep_restore_across_duplicated_strata() {
 /// pop-capture and reentered-slot flag inheritance under the ghost-flag store.
 #[test]
 fn pop_into_marked_region_and_restore() {
-    let mut t = VecT::<u32, u32, true>::new();
-    let mut p = VecP::<u32, u32, true>::new();
+    let mut t = ForkHistory::new(VecT::<u32, u32, true>::new());
+    let mut p = ForkHistory::new(VecP::<u32, u32, true>::new());
     for v in 0..10u32 {
         t.try_push(v).unwrap();
         p.try_push(v).unwrap();
     }
-    let tk_t = t.try_mark(ShrinkPolicy::Never).unwrap();
-    let tk_p = p.try_mark(ShrinkPolicy::Never).unwrap();
+    let tk_t = t.mark(ShrinkPolicy::Never).unwrap();
+    let tk_p = p.mark(ShrinkPolicy::Never).unwrap();
     // Pop below the mark, then rebuild over the popped region with new values,
     // writing each slot twice (trail duplicates).
     for _ in 0..6 {
@@ -108,8 +109,8 @@ fn pop_into_marked_region_and_restore() {
         p.set(last_t, 200 + v);
     }
     assert_twins_match(&t, &p, "after pop/push churn");
-    t.try_restore(tk_t).unwrap();
-    p.try_restore(tk_p).unwrap();
+    assert!(t.restore(tk_t), "restore: own token");
+    assert!(p.restore(tk_p), "restore: own token");
     assert_twins_match(&t, &p, "post-restore");
     for i in 0..10u32 {
         assert_eq!(t.get(i), i, "restored value at {i}");
@@ -142,8 +143,8 @@ proptest! {
     /// contents compared after every operation, oracle checked at restores.
     #[test]
     fn trail_matches_parallel_twin(ops in proptest::collection::vec(op_strategy(), 1..400)) {
-        let mut t = VecT::<u32, u32, true>::new();
-        let mut p = VecP::<u32, u32, true>::new();
+        let mut t = ForkHistory::new(VecT::<u32, u32, true>::new());
+        let mut p = ForkHistory::new(VecP::<u32, u32, true>::new());
         let mut oracle: Vec<u32> = Vec::new();
         let mut snapshots: Vec<(VecToken, VecToken, Vec<u32>)> = Vec::new();
 
@@ -170,16 +171,16 @@ proptest! {
                 }
                 Op::Mark => {
                     if snapshots.len() >= 16 { continue; }
-                    let tk_t = t.try_mark(ShrinkPolicy::Never).expect("depth in bounds");
-                    let tk_p = p.try_mark(ShrinkPolicy::Never).expect("depth in bounds");
+                    let tk_t = t.mark(ShrinkPolicy::Never).expect("depth in bounds");
+                    let tk_p = p.mark(ShrinkPolicy::Never).expect("depth in bounds");
                     snapshots.push((tk_t, tk_p, oracle.clone()));
                 }
                 Op::Restore(idx) => {
                     if snapshots.is_empty() { continue; }
                     let idx = idx % snapshots.len();
                     let (tk_t, tk_p, snap) = snapshots[idx].clone();
-                    t.try_restore(tk_t).expect("own live token");
-                    p.try_restore(tk_p).expect("own live token");
+                    assert!(t.restore(tk_t), "own live token");
+                    assert!(p.restore(tk_p), "own live token");
                     oracle = snap;
                     snapshots.truncate(idx);
                 }
@@ -207,7 +208,10 @@ fn vecd_kinds_match_oracle() {
         true,
     > = VecD::new_kind(StoreKind::Inline);
     let kinds = [StoreKind::Inline, StoreKind::Parallel, StoreKind::Trail];
-    let mut cols: Vec<VecD<u32, u32, true>> = kinds.iter().map(|&k| VecD::new_kind(k)).collect();
+    let mut cols: Vec<ForkHistory<VecD<u32, u32, true>>> = kinds
+        .iter()
+        .map(|&k| ForkHistory::new(VecD::new_kind(k)))
+        .collect();
     let mut oracle: Vec<u32> = Vec::new();
     let mut snaps: Vec<(Vec<VecToken>, Vec<u32>)> = Vec::new();
 
@@ -250,7 +254,7 @@ fn vecd_kinds_match_oracle() {
                 }
                 let toks = cols
                     .iter_mut()
-                    .map(|c| c.try_mark(ShrinkPolicy::Never).unwrap())
+                    .map(|c| c.mark(ShrinkPolicy::Never).unwrap())
                     .collect();
                 snaps.push((toks, oracle.clone()));
             }
@@ -261,7 +265,7 @@ fn vecd_kinds_match_oracle() {
                 let i = (rng() as usize) % snaps.len();
                 let (toks, snap) = snaps[i].clone();
                 for (c, t) in cols.iter_mut().zip(toks) {
-                    c.try_restore(t).unwrap();
+                    assert!(c.restore(t), "restore: own token");
                 }
                 oracle = snap;
                 snaps.truncate(i);

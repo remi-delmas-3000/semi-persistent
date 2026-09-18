@@ -13735,6 +13735,87 @@ where
         TRACK && self.depth_exec() < (u32::MAX as usize) && n <= cap
     }
 
+    /// The structural twin of `try_mark_with` (what a typed group's member
+    /// pushes): open a frame with explicit physical rollover control and
+    /// mint nothing — the group's `History` mints (`mint_pushed`). Total.
+    pub fn try_push_frame_with(&mut self, options: MarkOptions)
+        -> (r: Result<(), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> {
+                &&& final(self).view() == old(self).view()
+                &&& final(self).depth_spec() == old(self).depth_spec() + 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().push(old(self).view())
+            },
+            r is Err ==> final(self).view() == old(self).view()
+                && final(self).depth_spec() == old(self).depth_spec()
+                && final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        if !TRACK {
+            return Err(crate::error::ContainerError::Untracked);
+        }
+        if !(self.depth_exec() < (u32::MAX as usize)) {
+            return Err(crate::error::ContainerError::DepthLimit);
+        }
+        proof {
+            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
+            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
+            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
+        }
+        if !(self.store.raw_len() <= <I as crate::index_like::IndexLike>::max().as_usize()) {
+            return Err(crate::error::ContainerError::CapacityExhausted);
+        }
+        self.push_frame_with_options(options);
+        Ok(())
+    }
+
+    /// The structural twin of `try_mark_adaptive`: a deferred-rollover frame
+    /// push followed by one explicit adaptive closed-history pass, minting
+    /// nothing. Total.
+    #[cold]
+    #[inline(never)]
+    pub fn try_push_frame_adaptive(
+        &mut self,
+        shrink: ShrinkPolicy,
+        input: crate::tier_policy::AdaptiveInput,
+    ) -> (r: Result<crate::tier_policy::AdaptiveReport, crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> {
+                &&& final(self).view() == old(self).view()
+                &&& final(self).depth_spec() == old(self).depth_spec() + 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().push(old(self).view())
+            },
+            r is Err ==> final(self).view() == old(self).view()
+                && final(self).depth_spec() == old(self).depth_spec()
+                && final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        if !TRACK {
+            return Err(crate::error::ContainerError::Untracked);
+        }
+        if !(self.depth_exec() < (u32::MAX as usize)) {
+            return Err(crate::error::ContainerError::DepthLimit);
+        }
+        proof {
+            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
+            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
+            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
+        }
+        if !(self.store.raw_len() <= <I as crate::index_like::IndexLike>::max().as_usize()) {
+            return Err(crate::error::ContainerError::CapacityExhausted);
+        }
+        self.push_frame_with_options(MarkOptions::new(
+            shrink,
+            crate::tier_policy::RolloverPolicy::Defer,
+        ));
+        let report = self.runtime_apply_adaptive(input);
+        Ok(report)
+    }
+
     /// Total mark with independent shrink and rollover controls.
     pub fn try_mark_with(&mut self, options: MarkOptions)
         -> (r: Result<VecToken, crate::error::ContainerError>)
@@ -14308,6 +14389,48 @@ where
         let hot = self.hot_stack.len();
         let trail = self.trail_stack.len();
         let tok = token.depth as usize;
+        let mut out: std::vec::Vec<I> = std::vec::Vec::new();
+
+        let cold_lo = if tok < cold { tok } else { cold };
+        self.pending_cold_indices_checked(cold_lo, cold, &mut out);
+        let ghost after_cold = out@;
+        let hot_lo = if tok < cold { 0 } else if tok < cold + hot { tok - cold } else { hot };
+        self.pending_pair_indices_checked(false, hot_lo, hot, &mut out);
+        let ghost after_hot = out@;
+        let trail_lo = if tok < cold + hot { 0 } else { tok - cold - hot };
+        self.pending_pair_indices_checked(true, trail_lo, trail, &mut out);
+        proof {
+            self.lemma_pending_union(tok as nat, cold_lo as nat, hot_lo as nat, trail_lo as nat,
+                after_cold, after_hot, out@);
+        }
+        Some(out)
+    }
+
+    /// The indices a restore to frame `depth` would touch (the typed-group
+    /// form of `pending_restore_indices`: the depth is the group's token's
+    /// depth, validated by the group's `History`; here only the frame's
+    /// liveness is checked). `None` when `depth` is not below the frame
+    /// stack.
+    pub fn pending_restore_indices_at(&self, depth: usize) -> (r: Option<std::vec::Vec<I>>)
+        requires
+            self.wf(),
+        ensures
+            r is Some <==> (depth as nat) < self.depth_spec(),
+            r matches Some(out) ==> forall|j: nat| #[trigger] Self::names_index(out@, j)
+                <==> exists|f: int| depth as nat <= f < self.depth_spec()
+                    && #[trigger] self.frame_captures(f, j),
+    {
+        hide(Vec::wf);
+        hide(range_saved_value);
+        proof { self.lemma_wf_named_parts(); }
+        if !(depth < self.depth_exec()) {
+            return None;
+        }
+        proof { self.lemma_partition_counts(); }
+        let cold = self.cold_stack.len();
+        let hot = self.hot_stack.len();
+        let trail = self.trail_stack.len();
+        let tok = depth;
         let mut out: std::vec::Vec<I> = std::vec::Vec::new();
 
         let cold_lo = if tok < cold { tok } else { cold };

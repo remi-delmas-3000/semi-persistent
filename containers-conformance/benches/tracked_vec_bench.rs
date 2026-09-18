@@ -15,6 +15,7 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
+use verus::group::ForkHistory;
 
 use semi_persistent_containers as prod;
 use semi_persistent_containers_verus as verus;
@@ -57,10 +58,10 @@ fn veci_prod(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
 }
 
 fn veci_verus(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
-    type V = verus::VecI<u32, u32, true>;
+    type V = ForkHistory<verus::VecI<u32, u32, true>>;
     b.iter_batched_ref(
         || {
-            let mut v: V = V::new();
+            let mut v: V = ForkHistory::new(verus::VecI::new());
             for i in 0..n {
                 v.try_push((i as u32) & 0x7FFF_FFFF)
                     .expect("push: within index word");
@@ -71,7 +72,7 @@ fn veci_verus(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
             let mut x: u64 = 0x2545F491;
             for _ in 0..marks {
                 let tok = v
-                    .try_mark(verus::ShrinkPolicy::Never)
+                    .mark(verus::ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 for _ in 0..WRITES_PER_MARK {
                     x ^= x << 13;
@@ -81,7 +82,7 @@ fn veci_verus(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
                     v.set_index(idx, (x as u32) & 0x7FFF_FFFF);
                 }
                 // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
-                v.try_restore_and_pop(tok).expect("restore: own token");
+                assert!(v.restore_and_pop(tok), "restore: own token");
             }
             black_box(v.len());
         },
@@ -118,10 +119,10 @@ fn vecp_prod(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
 }
 
 fn vecp_verus(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
-    type V = verus::VecP<u64, u32, true>;
+    type V = ForkHistory<verus::VecP<u64, u32, true>>;
     b.iter_batched_ref(
         || {
-            let mut v: V = V::new();
+            let mut v: V = ForkHistory::new(verus::VecP::new());
             for i in 0..n {
                 v.try_push(i as u64).expect("push: within index word");
             }
@@ -131,7 +132,7 @@ fn vecp_verus(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
             let mut x: u64 = 0x2545F492;
             for _ in 0..marks {
                 let tok = v
-                    .try_mark(verus::ShrinkPolicy::Never)
+                    .mark(verus::ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 for _ in 0..WRITES_PER_MARK {
                     x ^= x << 13;
@@ -140,7 +141,7 @@ fn vecp_verus(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
                     let idx = (x % n as u64) as u32;
                     v.set_index(idx, x);
                 }
-                v.try_restore_and_pop(tok).expect("restore: own token");
+                assert!(v.restore_and_pop(tok), "restore: own token");
             }
             black_box(v.len());
         },

@@ -28,6 +28,7 @@
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
+use verus::group::ForkHistory;
 
 use containers_conformance::prod_class_ring::{self as pring, PNodeId};
 use semi_persistent_containers as prod;
@@ -54,7 +55,7 @@ const RING_MERGES: usize = RING_N / 2;
 const RING_WALK_PASSES: usize = 8;
 
 type VerusTrackedVec =
-    verus::vec::Vec<u64, u32, verus::parallel_store::ParallelStore<u64, u32>, true>;
+    ForkHistory<verus::vec::Vec<u64, u32, verus::parallel_store::ParallelStore<u64, u32>, true>>;
 type VerusRing<const TRACK: bool> = verus::CircularList<verus::Opt<VRingKey>, VRingNode, TRACK>;
 
 // ---------------------------------------------------------------------------
@@ -132,10 +133,17 @@ fn bench_vec_mark_set_restore(c: &mut Criterion) {
     });
 
     g.bench_function("verified", |b| {
-        type V = verus::vec::Vec<u64, u32, verus::parallel_store::ParallelStore<u64, u32>, true>;
+        type V = ForkHistory<
+            verus::vec::Vec<u64, u32, verus::parallel_store::ParallelStore<u64, u32>, true>,
+        >;
         b.iter_batched_ref(
             || {
-                let mut v: V = V::new();
+                let mut v: V = ForkHistory::new(verus::vec::Vec::<
+                    u64,
+                    u32,
+                    verus::parallel_store::ParallelStore<u64, u32>,
+                    true,
+                >::new());
                 for i in 0..VEC_N {
                     v.try_push(i as u64).expect("push: within index word");
                 }
@@ -143,7 +151,7 @@ fn bench_vec_mark_set_restore(c: &mut Criterion) {
             },
             |v| {
                 let tok = v
-                    .try_mark(verus::vec::ShrinkPolicy::Never)
+                    .mark(verus::vec::ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 let mut x: u64 = 0x9E3779B97F4A7C15;
                 for _ in 0..VEC_TOUCHES {
@@ -154,7 +162,7 @@ fn bench_vec_mark_set_restore(c: &mut Criterion) {
                     v.set(idx, x);
                 }
                 // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
-                v.try_restore_and_pop(tok).expect("restore: own token");
+                assert!(v.restore_and_pop(tok), "restore: own token");
                 black_box(v.len());
             },
             BatchSize::LargeInput,
@@ -187,20 +195,25 @@ fn prod_restore_fixture() -> (prod::VecP<u64, u32, true>, prod::VecToken) {
 }
 
 fn verus_restore_fixture() -> (VerusTrackedVec, verus::vec::VecToken) {
-    let mut v = VerusTrackedVec::new();
+    let mut v: VerusTrackedVec = ForkHistory::new(verus::vec::Vec::<
+        u64,
+        u32,
+        verus::parallel_store::ParallelStore<u64, u32>,
+        true,
+    >::new());
     for i in 0..VEC_N {
         v.try_push(i as u64).expect("push: within index word");
     }
     let warm = v
-        .try_mark(verus::vec::ShrinkPolicy::Never)
+        .mark(verus::vec::ShrinkPolicy::Never)
         .expect("mark: bounded depth");
     for i in 0..VEC_TOUCHES {
         v.set(i as u32, i as u64);
     }
-    v.try_restore_and_pop(warm).expect("restore: own token");
+    assert!(v.restore_and_pop(warm), "restore: own token");
 
     let token = v
-        .try_mark(verus::vec::ShrinkPolicy::Never)
+        .mark(verus::vec::ShrinkPolicy::Never)
         .expect("mark: bounded depth");
     for i in 0..VEC_TOUCHES {
         v.set(i as u32, (i + 999) as u64);
@@ -240,7 +253,7 @@ fn bench_vec_restore_replay(c: &mut Criterion) {
             |fixtures| {
                 let mut total = 0usize;
                 for (v, token) in fixtures.iter_mut() {
-                    v.try_restore_and_pop(*token).expect("restore: own token");
+                    assert!(v.restore_and_pop(*token), "restore: own token");
                     total += v.len() as usize;
                 }
                 black_box(total)
@@ -550,13 +563,13 @@ fn bench_class_ring_merge_restore(c: &mut Criterion) {
 
     g.bench_function("verified", |b| {
         b.iter_batched_ref(
-            verus_ring_build::<true>,
+            || ForkHistory::new(verus_ring_build::<true>()),
             |ring| {
                 let token = ring
-                    .try_mark(verus::vec::ShrinkPolicy::Never)
+                    .mark(verus::vec::ShrinkPolicy::Never)
                     .expect("mark: bounded depth");
                 verus_ring_merge_all(ring);
-                ring.try_restore_and_pop(token).expect("restore: own token");
+                assert!(ring.restore_and_pop(token), "restore: own token");
                 black_box(ring.len())
             },
             BatchSize::LargeInput,
@@ -609,7 +622,8 @@ fn bench_map_intern(c: &mut Criterion) {
 
     g.bench_function("verified", |b| {
         b.iter(|| {
-            let mut m: verus::SpMap<u64, (), usize, true> = verus::SpMap::new();
+            let mut m: ForkHistory<verus::SpMap<u64, (), usize, true>> =
+                ForkHistory::new(verus::SpMap::new());
             let mut x: u64 = 0x243F_6A88_85A3_08D3;
             let tok = {
                 for _ in 0..N / 2 {
@@ -621,7 +635,7 @@ fn bench_map_intern(c: &mut Criterion) {
                         m.try_insert(key, ()).expect("insert: within index word");
                     }
                 }
-                m.try_mark(verus::ShrinkPolicy::Never)
+                m.mark(verus::ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness")
             };
             for _ in 0..N / 2 {
@@ -633,7 +647,7 @@ fn bench_map_intern(c: &mut Criterion) {
                     m.try_insert(key, ()).expect("insert: within index word");
                 }
             }
-            m.try_restore_and_pop(tok).expect("restore: own token");
+            assert!(m.restore_and_pop(tok), "restore: own token");
             black_box(m.len())
         })
     });
@@ -679,14 +693,15 @@ fn bench_sparse_set_churn(c: &mut Criterion) {
 
     g.bench_function("verified", |b| {
         b.iter(|| {
-            let mut s: verus::SparseSet<u64, VElem, verus::ParallelStore<u64, VElem>, true> =
-                verus::SparseSet::new();
+            let mut s: ForkHistory<
+                verus::SparseSet<u64, VElem, verus::ParallelStore<u64, VElem>, true>,
+            > = ForkHistory::new(verus::SparseSet::new());
             let mut ids = Vec::with_capacity(N);
             for i in 0..N {
                 ids.push(s.try_add(i as u64).expect("add: within id space"));
             }
             let tok = s
-                .try_mark(verus::ShrinkPolicy::Never)
+                .mark(verus::ShrinkPolicy::Never)
                 .expect("mark: depth bounded by this harness");
             let mut x: u64 = 0xB5297A4D;
             for _ in 0..N / 2 {
@@ -701,7 +716,7 @@ fn bench_sparse_set_churn(c: &mut Criterion) {
                     ids[k] = s.try_add(x).expect("add: within id space");
                 }
             }
-            s.restore_and_pop(tok);
+            assert!(s.restore_and_pop(tok), "restore: own token");
             black_box(s.len().raw())
         })
     });
@@ -739,12 +754,13 @@ fn bench_aov_log(c: &mut Criterion) {
 
     g.bench_function("verified", |b| {
         b.iter(|| {
-            let mut v: verus::AppendOnlyVec<u64, usize, true> = verus::AppendOnlyVec::new();
+            let mut v: ForkHistory<verus::AppendOnlyVec<u64, usize, true>> =
+                ForkHistory::new(verus::AppendOnlyVec::new());
             for i in 0..N / 2 {
                 v.try_push(i as u64).expect("push: within index word");
             }
             let tok = v
-                .try_mark(verus::ShrinkPolicy::Never)
+                .mark(verus::ShrinkPolicy::Never)
                 .expect("mark: depth bounded by this harness");
             for i in 0..N / 2 {
                 v.try_push(i as u64).expect("push: within index word");
@@ -753,7 +769,7 @@ fn bench_aov_log(c: &mut Criterion) {
             for x in v.as_slice() {
                 acc = acc.wrapping_add(*x);
             }
-            v.try_restore_and_pop(tok).expect("restore: own token");
+            assert!(v.restore_and_pop(tok), "restore: own token");
             black_box((acc, v.len()))
         })
     });
@@ -907,19 +923,20 @@ fn bench_map_restore_small_suffix(c: &mut Criterion) {
         })
     });
     g.bench_function("verified", |b| {
-        let mut m: verus::SpMap<u64, (), usize, true> = verus::SpMap::new();
+        let mut m: ForkHistory<verus::SpMap<u64, (), usize, true>> =
+            ForkHistory::new(verus::SpMap::new());
         for k in 0..LIVE as u64 {
             m.try_insert(k, ()).expect("insert: within index word");
         }
         b.iter(|| {
             let tok = m
-                .try_mark(verus::ShrinkPolicy::Never)
+                .mark(verus::ShrinkPolicy::Never)
                 .expect("mark: depth bounded by this harness");
             for k in 0..PER_FRAME {
                 m.try_insert(LIVE as u64 + k, ())
                     .expect("insert: within index word");
             }
-            m.try_restore_and_pop(tok).expect("restore: own token");
+            assert!(m.restore_and_pop(tok), "restore: own token");
             black_box(m.len())
         })
     });
@@ -948,7 +965,8 @@ fn bench_map_restore_small_suffix(c: &mut Criterion) {
         })
     });
     g.bench_function("verified", |b| {
-        let mut m: verus::SpMap<String, u32, usize, true> = verus::SpMap::new();
+        let mut m: ForkHistory<verus::SpMap<String, u32, usize, true>> =
+            ForkHistory::new(verus::SpMap::new());
         for i in 0..LIVE_STRING as u64 {
             m.try_insert(key(i), i as u32)
                 .expect("insert: within index word");
@@ -958,13 +976,13 @@ fn bench_map_restore_small_suffix(c: &mut Criterion) {
             .collect();
         b.iter(|| {
             let tok = m
-                .try_mark(verus::ShrinkPolicy::Never)
+                .mark(verus::ShrinkPolicy::Never)
                 .expect("mark: depth bounded by this harness");
             for (k, s) in fresh.iter().enumerate() {
                 m.try_insert(s.clone(), k as u32)
                     .expect("insert: within index word");
             }
-            m.try_restore_and_pop(tok).expect("restore: own token");
+            assert!(m.restore_and_pop(tok), "restore: own token");
             black_box(m.len())
         })
     });

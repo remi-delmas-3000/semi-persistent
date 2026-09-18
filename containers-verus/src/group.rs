@@ -261,8 +261,9 @@ impl<M: Member> ForkHistory<M> {
 
     /// Drop the open top scope (the SMT-LIB `pop`): the member undoes and
     /// drops its top frame and the scope's token dies. `false` (nothing
-    /// changes) on an empty scope stack or a drifted member.
-    pub fn pop(&mut self) -> (r: bool)
+    /// changes) on an empty scope stack or a drifted member. (Named for the
+    /// scope: a member's element `pop` reaches through the group unshadowed.)
+    pub fn pop_scope(&mut self) -> (r: bool)
         requires old(self).history_ref().wf(), old(self).member_ref().wf(),
         ensures
             final(self).history_ref().wf(),
@@ -284,6 +285,25 @@ impl<M: Member> ForkHistory<M> {
         self.history.pop_member(&mut self.member)
     }
 
+    /// The member pushed a frame itself, by a structural variant of its own
+    /// (`group.member.push_frame_adaptive(..)`, say): mint its token. `None`
+    /// when the member is not exactly one frame ahead.
+    pub fn mint_pushed(&mut self) -> (r: Option<GroupToken>)
+        requires old(self).history_ref().wf(), old(self).member_ref().wf(),
+        ensures
+            final(self).history_ref().wf(),
+            final(self).member_ref() == old(self).member_ref(),
+            r matches Some(t) ==> {
+                &&& old(self).member_ref().depth_spec() == old(self).depth_spec() + 1
+                &&& final(self).wf()
+                &&& t.depth_spec() == old(self).depth_spec()
+                &&& final(self).valid_spec(t)
+            },
+            r is None ==> *final(self) == *old(self),
+    {
+        self.history.mint_pushed_member(&self.member)
+    }
+
     /// Does `t` name a live version of this group (minted here, not cut)?
     pub fn is_valid(&self, t: GroupToken) -> (b: bool)
         requires self.history_ref().wf(),
@@ -292,11 +312,12 @@ impl<M: Member> ForkHistory<M> {
         self.history.is_valid(t)
     }
 
-    pub fn depth(&self) -> (d: u32)
+    /// The scope depth (the member's frame depth when in lockstep).
+    pub fn depth(&self) -> (d: usize)
         requires self.history_ref().wf(),
         ensures d as nat == self.depth_spec(),
     {
-        self.history.depth()
+        self.history.depth() as usize
     }
 }
 
@@ -339,6 +360,32 @@ impl History {
         let t = self.mark();
         m.push_frame(shrink);
         Some(t)
+    }
+
+    /// Mint the token for a frame the member pushed itself, by a structural
+    /// variant of its own (an adaptive or options-driven push that the plain
+    /// `push_frame` does not spell): the member must sit exactly one frame
+    /// above this history. `None` (nothing changes) otherwise — a member
+    /// further ahead has drifted.
+    pub fn mint_pushed_member<M: Member>(&mut self, m: &M) -> (r: Option<GroupToken>)
+        requires old(self).wf(), m.wf(),
+        ensures
+            final(self).wf(),
+            r matches Some(t) ==> {
+                &&& m.depth_spec() == old(self).depth_spec() + 1
+                &&& final(self).depth_spec() == m.depth_spec()
+                &&& t.depth_spec() == old(self).depth_spec()
+                &&& final(self).valid_spec(t)
+            },
+            r is None ==> *final(self) == *old(self),
+    {
+        if !(self.depth() < u32::MAX) {
+            return None;
+        }
+        if !(m.depth_exec() == self.depth() as usize + 1) {
+            return None;
+        }
+        Some(self.mark())
     }
 
     /// Restore `m` to the version `t` names and keep its frame open
@@ -476,6 +523,7 @@ where
     }
 
     open spec fn can_push(&self) -> bool {
+        &&& TRACK
         &&& crate::vec::Vec::depth_spec(self) < u32::MAX as nat
         &&& crate::vec::Vec::view(self).len() < I::max_nat()
     }
@@ -501,7 +549,7 @@ where
         }
         let depth_ok = self.depth_exec() < u32::MAX as usize;
         let len_ok = self.store.raw_len() <= m.as_usize();
-        depth_ok && len_ok
+        TRACK && depth_ok && len_ok
     }
 
     fn depth_exec(&self) -> (d: usize) {
@@ -557,7 +605,8 @@ where
     }
 
     open spec fn can_push(&self) -> bool {
-        crate::append_only_vec::AppendOnlyVec::depth_spec(self) < u32::MAX as nat
+        &&& TRACK
+        &&& crate::append_only_vec::AppendOnlyVec::depth_spec(self) < u32::MAX as nat
     }
 
     open spec fn model(&self) -> Seq<T> {
@@ -572,7 +621,7 @@ where
     }
 
     fn can_push_now(&self) -> (b: bool) {
-        self.frames.len() < u32::MAX as usize
+        TRACK && self.frames.len() < u32::MAX as usize
     }
 
     fn depth_exec(&self) -> (d: usize) {
@@ -886,6 +935,7 @@ where
     }
 
     open spec fn can_push(&self) -> bool {
+        &&& TRACK
         &&& self.n_spec() < usize::MAX
         &&& crate::circular_list::CircularList::depth_spec(self) < u32::MAX as nat
     }
@@ -906,7 +956,8 @@ where
     }
 
     fn can_push_now(&self) -> (b: bool) {
-        self.entries.store.raw_len() < usize::MAX
+        TRACK
+            && self.entries.store.raw_len() < usize::MAX
             && self.entries.depth_exec() < (u32::MAX as usize)
     }
 
@@ -1017,6 +1068,7 @@ where
     }
 
     open spec fn can_push(&self) -> bool {
+        &&& TRACK
         &&& self.heads_view().len() < usize::MAX
         &&& self.nodes_view().len() < usize::MAX
         &&& self.heads_depth_spec() < u32::MAX as nat
@@ -1042,7 +1094,8 @@ where
     fn can_push_now(&self) -> (b: bool) {
         let hn = self.heads.store.raw_len();
         let nn = self.nodes.store.raw_len();
-        hn < usize::MAX
+        TRACK
+            && hn < usize::MAX
             && nn < usize::MAX
             && self.heads.depth_exec() < u32::MAX as usize
             && self.nodes.depth_exec() < u32::MAX as usize
@@ -1157,6 +1210,7 @@ where
     }
 
     open spec fn can_push(&self) -> bool {
+        &&& TRACK
         &&& self.parent_depth_spec() < u32::MAX as nat
         &&& self.parent_view().len() < <<T as crate::opt::DenseId>::Index as crate::index_like::IndexLike>::max_nat()
         &&& self.rank_depth_spec() < u32::MAX as nat
@@ -1346,7 +1400,8 @@ where
     }
 
     open spec fn can_push(&self) -> bool {
-        crate::map::SpMap::depth_spec(self) < u32::MAX as nat
+        &&& TRACK
+        &&& crate::map::SpMap::depth_spec(self) < u32::MAX as nat
     }
 
     open spec fn model(&self) -> Seq<(K, V)> {
@@ -1361,7 +1416,7 @@ where
     }
 
     fn can_push_now(&self) -> (b: bool) {
-        self.log.depth() < u32::MAX as usize
+        TRACK && self.log.depth() < u32::MAX as usize
     }
 
     fn depth_exec(&self) -> (d: usize) {
@@ -1421,7 +1476,8 @@ where
     }
 
     open spec fn can_push(&self) -> bool {
-        self.arena_depth_spec() < u32::MAX as nat
+        &&& TRACK
+        &&& self.arena_depth_spec() < u32::MAX as nat
     }
 
     open spec fn model(&self) -> (Seq<L::Node>, crate::bplus_tree::Tree) {
@@ -1440,7 +1496,7 @@ where
     }
 
     fn can_push_now(&self) -> (b: bool) {
-        self.nodes.depth_exec() < u32::MAX as usize
+        TRACK && self.nodes.depth_exec() < u32::MAX as usize
     }
 
     fn depth_exec(&self) -> (d: usize) {
@@ -1561,7 +1617,8 @@ where
     }
 
     open spec fn can_push(&self) -> bool {
-        crate::eclasses::EClasses::depth_spec(self) < u32::MAX as nat
+        &&& TRACK
+        &&& crate::eclasses::EClasses::depth_spec(self) < u32::MAX as nat
     }
 
     open spec fn model(&self) -> (Seq<usize>, Seq<Seq<usize>>, Seq<crate::circular_list::CircularListNode<crate::opt::Opt<K>, T>>, Seq<crate::eclasses::ClassData<L, T>>, Seq<<T as crate::opt::DenseId>::Index>, Seq<<T as crate::opt::DenseId>::Index>, Seq<Seq<usize>>, Seq<crate::opt::Opt<T>>) {
@@ -1595,7 +1652,7 @@ where
 
     fn can_push_now(&self) -> (b: bool) {
         proof { self.min_pool.lemma_snapshots_len(); }
-        self.min_pool.depth_exec() < u32::MAX as usize
+        TRACK && self.min_pool.depth_exec() < u32::MAX as usize
     }
 
     fn depth_exec(&self) -> (d: usize) {
@@ -1678,3 +1735,20 @@ where
 }
 
 } // verus!
+
+// Typed access without spelling `.member`: `group.len()`, `group.set(..)`,
+// `group.get(..)` reach the member (plain Rust, outside the verified
+// perimeter; the group's own operations shadow nothing the member has, since
+// the member carries no versioning surface of its own).
+impl<M: Member> core::ops::Deref for ForkHistory<M> {
+    type Target = M;
+    fn deref(&self) -> &M {
+        &self.member
+    }
+}
+
+impl<M: Member> core::ops::DerefMut for ForkHistory<M> {
+    fn deref_mut(&mut self) -> &mut M {
+        &mut self.member
+    }
+}
