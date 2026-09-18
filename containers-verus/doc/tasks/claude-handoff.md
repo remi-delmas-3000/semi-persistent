@@ -39,7 +39,7 @@ Read it and the linked acceptance checklist before continuing.
 
 - Working directory: `/Users/remidelmas/projects/sp-d21-exec`
 - Branch: `d21-exec`; commits are local and signed; **nothing is pushed**.
-- `e28ac37` committed the (since superseded) sort-based Trail selection
+- `3300b61` committed the (since superseded) sort-based Trail selection
   helpers; the Trail-dedupe checkpoint that follows it replaces that algorithm.
 
 ## Trail-dedupe checkpoint (2026-09-16)
@@ -94,10 +94,10 @@ reporters/diagnostics and transparent type registrations.
 
 ## Derived and Step 3 checkpoints (2026-09-16)
 
-`328c512` exports derived restore effects (ListArena, EClasses, SpMap,
+`e49eb08` exports derived restore effects (ListArena, EClasses, SpMap,
 CircularList, UnionFind, BPlusTreeSet) and group member models/archives
 (`SyncMember::model`/`archive`, `ForkHistory::mark`/`restore`, parallel
-variants over the documented rayon boundary). `9df28cb` checks
+variants over the documented rayon boundary). `f357cea` checks
 `pending_restore_indices` (exact captured-index set) and adds
 `sequence_witness_checked`, the production instantiation of the sequence
 theorem; the Step 3 dependency map is `proofs/top_down/interface-inventory.md`.
@@ -112,12 +112,12 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
 
 ## Next actions (goal extended by the user on 2026-09-16, evening)
 
-1. Done (`45fc132`): the protocol report for `f304bc7`.
+1. Done (`45df3b0`): the protocol report for `31286e2`.
 2. Caching / destination-passing work (from the allocation tour). Done: the
-   Trail→Hot dedupe `HashSet` owned by the `Vec` (`987a964`); the `SpMap`
+   Trail→Hot dedupe `HashSet` owned by the `Vec` (`3a41ff5`); the `SpMap`
    restore unwinding its index over the discarded suffix through a
    previous-occurrence column instead of rebuilding from the survivors
-   (`54563da`; the fingerprint-bucket variant was dropped because vstd
+   (`233305e`; the fingerprint-bucket variant was dropped because vstd
    specifies no `hash_one`, so it would have added trust). Settled by
    inspection, no change: `diff_compress::sort_frame_by_index`'s copy is
    reached only from the cold-stack sealing paths (`seal_runs`,
@@ -181,7 +181,7 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    a precondition but remains the one uninterpreted assumption a custom key
    type must satisfy for `SpMap`'s contract (`doc/future/key-model-tcb.md`).
 7. Wave after the extended goal (2026-09-17, five signed local commits on
-   top of `df0da02`, each with the full battery; progress doc, same date):
+   top of `cd8b2ef`, each with the full battery; progress doc, same date):
    byte reporters stratified out of the perimeter (`diagnostics::HeapBytes`,
    trust 37 + 5); a verified ascending-frame fast path in the Trail dedupe
    (the singleton-frame trade-off of item 6); the e-graph literal store on
@@ -198,17 +198,17 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    lemmas; limit 2000 → 300 — its old context had grown into a Z3
    memory blow-up that showed as an "expected rlimit-count" worker panic;
    a healthy full verify is ninety seconds). Three more commits closed the
-   wave the same night: `ed5c5f5` makes the stamp table O(1) per mark and
+   wave the same night: `683dbef` makes the stamp table O(1) per mark and
    per restore (the provenance commit's benchmarks had shown 1.1–1.7× on
-   every mark/restore-dominated case from the old bump loop), and `0b1200e`
+   every mark/restore-dominated case from the old bump loop), and `2743e17`
    ships restore semantics B — restore resets to the checkpoint and keeps
    its frame open, `pop_scope` drops it, the SMT-LIB `(pop)` is restore
    then pop — across the columns, the composites, the group manager, the
-   e-graph and the harnesses; `486fcb0` reopens the restored frame with a
+   e-graph and the harnesses; `c23eb12` reopens the restored frame with a
    deferred rollover (the first B benchmarks showed restore-dominated
    regressions: the reopen re-migrated the parent stratum on every restore)
    and makes every verified restore in the benches pop, for legacy parity;
-   `f676208` fuses the SMT-LIB pop into `restore_and_pop(t)` on one pop
+   `073e38a` fuses the SMT-LIB pop into `restore_and_pop(t)` on one pop
    core (spelled as `restore` then `pop_scope` it reopened the parent
    stratum twice: 1.4–2.1× on one-frame cases, 1.5× on the store traces).
    Benchmarks per commit: performance report, "Wave after extended goal
@@ -227,7 +227,7 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    two-step id-mint verification, is written up as an autonomous goal:
    `doc/tasks/nightshift-external-manager-goal.md`.
 8. External-manager wave (2026-09-18, six signed local commits
-   `a0b6d57`..`67900d4` on top of `0dd629c` — rebuilt from the twelve that
+   `5fc8b29`..`67900d4` on top of `4591d65` — rebuilt from the twelve that
    were built and lean-gated, which stay on the local branch
    `d21-exec-wave-full`; full battery on the final source; progress doc,
    "The external-manager wave"): the manager is provided from the
@@ -243,7 +243,7 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    lets the e-graph keep its members as separate fields: its nine
    synchronized members now run on one `History` through `EGraphMembers`,
    nine per-member token stacks deleted, store traces 0.97–1.00× and
-   `empty20k` 0.79–0.80× of `f676208`. Harnesses, benches and all 22
+   `empty20k` 0.79–0.80× of `073e38a`. Harnesses, benches and all 22
    in-crate test files drive groups of one.
    The fifth commit deleted the old surface (about 5,500 lines):
    the seven composites' `mark`/`restore`/`try_*`/`pop_scope`/
@@ -252,13 +252,13 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    (the director pool moved to the frame protocol; the per-column restore
    profiling was rewired into `NodeStore::reset_frame`). Verification
    **2726 verified, 0 errors**.
-   Two further commits closed the shape completely. `9d9fdef` put the
+   Two further commits closed the shape completely. `92dab5b` put the
    anti-unification search layer on one history (`au::group_members::
    AuMembers` over its five layers): one checkpoint is one stamp where it
    used to be 62 container tokens in eleven token structs, its action
    cache's action lists moved from a hand-truncated plain `Vec` into an
    `AppendOnlyVec`, and the per-layer provenance tests became one at the
-   session level. `a10fc54` then deleted the last token surfaces —
+   session level. `34b5a92` then deleted the last token surfaces —
    `SpMap`'s, `Vec`'s and `AppendOnlyVec`'s — with the columns' embedded
    `Genealogy`, its three framing lemmas and the cuts inside
    `restore_frame`/`reset_frame`; `sequence_witness_checked` restates the
@@ -340,7 +340,7 @@ fix tolerance/decision rule before evaluating results, repeat matched workloads 
 the same hardware/toolchain/features, retain raw Criterion estimates/CIs, require
 all applicable cases to bound slowdown within tolerance, and fix regressions.
 Inconclusive results remain open. Unmatched tier operations compare against
-`d191c4a` separately and do not establish legacy parity. Include parallel coverage
+`aa01a08` separately and do not establish legacy parity. Include parallel coverage
 or document and resolve required coverage gaps. Avoid verifier/test load while
 benchmarking.
 

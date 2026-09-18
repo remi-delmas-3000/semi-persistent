@@ -352,7 +352,7 @@ dead for good, and `pop_scope` (the SMT-LIB `pop`) drops the open top frame
 and kills its token. A token minted by another manager is refused whatever
 its numbers.
 
-The stamp table is O(1) per operation (commit `ed5c5f5`): stamps come from
+The stamp table is O(1) per operation (commit `683dbef`): stamps come from
 a counter that only grows (each handed out once), the table keeps a live
 length, validity is `depth < len && levels[depth] == stamp`, a cut is
 `len := d` (one write; the stale stamps above stay in place) and a mint at

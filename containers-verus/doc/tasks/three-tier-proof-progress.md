@@ -83,7 +83,7 @@ resolution preserves runtime code:
 - proof-erasure markers on `retained_closed_prefix` and
   `hot_frame_run_count`, whose std planner operations are unsupported.
 
-This is **three new `external_body` markers** relative to `44b8657`: one opaque
+This is **three new `external_body` markers** relative to `a1cf1bf`: one opaque
 type and two execution-only planner functions. `Vec::with_store_mode` and
 `Vec::with_store_policy` now verify, including the empty unique-state
 `hot_defer_wf` postcondition, so the pre-existing `with_store_policy` marker is
@@ -385,7 +385,7 @@ and remove the in-scope `restore_frame` trust.
 
 ## 2026-09-15 — H4 canonical history prefix (work in progress)
 
-Fresh checkout baseline at `90f3168`:
+Fresh checkout baseline at `de4b4d2`:
 
 ```text
 cargo verus verify -p semi-persistent-containers-verus
@@ -520,7 +520,7 @@ stronger public snapshot-stack guarantees.
 The user's updated execution plan is preserved in
 `all-tier-semi-persistence-goal.md`. It places the shared physical contract and
 all-tier Vec closure before the downstream public-contract pass. The H4 local
-checkpoint is `b904db2`; no push is authorized.
+checkpoint is `740c876`; no push is authorized.
 
 `range_saved_value` interprets a physical Trail/Hot range as the first
 chronological value at an index, or `None` when absent. Its contract is derived
@@ -608,7 +608,7 @@ The fresh `literal-types` Verus run also passed: **2240 verified, 0 errors**
 
 ### Mixed-tier reconstruction — local pre-state and batched induction
 
-The preceding Cold-run checkpoint is `70cd3ed`. The next reconstruction phase
+The preceding Cold-run checkpoint is `d174186`. The next reconstruction phase
 uses `let ghost pre = *self` and adds no persistent fields or ghost history.
 `frame_saved_value` remains a projection of physical pools. Reconstruction is
 separate from final well-formedness: intermediate buffers need only agree with
@@ -665,7 +665,7 @@ history or assuming the relationships. Also export a precise contract for
 
 ### Restore prefixes and zero-target closure
 
-The mixed-tier reconstruction checkpoint is `e410180`. Reconstruction now also
+The mixed-tier reconstruction checkpoint is `9a16936`. Reconstruction now also
 ensures every capture flag is clear: pair-tier header monotonicity proves any
 replayed ingress suffix contains all originally flagged indices. Fused stores
 clear those indices during the existing batch; other stores retain the checked
@@ -704,7 +704,7 @@ Nonzero physical-invariant restoration and survivor promotion remain unfinished.
 
 ### Retained Trail/Hot representation after truncation
 
-The preceding prefix and zero-target checkpoint is `ee746c2`. The actual
+The preceding prefix and zero-target checkpoint is `76c56fc`. The actual
 `truncate_restored_history_checked` helper now additionally establishes
 `hot_repr_ok` and `trail_repr_ok`. Each retained physical frame keeps its
 original range, snapshot, and newer layer. In particular, a newly open top
@@ -729,7 +729,7 @@ Trust remains 81 default markers plus five literal-type registrations.
 
 ### Retained Cold representation after truncation
 
-The retained pair-tier checkpoint is `6fc2c44`. The checked truncation helper
+The retained pair-tier checkpoint is `f2fb8d7`. The checked truncation helper
 now also establishes `cold_repr_ok`, so it exports all three physical tier
 invariants alongside exact physical/canonical prefixes and `wf_for_snap`.
 
@@ -757,7 +757,7 @@ mixed-tier paths are still unfinished.
 
 ### Capture rebuilding and retained-ingress restore
 
-The Cold-prefix checkpoint is `29c2928`. `finish_restore_range_checked` now
+The Cold-prefix checkpoint is `389c7eb`. `finish_restore_range_checked` now
 proves that flags across the whole live buffer equal membership in the retained
 physical frame. It passes the current live length to the store protocol, so
 saved lengths may still zigzag or exceed the restored live length.
@@ -789,7 +789,7 @@ histories; those cover the newly dispatched path and remaining promotion path.
 
 ### Checked Hot-to-Trail survivor promotion
 
-The capture-rebuilding checkpoint is `f52541d`. Hot-to-Trail promotion now has
+The capture-rebuilding checkpoint is `717873f`. Hot-to-Trail promotion now has
 an exact physical postcondition: the Hot prefix is retained, its newest frame's
 complete payload moves to a single Trail frame rebased to zero, and all other
 fields remain unchanged. The proof preserves the first hitter under rebasing,
@@ -827,7 +827,7 @@ promotion, empty frame identity, and write/remigrate after promotion.
 
 ### Checked Cold run formation and saved-domain bounds
 
-The Hot-promotion checkpoint is `cc9557e`. Cold promotion requires facts that
+The Hot-promotion checkpoint is `4ebf531`. Cold promotion requires facts that
 were absent from `cold_repr_ok`: emitted runs are nonempty, and every decoded
 index lies below that frame's saved length. `cold_payload_ok` now states those
 facts without adding stored fields or assuming monotone saved lengths.
@@ -870,7 +870,7 @@ works; the top theorem will not be weakened to fit existing helpers.
 
 ### Physical storage refines the shared top-down model
 
-The conditional composition and classification checkpoint is `5477152`.
+The conditional composition and classification checkpoint is `7827e85`.
 The production crate now imports the same mathematical model used by the
 conditional proof. `persistence_frame` derives a finite map from each physical
 frame's saved-value lookup; `persistence_model` uses those maps alongside the
@@ -974,7 +974,7 @@ existing capture-finalization theorem is applied.
 
 ### Checked Cold promotion and complete Cold-survivor restore
 
-The decoder checkpoint is signed local commit `25ecbcf`. The subsequent work
+The decoder checkpoint is signed local commit `a69572f`. The subsequent work
 checks the complete promotion assembly for both DiffStore-selected destinations.
 `promote_cold_storage_checked` proves the exact Cold prefixes, unchanged store
 and canonical fields, decoded destination contents, and the new survivor header.
@@ -1008,7 +1008,7 @@ oracle is unchanged.
 
 An additional CI partial-API audit fails with 73 public partial functions,
 33 allowlisted and 40 unlisted (zero unsafe-public functions). Running the
-same scanner against the committed `25ecbcf` source produced exactly the same
+same scanner against the committed `a69572f` source produced exactly the same
 output and exit status. This change adds no public partial API; the pre-existing
 allowlist discrepancy remains recorded rather than being hidden by expanding
 the allowlist. The trust-count CI check passes at 79 + 5.
@@ -1020,7 +1020,7 @@ part of the active objective.
 
 ### General canonical capture and checked mark wrapper
 
-The nightshift resumes from `d191c4a` under the detailed acceptance checklist in
+The nightshift resumes from `aa01a08` under the detailed acceptance checklist in
 `semi-persistence-completion-goal.md` and the execution instructions in
 `nightshift-completion-goal.md`. All four completion milestones remain open.
 
@@ -1074,7 +1074,7 @@ is recorded in the proof classification alongside the existing capture gaps.
 
 ### Checked all-tier physical capture through DiffStore
 
-Starting from signed checkpoint `96c90f9`, `runtime_capture` now verifies for
+Starting from signed checkpoint `d29bde3`, `runtime_capture` now verifies for
 both store-selected ingress disciplines under the general Vec invariant. The
 old trusted capture boundary is removed. Its contract exports exact physical
 append/no-op behavior, unchanged nonselected pool, capture-flag update, unchanged
@@ -1145,7 +1145,7 @@ remain open; this checkpoint does not complete any of the four overall steps.
 
 ### Checked mixed-tier set through capture and raw write
 
-Starting from signed checkpoint `122a5b7`, `runtime_set_fallback` now verifies
+Starting from signed checkpoint `226df51`, `runtime_set_fallback` now verifies
 against its original contract. Both ingress disciplines compose the checked
 general capture path with `DiffStore::set_raw`. The former unique-store branch
 no longer calls a Hot-only helper under a weaker mixed-history premise. The
@@ -1210,7 +1210,7 @@ four overall completion steps is declared complete by this checkpoint.
 
 ### Checked all-tier push/regrowth and pop
 
-Starting from signed checkpoint `f994e18`, both remaining mutation fallback
+Starting from signed checkpoint `28e2add`, both remaining mutation fallback
 bodies now verify: `runtime_push_fallback` and `runtime_pop_fallback`. Capture,
 set, push/regrowth and pop therefore have checked general implementations in
 addition to the retained Hot specializations. Mark/open-frame and policy
@@ -1261,7 +1261,7 @@ Final evidence:
   (`/tmp/sp-d21-push-pop-final-consumers.log`).
 - Formatting, whitespace and trust-count checks passed. The commands are the
   same full gate sequence recorded for the capture checkpoint. `containers/`
-  is unchanged both in the worktree and relative to baseline `d191c4a`.
+  is unchanged both in the worktree and relative to baseline `aa01a08`.
 
 Two trust markers are removed: **74 default + 5 literal registrations**, with
 unchanged axioms and synchronized CI/trust documentation. The additional
@@ -1302,7 +1302,7 @@ remain to be discharged. Existing specialized Hot proofs remain intact.
 Checkpoint validation: full default **2413 verified, zero errors**
 (`/tmp/sp-d21-mark-prepare-default.log`); feature regression tests completed
 successfully (`/tmp/sp-d21-mark-prepare-features.log`). Formatting and whitespace
-checks pass, and `containers/` remains unchanged from `d191c4a`. Trust markers
+checks pass, and `containers/` remains unchanged from `aa01a08`. Trust markers
 are unchanged. Literal-types verification, differential policy tests and consumer
 checks will be rerun with the completed frame-opening milestone; their previous
 checkpoint results are not claimed as verification of this revision. Final
@@ -1346,7 +1346,7 @@ The fallback remains trusted, and this checkpoint does not close Step 1 or 2.
 Structural checkpoint full evidence: default **2416 verified, zero errors**
 (`/tmp/sp-d21-mark-structure-default.log`); feature regression suite **277 passed,
 10 ignored** (`/tmp/sp-d21-mark-structure-features.log`). Formatting and whitespace
-checks pass; the legacy `containers/` tree is unchanged from `d191c4a`. No trust
+checks pass; the legacy `containers/` tree is unchanged from `aa01a08`. No trust
 marker or solver limit changed. Literal-types verification and broader policy/
 consumer gates remain due for the completed general opening milestone; final
 performance acceptance is still open.
@@ -1384,7 +1384,7 @@ Full checkpoint results: default and literal-types each **2419 verified, zero
 errors** (`/tmp/sp-d21-mark-physical-default.log`,
 `/tmp/sp-d21-mark-physical-literal.log`); conditional composition **80 verified,
 zero errors** (`/tmp/sp-d21-mark-physical-composition.log`). Formatting and
-whitespace checks pass, and `containers/` is unchanged from `d191c4a`. This
+whitespace checks pass, and `containers/` is unchanged from `aa01a08`. This
 checkpoint contains only proof/specification changes, so runtime regression tests
 were not repeated; the preceding structural checkpoint recorded 277 passing
 feature tests. Benchmark parity remains unmeasured and required.
@@ -1432,7 +1432,7 @@ General opening checkpoint evidence:
 - Conditional composition: **80 verified, zero errors**
   (`/tmp/sp-d21-mark-general-composition.log`).
 - Formatting/whitespace pass; trust remains **74 default + 5 literal**;
-  `containers/` is unchanged from `d191c4a`.
+  `containers/` is unchanged from `aa01a08`.
 
 Step 1 remains open for configured/forced mark's actual policy dependencies and
 shared-model interface closure. Next discharge closed-prefix Trail-to-Hot and
@@ -1568,7 +1568,7 @@ verified, zero errors** (`/tmp/sp-d21-retire-pairs-default.log`,
 (`/tmp/sp-d21-retire-pairs-features.log`); release differential policy matrix,
 `PROPTEST_CASES=1024`, **4 passed** (`/tmp/sp-d21-retire-pairs-policy.log`).
 Formatting/whitespace checks pass, trust counts are unchanged, and legacy
-`containers/` remains unchanged from `d191c4a`. Full migration composition,
+`containers/` remains unchanged from `aa01a08`. Full migration composition,
 consumer/final audits and measured benchmark parity remain open requirements.
 
 ## Composed adaptive Trail storage transition
@@ -1743,7 +1743,7 @@ with `PROPTEST_CASES=1024` **4 passed** (`/tmp/sp-d21-select-policy.log`). The
 first feature-suite run was interrupted by a session exit before `eclasses_behavior`
 reported and was rerun from scratch; the recorded log is the complete rerun.
 Formatting/whitespace pass, trust remains **74 default + 5 literal**, and legacy
-`containers/` is unchanged from `d191c4a`. Benchmark parity remains open.
+`containers/` is unchanged from `aa01a08`. Benchmark parity remains open.
 
 
 ## 2026-09-16 — Trail deduplication through an index set; checked Trail migration and selectors
@@ -2149,7 +2149,7 @@ decomposed lemmas and `maybe_shrink` **verified individually**
 
 Gate evidence (fresh, run in a worktree holding exactly this commit's files,
 `/tmp/sp-d21-1a-*.log`): full default **2606 verified, zero errors**
-(four more functions than `f304bc7`: the decomposed lemmas); literal-types
+(four more functions than `31286e2`: the decomposed lemmas); literal-types
 **2606 verified, zero errors**; conditional composition **80 verified**;
 `au-verus` **29 verified**; feature suite **277 passed, 10 ignored**; release
 differential policy matrix with `PROPTEST_CASES=1024` **4 passed**; B+ tree,
@@ -2204,7 +2204,7 @@ zero errors** (`scratchpad/hinted_verify1.log`).
 
 Gate evidence (fresh, run in a worktree holding exactly this commit's files,
 `/tmp/sp-d21-1b-*.log`): full default **2614 verified, zero errors** (eight
-more functions than `987a964`: the map's new lemmas and `unwind_index`);
+more functions than `3a41ff5`: the map's new lemmas and `unwind_index`);
 literal-types **2614 verified, zero errors**; conditional composition **80
 verified**; `au-verus` **29 verified**; feature suite **277 passed, 10
 ignored**; release differential policy matrix with `PROPTEST_CASES=1024`
@@ -2357,7 +2357,7 @@ is unchanged.
 
 Gate evidence (fresh, `/tmp/sp-d21-4-*.log`, run on the tree that becomes
 this commit): full default **2623 verified, zero errors** (two more
-functions than `ec1dd5e`: the public constructors); literal-types **2623
+functions than `197fb48`: the public constructors); literal-types **2623
 verified, zero errors**; conditional composition **80 verified**; `au-verus`
 **29 verified**; feature suite **277 passed, 10 ignored**; release
 differential policy matrix with `PROPTEST_CASES=1024` **4 passed**; B+ tree,
@@ -2426,7 +2426,7 @@ the composites are unchanged apart from the archive clauses named above.
 
 Gate evidence (fresh, run in a worktree holding exactly this commit's
 files, `/tmp/sp-d21-b7-*.log`): full default **2649 verified, zero errors**
-(twenty-six more functions than `1a90876`: the guards' proof helpers,
+(twenty-six more functions than `4453abc`: the guards' proof helpers,
 `lemma_archive_after_push`, `guard_different_rings` with
 `lemma_singleton_ring`, `is_node_wf` per layout, the split store impls and
 the cold-frame lemma's five pieces —
@@ -2443,21 +2443,21 @@ ignored**; canary **2 passed**; partial-API audit **0 public partial
 functions, 0 allowed, 0 new, 0 unsafe-public** (from 73/33/40/0);
 formatting, whitespace and the unchanged-legacy check passed; trust **49
 default + 5 literal** (the debug-only ring walk was the one marker
-removed; CI's `EXPECTED_DEFAULT` follows). Benchmarks against `1a90876`:
+removed; CI's `EXPECTED_DEFAULT` follows). Benchmarks against `4453abc`:
 `doc/tasks/final-performance-report.md`, "Extended goal 5".
 
 ## 2026-09-17 — Stratified reporters, literal store on SpMap, Trail fast path, token provenance, grouped-history tests
 
-Seven signed local commits on top of `df0da02`, each gated in the isolated
+Seven signed local commits on top of `cd8b2ef`, each gated in the isolated
 worktree with the full battery (logs `/tmp/sp-d21-s{1..5}-*.log`,
-`/tmp/sp-d21-w5b-*.log`, `/tmp/sp-d21-semb-*.log`): `0295502` stratified
-reporters, `8e89427` Trail ascending fast path, `291bd1c` literal store on
-SpMap, `f067459` token provenance, `9e099c6` grouped-history tests,
-`ed5c5f5` O(1) stamps, `0b1200e` restore semantics B. No `admit`/`assume`,
+`/tmp/sp-d21-w5b-*.log`, `/tmp/sp-d21-semb-*.log`): `71f8358` stratified
+reporters, `2425233` Trail ascending fast path, `60b34a1` literal store on
+SpMap, `6c96c24` token provenance, `33b565c` grouped-history tests,
+`683dbef` O(1) stamps, `2743e17` restore semantics B. No `admit`/`assume`,
 no new `external_body`, no solver limit raised (two were lowered);
 `containers/` unchanged.
 
-**Stratified reporters (`0295502`).** The byte reporters cannot alter
+**Stratified reporters (`71f8358`).** The byte reporters cannot alter
 execution and no proof reads them, so they left the verified perimeter: a
 plain-Rust `diagnostics::HeapBytes` trait carries `heap_bytes` for the
 stores and columns, every `tracking_bytes`/`total_bytes`/`diff_log_len` is
@@ -2482,7 +2482,7 @@ always called for (it had been 2000 since A1). A healthy full default verify
 of the crate takes ninety seconds; every hour-long run before this fix was
 that one function.
 
-**Trail ascending fast path (`8e89427`).** `trail_select::dedupe_trail_range`
+**Trail ascending fast path (`2425233`).** `trail_select::dedupe_trail_range`
 scans a frame for strictly ascending indices first (one compare per entry,
 stops at the first descent); an ascending frame holds no index twice, so
 every entry is its own first hitter and copies straight through, with no
@@ -2495,7 +2495,7 @@ considered and rejected: at the false-positive rates that would matter the
 filter is the size of the set (birthday bound, m ≳ n²), and a sort-based
 dedupe needs a stable sort to keep the write order of repeated indices.
 
-**Literal store on SpMap (`291bd1c`).** `LitValStore` is a
+**Literal store on SpMap (`60b34a1`).** `LitValStore` is a
 `SpMap<L::Key, L, V::Index, TRACK>` (the e-graph now enables the container
 crate's `literal-types`): intern, lookup, mark and restore go through the
 verified map, and the hand-rolled index with its incremental-versus-rebuild
@@ -2508,7 +2508,7 @@ types, strings and big integers under themselves; `define_litval!`
 generates the key enums. The node caches keep their hand-rolled index by
 request (`REBUILD_RATIO`/`restore_incrementally` stay for them).
 
-**Token provenance (`f067459`).** A version token was a bare frame index: a
+**Token provenance (`6c96c24`).** A version token was a bare frame index: a
 token minted by one vector was accepted by any other at the same depth, and
 a consumed token came back to life as soon as the next `mark` reused its
 frame index. Now `history::GroupToken { history: ContainerId, generation,
@@ -2539,7 +2539,7 @@ internal primitive and became `pub(crate)`, and the battery was rerun on the
 corrected files (no allowlist entry). Design docs 08 and 10 carry the
 semantics.
 
-**O(1) stamps (`ed5c5f5`).** The provenance commit's benchmarks showed
+**O(1) stamps (`683dbef`).** The provenance commit's benchmarks showed
 every mark/restore-dominated case 1.1–1.7× slower: `GenStamps::bump_from`
 rewrote every stamp level from the cut to the deepest depth ever reached
 (64 writes per restore on the 64-frame retained trace, up to 128 on the SMT
@@ -2556,7 +2556,7 @@ eager level array are gone; nothing outside `gen_stamps.rs`, the genealogy
 and three stamp tests changed. Memory is 8 bytes per depth of the deepest
 nesting reached, like every column's frame stack.
 
-**Restore semantics B (`0b1200e`).** The user's ruling of 2026-09-17
+**Restore semantics B (`2743e17`).** The user's ruling of 2026-09-17
 (design doc 08 §1, §6): `restore(t)` resets to the checkpoint — the state at
 the mark, with the mark's frame reopened empty — so the token stays valid
 and can be restored to again, every token minted after it is dead (cut at
@@ -2585,8 +2585,8 @@ pops. The crate verifies at **2676 functions** (pops and accessors added);
 the harness rule stays "verified-valid ⟹ production-valid" on the popped
 path.
 
-**Deferred-rollover reopen and bench parity (`486fcb0`).** The benchmarks
-of `0b1200e` against `291bd1c` (220 cases) showed ten regressions, all on
+**Deferred-rollover reopen and bench parity (`c23eb12`).** The benchmarks
+of `2743e17` against `60b34a1` (220 cases) showed ten regressions, all on
 restore-dominated cases (`store/*/eqsat32` and `smt32` 1.40–1.46,
 `vec/restore_replay/verified` 1.42, `three_tier_v1/restore/shallow_high_
 duplicates/*` 1.15–1.62, `smt_backtracking_128/static_vecp` 1.16), read
@@ -2602,7 +2602,7 @@ pop-restore, so a trace with `n` restores ran `n` frames deeper than its
 pair; every verified restore in the benches now pops the way the paired
 harnesses do (legacy restore = `restore` then `pop_scope`). Gate: lean per-commit gate in the main tree — default verify **2676 verified, 0 errors**, feature suite **279 passed, 10 ignored**, release policy matrix **4**, conformance **31**, consumers **1268 passed, 45 skipped** under cargo-nextest (110 s), canary **2**, partial-API **0/0/0/0**, fmt, whitespace, legacy unchanged, trust **37 + 5**.
 
-**The fused SMT-LIB pop (`f676208`).** The benchmarks of `486fcb0` fixed
+**The fused SMT-LIB pop (`073e38a`).** The benchmarks of `c23eb12` fixed
 `vec/restore_replay` (1.42 → 1.02) but left the store traces at 1.50–1.55
 and put every one-frame restore case at 1.4–2.1: `restore(t)` then
 `pop_scope()` reopens the parent stratum twice (the restore's pop core
@@ -2612,7 +2612,7 @@ reopens it once more and recomputes them) — two extra O(stratum) walks per
 `(pop)`, on nine columns in the store traces. `restore_and_pop(t)` and the
 total `try_restore_and_pop` are the two fused on the one pop core the
 legacy restore always used: contents at `t`, depth `t.depth`, `t` and every
-later token dead. Each fused body is the pre-B restore of `ed5c5f5` over
+later token dead. Each fused body is the pre-B restore of `683dbef` over
 the fused column ops, with its proof (`Vec`, `AppendOnlyVec`, `History`,
 `ForkHistory`, the seven composites, `HintedArena`); the crate verifies at
 **2696 functions** (twenty added, no limit raised). The e-graph gains
@@ -2625,7 +2625,7 @@ restore. `tests/restore_and_pop.rs` pins the equivalence with `restore`
 then `pop_scope`, the depth and token fate, and the refusal path. Gate:
 lean per-commit gate in the main tree — default verify **2696 verified, 0 errors**, feature suite **283 passed, 10 ignored**, release policy matrix **4**, conformance **31**, consumers **1268 passed, 45 skipped** under cargo-nextest (108 s), canary **2**, partial-API **0/0/0/0**, fmt, whitespace, legacy unchanged, trust **37 + 5**.
 
-**Grouped-history tests (`9e099c6`).** The lockstep property the group proofs
+**Grouped-history tests (`33b565c`).** The lockstep property the group proofs
 state is exercised end to end: `grouped_history_random_sequences_land_in_
 lockstep` drives three members of different widths under one `ForkHistory`
 with random marks, erased writes and restores (256 cases; every member must
@@ -2640,17 +2640,17 @@ replay of the history prefix; `EGraph::mark` rebuilds first, so the oracle
 records a rebuild at every mark).
 
 Gate evidence per commit (worktree holding exactly that commit's files):
-`0295502` default **2644 verified, 0 errors**, literal **2644/0**; `8e89427`
-**2646/0**, **2646/0**; `291bd1c` **2646/0**, **2646/0**; `f067459`
-**2655/0**, **2655/0**; `9e099c6` **2655/0**, **2655/0**; `ed5c5f5`
-**2651/0**, **2651/0** (the bump lemma and loop gone); `0b1200e`
-**2676/0**, **2676/0** (pops and accessors); `486fcb0` **2676/0** (lean
-per-commit gate, goal doc outcome 7: default verify in the main tree, the four test suites, consumers under nextest, the source checks); `f676208` **2696/0** (lean gate: default verify in the main tree, the four test suites, consumers under nextest, the source checks). Full battery on the final source `f676208` (2026-09-18 04:30): default **2696 verified, 0 errors**, literal **2696/0**, composition **80/0**, `au-verus` **29/0**, feature suite **283 passed, 10 ignored**, release policy matrix **4**, conformance **31**, consumers **1268 passed, 45 ignored**, canary **2**, partial-API **0/0/0/0**, fmt, whitespace, legacy unchanged, trust **37 + 5**. Every commit:
+`71f8358` default **2644 verified, 0 errors**, literal **2644/0**; `2425233`
+**2646/0**, **2646/0**; `60b34a1` **2646/0**, **2646/0**; `6c96c24`
+**2655/0**, **2655/0**; `33b565c` **2655/0**, **2655/0**; `683dbef`
+**2651/0**, **2651/0** (the bump lemma and loop gone); `2743e17`
+**2676/0**, **2676/0** (pops and accessors); `c23eb12` **2676/0** (lean
+per-commit gate, goal doc outcome 7: default verify in the main tree, the four test suites, consumers under nextest, the source checks); `073e38a` **2696/0** (lean gate: default verify in the main tree, the four test suites, consumers under nextest, the source checks). Full battery on the final source `073e38a` (2026-09-18 04:30): default **2696 verified, 0 errors**, literal **2696/0**, composition **80/0**, `au-verus` **29/0**, feature suite **283 passed, 10 ignored**, release policy matrix **4**, conformance **31**, consumers **1268 passed, 45 ignored**, canary **2**, partial-API **0/0/0/0**, fmt, whitespace, legacy unchanged, trust **37 + 5**. Every commit:
 conditional composition **80 verified**, `au-verus` **29 verified**, feature
 suite **277 passed, 10 ignored**, release differential policy matrix with
 `PROPTEST_CASES=1024` **4 passed**, B+ tree, oracle and reference-e-graph
 property tests **31 passed**, e-graph/SAT consumers **1267 passed, 45
-ignored** (`9e099c6`: **279** feature tests and **1268** consumer tests, the new ones), canary **2 passed**, partial-API audit **0/0/0/0**,
+ignored** (`33b565c`: **279** feature tests and **1268** consumer tests, the new ones), canary **2 passed**, partial-API audit **0/0/0/0**,
 formatting, whitespace and the unchanged-legacy check passed, trust **37
 default + 5 literal**. Benchmarks against each commit's predecessor:
 `doc/tasks/final-performance-report.md`, "Wave after extended goal 5".
@@ -2663,20 +2663,20 @@ typed external manager"; goal doc outcome 1).
 
 | Commit | What it adds | Feature suite |
 | --- | --- | --- |
-| `a0b6d57` | `group.rs`: the `Member` protocol, `ForkHistory<M>`, `Pair<A, B>`, `Vec`/`AppendOnlyVec` impls, `tests/typed_group.rs` | 289 |
-| `20f2ac4` | every composite a member: sparse set, ring, list arena, union-find, map, B+ tree, e-classes (token-free frame cores) | 296 |
-| `f7b036c` | `History::*_member` over a borrowed member, and the e-graph's nine members on one `History` via `EGraphMembers` | 296 |
-| `3675afd` | harnesses, benches and all 22 in-crate test files on groups of one; `mint_pushed`, `Deref`, `try_push_frame_with/_adaptive`; `HintedArena` a member | 296 |
-| `1c601af` | delete the containers' and e-graph wrappers' token surface | 291 |
+| `5fc8b29` | `group.rs`: the `Member` protocol, `ForkHistory<M>`, `Pair<A, B>`, `Vec`/`AppendOnlyVec` impls, `tests/typed_group.rs` | 289 |
+| `30f0e52` | every composite a member: sparse set, ring, list arena, union-find, map, B+ tree, e-classes (token-free frame cores) | 296 |
+| `006357c` | `History::*_member` over a borrowed member, and the e-graph's nine members on one `History` via `EGraphMembers` | 296 |
+| `19c2ca3` | harnesses, benches and all 22 in-crate test files on groups of one; `mint_pushed`, `Deref`, `try_push_frame_with/_adaptive`; `HintedArena` a member | 296 |
+| `7976be0` | delete the containers' and e-graph wrappers' token surface | 291 |
 | `67900d4` | this documentation | — |
 
 History note: the wave was built as twelve commits and rebuilt as these six
 at the user's request, each on a tree one of the twelve already had (the
 twelve stay on the local branch `d21-exec-wave-full`; the two heads have
 identical trees). The gate evidence below is per built commit, so it maps onto
-the six by tree: `3538cb0` → `a0b6d57`, `9c29a7e`/`0222bfd`/`534cced`/
-`e87df23`/`4cb12a3` → `20f2ac4`, `10ed6d9`/`e26623e` → `f7b036c`,
-`ae16efe`/`0e94c16` → `3675afd`, `778cdcf` → `1c601af`.
+the six by tree: `3538cb0` → `5fc8b29`, `9c29a7e`/`0222bfd`/`534cced`/
+`e87df23`/`4cb12a3` → `30f0e52`, `10ed6d9`/`e26623e` → `006357c`,
+`ae16efe`/`0e94c16` → `19c2ca3`, `778cdcf` → `7976be0`.
 
 Every built commit passed the lean per-commit gate (goal doc outcome 7):
 verification with 0 errors, the feature suite (289 → 296 as the members
@@ -2689,7 +2689,7 @@ verified at **2806 verified, 0 errors** and the deletion at **2726 verified, 0
 errors**. One flake seen once (`egraph/tests/par_fanout.rs`, which asserts two
 rayon workers under load) passed on rerun.
 
-Benchmarks, the e-graph commit against `f676208` (its own measurement): store
+Benchmarks, the e-graph commit against `073e38a` (its own measurement): store
 traces **0.97–1.00×**, `empty20k` **0.79–0.80×** (the per-column provenance
 constant is gone), saturation at parity.
 
@@ -2722,7 +2722,7 @@ canary **2**, partial-API **0/0/0/0**, fmt, whitespace, unchanged legacy,
 trust **34 + 5** (three `external_body` items fewer).
 
 **The last two consumers and the last surfaces (2026-09-18, two further
-commits).** `9d9fdef` puts the anti-unification search on one history:
+commits).** `92dab5b` puts the anti-unification search on one history:
 `SearchSession` owns a `History` and drives its five layers through
 `History::mark_member`/`restore_member` over one borrowed view (`AuMembers`),
 so a checkpoint is one stamp instead of 62 container tokens in a nest of eleven
@@ -2734,7 +2734,7 @@ and the four per-layer provenance tests become one at the session level. Gate
 policy **4**, conformance **31**, consumers **1265 passed, 45 skipped**, canary
 **2**, partial-API **0/0/0/0**, trust **34 + 5**.
 
-`a10fc54` then deletes the last token surfaces — `SpMap`'s, `Vec`'s and
+`34b5a92` then deletes the last token surfaces — `SpMap`'s, `Vec`'s and
 `AppendOnlyVec`'s, including the embedded `Genealogy`, the three framing lemmas
 it needed, the cuts inside `restore_frame`/`reset_frame` and the three
 dead-code compaction marks. `sequence_witness_checked`, the production
@@ -2760,4 +2760,15 @@ fallout.
 Known pre-existing flake, unrelated: `egraph/tests/au_exact_anytime.rs`
 (`exact_deadline_returns_anytime_incumbent`) asserts a 5 ms deadline is hit;
 in `--release` on this machine the exact solve finishes first (fails at
-`1a90876` too); the gate runs the consumer suites in debug, where it passes.
+`4453abc` too); the gate runs the consumer suites in debug, where it passes.
+
+## A note on the commit hashes in this document
+
+The branch was consolidated on 2026-09-18: the 101 commits of the ghost-trail
+and restore proof campaign (12 to 14 September), whose titles were `wip`,
+`proof` and `doc` notes and two of whose states did not compile, became eight
+milestone commits, each landing on a tree the project actually passed through.
+The twenty scratch verification dumps that campaign left at the repository root
+are gone from every tree, and `/*.txt` is ignored so they cannot come back. The
+hashes below name the consolidated history; the original per-lemma commits, with
+their own hashes, remain on the archival branch `d21-exec`.

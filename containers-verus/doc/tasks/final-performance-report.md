@@ -14,7 +14,7 @@ unset, no concurrent verifier or test load (the Verus/test gate battery is run
 to completion before the first timing command, and nothing else is started
 until the last one finishes). `three_tier_bench` — the only target used for
 the checkpoint comparison — and `containers-conformance/src` are byte-identical
-to checkpoint `d191c4a`, so both revisions run the same benchmark code there
+to checkpoint `aa01a08`, so both revisions run the same benchmark code there
 and differ only in the verified crate. Three same-binary targets were changed
 after the preliminary run at the user's direction (see "User-directed
 performance work"): `tracked_vec_bench` gained the 10M/100M groups,
@@ -34,7 +34,7 @@ classification stands):
 | `eclasses_bench` | `eclasses/{merge_cascade,find_sweep,mark_merge_restore}/{retained,verified}/N` | Required legacy comparison |
 | `bplus_cursor_bitset_bench` | 6 groups × `{prod,verus}` | Required legacy comparison |
 | `three_tier_bench` | `three_tier/write/*/{profile}` vs `production`; `three_tier/mark/no_rollover_smt` vs `no_rollover_production`; `three_tier/restore/*_one_frame` vs `production_one_frame`; `three_tier/end_to_end/{smt_backtrack,eqsat_retained}` vs `*_production`; `three_tier_v1/write/*/{dyn_*,static_*}` vs `production_veci`/`production_vecp` | Workload controls (legacy has no explicit tier policy; differences labelled) |
-| `three_tier_bench` tier-specific | `three_tier/mark/{trail_to_hot,hot_to_cold,explicit_defer_smt}`, `three_tier/restore/{trail,hot,cold}_one_frame`, `all_tiers_deep`, `three_tier/conversion/{trail_to_hot_dedupe,hot_to_cold_runs}`, `three_tier/promotion/cold_survivor_write_restore`, `three_tier/adaptive_decision/*`, `three_tier_v1/rollover/*`, `three_tier_v1/promotion/*`, `three_tier_v1/restore/*` | No legacy equivalent: compared with checkpoint `d191c4a` (supplementary; cannot establish legacy parity) |
+| `three_tier_bench` tier-specific | `three_tier/mark/{trail_to_hot,hot_to_cold,explicit_defer_smt}`, `three_tier/restore/{trail,hot,cold}_one_frame`, `all_tiers_deep`, `three_tier/conversion/{trail_to_hot_dedupe,hot_to_cold_runs}`, `three_tier/promotion/cold_survivor_write_restore`, `three_tier/adaptive_decision/*`, `three_tier_v1/rollover/*`, `three_tier_v1/promotion/*`, `three_tier_v1/restore/*` | No legacy equivalent: compared with checkpoint `aa01a08` (supplementary; cannot establish legacy parity) |
 | `diff_compress_bench`, `two_stack_bench`, `reorder_bench`, `scheme_comparison_bench`, `parallel_frame_bench`, `eager_write_bench`, `normalize_bench` | none | Supplementary or single-implementation; not parity evidence (recorded as exclusions) |
 
 Coverage gaps carried from the inventory: the parallel-frame target measures
@@ -45,11 +45,11 @@ reported as gaps, not measured as parity.
 
 Noise tolerance and decision rule (from the project's existing benchmark
 policy: the 5–8 % same-code noise band established in
-`three-tier-e5-measurement-a414090.md`; this rule is not widened after seeing
+`three-tier-e5-measurement-0eaec9e.md`; this rule is not widened after seeing
 results):
 
 1. Tolerance `τ = 1.08` on the ratio of mean times `r = verified / legacy`
-   (or `final / d191c4a` for the checkpoint comparison).
+   (or `final / aa01a08` for the checkpoint comparison).
 2. Every case is measured in two independent full runs (run A, run B) of its
    target. For each run the ratio interval is the conservative quotient of
    Criterion's 95 % mean confidence intervals, `[v_lo / l_hi, v_hi / l_lo]`.
@@ -80,8 +80,8 @@ env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench -p containers-conformance --be
 env -u SEMPER_COMPRESS -u SEMPER_DIFF cargo bench -p containers-conformance --bench <name> -- --save-baseline runB
 ```
 
-Checkpoint comparison: a git worktree at `d191c4a`
-(`/Users/remidelmas/projects/sp-d21-d191c4a`, its own build directory) runs
+Checkpoint comparison: a git worktree at `aa01a08`
+(`/Users/remidelmas/projects/sp-d21-aa01a08`, its own build directory) runs
 `three_tier_bench` with the same settings under `--save-baseline d191c4a_A` /
 `d191c4a_B`; both trees write to one `CRITERION_HOME`
 (`<final tree>/target/criterion`), and the final tree's `runA`/`runB`
@@ -95,7 +95,7 @@ plus the full Criterion logs under `/tmp/sp-d21-bench-*.log`; the comparison
 tables below are generated from the `estimates.json` files by
 `containers-verus/tools/bench_compare.py` (ratio, interval, status).
 
-## Preliminary run and regression investigation (2026-09-16, revision `09f00b0`)
+## Preliminary run and regression investigation (2026-09-16, revision `9ab731d`)
 
 The first execution of the protocol was stopped after run A of every target
 plus the checkpoint's `three_tier_bench` run A, because run A already showed
@@ -143,8 +143,8 @@ Findings, per case class:
    `eclasses/find_sweep/verified/4096` (×1.43 vs legacy, 1.00 at the
    checkpoint) and `tracked_vecp/mark_churn/verus/1000000` (×1.10 vs legacy,
    1.03 at the checkpoint). Bisected by commit: the find sweep is clean at
-   `a831cc1` and regressed at `9df28cb`; the mark churn is clean at `990eb08`
-   (1.02) and regressed at `a831cc1` (1.10). Neither interval changes any
+   `f126b6a` and regressed at `f357cea`; the mark churn is clean at `52cc94a`
+   (1.02) and regressed at `f126b6a` (1.10). Neither interval changes any
    function on the measured path (`find_const` → `get_index` → store read;
    `try_mark` → Hot-defer mark → `set_index` → `try_restore`): the commits
    change specs, migration/adaptive code and marker attributes only, and the
@@ -160,7 +160,7 @@ Findings, per case class:
    this control beside them.
 4. **Pre-existing against legacy (unchanged by this branch).**
    `bplus/from_sorted_then_scan/verus` ×1.90 and `bplus/insert_shuffled/verus`
-   ×1.12–1.13 are identical at `d191c4a`; `aov/log/verified` is ×1.08–1.11
+   ×1.12–1.13 are identical at `aa01a08`; `aov/log/verified` is ×1.08–1.11
    with a wide interval at both revisions (inconclusive). The B+ tree and
    append-only vector were not touched by this branch.
 5. **Workload controls, pre-existing.** The `three_tier/*` and
@@ -177,7 +177,7 @@ Findings, per case class:
 run-to-run layout/noise effect and re-evaluated in the final two-run
 protocol like every other case.
 
-## User-directed performance work (2026-09-16, after `2f99644`)
+## User-directed performance work (2026-09-16, after `bd25f84`)
 
 The user asked for three things beyond the protocol: the size sweep extended
 to 10M and 100M elements, the e-class find sweep "cracked", and the B+ tree
@@ -259,22 +259,22 @@ is redundant, all are verified under the same contracts. The dynamic store
 types on the same workload (`dyn_inline` 76.8 µs vs `static_veci` 29.8 µs on
 the SMT trace); consumers with a fixed store kind should use the static type.
 
-## Extended goal 1(a): cached Trail-to-Hot dedupe set (after `45fc132`)
+## Extended goal 1(a): cached Trail-to-Hot dedupe set (after `45df3b0`)
 
 The dedupe `HashSet` is now owned by the vector (`Vec::trail_seen`), taken out
 for a migration pass and put back, so its table survives across rollovers.
-Against the `f304bc7` run A/B baselines, the 37 affected tier-specific cases
+Against the `31286e2` run A/B baselines, the 37 affected tier-specific cases
 (Trail-to-Hot rollover, conversion, adaptive decisions and passes, the
 256-frame budgets) are unchanged: 32 pass, 5 nanosecond-scale/wide-interval
 inconclusives, no regression (`--save-baseline seen1`). The case the cache is
 for — rollover on *every* mark with small frames — did not exist in the
 inventory; `three_tier_v1/rollover/trail_to_hot_small_frames_per_mark/apply_configured_x64`
 (64 marks × 8 writes on a Trail store with `trail: Frames(0)`) was added and
-measured on both revisions with the same bench source: `f304bc7` 9.83 µs,
+measured on both revisions with the same bench source: `31286e2` 9.83 µs,
 now 9.01 µs — **1.09×** (interval [0.915, 0.920]), i.e. ~13 ns per mark, the
 allocation plus free the pass used to pay.
 
-## Extended goal 1(b): SpMap restore over the discarded suffix (after `987a964`)
+## Extended goal 1(b): SpMap restore over the discarded suffix (after `3a41ff5`)
 
 `SpMap::restore` used to clear its hash index and re-insert one cloned key per
 surviving entry, whatever the size of the frame being discarded (the legacy
@@ -291,7 +291,7 @@ the 1(b) tree and on the previous commit (same bench source), baselines
 `runA_1b`/`runB_1b` and `1a_A`/`1a_B`; means below, multiplier = old time ÷
 new time.
 
-| Case | Legacy | Verified at `987a964` | Verified now | vs legacy | vs `987a964` |
+| Case | Legacy | Verified at `3a41ff5` | Verified now | vs legacy | vs `3a41ff5` |
 |---|---|---|---|---|---|
 | `map/restore_small_suffix` | 528 µs | 515 µs | 544 ns | **970×** | **946×** |
 | `map/restore_small_suffix_string` | 724 µs | 755 µs | 3.51 µs | **206×** | **215×** |
@@ -300,7 +300,7 @@ new time.
 | `map/intern_composite` (insert-or-hit) | 1.346 ms | 1.344 ms | 1.356 ms | 0.99× | 0.99× |
 
 Frozen-rule verdicts: paired (verified vs legacy) 5 pass; checkpoint
-(verified now vs verified at `987a964`) 9 pass, 1 inconclusive
+(verified now vs verified at `3a41ff5`) 9 pass, 1 inconclusive
 (`map/intern/verified`: 1.059 in run A against 0.951 in run B, the two runs
 landing on the two placement modes seen throughout this report; the legacy
 arm moved 0.99/1.02 in the same binaries). The protocol rerun at
@@ -311,7 +311,7 @@ of the chain column is the 3–4 % on the String and composite interning cases
 (one `Option<usize>` push per insert next to a key clone and a hash insert);
 both stay inside τ.
 
-## Extended goal 2: store policy for every composite (after `54563da`)
+## Extended goal 2: store policy for every composite (after `233305e`)
 
 Every composite now takes a policy type parameter that chooses its columns'
 stores, defaulting to the stores it hardcoded before (`HotFirst`), so the
@@ -322,18 +322,18 @@ inlined `raw_len()` instead of the concrete `data` field. The composite
 benchmarks (`eclasses_bench`, `retained_containers_bench`,
 `bplus_cursor_bitset_bench`; runs `policy_A`/`policy_B` on the item-2 tree)
 were evaluated against the previous baselines: `runA`/`runB` for the
-composite groups (their code is unchanged since `f304bc7`) and
+composite groups (their code is unchanged since `31286e2`) and
 `runA_1b`/`runB_1b` for the map groups.
 
 Frozen-rule verdicts: paired (verified vs legacy, 26 cases) 23 pass, 2
-inconclusive, 1 regression; checkpoint (verified now vs `f304bc7`, 42
+inconclusive, 1 regression; checkpoint (verified now vs `31286e2`, 42
 non-map cases) 39 pass, 2 inconclusive, 1 regression; checkpoint vs the 1(b)
 run (10 map cases) 10 pass. The three flagged cases were rerun at
 `--sample-size 100 --warm-up-time 3 --measurement-time 10`, twice on the
-item-2 tree and twice on a worktree of `54563da` with the same bench source
+item-2 tree and twice on a worktree of `233305e` with the same bench source
 (`policy_rerun`/`policy_rerun2` vs `prev_rerun`/`prev_rerun2`):
 
-| Case | `54563da` (two reruns) | Item 2 (two reruns) | Ratio | Status |
+| Case | `233305e` (two reruns) | Item 2 (two reruns) | Ratio | Status |
 |---|---|---|---|---|
 | `class_ring/splice_untracked/legacy` | 5.774 µs / 5.774 µs | 5.776 µs / 5.779 µs | 1.000 / 1.001 | pass |
 | `class_ring/splice_untracked/verified` | 6.332 µs / 6.339 µs | 6.320 µs / 6.368 µs | 0.998 / 1.005 | pass |
@@ -344,7 +344,7 @@ So the store policy is neutral: the previous commit's binaries reproduce
 every flagged number. Two observations belong to the record rather than to
 this change. `class_ring/splice_untracked` is now 1.10× slower than legacy
 paired in the same binary on BOTH trees (legacy 5.77 µs, verified 6.33 µs),
-where the `f304bc7` protocol measured 0.945 (legacy 7.70 µs, verified 7.28
+where the `31286e2` protocol measured 0.945 (legacy 7.70 µs, verified 7.28
 µs): neither arm's source changed (the legacy crate is the untouched
 oracle; the untracked ring path is the same code), the bench binary did (the
 map cases were added), and the legacy arm gained 25 % from that layout
@@ -352,11 +352,11 @@ change against 13 % for the verified arm. It joins `aov/log` (1.07 here) as
 an open legacy gap attributed to code placement, not to an algorithmic
 difference. `eclasses/find_sweep/4096` keeps its per-process placement
 bimodality on both arms (203 µs and 252–274 µs modes), exactly as
-investigated for `f304bc7`. `vec/mark_set_restore/legacy` moved 1.10/1.16
-against its `f304bc7` measurement (an oracle arm, unchanged code) and is
+investigated for `31286e2`. `vec/mark_set_restore/legacy` moved 1.10/1.16
+against its `31286e2` measurement (an oracle arm, unchanged code) and is
 listed as machine drift.
 
-## Extended goal 3: the e-graph's cache stores (after `08dc0d5`)
+## Extended goal 3: the e-graph's cache stores (after `241f371`)
 
 The e-graph's ten node caches (`egraph/src/node_store.rs`: five fixed-arity,
 four variable-arity with their children columns, the literal cache) were
@@ -439,7 +439,7 @@ which is where the enum dispatch sat). The 2.5× dispatch cost measured on
 the three-tier micro-benchmarks is diluted here by everything else a
 transaction does.
 
-## Extended goal 4: e-graph configurations for saturation and for SMT (after `ec1dd5e`)
+## Extended goal 4: e-graph configurations for saturation and for SMT (after `197fb48`)
 
 The Trail-first policy exists for the Sundance SMT integration, so the
 engine now selects its store discipline per configuration
@@ -466,7 +466,7 @@ the same store types, and the generated code behaves as such.
 commit.** The default-sample runs were inconclusive (run A 1.07–1.08, run B
 1.01–1.03), so both trees were rerun at `--sample-size 100 --warm-up-time 3
 --measurement-time 10`, twice each (`prev_rerun`/`prev_rerun2` on a
-worktree of `ec1dd5e`, `cfg_rerun`/`cfg_rerun2` here); ratio = `EqSat32`
+worktree of `197fb48`, `cfg_rerun`/`cfg_rerun2` here); ratio = `EqSat32`
 now ÷ static caches before:
 
 | Program | Before (two reruns) | `EqSat32` now (two reruns) | Ratio | Status |
@@ -510,7 +510,7 @@ per level, so `Smt32`/`Smt64` are the configurations the SAT core wraps;
 the saturation configurations are unchanged. Whether the empty-frame cost
 matters is a question for the integration's own traces.
 
-## Extended goal 5: total public API (after `1a90876`)
+## Extended goal 5: total public API (after `4453abc`)
 
 Every public exec function became total (progress doc, "Total public
 API"). The runtime consequences are confined to guards: two extra compares
@@ -527,7 +527,7 @@ conditional contracts are contract-only changes.
 
 Protocol as frozen in this report: τ = 1.08, two interleaved runs per tree
 (candidate `total_A`/`total_B`, previous commit `prev5_A`/`prev5_B` from a
-worktree at `1a90876` with its own build, same benchmark files), ratio
+worktree at `4453abc` with its own build, same benchmark files), ratio
 intervals from Criterion's 95 % confidence intervals, inconclusive cases
 rerun once per side at `--sample-size 100 --warm-up-time 3
 --measurement-time 10` (`total_R`/`prev5_R`). Targets: `retained_containers_bench`
@@ -622,7 +622,7 @@ it is also on the reference-side drift list below).
 | `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096/dyn_parallel` | 15.9 ns | 15.8 ns | 0.989 [0.876, 1.115] | **inconclusive** |
 | `vec/try_extend/legacy` | 219.266 µs | 197.037 µs | 0.899 [0.883, 0.914] | pass |
 
-**Verdict: no verified-side regression against `1a90876`.** Over the 208
+**Verdict: no verified-side regression against `4453abc`.** Over the 208
 cases after the class-ring re-measurement and the reruns: 194 pass, 13
 inconclusive (nanosecond three-tier cases with wide intervals on both
 sides, one 12 % `prod`-side B+ tree drift, the singleton splice at the τ
@@ -861,7 +861,7 @@ First pass, every case (`total_A`/`total_B` vs `prev5_A`/`prev5_B`):
 | `vec/try_extend/legacy` | 194.043 µs / 192.178 µs | 216.588 µs / 194.843 µs | 1.116 [1.105, 1.128] | 1.014 [0.997, 1.031] | **inconclusive** |
 | `vec/try_extend/verified` | 152.914 µs / 148.911 µs | 137.307 µs / 133.321 µs | 0.898 [0.812, 0.991] | 0.895 [0.816, 0.982] | pass |
 
-## Wave after extended goal 5 (five commits after `df0da02`)
+## Wave after extended goal 5 (five commits after `cd8b2ef`)
 
 Protocol as frozen above: τ = 1.08, two interleaved runs per tree (candidate
 `<tag>_cand_A`/`_B`, the previous commit `<tag>_prev_A`/`_B`, each tree its
@@ -869,17 +869,17 @@ own worktree and build, same benchmark files), ratio intervals from
 Criterion's 95 % confidence intervals, inconclusive cases rerun once per
 side at `--sample-size 100 --warm-up-time 3 --measurement-time 10`
 (`<tag>_cand_R`/`_prev_R`). Only commits that touch an executed path were
-measured; the stratified reporters (`0295502`) and the grouped-history
-tests (`9e099c6`) change no runtime path. Apple M4 Pro, 2026-09-17
+measured; the stratified reporters (`71f8358`) and the grouped-history
+tests (`33b565c`) change no runtime path. Apple M4 Pro, 2026-09-17
 20:41–W5END, on an idle machine after the batteries.
 
-### `8e89427` Trail ascending fast path (against `0295502`), `three_tier_bench`
+### `2425233` Trail ascending fast path (against `71f8358`), `three_tier_bench`
 
 The change is `trail_select::dedupe_trail_range`: a strictly ascending frame
 copies straight through instead of feeding the hash set. The case that
 motivated it, the singleton-frame trade-off of extended goal 5:
 
-| Case | `0295502` mean (A/B) | `8e89427` mean (A/B) | Ratio A | Ratio B | Status |
+| Case | `71f8358` mean (A/B) | `2425233` mean (A/B) | Ratio A | Ratio B | Status |
 |---|---|---|---|---|---|
 | `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_trail` | 1.729 µs / 1.708 µs | 962.0 ns / 1.029 µs | 0.556 [0.545, 0.570] | 0.603 [0.584, 0.622] | pass |
 | `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_inline` | 425.5 ns / 425.7 ns | 425.8 ns / 424.3 ns | 1.001 [0.985, 1.017] | 0.997 [0.983, 1.011] | pass |
@@ -899,7 +899,7 @@ no_rollover_smt` 0.960 [0.812, 1.134], `three_tier/end_to_end/smt_backtrack`
 1.019 [0.959, 1.082], …): nanosecond-scale cases whose intervals exceed the
 tolerance in width, no regression. **Verdict: pass, 0 regressions.**
 
-### `291bd1c` literal store on SpMap (against `8e89427`), `store_bench`, `saturate_bench`
+### `60b34a1` literal store on SpMap (against `2425233`), `store_bench`, `saturate_bench`
 
 The e-graph's literal store went from an `AppendOnlyVec` log plus a
 hashbrown index to a `SpMap` (verified log, index and previous-occurrence
@@ -913,7 +913,7 @@ both runs with lower bounds above 1.03 — a real cost below the tolerance,
 in the store's mark/restore path rather than in interning (the keys of this
 program are copies, and `eqsat32` interns the same literals):
 
-| Case | `8e89427` mean (A/B) | `291bd1c` mean (A/B) | Ratio A | Ratio B | Status |
+| Case | `2425233` mean (A/B) | `60b34a1` mean (A/B) | Ratio A | Ratio B | Status |
 |---|---|---|---|---|---|
 | `store/sp-t880.base/smt32` | 4.563 ms / 4.601 ms | 4.876 ms / 4.882 ms | 1.069 [1.046, 1.093] | 1.061 [1.036, 1.087] | inconclusive |
 | `store/sp-t880.cycles/smt32` | 25.380 ms / 25.306 ms | 27.326 ms / 27.345 ms | 1.077 [1.049, 1.107] | 1.081 [1.051, 1.112] | inconclusive |
@@ -930,7 +930,7 @@ below the tolerance at the larger sample (`store/sp-t880.cycles/smt32` included)
 on the Trail-first configuration remain a real but in-tolerance cost, listed
 as outcome 4 of `doc/tasks/nightshift-external-manager-goal.md`.
 
-### `f067459` token provenance (against `291bd1c`), all container and e-graph targets
+### `6c96c24` token provenance (against `60b34a1`), all container and e-graph targets
 
 Every `mark` now mints a generation stamp and every `restore` validates the
 token (one id compare, one stamp read) and bumps the stamps at and above
@@ -944,7 +944,7 @@ three regressions and the inconclusive cases whose point estimates exceed
 1.05 in both runs share one shape — every one is dominated by `mark` and
 `restore`:
 
-| Case | `291bd1c` mean (A/B) | `f067459` mean (A/B) | Ratio A | Ratio B | Status |
+| Case | `60b34a1` mean (A/B) | `6c96c24` mean (A/B) | Ratio A | Ratio B | Status |
 |---|---|---|---|---|---|
 | `three_tier_v1/write/high_duplicates/dyn_trail` | 1.433 µs / 1.437 µs | 1.618 µs / 1.647 µs | 1.129 [1.106, 1.155] | 1.146 [1.126, 1.166] | regression |
 | `three_tier_v1/write/low_duplicates/dyn_trail` | 1.445 µs / 1.462 µs | 1.604 µs / 1.776 µs | 1.111 [1.095, 1.127] | 1.214 [1.187, 1.241] | regression |
@@ -974,12 +974,12 @@ that only grows (each handed out once), the cut is `len := min(len, d)`
 restore in its loop; it was a drift case in the item-5 report as well and
 goes to the rerun.
 
-### Semantics B and O(1) stamps (`0b1200e`) against `291bd1c`: first pass
+### Semantics B and O(1) stamps (`2743e17`) against `60b34a1`: first pass
 
 Runs A and B on 2026-09-18 00:12–01:05, the same ten targets. Summary: 220 cases, inconclusive=33, pass=177, regression=10
 The ten regressions:
 
-| Case | `291bd1c` mean (A/B) | `0b1200e` mean (A/B) | Ratio A | Ratio B | Status |
+| Case | `60b34a1` mean (A/B) | `2743e17` mean (A/B) | Ratio A | Ratio B | Status |
 |---|---|---|---|---|---|
 | `store/sp-t880.empty20k/eqsat32` | 16.891 ms / 17.023 ms | 23.744 ms / 23.858 ms | 1.406 [1.395, 1.416] | 1.402 [1.391, 1.412] | **regression** |
 | `store/sp-t880.empty20k/smt32` | 18.212 ms / 18.254 ms | 26.595 ms / 26.763 ms | 1.460 [1.449, 1.471] | 1.466 [1.455, 1.477] | **regression** |
@@ -1006,20 +1006,20 @@ verified side against the legacy pop-restore, so a trace with `n` restores
 ran `n` frames deeper than its legacy pair and every restore carried a
 frame push the legacy side never did (the store and saturation benches
 were already exact: the interpreter's `(pop)` pops). Both fixed in
-`486fcb0`: the reopen is a `Defer` push (a header push that converts no
+`c23eb12`: the reopen is a `Defer` push (a header push that converts no
 history), and every verified restore in the benches is followed by
 `pop_scope` (legacy restore = `restore` then `pop_scope`, design doc 08
 §1), so cand-vs-prev and verified-vs-legacy compare the same operation.
 The reruns of this pass were stopped once the cause was read (its
 inconclusive cases are superseded by the fixed pair below).
 
-### Deferred-rollover reopen with parity pops (`486fcb0`) against `291bd1c`
+### Deferred-rollover reopen with parity pops (`c23eb12`) against `60b34a1`
 
 Runs A and B on 2026-09-18 01:32–02:40, the same ten targets. Summary: 220 cases, inconclusive=40, pass=167, regression=13
 `vec/restore_replay/verified` went from 1.42 to **1.016 / 1.017** (the
 reopen no longer migrates history). The thirteen regressions:
 
-| Case | `291bd1c` mean (A/B) | `486fcb0` mean (A/B) | Ratio A | Ratio B | Status |
+| Case | `60b34a1` mean (A/B) | `c23eb12` mean (A/B) | Ratio A | Ratio B | Status |
 |---|---|---|---|---|---|
 | `eclasses/find_sweep/retained/4096` | 214.809 µs / 214.884 µs | 252.427 µs / 246.092 µs | 1.175 [1.174, 1.176] | 1.145 [1.131, 1.158] | **regression** |
 | `store/sp-t880.empty20k/eqsat32` | 16.916 ms / 16.876 ms | 26.164 ms / 25.991 ms | 1.547 [1.534, 1.559] | 1.540 [1.526, 1.554] | **regression** |
@@ -1045,17 +1045,17 @@ columns deep in the store traces, a full second restore's worth on the
 one-frame matrix cases. `eclasses/find_sweep/retained/4096` is the legacy
 side of its pair (same legacy source, a rebuilt bench binary; the verified
 side is 1.01). The reruns of this pass were stopped once the cause was
-read. Fixed in `f676208`: the SMT-LIB pop is one operation,
+read. Fixed in `073e38a`: the SMT-LIB pop is one operation,
 `restore_and_pop(t)`, on the single pop core the legacy restore always
 used; every paired bench measures it, and two verified-only cases measure
 the bare semantics-B restore.
 
-### The fused pop (`f676208`) against `291bd1c`
+### The fused pop (`073e38a`) against `60b34a1`
 
 Runs A and B on 2026-09-18 02:56–04:29 (reruns 03:50–04:29), the same ten targets. Summary: 220 cases, inconclusive=47, pass=170, regression=3
 The three first-pass regressions:
 
-| Case | `291bd1c` mean (A/B) | `f676208` mean (A/B) | Ratio A | Ratio B | Status |
+| Case | `60b34a1` mean (A/B) | `073e38a` mean (A/B) | Ratio A | Ratio B | Status |
 |---|---|---|---|---|---|
 | `store/sp-t880.empty20k/eqsat32` | 16.809 ms / 16.890 ms | 21.961 ms / 21.911 ms | 1.307 [1.295, 1.317] | 1.297 [1.287, 1.308] | **regression** |
 | `store/sp-t880.empty20k/smt32` | 18.236 ms / 18.204 ms | 22.337 ms / 22.322 ms | 1.225 [1.216, 1.234] | 1.226 [1.217, 1.236] | **regression** |
@@ -1063,7 +1063,7 @@ The three first-pass regressions:
 
 The formerly regressed cases, now:
 
-| Case | `291bd1c` mean (A/B) | `f676208` mean (A/B) | Ratio A | Ratio B | Status |
+| Case | `60b34a1` mean (A/B) | `073e38a` mean (A/B) | Ratio A | Ratio B | Status |
 |---|---|---|---|---|---|
 | `vec/restore_replay/verified` | 161.941 µs / 172.334 µs | 171.058 µs / 161.046 µs | 1.056 [1.048, 1.064] | 0.934 [0.933, 0.936] | pass |
 | `three_tier_v1/restore/shallow_high_duplicates/static_vecp` | 34.7 ns / 35.3 ns | 38.0 ns / 38.2 ns | 1.093 [1.003, 1.173] | 1.083 [0.987, 1.180] | **inconclusive** |
@@ -1079,7 +1079,7 @@ Protocol reruns of the inconclusive cases (`--sample-size 100 --warm-up-time 3
 --measurement-time 10`): Summary: 47 cases, inconclusive=18, pass=24, regression=5 (24 pass). The cases the rerun did
 not settle as a pass:
 
-| Case | `291bd1c` mean (rerun) | `f676208` mean (rerun) | Ratio | Status |
+| Case | `60b34a1` mean (rerun) | `073e38a` mean (rerun) | Ratio | Status |
 |---|---|---|---|---|
 | `three_tier/end_to_end/buffered_unique` | 32.376 µs | 35.212 µs | 1.088 [1.021, 1.158] | **inconclusive** |
 | `three_tier/end_to_end/restore_optimized` | 34.646 µs | 37.356 µs | 1.078 [1.031, 1.127] | **inconclusive** |
@@ -1117,7 +1117,7 @@ outcome 3 of the next wave's goal
 
 - **`store/sp-t880.empty20k/{eqsat32,smt32}` 1.23–1.30.** That trace is
   the base program plus 20 000 empty `(push)`/`(pop)` pairs, so its cost
-  is the per-scope constant: at `291bd1c` 845 ns per pair, now about
+  is the per-scope constant: at `60b34a1` 845 ns per pair, now about
   250 ns more. The difference is token provenance — each of the e-graph's
   roughly thirty columns mints a stamp on `(push)` and checks and cuts one
   on `(pop)`, about 8 ns per column per pair (the same constant the
@@ -1131,7 +1131,7 @@ outcome 3 of the next wave's goal
   1.13, and most of the eighteen cases the rerun left inconclusive are
   `dyn_*` traces at 1.02–1.11. Every static store and the production pair
   are at parity on the same loops, and no code on the write, promotion or
-  trace paths changed since `291bd1c`: the column grew by its genealogy and
+  trace paths changed since `60b34a1`: the column grew by its genealogy and
   the crate by twenty functions under fat LTO, which moves inlining and
   layout for the dyn-dispatched stores first. Not chased in this wave; the
   goal doc lists the bounded experiments (anchor the loops with
@@ -1149,8 +1149,8 @@ fused pop on the same fixtures, runs A / B, candidate tree only:
 
 | Case | `restore_and_pop` (legacy-equivalent) | bare `restore` (keep-open) |
 |---|---|---|
-| `three_tier/restore/hot_one_frame` | 346.3 ns / 338.7 ns (`291bd1c`: 331.0 / 344.4) | 351.9 ns / 349.0 ns |
-| `three_tier/restore/cold_one_frame` | 137.0 ns / 122.3 ns (`291bd1c`: 121.9 / 127.5) | 153.1 ns / 141.4 ns |
+| `three_tier/restore/hot_one_frame` | 346.3 ns / 338.7 ns (`60b34a1`: 331.0 / 344.4) | 351.9 ns / 349.0 ns |
+| `three_tier/restore/cold_one_frame` | 137.0 ns / 122.3 ns (`60b34a1`: 121.9 / 127.5) | 153.1 ns / 141.4 ns |
 
 The keep-open restore is the pop core plus the deferred header push
 (`prepare_mark` over the promoted stratum, then the header): about 2–3 %
@@ -1160,9 +1160,9 @@ take the keep-open case below the fused pop; it is optional, and measured
 first.
 
 
-## Results (revision `f304bc7`, runs A and B on 2026-09-16 17:05–18:45, reruns 18:50–19:10)
+## Results (revision `31286e2`, runs A and B on 2026-09-16 17:05–18:45, reruns 18:50–19:10)
 
-Bench binaries: `/tmp/sp-d21-bench-binaries-f304bc7.md5`; driver log
+Bench binaries: `/tmp/sp-d21-bench-binaries-31286e2.md5`; driver log
 `/tmp/sp-d21-bench-driver.log`; raw Criterion artifacts under
 `target/criterion/**/{runA,runB,d191c4a_A,d191c4a_B,rerun,d191c4a_rerun}`
 (earlier data preserved in `target/criterion-prelim*`). Evaluation by
@@ -1195,13 +1195,13 @@ sweep (0.85–0.95), with these exceptions:
 against the production `Vec`): 36 rows exceed the tolerance in both runs,
 ×1.1–×6.7. These compare the three-tier design against a store with no Trail
 tier, no tier policy and no adaptive pass, and every one of them is at the
-same ratio at checkpoint `d191c4a` (the checkpoint comparison of the same ids
+same ratio at checkpoint `aa01a08` (the checkpoint comparison of the same ids
 passes) — they measure the design, not this branch. Two `static_vect` trace
 rows flipped between pass and 1.15 across runs (production arm drift of
 10–15 %), i.e. VecT vs the production inline store is at parity within noise
 on those traces.
 
-**Checkpoint comparison** (tier-specific operations, final vs `d191c4a`): 147
+**Checkpoint comparison** (tier-specific operations, final vs `aa01a08`): 147
 cases, 127 pass, 1 regression, and after the reruns 10 inconclusive. The
 regression is `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_trail`
 at 1.33 (1.34 → 1.77 µs): an all-distinct Trail frame written in ascending
@@ -1326,8 +1326,8 @@ the run pair, since the drift was confined to those cases.
 | `vec/restore_replay/verified` | 320.983 µs | 169.951 µs | **1.89x** |
 | `vec/try_extend/verified` | 209.559 µs | 164.298 µs | **1.28x** |
 
-## Checkpoint d191c4a (= 1x) vs final, tier-specific cases only (mean of A and B on each side)
-| Case | d191c4a | final | speed |
+## Checkpoint aa01a08 (= 1x) vs final, tier-specific cases only (mean of A and B on each side)
+| Case | aa01a08 | final | speed |
 |---|---|---|---|
 | `three_tier/adaptive_decision/high_duplicates_convert/512` | 11.314 µs | 1.144 µs | **9.89x** |
 | `three_tier/adaptive_decision/low_duplicates_no_convert/512` | 9.157 µs | 2.226 µs | **4.11x** |
@@ -1516,7 +1516,7 @@ Step-3 reruns (paired):
 | `tracked_vecp/mark_churn_large/verus/100000000` | 505.086 µs | 482.207 µs | 0.955 [0.727, 1.262] | **inconclusive** |
 | `vec/try_extend/verified` | 202.738 µs | 164.603 µs | 0.812 [0.795, 0.829] | pass |
 
-Checkpoint (`d191c4a` = reference), runs A / B:
+Checkpoint (`aa01a08` = reference), runs A / B:
 
 | Case | Checkpoint mean (runA/runB) | Final mean (runA/runB) | Ratio runA | Ratio runB | Status |
 |---|---|---|---|---|---|

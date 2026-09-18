@@ -3,7 +3,7 @@
 Work autonomously on branch `d21-exec` in `/Users/remidelmas/projects/sp-d21-exec`
 (local signed commits only; **never push**) until every required outcome below
 meets its acceptance criterion. This goal follows the wave of 2026-09-17
-(commits `0295502`, `8e89427`, `291bd1c`, `f067459`, `9e099c6` and the docs
+(commits `71f8358`, `2425233`, `60b34a1`, `6c96c24`, `33b565c` and the docs
 commit after them; progress doc section "Stratified reporters, literal store
 on SpMap, Trail fast path, token provenance, grouped-history tests") and the
 architecture the user settled that evening: **the history manager is always
@@ -61,7 +61,7 @@ foreign tokens are refused).
      `eclasses/`, `bplus/`).
 
 2. **Restore semantics B — DONE in the wave of 2026-09-17 (commit
-   `0b1200e`), kept here as the specification the typed group must
+   `2743e17`), kept here as the specification the typed group must
    preserve.** `restore(t)` reconstructs the
    state at mark `t`, keeps frame `t.depth` open and empty, cuts the
    genealogy at `t.depth + 1` (so `t` stays valid and every later token dies),
@@ -100,7 +100,7 @@ foreign tokens are refused).
 
 3. **Close the append-only log gap** (`aov/log/verified` 0.92× of legacy,
    200 µs vs 183 µs for 100 000 pushes, 0.16 ns per push, pre-existing since
-   before `d191c4a`). Bounded experiments, in this order, each measured at the
+   before `aa01a08`). Bounded experiments, in this order, each measured at the
    protocol settings with both orders: (a) after outcome 1 the push path is
    different code — re-measure first; (b) layout: move the two benchmark
    bodies into `#[inline(never)]` functions and swap their order in the
@@ -111,7 +111,7 @@ foreign tokens are refused).
    parity (≤ 1.08 in both runs and the rerun) **or** a root cause written in
    the performance report. Add no public partial function to get it. Give
    the same treatment to the two residuals of the 2026-09-18 pair
-   (`f676208` against `291bd1c`): the dyn-store family — `three_tier_v1/
+   (`073e38a` against `60b34a1`): the dyn-store family — `three_tier_v1/
    write/*/dyn_{inline,trail}` 1.09–1.25, `promotion/*/dyn_trail` 1.13,
    `large_retained_256_frames/dyn_inline` 1.13, a dozen `dyn_*` traces
    1.02–1.11 (every static store at parity on the same loops; no code on
@@ -125,7 +125,7 @@ foreign tokens are refused).
    else.
 
 4. **Close the Trail-first literal-store cost** (`store/sp-t880.*/smt32`
-   1.06–1.08 against `8e89427`, the SpMap literal store; `eqsat32` at
+   1.06–1.08 against `2425233`, the SpMap literal store; `eqsat32` at
    1.00–1.02). The store's own operations are configuration-independent, so
    the working hypothesis is footprint: the map's log holds `(key, value)`
    pairs plus the previous-occurrence column, about 2.4× the bytes per
@@ -227,7 +227,7 @@ foreign tokens are refused).
 - No `admit`, `assume`, axioms, trusted semantic wrappers, new `external_body`
   or raised solver limits (`rlimit`). Decompose and hide instead; lowering a
   limit is allowed when the proof no longer needs it.
-- `containers/` stays byte-identical (`git diff --quiet d191c4a -- containers`).
+- `containers/` stays byte-identical (`git diff --quiet aa01a08 -- containers`).
 - Every public function is total: the partial-API gate must report 0/0/0/0
   with an empty allowlist. Internal primitives with preconditions are
   `pub(crate)`.
@@ -255,7 +255,7 @@ cargo test -p semi-persistent-satcore -p semi-persistent-egraph              # d
 cargo test -p containers-verus-canary --features compat-all
 (cd au-verus && touch src/lib.rs && cargo verus verify)                      # 29 verified
 python3 containers-verus/tools/check_partial_api.py containers-verus/src containers-verus/partial-api-allowlist.txt
-cargo fmt --all -- --check; git diff --check; git diff --quiet d191c4a -- containers
+cargo fmt --all -- --check; git diff --check; git diff --quiet aa01a08 -- containers
 grep -rh '#[verifier::external_body]' containers-verus/src --include='*.rs' | wc -l   # 42 = 37 default + 5 gated; CI pins 37
 ```
 
@@ -301,8 +301,8 @@ only on an idle machine, never concurrently with a battery.
   machine; the gate runs the consumer suites in debug.
 - Worktrees at the end of 2026-09-17: `sp-d21-b` (battery), `sp-d21-prev`,
   `sp-d21-bench`, `sp-d21-bench2`, `sp-d21-bench3` (benchmark trees, one per
-  wave state), plus the legacy checkpoints `sp-d21-d191c4a`,
-  `sp-d21-before-tiers-a414090`, `sp-d21-pre-topdown-07b6df8`. Reuse or
+  wave state), plus the legacy checkpoints `sp-d21-aa01a08`,
+  `sp-d21-before-tiers-0eaec9e`, `sp-d21-pre-topdown-3598ebd`. Reuse or
   remove them (`git worktree remove`), do not create more than needed.
 
 ## Completion and handoff
@@ -316,7 +316,7 @@ inconclusive benchmark is not a pass.
 ## Status at the wave's close (2026-09-18, wrapped up at the user's request)
 
 **Outcome 1 — the typed external manager: shipped, with two token surfaces
-left standing for a named reason.** Six commits, `a0b6d57` through `67900d4`
+left standing for a named reason.** Six commits, `5fc8b29` through `67900d4`
 (rebuilt from the twelve that were actually built and gated, which stay on the
 local branch `d21-exec-wave-full`; logs `scratchpad/lean_*.log`, and the
 progress doc carries the table plus the tree-by-tree mapping).
@@ -330,10 +330,10 @@ lockstep proptest over a nested `Pair` of three columns. The deletion took
 the seven composites' token API and token types, the token-only predicates,
 `sync_group`, `Solo`/`SyncPair` and the e-graph wrappers' token layer: about
 5,500 lines, verification **2726 verified, 0 errors**.
-**Closed (2026-09-18, two further commits).** `9d9fdef` put the
+**Closed (2026-09-18, two further commits).** `92dab5b` put the
 anti-unification search layer on one history (`AuMembers`; 62 tokens per
 checkpoint became one, and its action cache's plain `Vec` became an
-`AppendOnlyVec`), which unblocked `a10fc54`: the token API of `SpMap`, `Vec`
+`AppendOnlyVec`), which unblocked `34b5a92`: the token API of `SpMap`, `Vec`
 and `AppendOnlyVec` is deleted, along with the columns' embedded `Genealogy`,
 its three framing lemmas and the cuts inside `restore_frame`/`reset_frame`.
 Nothing in the workspace mints or validates a token outside a `History`.
@@ -342,7 +342,7 @@ Verification **2688 verified, 0 errors**; both commits lean-gated
 hand-maintained derived state left is the exact memo's hash index, which an
 `SpMap` would absorb.
 
-**Outcome 2 — restore semantics B: done** (`0b1200e`, `486fcb0`, `f676208`;
+**Outcome 2 — restore semantics B: done** (`2743e17`, `c23eb12`, `073e38a`;
 the fused `restore_and_pop` is the SMT-LIB `pop`). Outcome 2b (a true
 in-place B core) stays a milestone, not started.
 
