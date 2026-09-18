@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Version tokens now carry their minting manager, a generation and a depth
+  (`GroupToken`; `VecToken` is an alias); every container is a group of one
+  with its own token manager, and a token from another container is refused.
+- `restore(t)` resets to the checkpoint and keeps its frame open (semantics
+  B): the token stays valid and can be restored to again, every token minted
+  after it is dead, and the new `pop_scope` / `try_pop_scope` (with
+  `ContainerError::NoOpenFrame`) drops the open top frame. The SMT-LIB
+  `pop` is `restore_and_pop(t)` / `try_restore_and_pop(t)`: the two fused
+  on one pop core, at the legacy restore's cost. The e-graph gains
+  `EGraph::pop_scope` and `EGraph::restore_and_pop`; its interpreter's
+  `(pop)` is the fused call. The stamp table
+  behind token validity is O(1) per mark and per restore, and a restore
+  never migrates tier history (the reopened frame is a header push with a
+  deferred rollover; the next `mark` applies the tier policy once).
+- The e-graph literal store is a verified `SpMap` keyed by canonical keys
+  (`LitVal::Key`, `CanonicalKey`): floats intern under `CanonicalF64`,
+  rationals under `CanonicalRational`.
+- Byte reporters (`heap_bytes`, `tracking_bytes`, `total_bytes`,
+  `diff_log_len`) are plain Rust outside the verified perimeter; the
+  `HeapBytes` trait is exported for stores, and `DiffStore` no longer has a
+  `heap_bytes` method.
+- The Trail dedupe takes a verified straight-copy fast path on strictly
+  ascending frames.
+
+### Added
+
+- Randomized grouped-history tests at the `ForkHistory` and e-graph levels.
+
 ## [0.3.0] - 2026-08-28
 
 ### Added

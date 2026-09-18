@@ -63,8 +63,10 @@ deduplication and migration primitives", "Hot-to-Cold migration primitives",
 ## 3. Trust inventory (final source)
 
 Re-derived from `grep '#[verifier::external_body]'` on the final source:
-**49 default-build markers + 5 gated by `literal-types`** (the session started
-at 74 + 5; the debug-only ring walk left with the total public API), **4 default axioms** (`axiom_index_hasher_builds_valid_hashers`;
+**37 default-build markers + 5 gated by `literal-types`** (the session started
+at 74 + 5; the debug-only ring walk left with the total public API, the twelve
+byte reporters left the perimeter with the stratification commit `0295502`,
+ledger §2a), **4 default axioms** (`axiom_index_hasher_builds_valid_hashers`;
 `obeys_key_model` for `DenseId31`, `DenseId63`, `DenseUsize`, plus one generated
 per `define_id*!` id type) **+ 5 gated axioms**, no `admit`/`assume` in project
 sources (CI-checked). Every default marker, by ledger group:
@@ -94,18 +96,18 @@ nothing was served from cache; logs `/tmp/sp-d21-final-*.log`:
 
 | Gate | Command | Result |
 |---|---|---|
-| Full crate, default features | `cargo verus verify` | 2590 verified, 0 errors |
-| Full crate, `literal-types` | `cargo verus verify --features literal-types` | 2590 verified, 0 errors |
+| Full crate, default features | `cargo verus verify` | 2696 verified, 0 errors (at `f676208`; 2676 at `0b1200e`, 2590 at the final checkpoint `f304bc7`) |
+| Full crate, `literal-types` | `cargo verus verify --features literal-types` | 2696 verified, 0 errors |
 | Conditional composition (Step 3 theorem) | `verus --crate-type lib containers-verus/proofs/top_down/composition.rs` | 80 verified, 0 errors |
 | `au-verus` | `cargo verus verify` (in `au-verus/`) | 29 verified, 0 errors |
-| Feature/runtime suite | `cargo test -p semi-persistent-containers-verus --features 'compat-all,literal-types'` | 277 passed, 0 failed, 10 ignored |
+| Feature/runtime suite | `cargo test -p semi-persistent-containers-verus --features 'compat-all,literal-types'` | 279 passed, 0 failed, 10 ignored |
 | Release differential policy matrix | `PROPTEST_CASES=1024 cargo test -p containers-conformance --release --test three_tier_policy_matrix` | 4 passed |
-| Consumers (e-graph, SAT core) | `cargo test -p semi-persistent-satcore -p semi-persistent-egraph` | 1267 passed, 0 failed, 45 ignored |
+| Consumers (e-graph, SAT core) | `cargo test -p semi-persistent-satcore -p semi-persistent-egraph` | 1268 passed, 0 failed, 45 ignored |
 | Canary | `cargo test -p containers-verus-canary --features compat-all` | 2 passed |
 | Partial-API audit | `tools/check_partial_api.py` | 0 partial / 0 allowed / 0 unlisted / 0 unsafe — closed by extended goal 5 (§5); 73/33/40/0 at the final checkpoint |
 | Formatting, whitespace | `cargo fmt --all -- --check`, `git diff --check` | clean |
 | Legacy oracle unchanged | `git diff --quiet d191c4a -- containers` | unchanged |
-| Trust count (CI method) | grep of `#[verifier::external_body]` | 49 default + 5 gated (`EXPECTED_DEFAULT=49`; 50 until the debug-only ring walk left with extended goal 5) |
+| Trust count (CI method) | grep of `#[verifier::external_body]` | 37 default + 5 gated (`EXPECTED_DEFAULT=37`; 49 until the byte reporters left the perimeter, 50 until the debug-only ring walk left with extended goal 5) |
 
 The 10 ignored feature tests and 45 ignored consumer tests are the suites'
 pre-existing ignores (feature-gated or long-running), unchanged by this branch.

@@ -331,3 +331,66 @@ generation read removes a walk that was never the bottleneck, and reclamation's
 per-backjump bookkeeping roughly offsets it. Wall-clock stays dominated by diff
 replay and rebuild. Estimate, `D` unmeasured; measure decision depth on a real
 SMT run to confirm.
+
+## Shipped: token provenance and the group of one (2026-09-17)
+
+The token authority is one verified type, `history::Genealogy`: a
+`ContainerId` naming the manager plus the `GenStamps` levels. It has three
+operations — `mint(depth)`, `is_valid(&token)`, `cut_from(depth)` — and one
+token type, `GroupToken { history, generation, depth }` (`VecToken` is an
+alias). `History` for a synced group is a `Genealogy` plus the group depth;
+`ForkHistory` owns it and its members.
+
+Every standalone `Vec` and `AppendOnlyVec` embeds its own `Genealogy`: a
+group of one. `mark` pushes the frame and mints last (so the postcondition
+states the token's validity without re-framing the frame push); `restore`
+checks provenance first (`is_valid`: same manager, live stamp), resets to
+the checkpoint — the state at the mark, with the mark's frame reopened
+empty (semantics B, design doc 08 §1) — and cuts at `t.depth + 1`: the
+checkpoint's token stays valid and reusable, every token minted after it is
+dead for good, and `pop_scope` (the SMT-LIB `pop`) drops the open top frame
+and kills its token. A token minted by another manager is refused whatever
+its numbers.
+
+The stamp table is O(1) per operation (commit `ed5c5f5`): stamps come from
+a counter that only grows (each handed out once), the table keeps a live
+length, validity is `depth < len && levels[depth] == stamp`, a cut is
+`len := d` (one write; the stale stamps above stay in place) and a mint at
+the live length is one write. The first version bumped every level from
+the cut up — O(deepest depth) per restore — and cost 1.1–1.7× on every
+mark/restore-dominated benchmark; the truncating table replaced it the same
+evening. Memory stays O(deepest depth ever reached), 8 bytes per depth,
+kept as capacity like every column's frame stack.
+
+Proof shape. The `genealogy` field is absent from every physical, ghost-trail
+and snapshot predicate of `Vec`, so a change confined to it preserves `wf`:
+`lemma_genealogy_framing` (the twin of `lemma_full_trail_physical_framing`,
+plus a `wf_for_snap` half) is called after the mint/cut with a ghost snapshot
+of the physical state, and `mark`/`restore_frame` stay within their old
+solver budgets. Two lemmas of the Hot and ingress proofs were perturbed by the
+new field and are decomposed (`lemma_hot_migrating_frame_range`,
+`lemma_ingress_capture_{snap,cold}`); no limit was raised.
+
+Composite tokens (ListArena, CircularList, SparseSet, UnionFind, BPlus,
+EClasses, SpMap) still bundle their columns' tokens; their lockstep invariants
+are unchanged, only the field read is `depth`. Grouped members under
+`ForkHistory` are driven structurally (`push_frame`/`restore_frame`), and
+their own manager is inert (never minted, cut along with the frames).
+
+## Next: one external manager (planned)
+
+The standalone path is a convenience the group path does not need. The
+planned uniform shape, agreed on 2026-09-17: columns carry no manager and no
+tokens — their whole versioning surface is the member protocol
+(`push_frame`, `restore_frame(depth)`, `depth`); composites implement the same
+protocol by fanning out to their columns and doing their own restore work; a
+typed `ForkHistory<M: SyncMember>` owns the history and exactly one member
+`M` (a consumer's forwarding struct of columns), so `mark`/`restore` act on
+the whole state at once and typed access is `group.member.field`. A
+standalone container is then `ForkHistory::new(Vec::new())`, a group of one
+set up by hand. Misuse (calling `push_frame` on a member directly) makes the
+member's depth drift and the next group operation refuses. Ownership, not a
+shared handle, is what keeps the manager verifiable: a handle would put
+interior mutability and a permission token on every mark and restore.
+The execution plan with acceptance criteria is
+`doc/tasks/nightshift-external-manager-goal.md`.

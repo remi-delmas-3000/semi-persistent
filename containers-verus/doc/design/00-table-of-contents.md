@@ -43,7 +43,7 @@ not the ghost deep copies. The headline
 theorem is the equivalence between the diff engine and the deep-copy
 specification:
 
-> after `restore(token)`, `view() == snapshots[token.frame_idx]`
+> after `restore(token)`, `view() == snapshots[token.depth]`
 
 This holds per cell, at arbitrary mark-nesting depth, under any interleaving of
 `push`, `set`, and `pop`. A companion result constrains which tokens `restore`
@@ -119,7 +119,8 @@ the reading sequence above):
 07. **[Default Impls & `Tagged` Niche Safety](07-default-impls.md)**: why a
     fabricated `Default` filler is never observable, and the niche-bit recipe.
 08. **[Token Reuse & Restore Semantics](08-token-reuse-and-restore.md)**: what
-    `restore` does to the frame stack and why a reused token is trapped.
+    `restore` does to the frame stack (it resets to the checkpoint and keeps
+    its frame open; `pop_scope` drops it), which tokens stay valid, and why.
 
 ## Future work
 

@@ -2445,3 +2445,217 @@ formatting, whitespace and the unchanged-legacy check passed; trust **49
 default + 5 literal** (the debug-only ring walk was the one marker
 removed; CI's `EXPECTED_DEFAULT` follows). Benchmarks against `1a90876`:
 `doc/tasks/final-performance-report.md`, "Extended goal 5".
+
+## 2026-09-17 — Stratified reporters, literal store on SpMap, Trail fast path, token provenance, grouped-history tests
+
+Seven signed local commits on top of `df0da02`, each gated in the isolated
+worktree with the full battery (logs `/tmp/sp-d21-s{1..5}-*.log`,
+`/tmp/sp-d21-w5b-*.log`, `/tmp/sp-d21-semb-*.log`): `0295502` stratified
+reporters, `8e89427` Trail ascending fast path, `291bd1c` literal store on
+SpMap, `f067459` token provenance, `9e099c6` grouped-history tests,
+`ed5c5f5` O(1) stamps, `0b1200e` restore semantics B. No `admit`/`assume`,
+no new `external_body`, no solver limit raised (two were lowered);
+`containers/` unchanged.
+
+**Stratified reporters (`0295502`).** The byte reporters cannot alter
+execution and no proof reads them, so they left the verified perimeter: a
+plain-Rust `diagnostics::HeapBytes` trait carries `heap_bytes` for the
+stores and columns, every `tracking_bytes`/`total_bytes`/`diff_log_len` is
+an ordinary `impl` block after its container's `verus!` block, `DiffStore`
+lost its `heap_bytes` method and `SyncMember`/`ForkHistory` theirs. Twelve
+`external_body` markers went with them: trust **37 default + 5 literal**
+(CI `EXPECTED_DEFAULT=37`; ledger §2a). Two proofs needed maintenance in the
+new declaration context, both by decomposition: `lemma_survivor_top_bounds_
+trail` goes through the pointwise `lemma_trail_repr_at`, and
+`ListArena::splice_raw` — whose full-crate run had started dying in a Z3
+worker panic ("expected rlimit-count in smt statistics": the solver ran out
+of memory, 3.9 GB, before its 2000 limit) — no longer unfolds the old state's
+`cache_ok` and `model_disjoint` in its own context. The `next` quantifier of
+`cache_ok` is self-feeding (an instance at `(l, p)` creates `model[l][p+1]`,
+which matches it again); with both predicates hidden (`hide` as the first
+statements of the body), `lemma_cache_ends_at` supplies the two lists' cached
+ends, `lemma_splice_disjoint_arena` and `lemma_splice_cache_ok` re-establish
+the predicates for the new state in their own small contexts, and
+`lemma_disjoint_entries` gives the one instance the list_seq framing needs.
+The function verifies in seconds at limit 300, the value its own comment
+always called for (it had been 2000 since A1). A healthy full default verify
+of the crate takes ninety seconds; every hour-long run before this fix was
+that one function.
+
+**Trail ascending fast path (`8e89427`).** `trail_select::dedupe_trail_range`
+scans a frame for strictly ascending indices first (one compare per entry,
+stops at the first descent); an ascending frame holds no index twice, so
+every entry is its own first hitter and copies straight through, with no
+set and no hashing — the fast path proves `first_hitter` under the ascending
+invariant and reuses `lemma_dedupe_push`. Only a frame with a repeat or a
+descent takes the hash-set fold, which now sizes its set inside that branch.
+This is the singleton-frame trade-off measured under extended goal 5
+(`three_tier_v2/adaptive/singleton_*/dyn_trail`, 1.33x). A Bloom filter was
+considered and rejected: at the false-positive rates that would matter the
+filter is the size of the set (birthday bound, m ≳ n²), and a sort-based
+dedupe needs a stable sort to keep the write order of repeated indices.
+
+**Literal store on SpMap (`291bd1c`).** `LitValStore` is a
+`SpMap<L::Key, L, V::Index, TRACK>` (the e-graph now enables the container
+crate's `literal-types`): intern, lookup, mark and restore go through the
+verified map, and the hand-rolled index with its incremental-versus-rebuild
+restore heuristic is gone. Keys are canonical: `LitVal::Key`/`key()` through
+a `CanonicalKey` trait — `OrderedFloat<f64>` interns under `CanonicalF64`
+(the fold `OrderedFloat` already applies, pinned by the container crate's
+compliance tests), `BigRational` under `CanonicalRational` (gcd-reduced,
+sign-normalized, so structural equality is value equality), the machine
+types, strings and big integers under themselves; `define_litval!`
+generates the key enums. The node caches keep their hand-rolled index by
+request (`REBUILD_RATIO`/`restore_incrementally` stay for them).
+
+**Token provenance (`f067459`).** A version token was a bare frame index: a
+token minted by one vector was accepted by any other at the same depth, and
+a consumed token came back to life as soon as the next `mark` reused its
+frame index. Now `history::GroupToken { history: ContainerId, generation,
+depth }` is the one token type (`VecToken` is an alias); `Genealogy { id,
+stamps }` is the verified minting manager (`mint`, `is_valid`, `cut_from`),
+`History` for synced groups is a `Genealogy` plus the group depth, and every
+`Vec` and `AppendOnlyVec` embeds its own `Genealogy`: a standalone container
+is a group of one. `mark` mints last and `restore` cuts last; `restore` and
+`is_valid_token` check provenance first and refuse a foreign, consumed or
+later-minted token without mutating. The cut is inclusive
+(`cut_from(t.depth)`): `restore(t)` consumes `t`. Legacy keeps a token at the
+fork depth on-branch, so the verified rule is strictly stricter; the policy
+matrix and oracle proptests model per-depth generations with the inclusive
+cut and assert verified-valid ⟹ production-valid, and `misuse.rs` pins the
+abandoned-branch, consumed and foreign refusals (`standalone_vec_refuses_
+abandoned_branch_token`). Composite tokens still bundle column tokens (reads
+of `frame_idx` became `depth`). Proof shape: the `genealogy` field is absent
+from every physical, ghost-trail and snapshot predicate of `Vec`, so
+`lemma_genealogy_framing` (the twin of `lemma_full_trail_physical_framing`
+plus a `wf_for_snap` half, `lemma_genealogy_snap_framing`) carries `wf` and
+the observables across the mint/cut, called with a ghost snapshot of the
+physical state; `lemma_hot_frame_strict` and `lemma_ingress_capture_
+preserves` were perturbed by the new field and are decomposed
+(`lemma_hot_migrating_frame_range`; `lemma_ingress_capture_{snap,cold}`).
+The partial-API gate caught `Genealogy::mint` (`requires depth <
+u32::MAX`) as a new public partial function on the first battery; it is an
+internal primitive and became `pub(crate)`, and the battery was rerun on the
+corrected files (no allowlist entry). Design docs 08 and 10 carry the
+semantics.
+
+**O(1) stamps (`ed5c5f5`).** The provenance commit's benchmarks showed
+every mark/restore-dominated case 1.1–1.7× slower: `GenStamps::bump_from`
+rewrote every stamp level from the cut to the deepest depth ever reached
+(64 writes per restore on the 64-frame retained trace, up to 128 on the SMT
+traces), and `stamp_at` grew the level array on every mark. The table now
+hands out stamps from a counter that only grows and keeps a live length:
+validity is `depth < len && levels[depth] == g`, a cut is one write
+(`len := min(len, d)`, the stale stamps above stay in place and capacity is
+kept), a mint at the live length is one write (depths a group drove
+structurally are filled with fresh stamps first). Totality by refuse-guards
+at the counter and length ceilings; no invariant to thread — the freshness
+the token rule needs is a postcondition of `mint_at` (every stamp below the
+old counter keeps its validity status). `lemma_bump_invalidates` and the
+eager level array are gone; nothing outside `gen_stamps.rs`, the genealogy
+and three stamp tests changed. Memory is 8 bytes per depth of the deepest
+nesting reached, like every column's frame stack.
+
+**Restore semantics B (`0b1200e`).** The user's ruling of 2026-09-17
+(design doc 08 §1, §6): `restore(t)` resets to the checkpoint — the state at
+the mark, with the mark's frame reopened empty — so the token stays valid
+and can be restored to again, every token minted after it is dead (cut at
+`t.depth + 1`), and a new `pop_scope` drops the open top frame (the SMT-LIB
+`pop`; `try_pop_scope` with `ContainerError::NoOpenFrame`). On the tiered
+`Vec` the reset is the pop core followed by a structural frame push
+(`reset_frame` = `reset_frame_physical` + cut; the physical half hides `wf`
+and carries it through the step contracts, with the accessors
+`lemma_store_wf` and `lemma_snapshots_len`); `AppendOnlyVec` resets by
+truncation. `History::restore_to` cuts at `t.depth + 1` and gains `pop`;
+the member protocol gains `reset_frame`/`pop_frame` and `ForkHistory`
+resets its members and gains `pop`. Every composite's `restore` keeps the
+checkpoint's frame and every composite has `pop_scope` (the four with a
+structural core reuse it; `SpMap` gets a pop core; `BPlusTreeSet` and
+`EClasses` derive theirs from their restore proofs with the prefix cut one
+frame lower); the dead group-path prototype `EClasses::restore_with_history`
+is removed. The e-graph keeps the checkpoint's member tokens on its stacks,
+gains `EGraph::pop_scope`, and the interpreter's `(pop)` is `restore(t)`
+then `pop_scope()`; node store, caches, registries, routing column and
+literal store forward `pop_scope`. Legacy `containers/` restores are pops,
+so the paired harnesses assert the checkpoint is still valid after the
+verified restore and then pop for parity; the in-crate suites pin the
+reusable checkpoint, the cut above it and the refusal after the pop, and
+`three_tier_runtime` keeps its tier-mechanics expectations under explicit
+pops. The crate verifies at **2676 functions** (pops and accessors added);
+the harness rule stays "verified-valid ⟹ production-valid" on the popped
+path.
+
+**Deferred-rollover reopen and bench parity (`486fcb0`).** The benchmarks
+of `0b1200e` against `291bd1c` (220 cases) showed ten regressions, all on
+restore-dominated cases (`store/*/eqsat32` and `smt32` 1.40–1.46,
+`vec/restore_replay/verified` 1.42, `three_tier_v1/restore/shallow_high_
+duplicates/*` 1.15–1.62, `smt_backtracking_128/static_vecp` 1.16), read
+from the code rather than bisected. `reset_frame_physical` reopened the
+checkpoint's frame with `push_frame`, the configured-rollover push of
+`mark`: right after the pop core made the parent stratum writable, the
+push sealed it again under the tier policy and migrated it (Trail → Hot
+dedupe, Hot → Cold) on every restore. The reopen is now a `Defer` push
+(`push_frame_with_options`), a header push that converts no history; the
+next `mark` migrates once, as before. Same contract, same proof shape. The
+benches also still measured a bare `restore(t)` against the legacy
+pop-restore, so a trace with `n` restores ran `n` frames deeper than its
+pair; every verified restore in the benches now pops the way the paired
+harnesses do (legacy restore = `restore` then `pop_scope`). Gate: lean per-commit gate in the main tree — default verify **2676 verified, 0 errors**, feature suite **279 passed, 10 ignored**, release policy matrix **4**, conformance **31**, consumers **1268 passed, 45 skipped** under cargo-nextest (110 s), canary **2**, partial-API **0/0/0/0**, fmt, whitespace, legacy unchanged, trust **37 + 5**.
+
+**The fused SMT-LIB pop (`f676208`).** The benchmarks of `486fcb0` fixed
+`vec/restore_replay` (1.42 → 1.02) but left the store traces at 1.50–1.55
+and put every one-frame restore case at 1.4–2.1: `restore(t)` then
+`pop_scope()` reopens the parent stratum twice (the restore's pop core
+promotes the survivor and recomputes its capture tags, the deferred push
+seals it again and `prepare_mark` clears the tags over it, the pop's core
+reopens it once more and recomputes them) — two extra O(stratum) walks per
+`(pop)`, on nine columns in the store traces. `restore_and_pop(t)` and the
+total `try_restore_and_pop` are the two fused on the one pop core the
+legacy restore always used: contents at `t`, depth `t.depth`, `t` and every
+later token dead. Each fused body is the pre-B restore of `ed5c5f5` over
+the fused column ops, with its proof (`Vec`, `AppendOnlyVec`, `History`,
+`ForkHistory`, the seven composites, `HintedArena`); the crate verifies at
+**2696 functions** (twenty added, no limit raised). The e-graph gains
+`EGraph::restore_and_pop` (member tokens leave the stacks, one history
+cut) with the node store, caches, registries, routing column and literal
+store forwarding it, and the interpreter's `(pop)` is the one call; the SAT
+core's backjump stays the bare `restore`. Every paired bench measures
+`restore_and_pop`; two verified-only cases measure the bare semantics-B
+restore. `tests/restore_and_pop.rs` pins the equivalence with `restore`
+then `pop_scope`, the depth and token fate, and the refusal path. Gate:
+lean per-commit gate in the main tree — default verify **2696 verified, 0 errors**, feature suite **283 passed, 10 ignored**, release policy matrix **4**, conformance **31**, consumers **1268 passed, 45 skipped** under cargo-nextest (108 s), canary **2**, partial-API **0/0/0/0**, fmt, whitespace, legacy unchanged, trust **37 + 5**.
+
+**Grouped-history tests (`9e099c6`).** The lockstep property the group proofs
+state is exercised end to end: `grouped_history_random_sequences_land_in_
+lockstep` drives three members of different widths under one `ForkHistory`
+with random marks, erased writes and restores (256 cases; every member must
+equal its typed oracle snapshot from that mark, the group must sit at the
+token's depth, the consumed token and every later token must be refused
+forever), `consumed_and_foreign_tokens_are_refused` pins the deterministic
+cases, and `egraph/tests/group_history_props.rs` runs a replay oracle over
+`EGraph31<NiraLitVal, true, false>` (random insertions, merges, rebuilds,
+marks and restores; after each restore the class/node/literal/sort counts
+and the partition must equal both the snapshot taken at the mark and a fresh
+replay of the history prefix; `EGraph::mark` rebuilds first, so the oracle
+records a rebuild at every mark).
+
+Gate evidence per commit (worktree holding exactly that commit's files):
+`0295502` default **2644 verified, 0 errors**, literal **2644/0**; `8e89427`
+**2646/0**, **2646/0**; `291bd1c` **2646/0**, **2646/0**; `f067459`
+**2655/0**, **2655/0**; `9e099c6` **2655/0**, **2655/0**; `ed5c5f5`
+**2651/0**, **2651/0** (the bump lemma and loop gone); `0b1200e`
+**2676/0**, **2676/0** (pops and accessors); `486fcb0` **2676/0** (lean
+per-commit gate, goal doc outcome 7: default verify in the main tree, the four test suites, consumers under nextest, the source checks); `f676208` **2696/0** (lean gate: default verify in the main tree, the four test suites, consumers under nextest, the source checks). Full battery on the final source `f676208` (2026-09-18 04:30): default **2696 verified, 0 errors**, literal **2696/0**, composition **80/0**, `au-verus` **29/0**, feature suite **283 passed, 10 ignored**, release policy matrix **4**, conformance **31**, consumers **1268 passed, 45 ignored**, canary **2**, partial-API **0/0/0/0**, fmt, whitespace, legacy unchanged, trust **37 + 5**. Every commit:
+conditional composition **80 verified**, `au-verus` **29 verified**, feature
+suite **277 passed, 10 ignored**, release differential policy matrix with
+`PROPTEST_CASES=1024` **4 passed**, B+ tree, oracle and reference-e-graph
+property tests **31 passed**, e-graph/SAT consumers **1267 passed, 45
+ignored** (`9e099c6`: **279** feature tests and **1268** consumer tests, the new ones), canary **2 passed**, partial-API audit **0/0/0/0**,
+formatting, whitespace and the unchanged-legacy check passed, trust **37
+default + 5 literal**. Benchmarks against each commit's predecessor:
+`doc/tasks/final-performance-report.md`, "Wave after extended goal 5".
+
+Known pre-existing flake, unrelated: `egraph/tests/au_exact_anytime.rs`
+(`exact_deadline_returns_anytime_incumbent`) asserts a 5 ms deadline is hit;
+in `--release` on this machine the exact solve finishes first (fails at
+`1a90876` too); the gate runs the consumer suites in debug, where it passes.

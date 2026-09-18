@@ -180,6 +180,52 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    not instrumented; and the `obeys_key_model` type law, which is no longer
    a precondition but remains the one uninterpreted assumption a custom key
    type must satisfy for `SpMap`'s contract (`doc/future/key-model-tcb.md`).
+7. Wave after the extended goal (2026-09-17, five signed local commits on
+   top of `df0da02`, each with the full battery; progress doc, same date):
+   byte reporters stratified out of the perimeter (`diagnostics::HeapBytes`,
+   trust 37 + 5); a verified ascending-frame fast path in the Trail dedupe
+   (the singleton-frame trade-off of item 6); the e-graph literal store on
+   `SpMap` under canonical keys (`LitVal::Key`, `CanonicalKey`; the node
+   caches keep their hand-rolled index by request); **token provenance** —
+   `GroupToken { history, generation, depth }` minted by a `Genealogy` every
+   container owns (a group of one), restore consumes the token (inclusive
+   cut), foreign/consumed/later tokens refused, design docs 08 and 10; and
+   randomized grouped-history tests at the `ForkHistory` and e-graph
+   levels (the group property test of item 6 is answered). Proof
+   maintenance was by decomposition only: `lemma_genealogy_framing`,
+   `lemma_hot_migrating_frame_range`, `lemma_ingress_capture_{snap,cold}`,
+   and `ListArena::splice_raw` (hide `cache_ok`/`model_disjoint`, four
+   lemmas; limit 2000 → 300 — its old context had grown into a Z3
+   memory blow-up that showed as an "expected rlimit-count" worker panic;
+   a healthy full verify is ninety seconds). Three more commits closed the
+   wave the same night: `ed5c5f5` makes the stamp table O(1) per mark and
+   per restore (the provenance commit's benchmarks had shown 1.1–1.7× on
+   every mark/restore-dominated case from the old bump loop), and `0b1200e`
+   ships restore semantics B — restore resets to the checkpoint and keeps
+   its frame open, `pop_scope` drops it, the SMT-LIB `(pop)` is restore
+   then pop — across the columns, the composites, the group manager, the
+   e-graph and the harnesses; `486fcb0` reopens the restored frame with a
+   deferred rollover (the first B benchmarks showed restore-dominated
+   regressions: the reopen re-migrated the parent stratum on every restore)
+   and makes every verified restore in the benches pop, for legacy parity;
+   `f676208` fuses the SMT-LIB pop into `restore_and_pop(t)` on one pop
+   core (spelled as `restore` then `pop_scope` it reopened the parent
+   stratum twice: 1.4–2.1× on one-frame cases, 1.5× on the store traces).
+   Benchmarks per commit: performance report, "Wave after extended goal
+   5".
+   **Next wave, agreed with the user:** one external history manager and
+   no standalone path — columns keep only the member protocol
+   (`push_frame`, `restore_frame(depth)`, `depth`), composites implement it
+   by fanning out, a typed `ForkHistory<M: SyncMember>` owns the history
+   and one member (the consumer's forwarding struct of columns), a
+   standalone container is `ForkHistory::new(Vec::new())`; direct
+   `push_frame` on a member drifts its depth and the next group operation
+   refuses (doc 10, "Next: one external manager"). Also still open:
+   affine tokens (drop `Copy`, restore by move) and a `reset_to(&t)`
+   reusable checkpoint (doc 08 §4, §6). The whole of it, plus the two
+   open benchmark gaps (`aov/log` 0.92×, `store/*/smt32` 1.06–1.08) and the
+   two-step id-mint verification, is written up as an autonomous goal:
+   `doc/tasks/nightshift-external-manager-goal.md`.
 
 ## Existing proof architecture to reuse
 
@@ -219,9 +265,11 @@ fan-out, pending-restore consumers, and relevant supporting structures such as
 DenseSpanMap. Review `proofs/top_down/derived-contract-audit.md`; exact component
 archive/depth contracts and error framing matter, not just primary contents.
 
-Current trust inventory: **50 default + 5 literal external_body** (CI
-`EXPECTED_DEFAULT=49` since extended goal 5 removed the debug-only ring walk;
-50 before; the session started at 74 + 5); default axioms are the
+Current trust inventory: **37 default + 5 literal external_body** (CI
+`EXPECTED_DEFAULT=37` since the byte reporters left the verified perimeter
+on 2026-09-17 — plain Rust outside `verus!`, `diagnostics::HeapBytes`; 49
+after extended goal 5 removed the debug-only ring walk; 50 before; the
+session started at 74 + 5); default axioms are the
 hasher axioms plus the per-index-type `obeys_key_model` axioms
 (`axiom_key_model_*`), and the one trusted std contract is
 `std_sort::sort_pairs_by_index`. Reaudit on final source, and do not mislabel

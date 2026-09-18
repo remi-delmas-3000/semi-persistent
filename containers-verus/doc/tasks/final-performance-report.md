@@ -861,6 +861,305 @@ First pass, every case (`total_A`/`total_B` vs `prev5_A`/`prev5_B`):
 | `vec/try_extend/legacy` | 194.043 µs / 192.178 µs | 216.588 µs / 194.843 µs | 1.116 [1.105, 1.128] | 1.014 [0.997, 1.031] | **inconclusive** |
 | `vec/try_extend/verified` | 152.914 µs / 148.911 µs | 137.307 µs / 133.321 µs | 0.898 [0.812, 0.991] | 0.895 [0.816, 0.982] | pass |
 
+## Wave after extended goal 5 (five commits after `df0da02`)
+
+Protocol as frozen above: τ = 1.08, two interleaved runs per tree (candidate
+`<tag>_cand_A`/`_B`, the previous commit `<tag>_prev_A`/`_B`, each tree its
+own worktree and build, same benchmark files), ratio intervals from
+Criterion's 95 % confidence intervals, inconclusive cases rerun once per
+side at `--sample-size 100 --warm-up-time 3 --measurement-time 10`
+(`<tag>_cand_R`/`_prev_R`). Only commits that touch an executed path were
+measured; the stratified reporters (`0295502`) and the grouped-history
+tests (`9e099c6`) change no runtime path. Apple M4 Pro, 2026-09-17
+20:41–W5END, on an idle machine after the batteries.
+
+### `8e89427` Trail ascending fast path (against `0295502`), `three_tier_bench`
+
+The change is `trail_select::dedupe_trail_range`: a strictly ascending frame
+copies straight through instead of feeding the hash set. The case that
+motivated it, the singleton-frame trade-off of extended goal 5:
+
+| Case | `0295502` mean (A/B) | `8e89427` mean (A/B) | Ratio A | Ratio B | Status |
+|---|---|---|---|---|---|
+| `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_trail` | 1.729 µs / 1.708 µs | 962.0 ns / 1.029 µs | 0.556 [0.545, 0.570] | 0.603 [0.584, 0.622] | pass |
+| `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_inline` | 425.5 ns / 425.7 ns | 425.8 ns / 424.3 ns | 1.001 [0.985, 1.017] | 0.997 [0.983, 1.011] | pass |
+| `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_parallel` | 424.3 ns / 424.1 ns | 421.1 ns / 425.1 ns | 0.992 [0.982, 1.004] | 1.002 [0.987, 1.018] | pass |
+
+The Trail column's singleton frames now take 0.56–0.60 of their previous
+time (the 1.33× gap to the checkpoint measured under extended goal 5 is
+closed with margin); the Hot columns, which never enter the dedupe, are
+unchanged. **First pass, 148 cases: 112 pass, 36 inconclusive, 0
+regression.** The inconclusive cases include legacy-side ids that this
+commit cannot touch (`three_tier_v1/trace/smt_backtracking_128/production_veci`
+at 1.119 in run A and 1.025 in run B), which shows the drift between the two
+runs; the protocol rerun at the larger sample (one run per side, `w4_cand_R` /
+`w4_prev_R`) settles 29 of the 36 and leaves 7 inconclusive with point
+estimates 0.96–1.03 and intervals of ±10–15 % (`three_tier/mark/
+no_rollover_smt` 0.960 [0.812, 1.134], `three_tier/end_to_end/smt_backtrack`
+1.019 [0.959, 1.082], …): nanosecond-scale cases whose intervals exceed the
+tolerance in width, no regression. **Verdict: pass, 0 regressions.**
+
+### `291bd1c` literal store on SpMap (against `8e89427`), `store_bench`, `saturate_bench`
+
+The e-graph's literal store went from an `AppendOnlyVec` log plus a
+hashbrown index to a `SpMap` (verified log, index and previous-occurrence
+column) under canonical keys; `store_bench` runs whole programs under both
+31-bit configurations and `saturate_bench` the saturation corpus, all with
+`MachineLit` (the `sp-t880` programs are numeric-literal heavy: 2648 numeric
+tokens, one string). **First pass, 22 cases: 15 pass, 7 inconclusive, 0
+regression.** The `eqsat32` rows are at 1.00–1.02; the five `store/*/smt32`
+rows (the Trail-first, backtracking-heavy configuration) sit at 1.06–1.08 in
+both runs with lower bounds above 1.03 — a real cost below the tolerance,
+in the store's mark/restore path rather than in interning (the keys of this
+program are copies, and `eqsat32` interns the same literals):
+
+| Case | `8e89427` mean (A/B) | `291bd1c` mean (A/B) | Ratio A | Ratio B | Status |
+|---|---|---|---|---|---|
+| `store/sp-t880.base/smt32` | 4.563 ms / 4.601 ms | 4.876 ms / 4.882 ms | 1.069 [1.046, 1.093] | 1.061 [1.036, 1.087] | inconclusive |
+| `store/sp-t880.cycles/smt32` | 25.380 ms / 25.306 ms | 27.326 ms / 27.345 ms | 1.077 [1.049, 1.107] | 1.081 [1.051, 1.112] | inconclusive |
+| `store/sp-t880.empty/smt32` | 4.701 ms / 4.690 ms | 5.014 ms / 5.029 ms | 1.066 [1.044, 1.090] | 1.072 [1.049, 1.098] | inconclusive |
+| `store/sp-t880.rerun/smt32` | 5.638 ms / 5.623 ms | 5.978 ms / 5.992 ms | 1.060 [1.034, 1.087] | 1.066 [1.040, 1.093] | inconclusive |
+| `store/sp-t880.rerunnorun/smt32` | 4.594 ms / 4.574 ms | 4.904 ms / 4.892 ms | 1.067 [1.043, 1.093] | 1.069 [1.046, 1.095] | inconclusive |
+| `store/sp-t880.base/eqsat32` | 4.829 ms / 4.860 ms | 4.891 ms / 5.050 ms | 1.013 [0.968, 1.059] | 1.039 [0.992, 1.090] | inconclusive |
+| `saturate/plain7/naive/run` | 10.225 ms / 10.341 ms | 10.837 ms / 10.193 ms | 1.060 [1.017, 1.116] | 0.986 [0.978, 0.992] | inconclusive |
+
+The rerun settles all seven: **7 pass** — the five `smt32` store rows land
+below the tolerance at the larger sample (`store/sp-t880.cycles/smt32` included),
+`store/sp-t880.base/eqsat32` and `saturate/plain7/naive/run` were run noise.
+**Verdict: pass, 0 regressions**; the 1.06–1.08 first-pass point estimates
+on the Trail-first configuration remain a real but in-tolerance cost, listed
+as outcome 4 of `doc/tasks/nightshift-external-manager-goal.md`.
+
+### `f067459` token provenance (against `291bd1c`), all container and e-graph targets
+
+Every `mark` now mints a generation stamp and every `restore` validates the
+token (one id compare, one stamp read) and bumps the stamps at and above
+the restored depth; `is_valid_token` gained the id compare. Targets:
+`retained_containers_bench` (`class_ring/`, `sparse_set/`, `vec/`, `aov/`,
+`map/`), `eclasses_bench`, `bplus_cursor_bitset_bench`, `three_tier_bench`,
+`store_bench`, `saturate_bench`.
+
+**First pass, 220 cases: 132 pass, 85 inconclusive, 3 regression.** The
+three regressions and the inconclusive cases whose point estimates exceed
+1.05 in both runs share one shape — every one is dominated by `mark` and
+`restore`:
+
+| Case | `291bd1c` mean (A/B) | `f067459` mean (A/B) | Ratio A | Ratio B | Status |
+|---|---|---|---|---|---|
+| `three_tier_v1/write/high_duplicates/dyn_trail` | 1.433 µs / 1.437 µs | 1.618 µs / 1.647 µs | 1.129 [1.106, 1.155] | 1.146 [1.126, 1.166] | regression |
+| `three_tier_v1/write/low_duplicates/dyn_trail` | 1.445 µs / 1.462 µs | 1.604 µs / 1.776 µs | 1.111 [1.095, 1.127] | 1.214 [1.187, 1.241] | regression |
+| `vec/try_extend/verified` | 127.240 µs / 129.837 µs | 169.430 µs / 162.469 µs | 1.332 [1.229, 1.450] | 1.251 [1.194, 1.311] | regression |
+| `three_tier/mark/no_rollover_smt` | 10.5 ns / 9.3 ns | 13.6 ns / 15.8 ns | 1.298 [0.903, 1.859] | 1.697 [1.196, 2.380] | inconclusive |
+| `three_tier/mark/explicit_defer_smt` | 9.4 ns / 10.7 ns | 13.5 ns / 16.4 ns | 1.438 [1.046, 1.949] | 1.530 [1.070, 2.238] | inconclusive |
+| `three_tier_v1/rollover/hot_to_cold_contiguous/defer` | 19.1 ns / 18.6 ns | 22.3 ns / 21.9 ns | 1.167 [1.075, 1.270] | 1.175 [1.078, 1.277] | inconclusive |
+| `three_tier_v1/rollover/trail_to_hot_high_duplicates/defer` | 8.9 ns / 10.2 ns | 14.3 ns / 11.4 ns | 1.604 [0.815, 3.067] | 1.117 [0.734, 1.707] | inconclusive |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_parallel` | 23.1 ns / 24.5 ns | 27.2 ns / 28.7 ns | 1.176 [1.058, 1.285] | 1.173 [1.061, 1.289] | inconclusive |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_trail` | 34.021 µs / 33.809 µs | 41.721 µs / 38.153 µs | 1.226 [1.047, 1.420] | 1.128 [0.923, 1.365] | inconclusive |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_inline` | 44.371 µs / 44.892 µs | 49.227 µs / 52.289 µs | 1.109 [0.964, 1.254] | 1.165 [1.070, 1.248] | inconclusive |
+| `store/sp-t880.empty20k/eqsat32` | 11.649 ms / 12.122 ms | 14.248 ms / 12.787 ms | 1.223 [1.204, 1.242] | 1.055 [1.039, 1.071] | inconclusive |
+| `store/sp-t880.empty20k/smt32` | 12.656 ms / 12.688 ms | 14.795 ms / 13.480 ms | 1.169 [1.149, 1.190] | 1.062 [1.046, 1.079] | inconclusive |
+
+Diagnosis (from the code, not from further runs): `Genealogy::cut_from(d)`
+was `GenStamps::bump_from(d)`, which rewrote every stamp level from `d` to
+the deepest depth ever reached, so a restore cost O(deepest depth) — 64
+writes per restore on the 64-frame retained trace, up to 128 on the SMT
+backtracking traces, and one bump per iteration in the `write/*/dyn_trail`
+loops. `mark`'s mint (`stamp_at`) also read or grew the level array. The
+fix is the truncating stamp scheme of `W5B`: stamps come from a counter
+that only grows (each handed out once), the cut is `len := min(len, d)`
+(one write) and a mint at the live length is one write; validity is
+`depth < len && levels[depth] == g`. The consumed-token rule is unchanged
+(a re-mint stores a stamp at or above the counter, never the consumed one).
+`vec/try_extend/verified` (1.25–1.33, wide intervals) has no mark or
+restore in its loop; it was a drift case in the item-5 report as well and
+goes to the rerun.
+
+### Semantics B and O(1) stamps (`0b1200e`) against `291bd1c`: first pass
+
+Runs A and B on 2026-09-18 00:12–01:05, the same ten targets. Summary: 220 cases, inconclusive=33, pass=177, regression=10
+The ten regressions:
+
+| Case | `291bd1c` mean (A/B) | `0b1200e` mean (A/B) | Ratio A | Ratio B | Status |
+|---|---|---|---|---|---|
+| `store/sp-t880.empty20k/eqsat32` | 16.891 ms / 17.023 ms | 23.744 ms / 23.858 ms | 1.406 [1.395, 1.416] | 1.402 [1.391, 1.412] | **regression** |
+| `store/sp-t880.empty20k/smt32` | 18.212 ms / 18.254 ms | 26.595 ms / 26.763 ms | 1.460 [1.449, 1.471] | 1.466 [1.455, 1.477] | **regression** |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_inline` | 33.9 ns / 31.7 ns | 39.0 ns / 38.9 ns | 1.149 [1.095, 1.205] | 1.229 [1.143, 1.325] | **regression** |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_parallel` | 38.5 ns / 36.9 ns | 57.5 ns / 59.6 ns | 1.494 [1.372, 1.629] | 1.616 [1.488, 1.756] | **regression** |
+| `three_tier_v1/restore/shallow_high_duplicates/static_veci` | 32.6 ns / 30.4 ns | 38.9 ns / 40.3 ns | 1.194 [1.081, 1.315] | 1.326 [1.198, 1.463] | **regression** |
+| `three_tier_v1/restore/shallow_high_duplicates/static_vecp` | 39.4 ns / 34.4 ns | 57.1 ns / 55.1 ns | 1.450 [1.327, 1.560] | 1.604 [1.493, 1.693] | **regression** |
+| `three_tier_v1/rollover/hot_to_cold_contiguous/defer` | 28.2 ns / 28.2 ns | 35.9 ns / 35.7 ns | 1.274 [1.212, 1.337] | 1.266 [1.170, 1.361] | **regression** |
+| `three_tier_v1/rollover/hot_to_cold_singleton_runs/defer` | 29.9 ns / 29.3 ns | 36.5 ns / 35.9 ns | 1.218 [1.114, 1.327] | 1.228 [1.133, 1.332] | **regression** |
+| `three_tier_v1/trace/smt_backtracking_128/static_vecp` | 32.924 µs / 32.924 µs | 38.053 µs / 38.254 µs | 1.156 [1.150, 1.161] | 1.162 [1.158, 1.165] | **regression** |
+| `vec/restore_replay/verified` | 165.648 µs / 164.058 µs | 236.371 µs / 233.324 µs | 1.427 [1.413, 1.440] | 1.422 [1.405, 1.438] | **regression** |
+
+Diagnosis (from the code): every regression is restore-dominated.
+`Vec::reset_frame_physical` (the semantics-B reset) reopened the
+checkpoint's frame with `push_frame`, the configured-rollover push that
+`mark` uses: right after the pop core made the parent stratum writable, the
+push sealed it again under the tier policy and migrated it (Trail → Hot
+dedupe, Hot → Cold) — on every restore, work the next `mark` does exactly
+once. The SMT store traces pay it on every `(pop)` (a restore then a
+`pop_scope`, on nine columns), `restore_replay` on each of its eight
+restores, the shallow matrix cases on their single restore. The second
+cause is in the benches: they still measured a bare `restore(t)` on the
+verified side against the legacy pop-restore, so a trace with `n` restores
+ran `n` frames deeper than its legacy pair and every restore carried a
+frame push the legacy side never did (the store and saturation benches
+were already exact: the interpreter's `(pop)` pops). Both fixed in
+`486fcb0`: the reopen is a `Defer` push (a header push that converts no
+history), and every verified restore in the benches is followed by
+`pop_scope` (legacy restore = `restore` then `pop_scope`, design doc 08
+§1), so cand-vs-prev and verified-vs-legacy compare the same operation.
+The reruns of this pass were stopped once the cause was read (its
+inconclusive cases are superseded by the fixed pair below).
+
+### Deferred-rollover reopen with parity pops (`486fcb0`) against `291bd1c`
+
+Runs A and B on 2026-09-18 01:32–02:40, the same ten targets. Summary: 220 cases, inconclusive=40, pass=167, regression=13
+`vec/restore_replay/verified` went from 1.42 to **1.016 / 1.017** (the
+reopen no longer migrates history). The thirteen regressions:
+
+| Case | `291bd1c` mean (A/B) | `486fcb0` mean (A/B) | Ratio A | Ratio B | Status |
+|---|---|---|---|---|---|
+| `eclasses/find_sweep/retained/4096` | 214.809 µs / 214.884 µs | 252.427 µs / 246.092 µs | 1.175 [1.174, 1.176] | 1.145 [1.131, 1.158] | **regression** |
+| `store/sp-t880.empty20k/eqsat32` | 16.916 ms / 16.876 ms | 26.164 ms / 25.991 ms | 1.547 [1.534, 1.559] | 1.540 [1.526, 1.554] | **regression** |
+| `store/sp-t880.empty20k/smt32` | 18.190 ms / 18.185 ms | 27.420 ms / 27.313 ms | 1.507 [1.496, 1.519] | 1.502 [1.491, 1.513] | **regression** |
+| `three_tier/promotion/cold_survivor_write_restore` | 5.951 µs / 5.964 µs | 8.778 µs / 8.807 µs | 1.475 [1.462, 1.489] | 1.477 [1.467, 1.487] | **regression** |
+| `three_tier/restore/cold_one_frame` | 127.4 ns / 120.9 ns | 174.6 ns / 185.8 ns | 1.370 [1.232, 1.524] | 1.537 [1.372, 1.721] | **regression** |
+| `three_tier/restore/hot_one_frame` | 329.9 ns / 330.7 ns | 376.2 ns / 366.3 ns | 1.140 [1.112, 1.168] | 1.108 [1.090, 1.127] | **regression** |
+| `three_tier_v1/promotion/cold_survivor_write_restore/static_veci` | 1.395 µs / 1.401 µs | 1.535 µs / 1.533 µs | 1.100 [1.087, 1.113] | 1.095 [1.082, 1.107] | **regression** |
+| `three_tier_v1/restore/deep_64_frames/static_veci` | 548.9 ns / 548.0 ns | 814.7 ns / 815.3 ns | 1.484 [1.464, 1.505] | 1.488 [1.471, 1.504] | **regression** |
+| `three_tier_v1/restore/direct_cold_contiguous/dyn_parallel` | 124.0 ns / 119.6 ns | 174.2 ns / 187.6 ns | 1.405 [1.263, 1.563] | 1.569 [1.418, 1.733] | **regression** |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_parallel` | 37.3 ns / 36.0 ns | 76.2 ns / 74.0 ns | 2.043 [1.842, 2.289] | 2.054 [1.861, 2.252] | **regression** |
+| `three_tier_v1/restore/shallow_high_duplicates/static_veci` | 33.5 ns / 30.9 ns | 43.2 ns / 45.5 ns | 1.287 [1.180, 1.408] | 1.471 [1.312, 1.704] | **regression** |
+| `three_tier_v1/restore/shallow_high_duplicates/static_vecp` | 34.6 ns / 34.5 ns | 71.8 ns / 72.6 ns | 2.073 [1.980, 2.161] | 2.103 [1.959, 2.241] | **regression** |
+| `three_tier_v1/trace/smt_backtracking_128/static_vecp` | 32.890 µs / 32.995 µs | 37.691 µs / 37.570 µs | 1.146 [1.137, 1.155] | 1.139 [1.126, 1.153] | **regression** |
+
+Diagnosis (from the code): the paired benches now ran `restore(t)` then
+`pop_scope()`, and that pair reopens the parent stratum twice — the
+restore's pop core promotes the survivor into the trail and recomputes its
+capture tags, the deferred push seals it again (`prepare_mark` clears the
+captured flags over that stratum), and the pop's core reopens it once more
+and recomputes the tags: two extra O(stratum) walks per `(pop)`, nine
+columns deep in the store traces, a full second restore's worth on the
+one-frame matrix cases. `eclasses/find_sweep/retained/4096` is the legacy
+side of its pair (same legacy source, a rebuilt bench binary; the verified
+side is 1.01). The reruns of this pass were stopped once the cause was
+read. Fixed in `f676208`: the SMT-LIB pop is one operation,
+`restore_and_pop(t)`, on the single pop core the legacy restore always
+used; every paired bench measures it, and two verified-only cases measure
+the bare semantics-B restore.
+
+### The fused pop (`f676208`) against `291bd1c`
+
+Runs A and B on 2026-09-18 02:56–04:29 (reruns 03:50–04:29), the same ten targets. Summary: 220 cases, inconclusive=47, pass=170, regression=3
+The three first-pass regressions:
+
+| Case | `291bd1c` mean (A/B) | `f676208` mean (A/B) | Ratio A | Ratio B | Status |
+|---|---|---|---|---|---|
+| `store/sp-t880.empty20k/eqsat32` | 16.809 ms / 16.890 ms | 21.961 ms / 21.911 ms | 1.307 [1.295, 1.317] | 1.297 [1.287, 1.308] | **regression** |
+| `store/sp-t880.empty20k/smt32` | 18.236 ms / 18.204 ms | 22.337 ms / 22.322 ms | 1.225 [1.216, 1.234] | 1.226 [1.217, 1.236] | **regression** |
+| `three_tier_v1/write/high_duplicates/dyn_trail` | 2.168 µs / 2.179 µs | 2.379 µs / 2.373 µs | 1.097 [1.089, 1.106] | 1.089 [1.081, 1.096] | **regression** |
+
+The formerly regressed cases, now:
+
+| Case | `291bd1c` mean (A/B) | `f676208` mean (A/B) | Ratio A | Ratio B | Status |
+|---|---|---|---|---|---|
+| `vec/restore_replay/verified` | 161.941 µs / 172.334 µs | 171.058 µs / 161.046 µs | 1.056 [1.048, 1.064] | 0.934 [0.933, 0.936] | pass |
+| `three_tier_v1/restore/shallow_high_duplicates/static_vecp` | 34.7 ns / 35.3 ns | 38.0 ns / 38.2 ns | 1.093 [1.003, 1.173] | 1.083 [0.987, 1.180] | **inconclusive** |
+| `three_tier_v1/restore/shallow_high_duplicates/dyn_parallel` | 35.9 ns / 36.8 ns | 37.7 ns / 37.1 ns | 1.052 [0.944, 1.182] | 1.007 [0.881, 1.150] | **inconclusive** |
+| `three_tier/restore/cold_one_frame` | 121.9 ns / 127.5 ns | 137.0 ns / 122.3 ns | 1.125 [0.979, 1.280] | 0.959 [0.837, 1.100] | **inconclusive** |
+| `three_tier/promotion/cold_survivor_write_restore` | 5.914 µs / 5.893 µs | 6.001 µs / 6.018 µs | 1.015 [1.005, 1.024] | 1.021 [1.010, 1.033] | pass |
+| `three_tier_v1/restore/deep_64_frames/static_veci` | 550.7 ns / 547.2 ns | 547.8 ns / 549.1 ns | 0.995 [0.981, 1.009] | 1.003 [0.980, 1.031] | pass |
+| `three_tier_v1/trace/smt_backtracking_128/static_vecp` | 32.946 µs / 33.005 µs | 33.084 µs / 33.119 µs | 1.004 [0.995, 1.010] | 1.003 [0.997, 1.009] | pass |
+| `store/sp-t880.base/smt32` | 4.868 ms / 4.871 ms | 4.660 ms / 4.657 ms | 0.957 [0.934, 0.980] | 0.956 [0.933, 0.978] | pass |
+| `store/sp-t880.cycles/eqsat32` | 26.910 ms / 27.001 ms | 25.452 ms / 25.379 ms | 0.946 [0.919, 0.972] | 0.940 [0.913, 0.967] | pass |
+
+Protocol reruns of the inconclusive cases (`--sample-size 100 --warm-up-time 3
+--measurement-time 10`): Summary: 47 cases, inconclusive=18, pass=24, regression=5 (24 pass). The cases the rerun did
+not settle as a pass:
+
+| Case | `291bd1c` mean (rerun) | `f676208` mean (rerun) | Ratio | Status |
+|---|---|---|---|---|
+| `three_tier/end_to_end/buffered_unique` | 32.376 µs | 35.212 µs | 1.088 [1.021, 1.158] | **inconclusive** |
+| `three_tier/end_to_end/restore_optimized` | 34.646 µs | 37.356 µs | 1.078 [1.031, 1.127] | **inconclusive** |
+| `three_tier/end_to_end/smt_backtrack` | 44.400 µs | 45.416 µs | 1.023 [0.958, 1.093] | **inconclusive** |
+| `three_tier/mark/explicit_defer_smt` | 15.3 ns | 16.9 ns | 1.108 [0.961, 1.281] | **inconclusive** |
+| `three_tier/mark/no_rollover_smt` | 14.9 ns | 19.0 ns | 1.277 [1.114, 1.468] | **regression** |
+| `three_tier_v1/promotion/cold_survivor_write_restore/dyn_trail` | 2.112 µs | 2.379 µs | 1.127 [1.118, 1.135] | **regression** |
+| `three_tier_v1/restore/direct_cold_contiguous/static_vect` | 143.9 ns | 150.5 ns | 1.046 [0.982, 1.113] | **inconclusive** |
+| `three_tier_v1/rollover/trail_to_hot_high_duplicates/defer` | 15.0 ns | 15.6 ns | 1.040 [0.893, 1.212] | **inconclusive** |
+| `three_tier_v1/trace/eclasses_mark_merge_restore_32/dyn_parallel` | 90.712 µs | 97.924 µs | 1.079 [1.057, 1.102] | **inconclusive** |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_inline` | 60.724 µs | 64.950 µs | 1.070 [1.036, 1.103] | **inconclusive** |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_parallel` | 45.799 µs | 49.376 µs | 1.078 [1.033, 1.125] | **inconclusive** |
+| `three_tier_v1/trace/eqsat_retained_64_frames/dyn_trail` | 52.049 µs | 56.770 µs | 1.091 [1.036, 1.147] | **inconclusive** |
+| `three_tier_v1/trace/large_retained_256_frames/dyn_inline` | 100.748 µs | 113.618 µs | 1.128 [1.113, 1.142] | **regression** |
+| `three_tier_v1/trace/large_retained_256_frames/dyn_trail` | 105.596 µs | 115.028 µs | 1.089 [1.068, 1.112] | **inconclusive** |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_inline` | 68.916 µs | 76.299 µs | 1.107 [1.077, 1.136] | **inconclusive** |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_parallel` | 61.572 µs | 66.917 µs | 1.087 [1.050, 1.124] | **inconclusive** |
+| `three_tier_v1/trace/smt_backtracking_128/dyn_trail` | 70.216 µs | 73.848 µs | 1.052 [1.018, 1.087] | **inconclusive** |
+| `three_tier_v1/write/high_duplicates/dyn_inline` | 1.787 µs | 1.931 µs | 1.080 [1.070, 1.090] | **inconclusive** |
+| `three_tier_v1/write/low_duplicates/dyn_inline` | 2.801 µs | 3.487 µs | 1.245 [1.227, 1.262] | **regression** |
+| `three_tier_v1/write/low_duplicates/dyn_trail` | 2.237 µs | 2.502 µs | 1.118 [1.109, 1.127] | **regression** |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096/dyn_inline` | 16.6 ns | 16.8 ns | 1.015 [0.886, 1.163] | **inconclusive** |
+| `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096/dyn_parallel` | 15.8 ns | 15.7 ns | 0.992 [0.869, 1.133] | **inconclusive** |
+| `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_trail` | 989.8 ns | 1.062 µs | 1.073 [1.061, 1.085] | **inconclusive** |
+
+### Verdict on the wave's restore cost
+
+Every restore-dominated case of the two earlier passes is at parity: the
+one-frame matrix restores 1.00–1.09 (rerun-settled), `deep_64_frames`
+1.00, `smt_backtracking_128` 1.00, `cold_survivor_write_restore` 1.02,
+`restore_replay` 0.93–1.06, and every store trace but one at 0.94–0.99.
+Two residuals remain, both read from the code and both recorded as
+outcome 3 of the next wave's goal
+(`doc/tasks/nightshift-external-manager-goal.md`):
+
+- **`store/sp-t880.empty20k/{eqsat32,smt32}` 1.23–1.30.** That trace is
+  the base program plus 20 000 empty `(push)`/`(pop)` pairs, so its cost
+  is the per-scope constant: at `291bd1c` 845 ns per pair, now about
+  250 ns more. The difference is token provenance — each of the e-graph's
+  roughly thirty columns mints a stamp on `(push)` and checks and cuts one
+  on `(pop)`, about 8 ns per column per pair (the same constant the
+  `rollover/*/defer` marks show). The single external manager of the next
+  wave (one stamp per group per mark, outcome 1) removes it; re-measure
+  this trace first after that wave.
+- **The dyn-store family, 1.07–1.25.** `write/high_duplicates/dyn_trail`
+  1.09 in both runs; at the rerun `write/low_duplicates/dyn_inline` 1.25,
+  `write/low_duplicates/dyn_trail` 1.12, `promotion/cold_survivor_write_
+  restore/dyn_trail` 1.13, `trace/large_retained_256_frames/dyn_inline`
+  1.13, and most of the eighteen cases the rerun left inconclusive are
+  `dyn_*` traces at 1.02–1.11. Every static store and the production pair
+  are at parity on the same loops, and no code on the write, promotion or
+  trace paths changed since `291bd1c`: the column grew by its genealogy and
+  the crate by twenty functions under fat LTO, which moves inlining and
+  layout for the dyn-dispatched stores first. Not chased in this wave; the
+  goal doc lists the bounded experiments (anchor the loops with
+  `#[inline(never)]`, swap their order, re-measure after outcome 1).
+- **`three_tier/mark/no_rollover_smt` 1.28** (14.9 → 19.0 ns at the
+  rerun): the bare mark, so the provenance mint on its own — the same
+  per-column constant as the empty-scope trace, with the same remedy.
+
+`eclasses/find_sweep/retained/4096` (1.17 in run A, 1.00 in run B) is the
+legacy side of its pair in a rebuilt binary; the verified side is at 1.01.
+
+The two new verified-only cases measure the bare semantics-B restore (the
+SAT core's backjump: reset to the checkpoint, frame kept open) beside the
+fused pop on the same fixtures, runs A / B, candidate tree only:
+
+| Case | `restore_and_pop` (legacy-equivalent) | bare `restore` (keep-open) |
+|---|---|---|
+| `three_tier/restore/hot_one_frame` | 346.3 ns / 338.7 ns (`291bd1c`: 331.0 / 344.4) | 351.9 ns / 349.0 ns |
+| `three_tier/restore/cold_one_frame` | 137.0 ns / 122.3 ns (`291bd1c`: 121.9 / 127.5) | 153.1 ns / 141.4 ns |
+
+The keep-open restore is the pop core plus the deferred header push
+(`prepare_mark` over the promoted stratum, then the header): about 2–3 %
+above the fused pop on the hot fixture and about 12 % on the cold one. A
+restore that never reopens the parent (outcome 2b of the goal doc) would
+take the keep-open case below the fused pop; it is optional, and measured
+first.
+
+
 ## Results (revision `f304bc7`, runs A and B on 2026-09-16 17:05–18:45, reruns 18:50–19:10)
 
 Bench binaries: `/tmp/sp-d21-bench-binaries-f304bc7.md5`; driver log

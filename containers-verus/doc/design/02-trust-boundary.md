@@ -72,9 +72,10 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current final checkpoint has 49 default-build markers:
-3 opaque structs and 46 functions (the debug-only ring walk left with the
-total public API on 2026-09-17; §4 row 15). The permanent groups below remain the
+boundary. The current final checkpoint has 37 default-build markers:
+3 opaque structs and 34 functions (the debug-only ring walk left with the
+total public API on 2026-09-17, §4 row 15; the twelve byte reporters left the
+verified perimeter the same day, §2a). The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -312,7 +313,7 @@ minimal, local, and is exactly what the cross-container guard relies on.
 ### 1d. Why Group A is sound to trust
 
 The container check is **not on the correctness-critical path.** The headline
-`restore` theorem (`view() == snapshots[token.frame_idx]`) and all of branch-cut
+`restore` theorem (`view() == snapshots[token.depth]`) and all of branch-cut
 safety ([Ch. 3](03-fork-history.md)) hold *without* it; the container id only
 *rejects cross-container misuse*, a caller error. Concretely, no proof consumes
 `new()`'s distinctness; `is_token_valid_spec` only needs the *equality
@@ -326,16 +327,31 @@ environmental assumption, with finite runtime evidence from
 mint thousands of ids and check end-to-end that one container rejects another's
 token.
 
-## 2. Group B: unmodeled std behavior, 20 items
+## 2. Group B: unmodeled std behavior, 8 items
 
 Verus/vstd model a `Vec`'s element sequence (`@`) but not its **allocation**:
 `capacity()`, `shrink_to`, and `size_of::<T>()` have no specs. Everything that
 reads or manages capacity is therefore `external_body`. The B+tree hot-path
 primitives (§2d) are the same kind of trust over three other unspecced std
 operations (`get_unchecked`, `select_unpredictable`, `copy_within`). Four
-sub-kinds:
+sub-kinds, the first of which is now empty:
 
-### 2a. Byte reporters (no `ensures`; diagnostic), 12 items
+### 2a. Byte reporters: stratified out of the perimeter (was 12 items)
+
+The byte reporters (`Vec::{tracking_bytes, total_bytes, diff_log_len}`,
+`log_heap_bytes`, `ListArena::{tracking_bytes, total_bytes}`, and the
+`heap_bytes` of `CaptureBits`, `CompressedStack`, `Codes`, `GenStamps`,
+`InlineStore`, `ParallelStore`, plus the ones of `TrailStore`, `DynStore`,
+`TwoStackLog`, `CircularList`, `History`) are read-only diagnostics that no
+proof reads and that cannot alter execution. Since 2026-09-17 they are plain
+Rust outside every `verus!` block: a `diagnostics::HeapBytes` trait (exported
+as `HeapBytes`) carries `heap_bytes` for the stores and columns, and each
+container's reporters live in an ordinary `impl` block after its verified
+one. They are therefore neither verified nor trust markers — Verus does not
+see them — and `DiffStore` no longer has a `heap_bytes` method (consumers
+bound `S: HeapBytes` where they need the number). The production-parity
+checks below still run against them unchanged. What follows is the record of
+what they were while they carried markers.
 
 Production parity: all report the capacity-based allocation
 footprint using exactly production's formulas.
@@ -779,8 +795,9 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **49 default-build `external_body`
-markers plus 4 default-build axioms** (plus one generated `obeys_key_model`
+The complete current source count is **37 default-build `external_body`
+markers plus 4 default-build axioms** (the twelve byte reporters of rows
+4–9 and 11a–11b are outside the perimeter since 2026-09-17, §2a) (plus one generated `obeys_key_model`
 axiom per `define_id*!` id type in consumer crates); execution-first three-tier Vec markers not
 itemized here are enumerated in
 `doc/tasks/three-tier-frame-architecture-goal.md` §8. The `literal-types`
@@ -791,17 +808,11 @@ additions are listed after the table.
 | 1 | `struct ContainerId` | A | opaque identity by design (`uninterp id()`) | n/a: no contract |
 | 2 | `ContainerId::new` (+ `next_id_from` allocator) | A | process-global atomic side effect; no `ensures`; wrapping `u64` allocation with an optional fatal boundary | no (side effect) |
 | 3 | `ContainerId::eq` | A | bridges to an intentionally-`uninterp` `id()` | only by un-abstracting; declined |
-| 4 | `Vec::tracking_bytes` | B | capacity + `size_of` unmodeled; no `ensures` | partially: see feature request |
-| 5 | `Vec::total_bytes` | B | same | partially |
-| 6 | `ForkHistory::heap_bytes` | B | same | partially |
-| 7 | `CaptureBits::heap_bytes` | B | same | partially |
-| 8 | `ParallelStore::heap_bytes` | B | same | partially |
-| 9 | `InlineStore::heap_bytes` | B | same | partially |
+| 4–9 | byte reporters (`Vec::tracking_bytes`, `Vec::total_bytes`, `ForkHistory::heap_bytes`, `CaptureBits::heap_bytes`, `ParallelStore::heap_bytes`, `InlineStore::heap_bytes`) | — | **no longer markers**: plain Rust outside `verus!` since 2026-09-17 (§2a); read-only diagnostics | n/a (outside the perimeter) |
 | 10 | `shrink_vec_capacity` | B | `Vec::capacity`/`shrink_to` unmodeled; contract = element sequence unchanged (std-documented) | when vstd specs capacity ops |
 | 10b | `std_sort::sort_pairs_by_index` | B | std `<[T]>::sort_unstable_by_key` is unmodeled by vstd; contract = documented behaviour (permutation of the slice in non-decreasing key order, nothing else touched); consumed by Hot-to-Cold migration and `diff_compress::sort_frame_by_index` | when vstd specs slice sorting |
 | 11 | `shrink_aov_capacity` | B | same (AppendOnlyVec variant formula) | same |
-| 11a | `ListArena::tracking_bytes` | B | capacity + `size_of` unmodeled; no `ensures`; forwards to the two inner vecs | partially |
-| 11b | `ListArena::total_bytes` | B | same | partially |
+| 11a–11b | `ListArena::tracking_bytes`, `ListArena::total_bytes` | — | **no longer markers**: plain Rust outside `verus!` since 2026-09-17 (§2a) | n/a (outside the perimeter) |
 | 11c | `data_capacity_bits` | B | `Vec::capacity` unmodeled; **contract-carrying**: `n >= len` is what makes capture-word truncation unobservable (§2c) | when vstd specs capacity ops |
 | 11d | `arr_get` (bplus_layout) | B | `get_unchecked` unspecced; contract = checked indexing, `i < N` verified at every call site (§2d) | when vstd specs unchecked indexing |
 | 11e | `arr_set` (bplus_layout) | B | same, for the write (`update(i, v)` over the whole array) | same |

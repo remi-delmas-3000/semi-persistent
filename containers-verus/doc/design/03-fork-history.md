@@ -1,5 +1,14 @@
 # Fork History / Branch-Cut Safety
 
+> **Status (2026-09-17):** historical design. The shipped token is
+> `history::GroupToken { history: ContainerId, generation: u64, depth: u32 }`
+> (`VecToken` is an alias), minted and validated by a `Genealogy` that every
+> container owns (a group of one) or that a `ForkHistory` owns for a synced
+> group; `frame_idx` below is today's `depth`, and the branch model described
+> here was replaced by generation stamps (doc 10, "Shipped design"). The
+> restore rule is doc 08 §1: a restored token is consumed.
+
+
 Branch-cut safety is the second correctness property of the semi-persistent
 containers (the first is the reconstruction theorem of Chapter 1). It governs
 *which tokens `restore` will accept*: a token naming a state that has been

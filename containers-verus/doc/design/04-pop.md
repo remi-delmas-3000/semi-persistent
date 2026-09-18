@@ -61,7 +61,7 @@ used to derive the two dropped clauses).
 ## 3. The `restore` body
 
 ```
-target = token.frame_idx;  saved_len = frames[target].saved_len
+target = token.depth;  saved_len = frames[target].saved_len
 snapshot the pre-resize self, which satisfies wf_for_snap
 resize_default(saved_len)                 // truncate-or-grow to EXACTLY target
                                           //   (NOT max — production drops idx>=saved_len)
