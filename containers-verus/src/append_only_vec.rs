@@ -217,21 +217,20 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         (u32::MAX as usize).saturating_sub(self.frames.len())
     }
 
-    /// Mark: save the current length, returning a token. The new frame records
-    /// `data.len()` (>= every prior frame, since data only grew), keeping
-    /// `frames` monotone.
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
+    /// Push a frame without minting: the structural half of `mark` (what a
+    /// typed group drives; the group's `History` mints the token). The new
+    /// frame records `data.len()`, keeping `frames` monotone.
+    pub(crate) fn push_frame(&mut self, shrink: ShrinkPolicy)
         requires
             old(self).wf(),
-            // Production permits marks only when tracking is enabled.
             TRACK,
             old(self).depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
             final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+            final(self).genealogy == old(self).genealogy,
     {
         crate::guard::check_precondition(TRACK, "mark() called on untracked AppendOnlyVec");
         crate::guard::check_precondition(
@@ -291,7 +290,25 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
                 }
             }
         }
+    }
 
+    /// Mark: save the current length, returning a token. The new frame records
+    /// `data.len()` (>= every prior frame, since data only grew), keeping
+    /// `frames` monotone.
+    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
+        requires
+            old(self).wf(),
+            // Production permits marks only when tracking is enabled.
+            TRACK,
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view(),
+            token.frame_idx_spec() == old(self).depth_spec(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
+    {
+        self.push_frame(shrink);
         let idx = self.frames.len() - 1;
         self.genealogy.mint(idx)
     }

@@ -13662,6 +13662,7 @@ where
     /// loop invariant carries the bound to each core `push` — the amortized
     /// form of `try_push` for hot loops (one branch per batch, none per
     /// element).
+    #[verifier::spinoff_prover]
     pub fn try_extend(&mut self, values: &[T]) -> (r: Result<(), crate::error::ContainerError>)
         requires old(self).wf(),
         ensures
@@ -13671,6 +13672,10 @@ where
             final(self).snapshots_view() == old(self).snapshots_view(),
             r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted,
     {
+        // `wf` is carried as a fact through `push`'s contract; its body is not
+        // needed here and only feeds the solver.
+        hide(Vec::wf);
+        proof { self.lemma_store_wf(); }
         let n = self.store.raw_len();
         let cap = <I as crate::index_like::IndexLike>::max().as_usize();
         proof {

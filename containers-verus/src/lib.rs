@@ -118,6 +118,7 @@ pub mod error;
 pub mod external_specs;
 pub mod frame;
 pub mod gen_stamps;
+pub mod group;
 pub mod guard;
 pub mod hasher_spec;
 pub mod history;
