@@ -46,14 +46,16 @@
 
 ### Removed
 
-- The composites' own versioning surface: `SparseSet`, `CircularList`,
-  `ListArena`, `UnionFind`, `BPlusTreeSet`, `EClasses` and `HintedArena` no
-  longer have `mark`, `restore`, `restore_and_pop`, `try_*`, `pop_scope` or
-  `is_valid_token`, and their token types (`SparseSetToken`,
-  `CircularListToken`, `ListArenaToken`, `UnionFindToken`, `BPlusToken`,
-  `EClassesToken`) are gone. Version a composite by putting it in a
-  `ForkHistory` group of one. `Vec`, `AppendOnlyVec` and `SpMap` keep their
-  token API for now.
+- Every container's own versioning surface. `Vec`, `AppendOnlyVec`, `SpMap`,
+  `SparseSet`, `CircularList`, `ListArena`, `UnionFind`, `BPlusTreeSet`,
+  `EClasses` and `HintedArena` no longer have `mark`, `try_mark`, `restore`,
+  `try_restore`, `restore_and_pop`, `try_restore_and_pop`, `pop_scope`,
+  `try_pop_scope` or `is_valid_token`, and the token types (`MapToken`,
+  `SparseSetToken`, `CircularListToken`, `ListArenaToken`, `UnionFindToken`,
+  `BPlusToken`, `EClassesToken`) are gone; `VecToken` remains as the alias for
+  the group's `GroupToken`. Version a container by putting it in a
+  `ForkHistory` group of one. `Vec` and `AppendOnlyVec` also lost the embedded
+  `Genealogy`: the branch cut happens in the group's `History`.
 - The predecessor dyn group (`sync_group`, with `Box<dyn SyncMember>`
   members) and the `Solo`/`SyncPair` migration wrappers.
 - In the e-graph, the wrappers' token layer: `CacheToken`, `PoolCacheToken`,

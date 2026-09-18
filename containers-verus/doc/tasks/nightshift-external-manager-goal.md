@@ -330,13 +330,17 @@ lockstep proptest over a nested `Pair` of three columns. The deletion took
 the seven composites' token API and token types, the token-only predicates,
 `sync_group`, `Solo`/`SyncPair` and the e-graph wrappers' token layer: about
 5,500 lines, verification **2726 verified, 0 errors**.
-**Open, and why:** `Vec`/`AppendOnlyVec` keep their token API (the columns a
-group of one wraps; deleting the `Vec` half needs `lemma_genealogy_framing`
-and the `restore_frame`/`reset_frame` cuts reworked, plus the canary, the
-policy matrix and the `vec.rs` unit tests migrated), and `SpMap` keeps
-`MapToken` because the anti-unification search layer (`egraph/src/au`) still
-checkpoints maps and columns through eight token structs of its own. Putting
-that layer on one group is the next step, and it unblocks the rest.
+**Closed (2026-09-18, two further commits).** `9d9fdef` put the
+anti-unification search layer on one history (`AuMembers`; 62 tokens per
+checkpoint became one, and its action cache's plain `Vec` became an
+`AppendOnlyVec`), which unblocked `a10fc54`: the token API of `SpMap`, `Vec`
+and `AppendOnlyVec` is deleted, along with the columns' embedded `Genealogy`,
+its three framing lemmas and the cuts inside `restore_frame`/`reset_frame`.
+Nothing in the workspace mints or validates a token outside a `History`.
+Verification **2688 verified, 0 errors**; both commits lean-gated
+(`scratchpad/lean_au.log`, `scratchpad/lean_cols.log`). The one piece of
+hand-maintained derived state left is the exact memo's hash index, which an
+`SpMap` would absorb.
 
 **Outcome 2 — restore semantics B: done** (`0b1200e`, `486fcb0`, `f676208`;
 the fused `restore_and_pop` is the SMT-LIB `pop`). Outcome 2b (a true

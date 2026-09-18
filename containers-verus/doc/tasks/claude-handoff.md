@@ -252,15 +252,25 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    (the director pool moved to the frame protocol; the per-column restore
    profiling was rewired into `NodeStore::reset_frame`). Verification
    **2726 verified, 0 errors**.
-   **Next actions, in order:** (a) put the anti-unification search layer
-   (`egraph/src/au`, eight token structs: action cache, search, best
-   results, exact memo, term pool, context store, or-arena, space) on one
-   group — its members are already marked and restored together, so it
-   wants a forwarding member view like `EGraphMembers`. That is what keeps
-   `SpMap::MapToken` and the columns' token API alive; with it done, delete
-   those too (the `Vec` half needs `lemma_genealogy_framing` and the cuts
-   inside `restore_frame`/`reset_frame` reworked, plus the canary, the
-   policy matrix and the `vec.rs` unit tests migrated).
+   Two further commits closed the shape completely. `9d9fdef` put the
+   anti-unification search layer on one history (`au::group_members::
+   AuMembers` over its five layers): one checkpoint is one stamp where it
+   used to be 62 container tokens in eleven token structs, its action
+   cache's action lists moved from a hand-truncated plain `Vec` into an
+   `AppendOnlyVec`, and the per-layer provenance tests became one at the
+   session level. `a10fc54` then deleted the last token surfaces —
+   `SpMap`'s, `Vec`'s and `AppendOnlyVec`'s — with the columns' embedded
+   `Genealogy`, its three framing lemmas and the cuts inside
+   `restore_frame`/`reset_frame`; `sequence_witness_checked` restates the
+   sequence theorem on the structural protocol, and the forgery tests forge
+   a `GroupToken` against a group. Verification **2688 verified, 0
+   errors**, trust **34 + 5**. Nothing in the workspace mints or validates
+   a token outside a `History`.
+   **Next actions, in order:** (a) the exact memo's derived hash index
+   (`egraph/src/au/exact_memo.rs`) is the last hand-maintained rollback in
+   the workspace: it keeps the log length per frame and drops the keys
+   above a checkpoint by walking the log. An `SpMap` keyed by the class
+   pair would absorb both the walk and the length stack.
    (b) the two open benchmark gaps and the dyn-store residuals (goal doc
    outcome 3), (c) Trail-first literal cost (outcome 4), (d) two-step
    id-mint verification (outcome 5), (e) node caches on `SpMap`, only with

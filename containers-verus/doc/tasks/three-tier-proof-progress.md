@@ -2721,6 +2721,35 @@ matrix **4**, conformance **31**, consumers **1268 passed, 45 skipped**,
 canary **2**, partial-API **0/0/0/0**, fmt, whitespace, unchanged legacy,
 trust **34 + 5** (three `external_body` items fewer).
 
+**The last two consumers and the last surfaces (2026-09-18, two further
+commits).** `9d9fdef` puts the anti-unification search on one history:
+`SearchSession` owns a `History` and drives its five layers through
+`History::mark_member`/`restore_member` over one borrowed view (`AuMembers`),
+so a checkpoint is one stamp instead of 62 container tokens in a nest of eleven
+token structs; the action cache's action lists move from a hand-truncated plain
+`Vec` into an `AppendOnlyVec` (append-only, and that container needs no `Copy`
+bound); the exact memo keeps its derived index by hand on per-frame lengths;
+and the four per-layer provenance tests become one at the session level. Gate
+(`scratchpad/lean_au.log`): literal verify **2726/0**, feature suite **291**,
+policy **4**, conformance **31**, consumers **1265 passed, 45 skipped**, canary
+**2**, partial-API **0/0/0/0**, trust **34 + 5**.
+
+`a10fc54` then deletes the last token surfaces — `SpMap`'s, `Vec`'s and
+`AppendOnlyVec`'s, including the embedded `Genealogy`, the three framing lemmas
+it needed, the cuts inside `restore_frame`/`reset_frame` and the three
+dead-code compaction marks. `sequence_witness_checked`, the production
+instantiation of the sequence theorem, restates the same run on the structural
+protocol. Callers migrated: the canary's union-find shape is a
+`ForkHistory<Pair<..>>`, the environment-lever, trail-compression and
+trail-semi-persistence harnesses and the retained benches use groups of one on
+the verified side (the frozen legacy side keeps its tokens), and `vec.rs`'s own
+acceptance suites do the same; the forgery tests now forge a `GroupToken`
+against a group. Gate (`scratchpad/lean_cols.log`): literal verify **2688
+verified, 0 errors** (about 120 proof functions fewer, since the field's
+removal removed obligations), feature suite **290**, policy **4**, conformance
+**31**, consumers **1265**, canary **2**, partial-API **0/0/0/0**, fmt,
+whitespace, unchanged legacy, trust **34 + 5**.
+
 Method note: the first attempt at this deletion was scripted with brace
 counting and mis-cut function bodies in seven verified files (an
 `ensures ... ({ ... })` clause balances early). It was reverted and redone with

@@ -432,30 +432,43 @@ different depths, refuses at construction. Ownership, not a shared handle, is
 what keeps this verifiable: a handle would put interior mutability and a
 permission token on every mark and restore.
 
-The old surface is gone. Seven composites (`SparseSet`, `CircularList`,
-`ListArena`, `UnionFind`, `BPlusTreeSet`, `EClasses`, `HintedArena`) have no
-`mark`, `restore`, `try_*`, `pop_scope` or `is_valid_token` of their own and no
-token type; the token-only predicates (`is_token_valid_spec`,
-`is_restorable_spec`, `restore_pre_spec`, `snap_at`, `frames_agree`) went with
-them. So did the predecessor dyn group (`sync_group`, `Box<dyn SyncMember>`
-members) and the `Solo`/`SyncPair` migration wrappers in `history.rs`. In the
-e-graph, the wrappers' token layer went the same way: `CacheToken`,
-`PoolCacheToken`, `NodeStoreToken`, `RoutingToken`, `LitValStoreToken` and the
-four registry tokens, with the director pool switched to the frame protocol.
-That is about 5,500 lines deleted, and the crate verifies at **2726 verified,
-0 errors** (80 proof functions fewer than before the deletion).
+The old surface is gone, all of it. No container in the crate has `mark`,
+`try_mark`, `restore`, `try_restore`, `restore_and_pop`, `pop_scope` or
+`is_valid_token` of its own, none has a token type, and the token-only
+predicates (`is_token_valid_spec`, `is_restorable_spec`, `restore_pre_spec`,
+`snap_at`, `frames_agree`) are gone with them. `Vec` and `AppendOnlyVec` no
+longer embed a `Genealogy` either: the branch cut happens once, in the group's
+`History`, where the stamps live, and the three lemmas that framed a
+genealogy-only change against `wf` are no longer needed. The predecessor dyn
+group (`sync_group`) and the `Solo`/`SyncPair` migration wrappers are deleted,
+as is the e-graph's wrapper token layer (`CacheToken`, `PoolCacheToken`,
+`NodeStoreToken`, `RoutingToken`, `LitValStoreToken` and the four registry
+tokens), with the director pool switched to the frame protocol. `VecToken`
+survives only as the alias for the group's `GroupToken`, which is what the
+paired harnesses spell.
 
-Two token surfaces stay, each for a reason. `Vec` and `AppendOnlyVec` keep
-theirs because the columns are what a group of one wraps, and because the
-`Vec` half cannot be deleted without reworking `lemma_genealogy_framing` and
-the cuts inside `restore_frame`/`reset_frame`. `SpMap` keeps its `MapToken`
-because the anti-unification search layer (`egraph/src/au`) still checkpoints
-maps and columns directly, through eight token structs of its own
-(`ActionCacheToken`, `SearchToken`, `BestResultsToken`, `ExactMemoToken`,
-`TermPoolToken`, `ContextStoreToken`, `OrArenaToken`, `SpaceToken`). That
-layer is the next consumer to put on a group: its members are already marked
-and restored together, so it wants one forwarding member view like
-`EGraphMembers`, after which the last two token surfaces can go too.
+The crate verifies at **2688 verified, 0 errors** — about 120 proof functions
+fewer than before the deletions, because removing the field removed obligations
+rather than creating them — and the trust surface went from 37 `external_body`
+items to 34.
+
+Consumers followed, each keeping what it measured or asserted. The e-graph runs
+its nine members on one history through `EGraphMembers`. The anti-unification
+search layer runs its five layers on one history through `AuMembers`: one
+`SearchSession::mark` used to mint 62 container tokens (39 across the MCGS
+statistics, 14 across the space layer, 7 in the term pool, one each for the
+result table and the action cache) inside a nest of eleven token structs, and
+now mints one. Its action cache stopped backtracking a plain `Vec` by hand: the
+action lists live in an `AppendOnlyVec`, which fits because the cache is
+append-only and because that container puts no `Copy` bound on its element. The
+exact memo's derived hash index is still maintained by hand, on per-frame
+lengths rather than a token's saved length; making it an `SpMap` would remove
+that too.
+
+Forgery is tested where tokens now exist. A column has no token to forge, so
+those tests drive a group of one and forge a `GroupToken`: an out-of-range
+depth and a never-minted generation are refused without mutating, and a token
+from an abandoned future stays refused after a fresh mark reoccupies its depth.
 
 The typed-group tests (`tests/typed_group.rs`) are the acceptance evidence for
 the shape: a group of one per container, a nested `Pair` of three columns under
