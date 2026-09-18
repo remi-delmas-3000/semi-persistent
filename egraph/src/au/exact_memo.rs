@@ -23,7 +23,8 @@
 use std::collections::HashMap;
 
 use crate::containers::error::ContainerError;
-use crate::containers::{AppendOnlyVec, IndexLike, ShrinkPolicy, VecToken};
+use crate::containers::group::Member;
+use crate::containers::{AppendOnlyVec, IndexLike, ShrinkPolicy};
 
 /// One memoized clean solve. Supports are sorted and deduplicated at
 /// publication (the exact solver sorts before it writes).
@@ -34,21 +35,16 @@ struct MemoEntry<T, C> {
     support_r: Vec<C>,
 }
 
-/// Token for [`ExactMemo::mark`] / [`ExactMemo::restore`].
-///
-/// Carries the log length at the mark alongside the log's own token: restore
-/// reads it to find the suffix of entries recorded since, which is exactly
-/// the set of index keys it has to drop. Branch validity lives entirely in
-/// the `VecToken`.
-#[derive(Clone, Copy, Debug)]
-pub struct ExactMemoToken(VecToken, usize);
-
 /// The session memo. `T` is the term id type, `C` the class id type, `I` the
 /// session index word.
 pub struct ExactMemo<T: Copy, C: Copy + Ord, I: IndexLike = usize> {
     log: AppendOnlyVec<MemoEntry<T, C>, I>,
     /// Derived: class-pair key -> log position of its (unique) entry.
     index: HashMap<(u64, u64), usize>,
+    /// The log length at each open frame, oldest first: what the token used to
+    /// carry. The index is not semi-persistent, so a move to frame `d` has to
+    /// know where that frame started to drop exactly the keys above it.
+    frame_lens: Vec<usize>,
 }
 
 impl<T: Copy, C: Copy + Ord, I: IndexLike> ExactMemo<T, C, I> {
@@ -56,6 +52,7 @@ impl<T: Copy, C: Copy + Ord, I: IndexLike> ExactMemo<T, C, I> {
         ExactMemo {
             log: AppendOnlyVec::new(),
             index: HashMap::new(),
+            frame_lens: Vec::new(),
         }
     }
 
@@ -101,39 +98,49 @@ impl<T: Copy, C: Copy + Ord, I: IndexLike> ExactMemo<T, C, I> {
         Ok(())
     }
 
-    pub fn mark(&mut self) -> ExactMemoToken {
-        let len = self.len();
-        ExactMemoToken(
-            self.log
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            len,
-        )
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority. The
+    // derived index is maintained here, which is what the token's saved length
+    // used to pay for.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        self.frame_lens.push(self.len());
+        Member::push_frame(&mut self.log, shrink);
     }
 
-    pub fn is_valid_token(&self, token: &ExactMemoToken) -> bool {
-        self.log.is_valid_token(&token.0) && token.1 <= self.len()
-    }
-
-    pub fn restore(&mut self, token: ExactMemoToken) {
-        // Validate BEFORE touching the index: the removals below are not
-        // undoable, so an invalid token must refuse while log and index are
-        // still in step.
-        assert!(
-            self.log.is_valid_token(&token.0),
-            "ExactMemo: token is invalid (foreign or abandoned)"
-        );
-        let saved_len = token.1;
+    /// Drop the index keys of every entry above frame `depth`, reading them from
+    /// the log while it is still live, then move the log.
+    fn unindex_above(&mut self, depth: usize) {
+        let saved_len = self.frame_lens[depth];
         for pos in saved_len..self.len() {
             let entry = self
                 .log
                 .get(I::try_from_usize(pos).expect("position within log length"));
-            self.index.remove(&entry.key);
+            let key = entry.key;
+            self.index.remove(&key);
         }
-        self.log
-            .try_restore(token.0)
-            .expect("restore: token minted by this container's own mark");
-        debug_assert_eq!(self.index.len(), self.len());
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        self.unindex_above(depth);
+        Member::reset_frame(&mut self.log, depth);
+        self.frame_lens.truncate(depth + 1);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        self.unindex_above(depth);
+        Member::restore_frame(&mut self.log, depth);
+        self.frame_lens.truncate(depth);
+    }
+
+    /// The scope pop keeps the state and drops the checkpoint, so the index is
+    /// already correct for what stays live.
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.log);
+        self.frame_lens.pop();
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.log)
     }
 }
 
@@ -164,11 +171,12 @@ mod tests {
     fn mark_restore_truncates_and_unindexes() {
         let mut m = Memo::new();
         m.insert_if_absent(1, 2, 10, vec![], vec![]).unwrap();
-        let token = m.mark();
+        let token = m.frame_depth();
+        m.push_frame(ShrinkPolicy::Never);
         m.insert_if_absent(3, 4, 20, vec![], vec![]).unwrap();
         assert_eq!(m.len(), 2);
 
-        m.restore(token);
+        m.reset_frame(token);
         assert_eq!(m.len(), 1);
         assert!(m.get(1, 2).is_some());
         assert!(m.get(3, 4).is_none());
@@ -181,13 +189,15 @@ mod tests {
     #[test]
     fn nested_marks() {
         let mut m = Memo::new();
-        let outer = m.mark();
+        let outer = m.frame_depth();
+        m.push_frame(ShrinkPolicy::Never);
         m.insert_if_absent(1, 1, 1, vec![], vec![]).unwrap();
-        let inner = m.mark();
+        let inner = m.frame_depth();
+        m.push_frame(ShrinkPolicy::Never);
         m.insert_if_absent(2, 2, 2, vec![], vec![]).unwrap();
-        m.restore(inner);
+        m.reset_frame(inner);
         assert!(m.get(1, 1).is_some() && m.get(2, 2).is_none());
-        m.restore(outer);
+        m.reset_frame(outer);
         assert!(m.get(1, 1).is_none());
         assert!(m.is_empty());
     }

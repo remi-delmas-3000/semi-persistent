@@ -47,6 +47,7 @@ pub mod estimates;
 pub mod exact;
 mod exact_fixed;
 pub mod exact_memo;
+pub(crate) mod group_members;
 pub mod mcgs;
 pub mod pretty;
 pub mod results;

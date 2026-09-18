@@ -11,7 +11,8 @@
 
 use crate::canon::{MSetCanon, VarCanon};
 use crate::config::EGraphConfig;
-use crate::containers::{DenseId, MapToken, ShrinkPolicy, SpMap};
+use crate::containers::group::Member;
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpMap};
 use crate::egraph::EGraph;
 use crate::id::ENodeKind;
 use crate::literal::LitVal;
@@ -79,7 +80,7 @@ pub const DEFAULT_A_MAX: usize = 32;
 
 /// The action cache: maps class pair `(l, r)` to a list of actions.
 /// Semi-persistent: the `index` map (AppendOnlyVec + SpMap) is append-only and
-/// provides branch genealogy for tokens. The `values` vec grows in lockstep
+/// provides branch genealogy for tokens. The `values` column grows in lockstep
 /// and is truncated on restore. Actions are deterministic from the immutable
 /// snapshot, so re-derivation after restore is cheap (cache is a performance
 /// optimization, not a correctness requirement).
@@ -89,25 +90,21 @@ pub struct ActionCache<O: DenseId, A: AuIds = AuIds31, M: MultiplicityLike = Mul
     /// Index word `A::Index`: the map's log positions are what the `A::Action`s are
     /// minted from, and `A::Action::Index` is that word.
     index: SpMap<(A::Class, A::Class), A::Action, A::Index>,
-    /// Action lists, indexed by the map's stored value.
-    values: Vec<Vec<Action<O, A, M>>>,
+    /// Action lists, indexed by the map's stored value. An append-only column:
+    /// ids are positions, an entry is never overwritten, and a rollback is
+    /// exactly "drop the suffix", which is what `AppendOnlyVec` proves. Its
+    /// element need not be `Copy` (no diff is recorded, only a length per
+    /// frame), so the action lists ride in it as they are.
+    values: AppendOnlyVec<Vec<Action<O, A, M>>, A::Index>,
     a_max: usize,
     include_ac: bool,
-}
-
-/// Token for restoring an `ActionCache`. Wraps the SpMap's token, which
-/// carries container identity and branch genealogy.
-#[derive(Clone, Copy, Debug)]
-pub struct ActionCacheToken {
-    index: MapToken,
-    values_len: usize,
 }
 
 impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
     pub fn new(a_max: usize) -> Self {
         ActionCache {
             index: SpMap::new(),
-            values: Vec::new(),
+            values: AppendOnlyVec::new(),
             a_max,
             include_ac: true,
         }
@@ -118,7 +115,7 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
     pub fn without_ac_actions(a_max: usize) -> Self {
         ActionCache {
             index: SpMap::new(),
-            values: Vec::new(),
+            values: AppendOnlyVec::new(),
             a_max,
             include_ac: false,
         }
@@ -132,17 +129,21 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
         let key = (l, r);
         self.index.id_of(&key).map(|log_idx| {
             let &idx = self.index.get_val(log_idx);
-            self.values[idx.to_usize()].as_slice()
+            self.values
+                .get(A::Index::try_from_usize(idx.to_usize()).expect("id within the index word"))
+                .as_slice()
         })
     }
 
     pub fn insert(&mut self, l: A::Class, r: A::Class, actions: Vec<Action<O, A, M>>) {
-        // Checked: `values` is a plain `Vec`, so nothing but this call stands between the
-        // action-list count and the `A::Action` id space. Masking would hand the new list
-        // the id of an older one, and `get` would then serve the wrong action list for a
-        // class pair — a search that expands moves belonging to a different subproblem.
-        let idx = crate::id::id_at::<A::Action>(self.values.len());
-        self.values.push(actions);
+        // The column refuses at its index word rather than masking: masking would
+        // hand the new list the id of an older one, and `get` would then serve the
+        // wrong action list for a class pair — a search that expands moves
+        // belonging to a different subproblem.
+        let idx = crate::id::id_at::<A::Action>(self.values.len().as_usize());
+        self.values
+            .try_push(actions)
+            .expect("AU arena sized by its index word");
         self.index
             .try_insert((l, r), idx)
             .expect("AU arena sized by its index word");
@@ -152,26 +153,31 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
         self.a_max
     }
 
-    pub fn mark(&mut self) -> ActionCacheToken {
-        ActionCacheToken {
-            index: self
-                .index
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            values_len: self.values.len(),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.index, shrink);
+        Member::push_frame(&mut self.values, shrink);
     }
 
-    /// Is this token restorable right now (same instance, live branch)?
-    pub fn is_valid_token(&self, token: &ActionCacheToken) -> bool {
-        self.index.is_valid_token(&token.index)
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.index, depth);
+        Member::reset_frame(&mut self.values, depth);
     }
 
-    pub fn restore(&mut self, token: ActionCacheToken) {
-        self.index
-            .try_restore(token.index)
-            .expect("restore: token minted by this container's own mark");
-        self.values.truncate(token.values_len);
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.index, depth);
+        Member::restore_frame(&mut self.values, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.index);
+        Member::pop_frame(&mut self.values);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.index)
     }
 }
 

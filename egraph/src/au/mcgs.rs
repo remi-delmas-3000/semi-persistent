@@ -105,9 +105,8 @@
 
 use crate::canon::{MSetCanon, VarCanon};
 use crate::config::EGraphConfig;
-use crate::containers::{
-    AppendOnlyVec, DenseId, IndexLike, MapToken, ShrinkPolicy, SpMap, VecP, VecToken,
-};
+use crate::containers::group::Member;
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpMap, VecP};
 use crate::literal::LitVal;
 use crate::multiplicity::MultiplicityLike;
 
@@ -426,33 +425,6 @@ struct AndStatsRef<'a, OS, O, CS> {
     transport_rows: &'a [u32],
     transport_cols: &'a [u32],
     transport_cell_map: &'a [Option<CS>],
-}
-
-/// Token for the OR-statistics arena. It contains only tokens issued by the
-/// standard semi-persistent containers that own each aligned field.
-#[derive(Clone, Copy, Debug)]
-struct OrStatsToken {
-    or_ids: VecToken,
-    min_size: VecToken,
-    max_size: VecToken,
-    terminal: VecToken,
-    edge_spans: VecToken,
-    initial_value: VecToken,
-    value: VecToken,
-    edge_visits: VecToken,
-    edge_and: VecToken,
-    edge_bounds: VecToken,
-    edge_excluded: VecToken,
-    rolled: VecToken,
-    edge_lb: VecToken,
-    node_lb: VecToken,
-    first_unrealized: VecToken,
-    transport_descs: VecToken,
-    closed: VecToken,
-    open_edges: VecToken,
-    parent_head: VecToken,
-    parent_and: VecToken,
-    parent_next: VecToken,
 }
 
 /// OR statistics stored in aligned semi-persistent arenas. Node structure is
@@ -887,209 +859,108 @@ impl<A: AuIds, O: DenseId> OrStatsArena<A, O> {
         );
     }
 
-    fn mark(&mut self) -> OrStatsToken {
-        OrStatsToken {
-            or_ids: self
-                .or_ids
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            min_size: self
-                .min_size
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            max_size: self
-                .max_size
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            terminal: self
-                .terminal
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            edge_spans: self
-                .edge_spans
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            initial_value: self
-                .initial_value
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            value: self
-                .value
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            edge_visits: self
-                .edge_visits
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            edge_and: self
-                .edge_and
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            edge_bounds: self
-                .edge_bounds
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            edge_excluded: self
-                .edge_excluded
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            rolled: self
-                .rolled
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            edge_lb: self
-                .edge_lb
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            node_lb: self
-                .node_lb
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            first_unrealized: self
-                .first_unrealized
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            transport_descs: self
-                .transport_descs
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            closed: self
-                .closed
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            open_edges: self
-                .open_edges
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            parent_head: self
-                .parent_head
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            parent_and: self
-                .parent_and
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            parent_next: self
-                .parent_next
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.or_ids, shrink);
+        Member::push_frame(&mut self.min_size, shrink);
+        Member::push_frame(&mut self.max_size, shrink);
+        Member::push_frame(&mut self.terminal, shrink);
+        Member::push_frame(&mut self.edge_spans, shrink);
+        Member::push_frame(&mut self.initial_value, shrink);
+        Member::push_frame(&mut self.value, shrink);
+        Member::push_frame(&mut self.edge_visits, shrink);
+        Member::push_frame(&mut self.edge_and, shrink);
+        Member::push_frame(&mut self.edge_bounds, shrink);
+        Member::push_frame(&mut self.edge_excluded, shrink);
+        Member::push_frame(&mut self.rolled, shrink);
+        Member::push_frame(&mut self.edge_lb, shrink);
+        Member::push_frame(&mut self.node_lb, shrink);
+        Member::push_frame(&mut self.first_unrealized, shrink);
+        Member::push_frame(&mut self.transport_descs, shrink);
+        Member::push_frame(&mut self.closed, shrink);
+        Member::push_frame(&mut self.open_edges, shrink);
+        Member::push_frame(&mut self.parent_head, shrink);
+        Member::push_frame(&mut self.parent_and, shrink);
+        Member::push_frame(&mut self.parent_next, shrink);
     }
 
-    fn is_valid_token(&self, token: &OrStatsToken) -> bool {
-        self.or_ids.is_valid_token(&token.or_ids)
-            && self.min_size.is_valid_token(&token.min_size)
-            && self.max_size.is_valid_token(&token.max_size)
-            && self.terminal.is_valid_token(&token.terminal)
-            && self.edge_spans.is_valid_token(&token.edge_spans)
-            && self.initial_value.is_valid_token(&token.initial_value)
-            && self.value.is_valid_token(&token.value)
-            && self.edge_visits.is_valid_token(&token.edge_visits)
-            && self.edge_and.is_valid_token(&token.edge_and)
-            && self.edge_bounds.is_valid_token(&token.edge_bounds)
-            && self.edge_excluded.is_valid_token(&token.edge_excluded)
-            && self.rolled.is_valid_token(&token.rolled)
-            && self.edge_lb.is_valid_token(&token.edge_lb)
-            && self.node_lb.is_valid_token(&token.node_lb)
-            && self
-                .first_unrealized
-                .is_valid_token(&token.first_unrealized)
-            && self.transport_descs.is_valid_token(&token.transport_descs)
-            && self.closed.is_valid_token(&token.closed)
-            && self.open_edges.is_valid_token(&token.open_edges)
-            && self.parent_head.is_valid_token(&token.parent_head)
-            && self.parent_and.is_valid_token(&token.parent_and)
-            && self.parent_next.is_valid_token(&token.parent_next)
+    fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.or_ids, depth);
+        Member::reset_frame(&mut self.min_size, depth);
+        Member::reset_frame(&mut self.max_size, depth);
+        Member::reset_frame(&mut self.terminal, depth);
+        Member::reset_frame(&mut self.edge_spans, depth);
+        Member::reset_frame(&mut self.initial_value, depth);
+        Member::reset_frame(&mut self.value, depth);
+        Member::reset_frame(&mut self.edge_visits, depth);
+        Member::reset_frame(&mut self.edge_and, depth);
+        Member::reset_frame(&mut self.edge_bounds, depth);
+        Member::reset_frame(&mut self.edge_excluded, depth);
+        Member::reset_frame(&mut self.rolled, depth);
+        Member::reset_frame(&mut self.edge_lb, depth);
+        Member::reset_frame(&mut self.node_lb, depth);
+        Member::reset_frame(&mut self.first_unrealized, depth);
+        Member::reset_frame(&mut self.transport_descs, depth);
+        Member::reset_frame(&mut self.closed, depth);
+        Member::reset_frame(&mut self.open_edges, depth);
+        Member::reset_frame(&mut self.parent_head, depth);
+        Member::reset_frame(&mut self.parent_and, depth);
+        Member::reset_frame(&mut self.parent_next, depth);
     }
 
-    fn restore(&mut self, token: OrStatsToken) {
-        assert!(self.is_valid_token(&token), "OrStatsArena: invalid token");
-        self.parent_next
-            .try_restore(token.parent_next)
-            .expect("restore: token minted by this container's own mark");
-        self.parent_and
-            .try_restore(token.parent_and)
-            .expect("restore: token minted by this container's own mark");
-        self.parent_head
-            .try_restore(token.parent_head)
-            .expect("restore: token minted by this container's own mark");
-        self.open_edges
-            .try_restore(token.open_edges)
-            .expect("restore: token minted by this container's own mark");
-        self.closed
-            .try_restore(token.closed)
-            .expect("restore: token minted by this container's own mark");
-        self.transport_descs
-            .try_restore(token.transport_descs)
-            .expect("restore: token minted by this container's own mark");
-        self.first_unrealized
-            .try_restore(token.first_unrealized)
-            .expect("restore: token minted by this container's own mark");
-        self.node_lb
-            .try_restore(token.node_lb)
-            .expect("restore: token minted by this container's own mark");
-        self.edge_lb
-            .try_restore(token.edge_lb)
-            .expect("restore: token minted by this container's own mark");
-        self.rolled
-            .try_restore(token.rolled)
-            .expect("restore: token minted by this container's own mark");
-        self.edge_excluded
-            .try_restore(token.edge_excluded)
-            .expect("restore: token minted by this container's own mark");
-        self.edge_bounds
-            .try_restore(token.edge_bounds)
-            .expect("restore: token minted by this container's own mark");
-        self.edge_and
-            .try_restore(token.edge_and)
-            .expect("restore: token minted by this container's own mark");
-        self.edge_visits
-            .try_restore(token.edge_visits)
-            .expect("restore: token minted by this container's own mark");
-        self.value
-            .try_restore(token.value)
-            .expect("restore: token minted by this container's own mark");
-        self.initial_value
-            .try_restore(token.initial_value)
-            .expect("restore: token minted by this container's own mark");
-        self.edge_spans
-            .try_restore(token.edge_spans)
-            .expect("restore: token minted by this container's own mark");
-        self.terminal
-            .try_restore(token.terminal)
-            .expect("restore: token minted by this container's own mark");
-        self.max_size
-            .try_restore(token.max_size)
-            .expect("restore: token minted by this container's own mark");
-        self.min_size
-            .try_restore(token.min_size)
-            .expect("restore: token minted by this container's own mark");
-        self.or_ids
-            .try_restore(token.or_ids)
-            .expect("restore: token minted by this container's own mark");
+    fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.or_ids, depth);
+        Member::restore_frame(&mut self.min_size, depth);
+        Member::restore_frame(&mut self.max_size, depth);
+        Member::restore_frame(&mut self.terminal, depth);
+        Member::restore_frame(&mut self.edge_spans, depth);
+        Member::restore_frame(&mut self.initial_value, depth);
+        Member::restore_frame(&mut self.value, depth);
+        Member::restore_frame(&mut self.edge_visits, depth);
+        Member::restore_frame(&mut self.edge_and, depth);
+        Member::restore_frame(&mut self.edge_bounds, depth);
+        Member::restore_frame(&mut self.edge_excluded, depth);
+        Member::restore_frame(&mut self.rolled, depth);
+        Member::restore_frame(&mut self.edge_lb, depth);
+        Member::restore_frame(&mut self.node_lb, depth);
+        Member::restore_frame(&mut self.first_unrealized, depth);
+        Member::restore_frame(&mut self.transport_descs, depth);
+        Member::restore_frame(&mut self.closed, depth);
+        Member::restore_frame(&mut self.open_edges, depth);
+        Member::restore_frame(&mut self.parent_head, depth);
+        Member::restore_frame(&mut self.parent_and, depth);
+        Member::restore_frame(&mut self.parent_next, depth);
     }
-}
 
-/// Token for the AND-statistics arena. It contains only tokens issued by the
-/// standard semi-persistent containers that own each aligned field.
-#[derive(Clone, Copy, Debug)]
-struct AndStatsToken {
-    parent: VecToken,
-    parent_slot: VecToken,
-    lb: VecToken,
-    op: VecToken,
-    commutative: VecToken,
-    child_spans: VecToken,
-    child_or_stats: VecToken,
-    value: VecToken,
-    child_counts: VecToken,
-    child_visits: VecToken,
-    round_robin: VecToken,
-    transport_rows: VecToken,
-    transport_cols: VecToken,
-    transport_cell_map: VecToken,
-    closed: VecToken,
-    open_children: VecToken,
+    fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.or_ids);
+        Member::pop_frame(&mut self.min_size);
+        Member::pop_frame(&mut self.max_size);
+        Member::pop_frame(&mut self.terminal);
+        Member::pop_frame(&mut self.edge_spans);
+        Member::pop_frame(&mut self.initial_value);
+        Member::pop_frame(&mut self.value);
+        Member::pop_frame(&mut self.edge_visits);
+        Member::pop_frame(&mut self.edge_and);
+        Member::pop_frame(&mut self.edge_bounds);
+        Member::pop_frame(&mut self.edge_excluded);
+        Member::pop_frame(&mut self.rolled);
+        Member::pop_frame(&mut self.edge_lb);
+        Member::pop_frame(&mut self.node_lb);
+        Member::pop_frame(&mut self.first_unrealized);
+        Member::pop_frame(&mut self.transport_descs);
+        Member::pop_frame(&mut self.closed);
+        Member::pop_frame(&mut self.open_edges);
+        Member::pop_frame(&mut self.parent_head);
+        Member::pop_frame(&mut self.parent_and);
+        Member::pop_frame(&mut self.parent_next);
+    }
+
+    fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.or_ids)
+    }
 }
 
 /// AND statistics stored in aligned semi-persistent arenas. Child state is
@@ -1379,146 +1250,87 @@ impl<A: AuIds, O: DenseId> AndStatsArena<A, O> {
         self.round_robin.set(node, self.round_robin.get(node) + 1);
     }
 
-    fn mark(&mut self) -> AndStatsToken {
-        AndStatsToken {
-            parent: self
-                .parent
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            parent_slot: self
-                .parent_slot
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            lb: self
-                .lb
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            op: self
-                .op
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            commutative: self
-                .commutative
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            child_spans: self
-                .child_spans
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            child_or_stats: self
-                .child_or_stats
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            value: self
-                .value
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            child_counts: self
-                .child_counts
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            child_visits: self
-                .child_visits
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            round_robin: self
-                .round_robin
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            transport_rows: self
-                .transport_rows
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            transport_cols: self
-                .transport_cols
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            transport_cell_map: self
-                .transport_cell_map
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            closed: self
-                .closed
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            open_children: self
-                .open_children
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.parent, shrink);
+        Member::push_frame(&mut self.parent_slot, shrink);
+        Member::push_frame(&mut self.lb, shrink);
+        Member::push_frame(&mut self.op, shrink);
+        Member::push_frame(&mut self.commutative, shrink);
+        Member::push_frame(&mut self.child_spans, shrink);
+        Member::push_frame(&mut self.child_or_stats, shrink);
+        Member::push_frame(&mut self.value, shrink);
+        Member::push_frame(&mut self.child_counts, shrink);
+        Member::push_frame(&mut self.child_visits, shrink);
+        Member::push_frame(&mut self.round_robin, shrink);
+        Member::push_frame(&mut self.transport_rows, shrink);
+        Member::push_frame(&mut self.transport_cols, shrink);
+        Member::push_frame(&mut self.transport_cell_map, shrink);
+        Member::push_frame(&mut self.closed, shrink);
+        Member::push_frame(&mut self.open_children, shrink);
     }
 
-    fn is_valid_token(&self, token: &AndStatsToken) -> bool {
-        self.parent.is_valid_token(&token.parent)
-            && self.parent_slot.is_valid_token(&token.parent_slot)
-            && self.lb.is_valid_token(&token.lb)
-            && self.op.is_valid_token(&token.op)
-            && self.commutative.is_valid_token(&token.commutative)
-            && self.child_spans.is_valid_token(&token.child_spans)
-            && self.child_or_stats.is_valid_token(&token.child_or_stats)
-            && self.value.is_valid_token(&token.value)
-            && self.child_counts.is_valid_token(&token.child_counts)
-            && self.child_visits.is_valid_token(&token.child_visits)
-            && self.round_robin.is_valid_token(&token.round_robin)
-            && self.transport_rows.is_valid_token(&token.transport_rows)
-            && self.transport_cols.is_valid_token(&token.transport_cols)
-            && self
-                .transport_cell_map
-                .is_valid_token(&token.transport_cell_map)
-            && self.closed.is_valid_token(&token.closed)
-            && self.open_children.is_valid_token(&token.open_children)
+    fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.parent, depth);
+        Member::reset_frame(&mut self.parent_slot, depth);
+        Member::reset_frame(&mut self.lb, depth);
+        Member::reset_frame(&mut self.op, depth);
+        Member::reset_frame(&mut self.commutative, depth);
+        Member::reset_frame(&mut self.child_spans, depth);
+        Member::reset_frame(&mut self.child_or_stats, depth);
+        Member::reset_frame(&mut self.value, depth);
+        Member::reset_frame(&mut self.child_counts, depth);
+        Member::reset_frame(&mut self.child_visits, depth);
+        Member::reset_frame(&mut self.round_robin, depth);
+        Member::reset_frame(&mut self.transport_rows, depth);
+        Member::reset_frame(&mut self.transport_cols, depth);
+        Member::reset_frame(&mut self.transport_cell_map, depth);
+        Member::reset_frame(&mut self.closed, depth);
+        Member::reset_frame(&mut self.open_children, depth);
     }
 
-    fn restore(&mut self, token: AndStatsToken) {
-        assert!(self.is_valid_token(&token), "AndStatsArena: invalid token");
-        self.open_children
-            .try_restore(token.open_children)
-            .expect("restore: token minted by this container's own mark");
-        self.closed
-            .try_restore(token.closed)
-            .expect("restore: token minted by this container's own mark");
-        self.transport_cell_map
-            .try_restore(token.transport_cell_map)
-            .expect("restore: token minted by this container's own mark");
-        self.transport_cols
-            .try_restore(token.transport_cols)
-            .expect("restore: token minted by this container's own mark");
-        self.transport_rows
-            .try_restore(token.transport_rows)
-            .expect("restore: token minted by this container's own mark");
-        self.round_robin
-            .try_restore(token.round_robin)
-            .expect("restore: token minted by this container's own mark");
-        self.child_visits
-            .try_restore(token.child_visits)
-            .expect("restore: token minted by this container's own mark");
-        self.child_counts
-            .try_restore(token.child_counts)
-            .expect("restore: token minted by this container's own mark");
-        self.value
-            .try_restore(token.value)
-            .expect("restore: token minted by this container's own mark");
-        self.child_or_stats
-            .try_restore(token.child_or_stats)
-            .expect("restore: token minted by this container's own mark");
-        self.child_spans
-            .try_restore(token.child_spans)
-            .expect("restore: token minted by this container's own mark");
-        self.commutative
-            .try_restore(token.commutative)
-            .expect("restore: token minted by this container's own mark");
-        self.op
-            .try_restore(token.op)
-            .expect("restore: token minted by this container's own mark");
-        self.lb
-            .try_restore(token.lb)
-            .expect("restore: token minted by this container's own mark");
-        self.parent_slot
-            .try_restore(token.parent_slot)
-            .expect("restore: token minted by this container's own mark");
-        self.parent
-            .try_restore(token.parent)
-            .expect("restore: token minted by this container's own mark");
+    fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.parent, depth);
+        Member::restore_frame(&mut self.parent_slot, depth);
+        Member::restore_frame(&mut self.lb, depth);
+        Member::restore_frame(&mut self.op, depth);
+        Member::restore_frame(&mut self.commutative, depth);
+        Member::restore_frame(&mut self.child_spans, depth);
+        Member::restore_frame(&mut self.child_or_stats, depth);
+        Member::restore_frame(&mut self.value, depth);
+        Member::restore_frame(&mut self.child_counts, depth);
+        Member::restore_frame(&mut self.child_visits, depth);
+        Member::restore_frame(&mut self.round_robin, depth);
+        Member::restore_frame(&mut self.transport_rows, depth);
+        Member::restore_frame(&mut self.transport_cols, depth);
+        Member::restore_frame(&mut self.transport_cell_map, depth);
+        Member::restore_frame(&mut self.closed, depth);
+        Member::restore_frame(&mut self.open_children, depth);
+    }
+
+    fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.parent);
+        Member::pop_frame(&mut self.parent_slot);
+        Member::pop_frame(&mut self.lb);
+        Member::pop_frame(&mut self.op);
+        Member::pop_frame(&mut self.commutative);
+        Member::pop_frame(&mut self.child_spans);
+        Member::pop_frame(&mut self.child_or_stats);
+        Member::pop_frame(&mut self.value);
+        Member::pop_frame(&mut self.child_counts);
+        Member::pop_frame(&mut self.child_visits);
+        Member::pop_frame(&mut self.round_robin);
+        Member::pop_frame(&mut self.transport_rows);
+        Member::pop_frame(&mut self.transport_cols);
+        Member::pop_frame(&mut self.transport_cell_map);
+        Member::pop_frame(&mut self.closed);
+        Member::pop_frame(&mut self.open_children);
+    }
+
+    fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.parent)
     }
 }
 
@@ -1537,15 +1349,6 @@ pub(crate) struct McgsState<A: AuIds = AuIds31, O: DenseId = crate::id::OpId> {
     /// not search state: nothing reads them back, so they sit outside the
     /// semi-persistent arenas and `mark`/`restore` do not touch them.
     hybrid: HybridStats,
-}
-
-/// Token for restoring `McgsState`. It bundles only arena and map tokens.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct McgsToken {
-    or_stats: OrStatsToken,
-    and_stats: AndStatsToken,
-    or_stats_map: MapToken,
-    exact_memo: super::exact_memo::ExactMemoToken,
 }
 
 impl<A: AuIds, O: DenseId> McgsState<A, O> {
@@ -1573,36 +1376,39 @@ impl<A: AuIds, O: DenseId> McgsState<A, O> {
         &mut self.exact_memo
     }
 
-    pub(crate) fn mark(&mut self) -> McgsToken {
-        McgsToken {
-            or_stats: self.or_stats.mark(),
-            and_stats: self.and_stats.mark(),
-            or_stats_map: self
-                .or_stats_map
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            exact_memo: self.exact_memo.mark(),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    pub(crate) fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.or_stats_map, shrink);
+        self.or_stats.push_frame(shrink);
+        self.and_stats.push_frame(shrink);
+        self.exact_memo.push_frame(shrink);
     }
 
-    pub(crate) fn is_valid_token(&self, token: &McgsToken) -> bool {
-        self.or_stats.is_valid_token(&token.or_stats)
-            && self.and_stats.is_valid_token(&token.and_stats)
-            && self.or_stats_map.is_valid_token(&token.or_stats_map)
-            && self.exact_memo.is_valid_token(&token.exact_memo)
+    pub(crate) fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.or_stats_map, depth);
+        self.or_stats.reset_frame(depth);
+        self.and_stats.reset_frame(depth);
+        self.exact_memo.reset_frame(depth);
     }
 
-    pub(crate) fn restore(&mut self, token: McgsToken) {
-        assert!(
-            self.is_valid_token(&token),
-            "McgsState: token is invalid (foreign or abandoned)"
-        );
-        self.exact_memo.restore(token.exact_memo);
-        self.or_stats_map
-            .try_restore(token.or_stats_map)
-            .expect("restore: token minted by this container's own mark");
-        self.and_stats.restore(token.and_stats);
-        self.or_stats.restore(token.or_stats);
+    pub(crate) fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.or_stats_map, depth);
+        self.or_stats.restore_frame(depth);
+        self.and_stats.restore_frame(depth);
+        self.exact_memo.restore_frame(depth);
+    }
+
+    pub(crate) fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.or_stats_map);
+        self.or_stats.pop_frame();
+        self.and_stats.pop_frame();
+        self.exact_memo.pop_frame();
+    }
+
+    pub(crate) fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.or_stats_map)
     }
 
     #[inline]
@@ -4176,7 +3982,8 @@ mod tests {
                 edge_bounds: vec![0; 1],
             },
         );
-        let token = state.mark();
+        let token = state.frame_depth();
+        state.push_frame(ShrinkPolicy::Never);
 
         // Simulate expansion: create an AND-node and link it.
         push_and(
@@ -4199,7 +4006,7 @@ mod tests {
         state.set_or_edge_and(os(0), 0, Some(asid(0)));
         state.bump_or_edge_visit(os(0), 0);
 
-        state.restore(token);
+        state.reset_frame(token);
         assert_eq!(state.and_stats.len(), 0);
         let edges: crate::au::Span<OrEdgeStatId> = state.or_stats.edge_span(os(0));
         assert_eq!(edges, crate::au::Span::new(0, 1));
@@ -4226,14 +4033,15 @@ mod tests {
                 edge_bounds: vec![7, 9],
             },
         );
-        let token = state.mark();
+        let token = state.frame_depth();
+        state.push_frame(ShrinkPolicy::Never);
 
         state.or_stats.set_edge_excluded(os(0), 1);
         state.or_stats.close_edge(os(0));
         assert!(state.or_stats.edge_excluded(os(0), 1));
         assert_eq!(state.or_stats.open_edges(os(0)), 1);
 
-        state.restore(token);
+        state.reset_frame(token);
         assert!(!state.or_stats.edge_excluded(os(0), 0));
         assert!(!state.or_stats.edge_excluded(os(0), 1));
         assert_eq!(state.or_stats.open_edges(os(0)), 2);
@@ -4354,7 +4162,8 @@ mod tests {
                 transport_cell_map: Vec::new(),
             },
         );
-        let token = state.mark();
+        let token = state.frame_depth();
+        state.push_frame(ShrinkPolicy::Never);
 
         state.set_or_initial_value(os(0), 2.0);
         state.set_or_value(os(0), 2.0);
@@ -4372,7 +4181,7 @@ mod tests {
         state.or_stats.set_closed(os(0));
         state.or_stats.push_parent(os(0), asid(0));
 
-        state.restore(token);
+        state.reset_frame(token);
         let or = state.or_stat(os(0));
         assert_eq!(state.or_id(os(0)), OrId::from_usize(0));
         assert_eq!(or.initial_value, 3.0);
@@ -4596,57 +4405,6 @@ mod tests {
             core::mem::size_of::<u64>(),
             "visit counters must represent every supported u64 playout budget"
         );
-    }
-
-    #[test]
-    fn mcgs_rejects_foreign_token_before_mutation() {
-        let mut source: McgsState = McgsState::new();
-        let foreign = source.mark();
-
-        let mut target: McgsState = McgsState::new();
-        push_or(
-            &mut target,
-            OrStatsData {
-                initial_value: 4.0,
-                value: 4.0,
-                min_size: 1.0,
-                max_size: 2.0,
-                terminal: true,
-                edge_visits: Vec::new(),
-                edge_and: Vec::new(),
-                edge_bounds: Vec::new(),
-            },
-        );
-        assert!(!target.is_valid_token(&foreign));
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            target.restore(foreign);
-        }));
-        assert!(outcome.is_err());
-        assert_eq!(target.or_stats.len(), 1);
-        assert_eq!(target.or_stat(os(0)).value, 4.0);
-    }
-
-    #[test]
-    fn mcgs_invalidates_abandoned_future_token() {
-        let mut state: McgsState = McgsState::new();
-        let outer = state.mark();
-        push_or(
-            &mut state,
-            OrStatsData {
-                initial_value: 1.0,
-                value: 1.0,
-                min_size: 1.0,
-                max_size: 1.0,
-                terminal: true,
-                edge_visits: Vec::new(),
-                edge_and: Vec::new(),
-                edge_bounds: Vec::new(),
-            },
-        );
-        let abandoned = state.mark();
-        state.set_or_value(os(0), 2.0);
-        state.restore(outer);
-        assert!(!state.is_valid_token(&abandoned));
     }
 
     /// Synthetic 2-child AND fixture for AND-selector tests: both children
@@ -5207,11 +4965,16 @@ mod tests {
         let mut results = BestResults::new();
         let mut state = McgsState::new();
 
-        let space_token = space.mark();
-        let pool_token = pool.mark();
-        let results_token = results.mark();
-        let cache_token = cache.mark();
-        let state_token = state.mark();
+        let space_token = space.frame_depth();
+        space.push_frame(ShrinkPolicy::Never);
+        let pool_token = pool.frame_depth();
+        pool.push_frame(ShrinkPolicy::Never);
+        let results_token = results.frame_depth();
+        results.push_frame(ShrinkPolicy::Never);
+        let cache_token = cache.frame_depth();
+        cache.push_frame(ShrinkPolicy::Never);
+        let state_token = state.frame_depth();
+        state.push_frame(ShrinkPolicy::Never);
 
         let config = McgsConfig {
             playouts: 500,
@@ -5246,11 +5009,11 @@ mod tests {
             "the closed root must be marked exact"
         );
 
-        state.restore(state_token);
-        cache.restore(cache_token);
-        results.restore(results_token);
-        pool.restore(pool_token);
-        space.restore(space_token);
+        state.reset_frame(state_token);
+        cache.reset_frame(cache_token);
+        results.reset_frame(results_token);
+        pool.reset_frame(pool_token);
+        space.reset_frame(space_token);
         assert!(
             !results.is_exact(root_or),
             "the restore must take the closure proof with it"

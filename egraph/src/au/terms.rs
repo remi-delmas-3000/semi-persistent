@@ -8,9 +8,8 @@
 
 use crate::canon::{MSetCanon, VarCanon};
 use crate::config::{AuIds, EGraphConfig};
-use crate::containers::{
-    AppendOnlyVec, DenseId, IndexLike, MapToken, ShrinkPolicy, SpMap, VecToken,
-};
+use crate::containers::group::Member;
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpMap};
 use crate::literal::LitVal;
 use crate::multiplicity::MultiplicityLike;
 
@@ -66,18 +65,6 @@ pub struct TermPool<O: DenseId, V: DenseId, A: AuIds = AuIds31> {
     /// by construction: every pool is created next to one snapshot
     /// (`session.rs`, `exact.rs`, `mcgs.rs`) and never outlives it.
     best_terms: SpMap<A::Class, A::Term, A::Index>,
-}
-
-/// Token for restoring a `TermPool` to a previous state.
-#[derive(Clone, Copy, Debug)]
-pub struct TermPoolToken {
-    ops: VecToken,
-    child_spans: VecToken,
-    child_pool: VecToken,
-    sizes: VecToken,
-    vmasses: VecToken,
-    by_structure: MapToken,
-    best_terms: MapToken,
 }
 
 impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> TermPool<O, V, A> {
@@ -327,73 +314,51 @@ impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> Ter
             .expect("AU arena sized by its index word");
     }
 
-    pub fn mark(&mut self) -> TermPoolToken {
-        TermPoolToken {
-            ops: self
-                .ops
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            child_spans: self
-                .child_spans
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            child_pool: self
-                .child_pool
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            sizes: self
-                .sizes
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            vmasses: self
-                .vmasses
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            by_structure: self
-                .by_structure
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            best_terms: self
-                .best_terms
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.ops, shrink);
+        Member::push_frame(&mut self.child_spans, shrink);
+        Member::push_frame(&mut self.child_pool, shrink);
+        Member::push_frame(&mut self.sizes, shrink);
+        Member::push_frame(&mut self.vmasses, shrink);
+        Member::push_frame(&mut self.by_structure, shrink);
+        Member::push_frame(&mut self.best_terms, shrink);
     }
 
-    /// Is this token restorable right now (same instances, live branches on
-    /// every inner container)?
-    pub fn is_valid_token(&self, token: &TermPoolToken) -> bool {
-        self.ops.is_valid_token(&token.ops)
-            && self.child_spans.is_valid_token(&token.child_spans)
-            && self.child_pool.is_valid_token(&token.child_pool)
-            && self.sizes.is_valid_token(&token.sizes)
-            && self.vmasses.is_valid_token(&token.vmasses)
-            && self.by_structure.is_valid_token(&token.by_structure)
-            && self.best_terms.is_valid_token(&token.best_terms)
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.ops, depth);
+        Member::reset_frame(&mut self.child_spans, depth);
+        Member::reset_frame(&mut self.child_pool, depth);
+        Member::reset_frame(&mut self.sizes, depth);
+        Member::reset_frame(&mut self.vmasses, depth);
+        Member::reset_frame(&mut self.by_structure, depth);
+        Member::reset_frame(&mut self.best_terms, depth);
     }
 
-    pub fn restore(&mut self, token: TermPoolToken) {
-        self.best_terms
-            .try_restore(token.best_terms)
-            .expect("restore: token minted by this container's own mark");
-        self.by_structure
-            .try_restore(token.by_structure)
-            .expect("restore: token minted by this container's own mark");
-        self.vmasses
-            .try_restore(token.vmasses)
-            .expect("restore: token minted by this container's own mark");
-        self.sizes
-            .try_restore(token.sizes)
-            .expect("restore: token minted by this container's own mark");
-        self.child_pool
-            .try_restore(token.child_pool)
-            .expect("restore: token minted by this container's own mark");
-        self.child_spans
-            .try_restore(token.child_spans)
-            .expect("restore: token minted by this container's own mark");
-        self.ops
-            .try_restore(token.ops)
-            .expect("restore: token minted by this container's own mark");
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.ops, depth);
+        Member::restore_frame(&mut self.child_spans, depth);
+        Member::restore_frame(&mut self.child_pool, depth);
+        Member::restore_frame(&mut self.sizes, depth);
+        Member::restore_frame(&mut self.vmasses, depth);
+        Member::restore_frame(&mut self.by_structure, depth);
+        Member::restore_frame(&mut self.best_terms, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.ops);
+        Member::pop_frame(&mut self.child_spans);
+        Member::pop_frame(&mut self.child_pool);
+        Member::pop_frame(&mut self.sizes);
+        Member::pop_frame(&mut self.vmasses);
+        Member::pop_frame(&mut self.by_structure);
+        Member::pop_frame(&mut self.best_terms);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.ops)
     }
 
     /// Project one side of the anti-unifier: replace every `Variants` node —
@@ -839,7 +804,8 @@ mod tests {
         assert_eq!(pool.size(t_fa), 2);
 
         let len_at_mark = pool.len();
-        let token = pool.mark();
+        let token = pool.frame_depth();
+        pool.push_frame(ShrinkPolicy::Never);
 
         // Post-mark: caches the gfa class and interns the g term.
         let t_gfa = build_best_term(&snap, &mut pool, gfa_class);
@@ -847,7 +813,7 @@ mod tests {
         assert_eq!(pool.children(t_gfa), &[t_fa]);
         assert!(pool.len() > len_at_mark);
 
-        pool.restore(token);
+        pool.reset_frame(token);
         assert_eq!(pool.len(), len_at_mark);
 
         // Pre-mark entry survives: cache hit on the surviving id, no growth.
