@@ -63,9 +63,10 @@ impl GroupToken {
 /// One instance backs all members, so the fork history is held `×1` instead of
 /// `×N` — and, unlike the old append-only `origins` (which grew one entry per
 /// restore, never reclaimed, O(R)), the stamp array is O(max depth): the leak fix
-/// (doc 10). A token minted at depth `d` carries `stamps.stamp_at(d)`; a restore
-/// diverging at `d` bumps the deeper levels, O(1)-invalidating the abandoned
-/// future via `lemma_bump_invalidates`.
+/// (doc 10). A token minted at depth `d` carries `stamps.mint_at(d)`, a fresh
+/// stamp from a counter that only grows; a restore to `d` cuts the live length
+/// to `d` (`GenStamps::cut_from`), one write that invalidates the consumed
+/// token and the abandoned future together.
 /// What a manager mints tokens from: its identity and the per-depth generation
 /// stamps. The group `History` wraps one together with the group depth; a
 /// standalone container embeds one and uses its own frame count as the depth,
@@ -85,8 +86,16 @@ impl Genealogy {
     }
 
     /// Number of stamp levels held (spec accessor).
+    /// Live stamp depths (`GenStamps::live_len`): the depths a token can be
+    /// valid at.
     pub open(crate) spec fn levels_len(&self) -> nat {
-        self.stamps.levels@.len()
+        self.stamps.live_len()
+    }
+
+    /// The next stamp this manager will hand out; every stamp it ever handed
+    /// out is below it.
+    pub open(crate) spec fn next_spec(&self) -> u64 {
+        self.stamps.next_spec()
     }
 
     /// `t` was minted here and its generation is still the live stamp at its
@@ -101,7 +110,7 @@ impl Genealogy {
     {
         Genealogy {
             id: crate::container_id::ContainerId::new(),
-            stamps: crate::gen_stamps::GenStamps::new(0),
+            stamps: crate::gen_stamps::GenStamps::new(),
         }
     }
 
@@ -116,10 +125,16 @@ impl Genealogy {
             final(self).id_spec() == old(self).id_spec(),
             final(self).valid_spec(t),
             forall|u: GroupToken| old(self).valid_spec(u) ==> final(self).valid_spec(u),
-            final(self).levels_len() >= old(self).levels_len(),
-            final(self).levels_len() > depth,
+            final(self).levels_len() == depth as nat + 1,
+            // Freshness: the minted stamp is new, so every token this manager
+            // handed out before (its stamp is below the old counter) keeps its
+            // validity status — a consumed token stays consumed.
+            t.generation >= old(self).next_spec(),
+            final(self).next_spec() > t.generation,
+            forall|u: GroupToken| u.generation < old(self).next_spec()
+                ==> final(self).valid_spec(u) == old(self).valid_spec(u),
     {
-        let g = self.stamps.stamp_at(depth);
+        let g = self.stamps.mint_at(depth);
         GroupToken { history: self.id, generation: g, depth: depth as u32 }
     }
 
@@ -132,34 +147,19 @@ impl Genealogy {
     /// The cut of a restore: every token at `depth` or deeper that is valid now
     /// is dead for good (its stamp changes; stamps never return), tokens above
     /// the cut are untouched.
+    /// The cut: every token at or above `depth` is dead for good (the live
+    /// length drops to `depth`), tokens below keep their status, the counter
+    /// is untouched. One write, whatever the deepest depth ever reached.
     pub fn cut_from(&mut self, depth: usize)
         ensures
             final(self).id_spec() == old(self).id_spec(),
-            final(self).levels_len() == old(self).levels_len(),
-            forall|u: GroupToken| u.depth_spec() >= depth as nat && old(self).valid_spec(u)
-                ==> !final(self).valid_spec(u),
+            final(self).next_spec() == old(self).next_spec(),
+            final(self).levels_len() == if depth < old(self).levels_len() { depth as nat } else { old(self).levels_len() },
+            forall|u: GroupToken| u.depth_spec() >= depth as nat ==> !final(self).valid_spec(u),
             forall|u: GroupToken| u.depth_spec() < depth as nat
                 ==> final(self).valid_spec(u) == old(self).valid_spec(u),
     {
-        let ghost pre = self.stamps;
-        let n = self.stamps.depth_capacity();
-        self.stamps.bump_from(depth);
-        proof {
-            if depth <= n {
-                crate::gen_stamps::lemma_bump_invalidates(pre, self.stamps, depth as nat);
-            } else {
-                // No level at or beyond `depth` exists (the bump touched
-                // nothing): tokens there were never valid, and every level
-                // below `depth` is a level below `n`, left unchanged.
-                assert forall|u: GroupToken| u.depth_spec() < depth as nat
-                    implies self.stamps.valid(u.depth as nat, u.generation)
-                        == pre.valid(u.depth as nat, u.generation) by {
-                    if u.depth_spec() < n as nat {
-                        assert(self.stamps.levels@[u.depth as int] == pre.levels@[u.depth as int]);
-                    }
-                }
-            }
-        }
+        self.stamps.cut_from(depth);
     }
 }
 
@@ -233,11 +233,11 @@ impl History {
         self.genealogy.is_valid(&t)
     }
 
-    /// Restore to `t`: bump the levels strictly below `t.depth` (invalidating the
-    /// abandoned future — every token at depth `> t.depth` — while `t` and its
-    /// ancestors stay valid), and set the depth to the token's. O(1) amortized;
-    /// no per-restore growth. No overflow precondition: `bump_from` uses
-    /// `wrapping_add`, which changes a level unconditionally.
+    /// Restore to `t`: cut the genealogy at `t.depth` (the consumed token and
+    /// every token minted after it die for good; `t`'s ancestors stay valid)
+    /// and set the depth to the token's. One write, no per-restore growth, no
+    /// overflow precondition: the stamp counter only grows and refuses at its
+    /// ceiling.
     pub fn restore_to(&mut self, t: GroupToken)
         requires
             old(self).wf(),

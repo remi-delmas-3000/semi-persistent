@@ -1,214 +1,164 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-//! Depth-indexed generation stamps: the O(max-depth) reclamation core for fork
-//! history (`doc/design/10-shared-fork-history.md`, "Dense alternative").
+//! Generation stamps: the token authority's memory, one stamp per live depth.
 //!
-//! `ForkHistory.origins` grows one entry per restore and is never reclaimed, so
-//! its size is O(R) (lifetime restore count) — an unbounded leak on SMT's
-//! millions of backjumps, even in the shared copy. The fix is the trail-solver
-//! level-stamp trick: keep one generation counter per depth, `levels[d]`. A token
-//! minted at depth `d` carries `levels[d]` at mark time; a restore that diverges
-//! at depth `d` bumps `levels[d..]`, so every token from the abandoned future
-//! (`depth >= d`) fails the O(1) check `token.gen == levels[token.depth]` while
-//! shallower tokens stay valid. Size is O(max depth), not O(R).
+//! A `GenStamps` hands out stamps from a counter that only grows, so every
+//! stamp is handed out exactly once. Depth `d` is live iff `d < len`; a token
+//! `(d, g)` is valid iff `d` is live and `levels[d] == g`. A cut at depth `d`
+//! is `len := min(len, d)`: one write, no rewriting of the stamps above the
+//! cut (they are stale because they are beyond the live length). A mint at
+//! the live length stores the next counter value: one write. Both are O(1),
+//! whatever the deepest depth ever reached; capacity is kept across cuts so a
+//! restore never reallocates, and live memory stays O(deepest depth).
 //!
-//! This module is the standalone, verified stamp array; wiring it into
-//! `ForkHistory` (replacing the append-only `origins` walk) is the follow-on that
-//! actually bounds the live size.
-
+//! Why a consumed token never revives: a token's stamp was `next` when it was
+//! minted and `next` only grows, so the stamp is below the counter for ever;
+//! re-minting the token's depth stores a value at or above the counter, never
+//! the token's own. `mint_at`'s last postcondition states exactly that: every
+//! stamp below the old counter keeps its validity status across a mint.
+//!
+//! Predecessor (2026-09-17, replaced the same day after the provenance
+//! benchmarks): one stamp per depth for the deepest depth ever reached, and a
+//! cut at `d` bumped every level from `d` up — O(deepest depth) per restore,
+//! which cost 1.1–1.7× on every mark/restore-dominated benchmark.
 use vstd::prelude::*;
 
 verus! {
 
 pub struct GenStamps {
-    /// `levels[d]` is the live generation at depth `d`. Stamps start at 1 so 0 is
-    /// a reserved "never minted / always invalid" sentinel.
-    pub levels: Vec<u64>,
+    /// Stamp storage. Only the first `len` entries are live; the rest are
+    /// stale stamps of cut depths, kept so a re-climb reuses the capacity.
+    pub(crate) levels: Vec<u64>,
+    /// Live length: depth `d` has a stamp iff `d < len`.
+    pub(crate) len: usize,
+    /// The next stamp to hand out. Starts at 1; every stamp handed out so far
+    /// is below it.
+    pub(crate) next: u64,
 }
 
 impl GenStamps {
-    /// Validity: a token minted at `depth` with generation `g` is live iff `depth`
-    /// is in range and its stamp still matches. O(1) — a single array read.
-    pub open spec fn valid(&self, depth: nat, g: u64) -> bool {
-        depth < self.levels@.len() && self.levels@[depth as int] == g
+    /// Is `(depth, g)` a live stamp? Bounds are part of the definition, so the
+    /// exec check needs no invariant.
+    pub open(crate) spec fn valid(&self, depth: nat, g: u64) -> bool {
+        &&& depth < self.len
+        &&& depth < self.levels@.len()
+        &&& self.levels@[depth as int] == g
     }
 
-    /// A fresh stamp array for depths `[0, max_depth)`, all at generation 1.
-    pub fn new(max_depth: usize) -> (r: GenStamps)
-        ensures
-            r.levels@.len() == max_depth,
-            forall|d: int| 0 <= d < max_depth ==> r.levels@[d] == 1,
+    pub open(crate) spec fn live_len(&self) -> nat {
+        self.len as nat
+    }
+
+    pub open(crate) spec fn next_spec(&self) -> u64 {
+        self.next
+    }
+
+    /// The stamp storage, live and stale entries alike.
+    pub open(crate) spec fn levels_view(&self) -> Seq<u64> {
+        self.levels@
+    }
+
+    pub fn new() -> (r: GenStamps)
+        ensures r.live_len() == 0, r.next_spec() == 1,
     {
-        let mut levels: Vec<u64> = Vec::new();
-        let mut d: usize = 0;
-        while d < max_depth
-            invariant
-                d <= max_depth,
-                levels@.len() == d,
-                forall|k: int| 0 <= k < d ==> levels@[k] == 1,
-            decreases max_depth - d,
-        {
-            levels.push(1u64);
-            d += 1;
-        }
-        GenStamps { levels }
+        GenStamps { levels: Vec::new(), len: 0, next: 1 }
     }
 
-    pub fn depth_capacity(&self) -> (n: usize)
-        ensures n == self.levels@.len(),
+    pub fn live_depths(&self) -> (n: usize)
+        ensures n == self.live_len(),
     {
-        self.levels.len()
+        self.len
     }
 
-    /// Extend by one depth level at generation 1 (a depth reached for the first
-    /// time). The array grows only to the max depth ever marked — O(max depth),
-    /// the bound that fixes the O(R) `origins` leak.
-    pub fn push_level(&mut self)
-        ensures
-            final(self).levels@.len() == old(self).levels@.len() + 1,
-            forall|d: int| 0 <= d < old(self).levels@.len()
-                ==> final(self).levels@[d] == old(self).levels@[d],
-            final(self).levels@[old(self).levels@.len() as int] == 1,
-    {
-        self.levels.push(1u64);
-    }
-
-    /// Mint: the current generation at `depth`, to store in a token.
-    pub fn stamp(&self, depth: usize) -> (g: u64)
-        ensures depth < self.levels@.len() ==> g == self.levels@[depth as int],
-    {
-        // Total: an unreached depth is the documented trap.
-        if !(depth < self.levels.len()) {
-            crate::guard::refuse("GenStamps::stamp: depth has no stamp yet");
-        }
-        self.levels[depth]
-    }
-
-    /// Fork-history mint: the generation for a mark at frame depth `depth`,
-    /// growing the array by one level the first time a depth is reached. The
-    /// returned generation is immediately valid; older levels are preserved. This
-    /// is the "mark" side of the reclaimed fork history (`cut` = `bump_from` is
-    /// the "restore" side); `GenStamps` IS the fork history, no wrapper needed.
-    pub fn stamp_at(&mut self, depth: usize) -> (g: u64)
-        ensures
-            final(self).levels@.len() >= old(self).levels@.len(),
-            depth < final(self).levels@.len(),
-            forall|d: int| 0 <= d < old(self).levels@.len()
-                ==> final(self).levels@[d] == old(self).levels@[d],
-            g == final(self).levels@[depth as int],
-            final(self).valid(depth as nat, g),
-    {
-        // Total: the depth ceiling is the documented trap.
-        if !(depth < usize::MAX) {
-            crate::guard::refuse("GenStamps::stamp_at: depth at the usize ceiling");
-        }
-        // Grow to cover `depth` (a depth reached for the first time may be beyond
-        // the current array, e.g. after a member used the genealogy-free
-        // `push_frame` without minting through this array).
-        while self.levels.len() <= depth
-            invariant
-                depth < usize::MAX,
-                forall|d: int| 0 <= d < old(self).levels@.len()
-                    ==> self.levels@[d] == old(self).levels@[d],
-                self.levels@.len() >= old(self).levels@.len(),
-            decreases depth as int + 1 - self.levels@.len(),
-        {
-            self.push_level();
-        }
-        self.stamp(depth)
-    }
-
-    /// The O(1) validity check for a token `(depth, g)`.
     pub fn is_valid(&self, depth: usize, g: u64) -> (b: bool)
         ensures b == self.valid(depth as nat, g),
     {
-        if depth < self.levels.len() {
+        if depth < self.len && depth < self.levels.len() {
             self.levels[depth] == g
         } else {
             false
         }
     }
 
-    /// A restore diverging at `depth` abandons every future at depth `>= depth`:
-    /// bump `levels[depth..]` so their tokens no longer match, while
-    /// `levels[0..depth]` (the surviving spine) is untouched. Uses `wrapping_add`,
-    /// which ALWAYS changes a value: `(x + 1) % 2^64 != x` for every `u64`, wrap
-    /// included, PROVED below by the two-case split (no wrap: the successor
-    /// differs; wrap: zero differs from `u64::MAX`). No overflow precondition
-    /// threads through the container hierarchy. The only residue of wrap is ABA
-    /// after 2^64 restores at ONE depth (physically unreachable), and even then
-    /// frame-liveness backstops it. Discharged from the trust ledger 2026-09:
-    /// formerly `external_body` trusting wrapping semantics.
-    pub fn bump_from(&mut self, depth: usize)
+    /// Hand out a fresh stamp at the live length (which becomes live). Total:
+    /// refuses at the counter ceiling and at the length ceiling, and refuses
+    /// a live length beyond the storage (unreachable through this API).
+    fn push_fresh(&mut self) -> (g: u64)
         ensures
-            final(self).levels@.len() == old(self).levels@.len(),
-            forall|d: int| 0 <= d < old(self).levels@.len() && d < depth
-                ==> final(self).levels@[d] == old(self).levels@[d],
-            forall|d: int| depth <= d < old(self).levels@.len()
-                ==> final(self).levels@[d] != old(self).levels@[d],
+            final(self).live_len() == old(self).live_len() + 1,
+            g == old(self).next_spec(),
+            final(self).next_spec() == old(self).next_spec() + 1,
+            final(self).valid(old(self).live_len(), g),
+            forall|d: nat, x: u64| old(self).valid(d, x) ==> final(self).valid(d, x),
+            forall|d: nat, x: u64| x < old(self).next_spec()
+                ==> final(self).valid(d, x) == old(self).valid(d, x),
     {
-        let n = self.levels.len();
-        let mut d: usize = depth;
-        while d < n
-            invariant
-                depth <= d,
-                // A depth past the stamp array is a legal no-op call.
-                d <= n || depth >= n,
-                n == self.levels@.len(),
-                self.levels@.len() == old(self).levels@.len(),
-                forall|k: int| 0 <= k < n && k < depth
-                    ==> self.levels@[k] == old(self).levels@[k],
-                forall|k: int| depth <= k < d
-                    ==> #[trigger] self.levels@[k] != old(self).levels@[k],
-                forall|k: int| d <= k < n
-                    ==> #[trigger] self.levels@[k] == old(self).levels@[k],
-            decreases n - d,
-        {
-            let v = self.levels[d];
-            let bumped = v.wrapping_add(1);
-            proof {
-                // wrapping_add(1) always changes a u64: either the plain
-                // successor (differs by one) or the wrap to zero (differs
-                // from u64::MAX).
-                if v == u64::MAX {
-                    assert(bumped == 0);
-                } else {
-                    assert(bumped == v + 1);
-                }
-                assert(bumped != v);
-            }
-            self.levels.set(d, bumped);
-            d += 1;
+        if !(self.next < u64::MAX) {
+            crate::guard::refuse("GenStamps: stamp counter exhausted");
         }
+        if !(self.len < usize::MAX) {
+            crate::guard::refuse("GenStamps: live length at the usize ceiling");
+        }
+        let g = self.next;
+        if self.len < self.levels.len() {
+            self.levels.set(self.len, g);
+        } else if self.len == self.levels.len() {
+            self.levels.push(g);
+        } else {
+            crate::guard::refuse("GenStamps: live length beyond the stamp storage");
+        }
+        self.len = self.len + 1;
+        self.next = self.next + 1;
+        g
     }
-}
 
-/// Invalidation corollary: after `bump_from(cut)`, a token minted below the cut
-/// (`depth >= cut`) with its old stamp is no longer valid, while a token above
-/// the cut (`depth < cut`) keeps its validity. This is the soundness of dropping
-/// the abandoned future — exactly what `fork_valid` would reject, now O(1).
-pub proof fn lemma_bump_invalidates(old_g: GenStamps, new_g: GenStamps, cut: nat)
-    requires
-        new_g.levels@.len() == old_g.levels@.len(),
-        forall|d: int| 0 <= d < cut ==> new_g.levels@[d] == old_g.levels@[d],
-        forall|d: int| cut <= d < new_g.levels@.len() ==>
-            new_g.levels@[d] != old_g.levels@[d],
-    ensures
-        forall|depth: nat, g: u64|
-            cut <= depth < old_g.levels@.len() && old_g.valid(depth, g)
-                ==> !new_g.valid(depth, g),
-        forall|depth: nat, g: u64|
-            depth < cut ==> old_g.valid(depth, g) == new_g.valid(depth, g),
-{
-    assert forall|depth: nat, g: u64|
-        cut <= depth < old_g.levels@.len() && old_g.valid(depth, g)
-            implies !new_g.valid(depth, g) by {
-        assert(new_g.levels@[depth as int] != old_g.levels@[depth as int]);
+    /// Mint the stamp for depth `depth`, which becomes the last live depth
+    /// (`live_len() == depth + 1`). Depths between the live length and `depth`
+    /// get fresh stamps of their own (a member driven structurally by a group
+    /// has frames its own genealogy never minted). Total: refuses a depth
+    /// below the live length — frames were cut without cutting the genealogy,
+    /// which this API never does.
+    pub fn mint_at(&mut self, depth: usize) -> (g: u64)
+        ensures
+            final(self).live_len() == depth as nat + 1,
+            final(self).valid(depth as nat, g),
+            g >= old(self).next_spec(),
+            final(self).next_spec() > g,
+            forall|d: nat, x: u64| old(self).valid(d, x) ==> final(self).valid(d, x),
+            forall|d: nat, x: u64| x < old(self).next_spec()
+                ==> final(self).valid(d, x) == old(self).valid(d, x),
+    {
+        if !(self.len <= depth) {
+            crate::guard::refuse("GenStamps::mint_at: depth below the live length");
+        }
+        if !(depth < usize::MAX) {
+            crate::guard::refuse("GenStamps::mint_at: depth at the usize ceiling");
+        }
+        while self.len < depth
+            invariant
+                self.len <= depth,
+                depth < usize::MAX,
+                self.next_spec() >= old(self).next_spec(),
+                forall|d: nat, x: u64| old(self).valid(d, x) ==> self.valid(d, x),
+                forall|d: nat, x: u64| x < old(self).next_spec()
+                    ==> self.valid(d, x) == old(self).valid(d, x),
+            decreases depth - self.len,
+        {
+            let _ = self.push_fresh();
+        }
+        self.push_fresh()
     }
-    assert forall|depth: nat, g: u64| depth < cut implies
-        old_g.valid(depth, g) == new_g.valid(depth, g) by {
-        if depth < old_g.levels@.len() {
-            assert(new_g.levels@[depth as int] == old_g.levels@[depth as int]);
+
+    /// Cut at `depth`: every stamp at or above `depth` dies, nothing below
+    /// changes, the counter is untouched. One write.
+    pub fn cut_from(&mut self, depth: usize)
+        ensures
+            final(self).levels_view() == old(self).levels_view(),
+            final(self).next_spec() == old(self).next_spec(),
+            final(self).live_len() == if depth < old(self).live_len() { depth as nat } else { old(self).live_len() },
+            forall|d: nat, x: u64| d >= depth ==> !final(self).valid(d, x),
+            forall|d: nat, x: u64| d < depth ==> final(self).valid(d, x) == old(self).valid(d, x),
+    {
+        if depth < self.len {
+            self.len = depth;
         }
     }
 }

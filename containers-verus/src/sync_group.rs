@@ -796,7 +796,7 @@ mod fork_history_tests {
         for &depth in &[128usize, 1024, 4096] {
             let mut shared = crate::history::History::new();
             let mut per_member: Vec<crate::gen_stamps::GenStamps> = (0..MEMBERS)
-                .map(|_| crate::gen_stamps::GenStamps::new(0))
+                .map(|_| crate::gen_stamps::GenStamps::new())
                 .collect();
             // Drive to `depth`, then a restore-to-half and a re-climb, so the
             // stamp arrays see a branch cut (the workload that grew the old
@@ -806,18 +806,18 @@ mod fork_history_tests {
                 toks.push(shared.mark());
                 for m in per_member.iter_mut() {
                     let d = toks.len() - 1;
-                    let _ = m.stamp_at(d);
+                    let _ = m.mint_at(d);
                 }
             }
             let half = toks[depth / 2];
             shared.restore_to(half);
             for m in per_member.iter_mut() {
-                m.bump_from(depth / 2 + 1);
+                m.cut_from(depth / 2);
             }
             for k in 0..depth / 2 {
                 toks.push(shared.mark());
                 for m in per_member.iter_mut() {
-                    let _ = m.stamp_at(depth / 2 + k);
+                    let _ = m.mint_at(depth / 2 + k);
                 }
             }
             let shared_bytes = shared.heap_bytes();

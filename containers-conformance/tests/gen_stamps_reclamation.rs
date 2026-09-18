@@ -14,21 +14,22 @@ use verus::HeapBytes;
 // Drive `restores` restore/re-mark cycles at a bounded spine depth and confirm the
 // live size tracks depth, not the restore count.
 fn live_bytes_after(depth: usize, restores: usize) -> usize {
-    let mut g = GenStamps::new(0);
+    let mut g = GenStamps::new();
     // Deepen the spine to `depth` once (first time each depth is reached).
     for d in 0..depth {
-        g.stamp_at(d);
+        g.mint_at(d);
     }
     let after_deepen = g.heap_bytes();
-    // `restores` cycles: restore to the middle of the spine (cut the abandoned
-    // future), then re-mark back down to `depth`. In the old model each restore
-    // appended an origin (O(R) growth); here bump_from/stamp_at touch existing
-    // levels only, so the array never grows past `depth`.
+    // `restores` cycles: restore to the middle of the spine (cut the consumed
+    // token and the abandoned future), then re-mark back down to `depth`. In
+    // the old model each restore appended an origin (O(R) growth); here the cut
+    // is one write and the re-mints reuse the storage, so the array never grows
+    // past `depth`.
     let mid = depth / 2;
     for _ in 0..restores {
-        g.bump_from(mid + 1);
+        g.cut_from(mid);
         for d in mid..depth {
-            g.stamp_at(d);
+            g.mint_at(d);
         }
     }
     let after_restores = g.heap_bytes();
