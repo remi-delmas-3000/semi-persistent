@@ -7,6 +7,7 @@
 //! in-process set_var lands before the lever's OnceLock caches.
 
 use semi_persistent_containers_verus as verus;
+use semi_persistent_containers_verus::group::ForkHistory;
 use verus::vec::ShrinkPolicy;
 
 type V = verus::Vec<u32, u32, verus::parallel_store::ParallelStore<u32, u32>, true>;
@@ -17,14 +18,16 @@ fn env_auto_activates_and_matches_oracle() {
     unsafe { std::env::set_var("SEMPER_COMPRESS", "auto") };
 
     const N: u32 = 500;
-    let mut v = V::new(); // default constructor: the lever's target
-    let mut oracle = V::new_with_mode(verus::diff_compress::CompressionMode::None);
+    let mut v = ForkHistory::new(V::new()); // default constructor: the lever's target
+    let mut oracle = ForkHistory::new(V::new_with_mode(
+        verus::diff_compress::CompressionMode::None,
+    ));
     for _ in 0..N {
         v.try_push(0).unwrap();
         oracle.try_push(0).unwrap();
     }
-    let t0 = v.try_mark(ShrinkPolicy::Never).unwrap();
-    let o0 = oracle.try_mark(ShrinkPolicy::Never).unwrap();
+    let t0 = v.mark(ShrinkPolicy::Never).unwrap();
+    let o0 = oracle.mark(ShrinkPolicy::Never).unwrap();
     // ACTIVATION under the ruled cadence: an activated column compresses
     // once more than HOT_BUFFER (8) hot frames exist, folding each frame's
     // contiguous distinct-valued writes into run cold frames; the plain
@@ -39,12 +42,12 @@ fn env_auto_activates_and_matches_oracle() {
         // then release over-committed capacity); the plain oracle keeps
         // ShrinkPolicy::Never so its log capacity reflects its length.
         let _ = v
-            .try_mark(ShrinkPolicy::IfOverallocated {
+            .mark(ShrinkPolicy::IfOverallocated {
                 factor: 2,
                 headroom: 64,
             })
             .unwrap();
-        let _ = oracle.try_mark(ShrinkPolicy::Never).unwrap();
+        let _ = oracle.mark(ShrinkPolicy::Never).unwrap();
     }
     let bytes_after = v.tracking_bytes();
     let plain_bytes = oracle.tracking_bytes();
@@ -57,8 +60,8 @@ fn env_auto_activates_and_matches_oracle() {
         v.set_index(i, i * 2);
         oracle.set_index(i, i * 2);
     }
-    v.try_restore(t0).unwrap();
-    oracle.try_restore(o0).unwrap();
+    assert!(v.restore(t0), "restore: own token");
+    assert!(oracle.restore(o0), "restore: own token");
     let a: Vec<u32> = (0..N).map(|i| v.get_index(i)).collect();
     let b: Vec<u32> = (0..N).map(|i| oracle.get_index(i)).collect();
     assert_eq!(a, b, "compressed restore diverged from the oracle");

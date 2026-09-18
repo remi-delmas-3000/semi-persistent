@@ -554,7 +554,7 @@ fn bench_class_ring_merge_restore(c: &mut Criterion) {
             |ring| {
                 let token = ring.mark(prod::ShrinkPolicy::Never);
                 prod_ring_merge_all(ring);
-                ring.try_restore(token).expect("restore: own token");
+                ring.restore(token);
                 black_box(ring.len())
             },
             BatchSize::LargeInput,

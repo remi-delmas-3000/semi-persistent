@@ -2416,7 +2416,6 @@ where
     /// The vector's own token manager (a group of one): identity and
     /// per-frame generation stamps. Minted on `mark`, consulted on
     /// validation, cut on every `restore_frame`.
-    pub(crate) genealogy: crate::history::Genealogy,
     #[allow(dead_code)] // ghost: read only by specs
     pub(crate) trail_frames: Ghost<Seq<nat>>,
     /// The saved_len of the topmost (active) frame, cached for the hot path.
@@ -2495,14 +2494,6 @@ where
         }
     }
 
-    /// Structural token validity (H2): the genealogy (generation stamps,
-    /// container identity) lives on the owning group's `History`, so per-vec
-    /// validity reduces to frame liveness. Kept under its historical name so
-    /// composite validity chains read unchanged.
-    pub open(crate) spec fn is_token_valid_spec(&self, token: VecToken) -> bool {
-        &&& self.genealogy.valid_spec(token)
-        &&& token.depth < self.trail_frames@.len()
-    }
 
     /// The mark-depth quantity the depth-headroom contracts are phrased over.
     /// Post-H2 the container tracks no genealogy, so this is the live frame
@@ -2511,17 +2502,6 @@ where
         self.trail_frames@.len()
     }
 
-    /// "Restorable now": the full runtime-checkable STRUCTURAL precondition of
-    /// `restore` — frame liveness, the TRACK gate, and the depth headroom.
-    /// Branch validity (was: container identity + generation stamp) lives on
-    /// the owning group's `History` (doc 10 / H2), which validates once for
-    /// every member instead of once per member.
-    pub open(crate) spec fn is_restorable_spec(&self, token: VecToken) -> bool {
-        &&& TRACK
-        &&& self.genealogy.valid_spec(token)
-        &&& token.depth < self.trail_frames@.len()
-        &&& self.trail_frames@.len() < u32::MAX
-    }
 
     /// The "layer above" frame `k`: snapshots[k+1] for inner frames, or the
     /// current view for the topmost frame.
@@ -3707,7 +3687,6 @@ where
                 legacy_batch_rollover,
             ),
             full_trail: Ghost(Seq::empty()),
-            genealogy: crate::history::Genealogy::new(),
             trail_frames: Ghost(Seq::empty()),
             active_saved_len: <I as IndexLike>::min(),
             phantom: core::marker::PhantomData,
@@ -4349,89 +4328,8 @@ where
         }
     }
 
-    /// The token manager is absent from every physical, ghost-trail and
-    /// snapshot predicate: a change confined to `genealogy` (a mint on `mark`,
-    /// a cut on `restore`) preserves `wf` and every observable the callers
-    /// state, without re-unfolding `wf` across the update.
-    #[verifier::spinoff_prover]
-    proof fn lemma_genealogy_framing(&self, physical: Self)
-        requires physical.wf(), *self == (Self { genealogy: self.genealogy, ..physical }),
-        ensures self.wf(),
-            self.view() == physical.view(),
-            self.depth_spec() == physical.depth_spec(),
-            self.snapshots_view() == physical.snapshots_view(),
-            self.trail_frames@ == physical.trail_frames@,
-    {
-        hide(Vec::wf);
-        hide(Vec::wf_for_snap);
-        self.lemma_genealogy_physical_framing(physical);
-        self.lemma_genealogy_snap_framing(physical);
-        reveal(Vec::wf);
-    }
 
-    /// Every physical tier, ownership and capture part of `wf` under a
-    /// genealogy-only change: the exact twin of
-    /// `lemma_full_trail_physical_framing` for the other non-physical field.
-    #[verifier::spinoff_prover]
-    proof fn lemma_genealogy_physical_framing(&self, physical: Self)
-        requires physical.wf(), *self == (Self { genealogy: self.genealogy, ..physical }),
-        ensures self.frame_partition_ok(), self.hot_repr_ok(), self.trail_repr_ok(),
-            self.cold_repr_ok(), self.open_ingress_ok(), self.proof_compat_ok(),
-    {
-        hide(Vec::wf);
-        hide(Vec::wf_for_snap);
-        hide(Vec::cold_reconstructs);
-        hide(frame_inv_range);
-        hide(stratum_unique);
-        physical.lemma_wf_named_parts();
-        reveal(Vec::frame_partition_ok);
-        reveal(Vec::hot_repr_ok);
-        reveal(Vec::trail_repr_ok);
-        reveal(Vec::cold_repr_ok);
-        reveal(Vec::cold_payload_ok);
-        reveal(Vec::open_ingress_ok);
-        reveal(Vec::proof_compat_ok);
-        assert forall|f: int| 0 <= f < self.depth_spec() implies
-            #[trigger] self.layer_above_at(f) == physical.layer_above_at(f) by {}
-        assert(self.frame_partition_ok());
-        assert(self.hot_repr_ok());
-        assert(self.trail_repr_ok());
-        assert(self.open_ingress_ok());
-        assert(self.proof_compat_ok());
-        assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
-            #[trigger] self.cold_reconstructs(f) by {
-            self.lemma_cold_reconstructs_transfer(physical, f);
-        }
-    }
 
-    /// Snapshot part of `wf` under a genealogy-only change: the ghost trail,
-    /// the frame boundaries and every canonical frame contract read fields
-    /// the genealogy is not among.
-    #[verifier::spinoff_prover]
-    proof fn lemma_genealogy_snap_framing(&self, physical: Self)
-        requires physical.wf(), *self == (Self { genealogy: self.genealogy, ..physical }),
-            self.frame_partition_ok(),
-        ensures self.wf_for_snap(),
-    {
-        hide(frame_inv_range);
-        hide(stratum_unique);
-        hide(Vec::repr_ok);
-        hide(Vec::cold_runs_disjoint);
-        hide(Vec::wf);
-        hide(Vec::cold_reconstructs);
-        hide(Vec::cold_repr_ok);
-        hide(Vec::hot_repr_ok);
-        hide(Vec::trail_repr_ok);
-        hide(Vec::open_ingress_ok);
-        hide(Vec::proof_compat_ok);
-        hide(Vec::frame_partition_ok);
-        physical.lemma_wf_named_parts();
-        assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
-            #[trigger] self.layer_above_at(k) == physical.layer_above_at(k)
-            && self.g_start(k) == physical.g_start(k)
-            && self.g_end(k) == physical.g_end(k) by {}
-        reveal(Vec::wf_for_snap);
-    }
 
     /// Appending a canonical event does not change any physical representation.
     #[verifier::spinoff_prover]
@@ -13816,173 +13714,10 @@ where
         Ok(report)
     }
 
-    /// Total mark with independent shrink and rollover controls.
-    pub fn try_mark_with(&mut self, options: MarkOptions)
-        -> (r: Result<VecToken, crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r matches Ok(token) ==> {
-                &&& final(self).view() == old(self).view()
-                &&& token.frame_idx_spec() == old(self).depth_spec()
-                &&& final(self).depth_spec() == old(self).depth_spec() + 1
-                &&& final(self).snapshots_view()
-                    == old(self).snapshots_view().push(old(self).view())
-            },
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.depth_exec() < (u32::MAX as usize)) {
-            return Err(crate::error::ContainerError::DepthLimit);
-        }
-        proof {
-            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
-            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
-            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
-        }
-        if !(self.store.raw_len() <= <I as crate::index_like::IndexLike>::max().as_usize()) {
-            return Err(crate::error::ContainerError::CapacityExhausted);
-        }
-        Ok(self.mark_with_options(options))
-    }
 
-    /// Total mark followed by one explicit adaptive closed-history pass.
-    ///
-    /// The old frame is sealed and its replacement opens with the existing
-    /// immutable `DiffStore` ingress protocol before planning starts. No
-    /// configured rollover is applied by this operation.
-    #[cold]
-    #[inline(never)]
-    pub fn try_mark_adaptive(
-        &mut self,
-        shrink: ShrinkPolicy,
-        input: crate::tier_policy::AdaptiveInput,
-    ) -> (r: Result<(VecToken, crate::tier_policy::AdaptiveReport), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r matches Ok((token, _)) ==> {
-                &&& final(self).view() == old(self).view()
-                &&& token.frame_idx_spec() == old(self).depth_spec()
-                &&& final(self).depth_spec() == old(self).depth_spec() + 1
-                &&& final(self).snapshots_view()
-                    == old(self).snapshots_view().push(old(self).view())
-            },
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.depth_exec() < (u32::MAX as usize)) {
-            return Err(crate::error::ContainerError::DepthLimit);
-        }
-        proof {
-            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
-            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
-            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
-        }
-        if !(self.store.raw_len() <= <I as crate::index_like::IndexLike>::max().as_usize()) {
-            return Err(crate::error::ContainerError::CapacityExhausted);
-        }
-        let token = self.mark_with_options(MarkOptions::new(
-            shrink,
-            crate::tier_policy::RolloverPolicy::Defer,
-        ));
-        let report = self.runtime_apply_adaptive(input);
-        Ok((token, report))
-    }
 
-    /// Total mark using the vector's configured rollover behavior. This is
-    /// source-compatible with the original API.
-    pub fn try_mark(&mut self, shrink: ShrinkPolicy)
-        -> (r: Result<VecToken, crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r matches Ok(token) ==> {
-                &&& final(self).view() == old(self).view()
-                &&& token.frame_idx_spec() == old(self).depth_spec()
-                &&& final(self).depth_spec() == old(self).depth_spec() + 1
-                &&& final(self).snapshots_view()
-                    == old(self).snapshots_view().push(old(self).view())
-            },
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.depth_exec() < (u32::MAX as usize)) {
-            return Err(crate::error::ContainerError::DepthLimit);
-        }
-        proof {
-            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
-            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
-            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
-        }
-        if !(self.store.raw_len() <= <I as crate::index_like::IndexLike>::max().as_usize()) {
-            return Err(crate::error::ContainerError::CapacityExhausted);
-        }
-        Ok(self.mark(shrink))
-    }
 
-    /// Total restore: `is_valid_token` already answers exactly "would
-    /// `restore` succeed right now" (`is_restorable_spec` is the FULL
-    /// runtime-checkable precondition), so the wrapper is the check.
-    pub fn try_restore(&mut self, token: VecToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        where T: core::default::Default
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> final(self).view()
-                == old(self).snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec() + 1
-                && final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if self.is_valid_token(&token) {
-            self.restore(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
-    /// container would refuse, with nothing changed.
-    pub fn try_restore_and_pop(&mut self, token: VecToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        where T: core::default::Default
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> final(self).view()
-                == old(self).snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec()
-                && final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if self.is_valid_token(&token) {
-            self.restore_and_pop(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
     /// The index column of the diff-log strata a `restore(token)` would pop:
     /// entries `[frames[token.frame_idx].diff_start, diff_log.len())`. Each
@@ -14361,50 +14096,6 @@ where
         }
     }
 
-    /// The indices whose live cells a restore to `token` would rewrite: every
-    /// cell captured by a frame at or above the token's frame, oldest tier
-    /// first. `None` when the token is not restorable now. Read-only.
-    ///
-    /// This is the map-repair enabler: an unverified associate structure
-    /// keyed by slot content (the e-graph's hashcons index) reads this BEFORE
-    /// a restore to remove exactly the entries whose keys are about to change,
-    /// and re-inserts the same ids from restored content AFTER.
-    #[verifier::spinoff_prover]
-    pub fn pending_restore_indices(&self, token: &VecToken) -> (r: Option<std::vec::Vec<I>>)
-        requires
-            self.wf(),
-        ensures
-            r is Some <==> self.is_restorable_spec(*token),
-            r matches Some(out) ==> forall|j: nat| #[trigger] Self::names_index(out@, j)
-                <==> exists|f: int| token.frame_idx_spec() <= f < self.depth_spec()
-                    && #[trigger] self.frame_captures(f, j),
-    {
-        hide(Vec::wf);
-        hide(range_saved_value);
-        if !self.is_valid_token(token) {
-            return None;
-        }
-        proof { self.lemma_partition_counts(); }
-        let cold = self.cold_stack.len();
-        let hot = self.hot_stack.len();
-        let trail = self.trail_stack.len();
-        let tok = token.depth as usize;
-        let mut out: std::vec::Vec<I> = std::vec::Vec::new();
-
-        let cold_lo = if tok < cold { tok } else { cold };
-        self.pending_cold_indices_checked(cold_lo, cold, &mut out);
-        let ghost after_cold = out@;
-        let hot_lo = if tok < cold { 0 } else if tok < cold + hot { tok - cold } else { hot };
-        self.pending_pair_indices_checked(false, hot_lo, hot, &mut out);
-        let ghost after_hot = out@;
-        let trail_lo = if tok < cold + hot { 0 } else { tok - cold - hot };
-        self.pending_pair_indices_checked(true, trail_lo, trail, &mut out);
-        proof {
-            self.lemma_pending_union(tok as nat, cold_lo as nat, hot_lo as nat, trail_lo as nat,
-                after_cold, after_hot, out@);
-        }
-        Some(out)
-    }
 
     /// The indices a restore to frame `depth` would touch (the typed-group
     /// form of `pending_restore_indices`: the depth is the group's token's
@@ -14464,73 +14155,41 @@ where
         let ghost v0 = self.view();
         let ghost d0 = self.depth_spec();
         let ghost s0 = self.snapshots_view();
-        let t1 = match self.try_mark_with(MarkOptions::default()) {
-            Ok(t) => t,
+        // The two marks are frames `base` and `base + 1`: a group would mint a
+        // token naming each, and here the frame index is the name.
+        let base = self.depth();
+        match self.try_push_frame_with(MarkOptions::default()) {
+            Ok(()) => {}
             Err(_) => { return; }
-        };
+        }
         assert(self.view() == v0 && self.depth_spec() == d0 + 1 && self.snapshots_view() == s0.push(v0));
         self.set_index(i, a);
         assert(self.view() == v0.update(i.as_nat() as int, a));
         let ghost v1 = self.view();
-        let t2 = match self.try_mark_with(MarkOptions::default()) {
-            Ok(t) => t,
-            Err(_) => { return; }
-        };
-        assert(self.snapshots_view() == s0.push(v0).push(v1) && self.depth_spec() == d0 + 2);
-        self.set_index(i, b);
-        // Restore to the second mark: the write of `b` is undone.
-        // Semantics B (design doc 08 §1): a restore keeps the token's frame open.
-        match self.try_restore(t2) {
-            Ok(()) => {
-                assert(self.view() == v1);
-                assert(self.depth_spec() == d0 + 2);
-                assert(self.snapshots_view() == s0.push(v0).push(v1));
-            }
+        match self.try_push_frame_with(MarkOptions::default()) {
+            Ok(()) => {}
             Err(_) => { return; }
         }
-        // Mutate again after the restore, then roll history over.
+        assert(self.snapshots_view() == s0.push(v0).push(v1) && self.depth_spec() == d0 + 2);
+        self.set_index(i, b);
+        // Reset to the second mark: the write of `b` is undone.
+        // Semantics B (design doc 08 §1): the reset keeps that frame open.
+        self.reset_frame(base + 1);
+        assert(self.view() == v1);
+        assert(self.depth_spec() == d0 + 2);
+        assert(self.snapshots_view() == s0.push(v0).push(v1));
+        // Mutate again after the reset, then roll history over.
         self.set_index(i, b);
         self.apply_tier_policy();
         assert(self.view() == v1.update(i.as_nat() as int, b));
         assert(self.snapshots_view() == s0.push(v0).push(v1));
-        // Restore to the older mark: back to the original view, its frame open.
-        match self.try_restore(t1) {
-            Ok(()) => {
-                assert(self.view() == v0);
-                assert(self.depth_spec() == d0 + 1);
-                assert(self.snapshots_view() == s0.push(v0));
-            }
-            Err(_) => {}
-        }
+        // Reset to the older mark: back to the original view, its frame open.
+        self.reset_frame(base);
+        assert(self.view() == v0);
+        assert(self.depth_spec() == d0 + 1);
+        assert(self.snapshots_view() == s0.push(v0));
     }
 
-    /// The public token-validity check: "restorable now", STRUCTURALLY.
-    /// Returns exactly `is_restorable_spec(token)` — true iff `restore(token)`
-    /// would succeed at this moment: TRACK on, frame still live (rejects
-    /// consumed tokens), depth headroom. Branch validity and forgery rejection
-    /// live on the owning group's `History` (doc 10 / H2); a raw token past a
-    /// branch cut is structurally restorable to the frame now at its index.
-    pub fn is_valid_token(&self, token: &VecToken) -> (b: bool)
-        requires
-            self.wf(),
-        ensures
-            b == self.is_restorable_spec(*token),
-    {
-        if !TRACK {
-            return false;
-        }
-        // Provenance: minted by this vector's own manager, and not cut since.
-        if !self.genealogy.is_valid(token) {
-            return false;
-        }
-        if token.depth as usize >= self.depth_exec() {
-            return false;
-        }
-        if self.depth_exec() >= u32::MAX as usize {
-            return false;
-        }
-        true
-    }
 
     #[verifier::rlimit(300)]
     #[inline(always)]
@@ -15912,57 +15571,7 @@ where
         });
     }
 
-    /// Open a mark with explicit physical rollover control. The token,
-    /// snapshots, depth, and live contents are independent of that choice.
-    pub(crate) fn mark_with_options(&mut self, options: MarkOptions) -> (token: VecToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).depth_spec() < u32::MAX,
-            old(self).view().len() < I::max_nat(),
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
-            final(self).is_token_valid_spec(token),
-            final(self).depth_spec() == old(self).depth_spec() + 1,
-            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
-    {
-        self.evict_cold_frame();
-        self.seal_open_frame_copy();
-        self.push_frame_with_options(options);
-        let idx = self.depth_exec() - 1;
-        let ghost physical = *self;
-        let token = self.genealogy.mint(idx);
-        proof { self.lemma_genealogy_framing(physical); }
-        token
-    }
 
-    /// Open a mark, returning a token that names this version. Existing
-    /// callers retain configured rollover behavior.
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).depth_spec() < u32::MAX,
-            old(self).view().len() < I::max_nat(),
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
-            final(self).is_token_valid_spec(token),
-            final(self).depth_spec() == old(self).depth_spec() + 1,
-            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
-    {
-        self.evict_cold_frame();
-        self.seal_open_frame_copy();
-        self.push_frame(shrink);
-        let idx = self.depth_exec() - 1;
-        let ghost physical = *self;
-        let token = self.genealogy.mint(idx);
-        proof { self.lemma_genealogy_framing(physical); }
-        token
-    }
 
     /// The eviction buffer: how many closed hot strata a column keeps
     /// uncompressed before `mark` seals the oldest into a cold frame.
@@ -16047,12 +15656,6 @@ where
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target_index as int),
     {
         self.runtime_restore_frame(target_index);
-        // The cut: every token at `target_index` or deeper is dead for good,
-        // whether the restore came through this vector's own token or through
-        // a group that drives it structurally.
-        let ghost physical = *self;
-        self.genealogy.cut_from(target_index);
-        proof { self.lemma_genealogy_framing(physical); }
     }
 
     /// Semantics B (design doc 08 §1): reconstruct to the version at frame
@@ -16078,14 +15681,11 @@ where
             final(self).view() == old(self).snapshots_view()[target as int],
             final(self).depth_spec() == target as nat + 1,
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target as int + 1),
-            forall|u: VecToken| u.depth_spec() > target as nat ==> !final(self).genealogy.valid_spec(u),
     {
         hide(Vec::wf);
         hide(Vec::wf_for_snap);
         self.reset_frame_physical(target);
         let ghost physical = *self;
-        self.genealogy.cut_from(target + 1);
-        proof { self.lemma_genealogy_framing(physical); }
     }
 
     /// The physical half of `reset_frame`: undo and pop the strata `target..`,
@@ -16174,129 +15774,9 @@ where
     }
 
 
-    /// Restore to the version named by `token` and keep its frame open
-    /// (design doc 08 §1, semantics B): the contents are the snapshot taken at
-    /// that mark, the writable frame is the token's own again — so `token`
-    /// stays valid and can be restored to again — and every token minted
-    /// after it is dead for good. The SMT-LIB `pop` is `restore(t)` followed
-    /// by `pop()`. The standalone entry point; a group drives its members
-    /// through `reset_frame` and records the cut once (`History::restore_to`).
-    #[verifier::spinoff_prover]
-    pub(crate) fn restore(&mut self, token: VecToken)
-        where T: core::default::Default
-        requires
-            old(self).wf(),
-            TRACK,
-            token.frame_idx_spec() < old(self).depth_spec(),
-            old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec() + 1,
-            final(self).snapshots_view()
-                == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
-    {
-        // Structural guards — the parts `restore_frame` deliberately omits.
-        crate::guard::check_precondition(TRACK, "restore() called on untracked vec");
-        // Provenance: minted by this vector's own manager, and not cut since.
-        if !self.genealogy.is_valid(&token) {
-            crate::guard::refuse("Vec::restore: token is foreign, stale or consumed");
-        }
-        crate::guard::check_precondition(
-            (token.depth as usize) < self.depth_exec(),
-            "token points beyond frame stack",
-        );
-        crate::guard::check_precondition(
-            self.depth_exec() < u32::MAX as usize,
-            "Vec::restore: frame-stack depth would overflow u32",
-        );
-        self.reset_frame(token.depth as usize);
-    }
 
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
-    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
-    /// token minted after it die. This is the SMT-LIB `pop` to the level below
-    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
-    /// is reopened once, so it costs what the legacy restore costs. `restore`
-    /// alone keeps the checkpoint's frame open instead.
-    #[verifier::spinoff_prover]
-    pub(crate) fn restore_and_pop(&mut self, token: VecToken)
-        where T: core::default::Default
-        requires
-            old(self).wf(),
-            TRACK,
-            token.frame_idx_spec() < old(self).depth_spec(),
-            old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec(),
-            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
-    {
-        // Structural guards — the parts `restore_frame` deliberately omits.
-        crate::guard::check_precondition(TRACK, "restore_and_pop() called on untracked vec");
-        // Provenance: minted by this vector's own manager, and not cut since.
-        if !self.genealogy.is_valid(&token) {
-            crate::guard::refuse("Vec::restore_and_pop: token is foreign, stale or consumed");
-        }
-        crate::guard::check_precondition(
-            (token.depth as usize) < self.depth_exec(),
-            "token points beyond frame stack",
-        );
-        crate::guard::check_precondition(
-            self.depth_exec() < u32::MAX as usize,
-            "Vec::restore_and_pop: frame-stack depth would overflow u32",
-        );
-        self.restore_frame(token.depth as usize);
-    }
 
-    /// Drop the open top frame, undoing its writes, and make the parent frame
-    /// writable again (the SMT-LIB `pop`; that frame's token dies). Refuses on
-    /// an untracked vector or an empty frame stack.
-    pub fn pop_scope(&mut self)
-        where T: core::default::Default
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            (TRACK && old(self).depth_spec() >= 1) ==> {
-                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
-                &&& final(self).depth_spec() == old(self).depth_spec() - 1
-                &&& final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
-            },
-    {
-        if !TRACK {
-            crate::guard::refuse("pop_scope() called on untracked vec");
-        }
-        self.pop_frame();
-    }
 
-    /// `pop_scope` as a `Result`: `Untracked` or `NoOpenFrame` instead of a refusal.
-    pub fn try_pop_scope(&mut self) -> (r: Result<(), crate::error::ContainerError>)
-        where T: core::default::Default
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> {
-                &&& old(self).depth_spec() >= 1
-                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
-                &&& final(self).depth_spec() == old(self).depth_spec() - 1
-                &&& final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
-            },
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.depth_exec() >= 1) {
-            return Err(crate::error::ContainerError::NoOpenFrame);
-        }
-        self.pop_frame();
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -16484,96 +15964,8 @@ where
     I: IndexLike,
     S: DiffStore<T, I, TRACK>,
 {
-    /// `mark`, then fold the just-closed frame's value column into one immutable cold
-    /// frame (value-major only; a no-op for the plain log). Requires `T: IndexLike`
-    /// for the dictionary dedup, so it is a separate entry from the generic `mark`;
-    /// value-major columns (union-find `parent`/`rank`) call this. Same contract as
-    /// `mark`: `compact_tail` preserves `diff_log@` and `diff_log.wf()`, so the Vec
-    /// invariant is unchanged (`lemma_diff_log_rep_change_preserves_wf`).
-    #[verifier::rlimit(400)]
-    #[allow(dead_code)]
-    pub(crate) fn mark_and_compact(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).depth_spec() < u32::MAX,
-            old(self).view().len() < I::max_nat(),
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
-            final(self).depth_spec() == old(self).depth_spec() + 1,
-            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
-    {
-        // A2a: compression off - a plain mark. A2b folds at eviction instead.
-        self.mark(shrink)
-    }
 
-    /// Sorted index-major `mark`: sort-fold the open top frame's stratum (the strongest
-    /// index-major compression) BEFORE opening the next frame. The fold permutes only
-    /// that stratum while preserving its write multiset, so `Vec::wf` carries via
-    /// `lemma_diff_log_rep_change_preserves_wf_multiset`. Requires the run-compressed
-    /// log's cold region to end exactly at the open frame (`cold_len == diff_start(top)`,
-    /// the alignment a compact-at-every-mark discipline maintains) and that frame's
-    /// indices to be unique (first-write-wins); both hold by construction for an
-    /// `IndexRunsSorted` column driven only through this entry and `push`.
-    #[verifier::rlimit(800)]
-    #[verifier::spinoff_prover]
-    #[allow(dead_code)]
-    pub(crate) fn mark_and_compact_sorted(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            // Sorting-fold entry: unique discipline only (a chronological
-            // column's inner strata carry duplicates, so the per-frame
-            // uniqueness the fold's wf transfer reads does not hold).
-            old(self).store.unique_capture_spec(),
-            old(self).depth_spec() < u32::MAX,
-            old(self).view().len() < I::max_nat(),
-            old(self).depth_spec() > 0,
-            false,
-            0nat == old(self).top_diff_start_spec(),
-            crate::diff_compress::unique_idx(old(self).diff_log@.subrange(
-                old(self).top_diff_start_spec(), old(self).diff_log@.len() as int)),
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
-            final(self).depth_spec() == old(self).depth_spec() + 1,
-            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
-    {
-        // A2a: compression off - a plain mark. A2b folds at eviction instead.
-        self.mark(shrink)
-    }
 
-    /// Per-frame-adaptive `mark`: fold the open top frame in `mode` (the selector's
-    /// per-frame choice) before opening the next. Any mode preserves the folded
-    /// stratum's write multiset, so `Vec::wf` carries via the multiset frame rule.
-    /// Same alignment + uniqueness preconditions as `mark_and_compact_sorted`.
-    #[verifier::rlimit(800)]
-    #[verifier::spinoff_prover]
-    #[allow(dead_code)]
-    pub(crate) fn mark_and_compact_adaptive(&mut self, mode: crate::diff_compress::CompressionMode, shrink: ShrinkPolicy) -> (token: VecToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).depth_spec() < u32::MAX,
-            old(self).view().len() < I::max_nat(),
-            old(self).depth_spec() > 0,
-            true,
-            0nat == old(self).top_diff_start_spec(),
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
-            final(self).depth_spec() == old(self).depth_spec() + 1,
-            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
-    {
-        // A2a: compression off - a plain mark. A2b folds at eviction with
-        // the per-frame selector; `mode` becomes the column hint there.
-        let _ = mode;
-        self.mark(shrink)
-    }
 
 }
 
@@ -16773,6 +16165,7 @@ mod value_major_compaction_tests {
     // strictly smaller on a value-repetitive workload.
     use super::{ShrinkPolicy, Vec};
     use crate::diff_compress::CompressionMode;
+    use crate::group::ForkHistory;
     use crate::parallel_store::ParallelStore;
 
     type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
@@ -16788,8 +16181,8 @@ mod value_major_compaction_tests {
         const N: u32 = 200;
         const FRAMES: u32 = 24;
 
-        let mut vc = V::new_with_mode(CompressionMode::ValueDict);
-        let mut vp = V::new_with_mode(CompressionMode::None);
+        let mut vc = ForkHistory::new(V::new_with_mode(CompressionMode::ValueDict));
+        let mut vp = ForkHistory::new(V::new_with_mode(CompressionMode::None));
         for _ in 0..N {
             vc.push(0);
             vp.push(0);
@@ -16801,8 +16194,14 @@ mod value_major_compaction_tests {
         let mut tc = std::vec::Vec::new();
         let mut tp = std::vec::Vec::new();
         for k in 0..FRAMES {
-            tc.push(vc.mark_and_compact(ShrinkPolicy::Never));
-            tp.push(vp.mark(ShrinkPolicy::Never));
+            tc.push(
+                vc.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
+            tp.push(
+                vp.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
             for i in 0..N {
                 vc.set(i, k + 1);
                 vp.set(i, k + 1);
@@ -16827,8 +16226,8 @@ mod value_major_compaction_tests {
 
         // Restore both to an early frame (deep backtrack through the cold region) and
         // to a recent one; contents must still agree (A1.2 through the cold decode).
-        vc.restore(tc[3]);
-        vp.restore(tp[3]);
+        assert!(vc.restore(tc[3]), "restore: own live token");
+        assert!(vp.restore(tp[3]), "restore: own live token");
         assert_eq!(
             read_back(&vc),
             read_back(&vp),
@@ -16846,6 +16245,7 @@ mod index_major_compaction_tests {
     // restore==oracle test plus the heap check the contract requires for A2.
     use super::{ShrinkPolicy, Vec};
     use crate::diff_compress::CompressionMode;
+    use crate::group::ForkHistory;
     use crate::parallel_store::ParallelStore;
 
     type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
@@ -16861,8 +16261,8 @@ mod index_major_compaction_tests {
         const N: u32 = 200;
         const FRAMES: u32 = 24;
 
-        let mut vc = V::new_with_mode(CompressionMode::IndexRuns);
-        let mut vp = V::new_with_mode(CompressionMode::None);
+        let mut vc = ForkHistory::new(V::new_with_mode(CompressionMode::IndexRuns));
+        let mut vp = ForkHistory::new(V::new_with_mode(CompressionMode::None));
         for _ in 0..N {
             vc.push(0);
             vp.push(0);
@@ -16874,8 +16274,14 @@ mod index_major_compaction_tests {
         let mut tc = std::vec::Vec::new();
         let mut tp = std::vec::Vec::new();
         for k in 0..FRAMES {
-            tc.push(vc.mark_and_compact(ShrinkPolicy::Never));
-            tp.push(vp.mark(ShrinkPolicy::Never));
+            tc.push(
+                vc.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
+            tp.push(
+                vp.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
             for i in 0..N {
                 vc.set(i, k + 1);
                 vp.set(i, k + 1);
@@ -16900,8 +16306,8 @@ mod index_major_compaction_tests {
 
         // Restore into the cold region (deep backtrack through run-decoded indices)
         // and contents must still agree (A2 through the run reconstruction).
-        vc.restore(tc[3]);
-        vp.restore(tp[3]);
+        assert!(vc.restore(tc[3]), "restore: own live token");
+        assert!(vp.restore(tp[3]), "restore: own live token");
         assert_eq!(
             read_back(&vc),
             read_back(&vp),
@@ -16921,6 +16327,7 @@ mod index_major_sorted_compaction_tests {
     // (reordering) cold flush and its multiset-based restore.
     use super::{ShrinkPolicy, Vec};
     use crate::diff_compress::CompressionMode;
+    use crate::group::ForkHistory;
     use crate::parallel_store::ParallelStore;
 
     type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
@@ -16936,8 +16343,8 @@ mod index_major_sorted_compaction_tests {
         const N: u32 = 200;
         const FRAMES: u32 = 24;
 
-        let mut vc = V::new_with_mode(CompressionMode::IndexRunsSorted);
-        let mut vp = V::new_with_mode(CompressionMode::None);
+        let mut vc = ForkHistory::new(V::new_with_mode(CompressionMode::IndexRunsSorted));
+        let mut vp = ForkHistory::new(V::new_with_mode(CompressionMode::None));
         for _ in 0..N {
             vc.push(0);
             vp.push(0);
@@ -16953,8 +16360,14 @@ mod index_major_sorted_compaction_tests {
         let mut tp = std::vec::Vec::new();
 
         // First frame: a plain mark (no open frame to sort-compact yet).
-        tc.push(vc.mark(ShrinkPolicy::Never));
-        tp.push(vp.mark(ShrinkPolicy::Never));
+        tc.push(
+            vc.mark(ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness"),
+        );
+        tp.push(
+            vp.mark(ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness"),
+        );
         for i in 0..N {
             let j = (i * 7) % N;
             vc.set(j, 1);
@@ -16964,8 +16377,14 @@ mod index_major_sorted_compaction_tests {
 
         for k in 1..FRAMES {
             // Sort-fold the previous frame, open the next.
-            tc.push(vc.mark_and_compact_sorted(ShrinkPolicy::Never));
-            tp.push(vp.mark(ShrinkPolicy::Never));
+            tc.push(
+                vc.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
+            tp.push(
+                vp.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
             for i in 0..N {
                 let j = (i * 7) % N;
                 vc.set(j, k + 1);
@@ -16978,8 +16397,14 @@ mod index_major_sorted_compaction_tests {
             );
         }
         // Fold the last open frame too, so all but the top are sorted-compressed.
-        tc.push(vc.mark_and_compact_sorted(ShrinkPolicy::Never));
-        tp.push(vp.mark(ShrinkPolicy::Never));
+        tc.push(
+            vc.mark(ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness"),
+        );
+        tp.push(
+            vp.mark(ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness"),
+        );
 
         // A3 heap check: each scattered frame's index column is sorted to one run, so
         // the compressed diff log is strictly smaller than plain.
@@ -16992,8 +16417,8 @@ mod index_major_sorted_compaction_tests {
 
         // Deep restore through the sorted (reordered) cold region: contents still
         // agree, because restore depends on the per-frame write multiset, not order.
-        vc.restore(tc[3]);
-        vp.restore(tp[3]);
+        assert!(vc.restore(tc[3]), "restore: own live token");
+        assert!(vp.restore(tp[3]), "restore: own live token");
         assert_eq!(
             read_back(&vc),
             read_back(&vp),
@@ -17012,6 +16437,7 @@ mod layered_selector_tests {
     // differential-equal), and its diff-log footprint is strictly below the
     // index-layer-only twin's: the value layer pays beyond the index layer.
     use super::{ShrinkPolicy, Vec};
+    use crate::group::ForkHistory;
     use crate::parallel_store::ParallelStore;
     use crate::value_compressor::ValueDictC;
 
@@ -17034,8 +16460,12 @@ mod layered_selector_tests {
         const N: u32 = 256;
         const FRAMES: u32 = 24;
 
-        let mut vd = VDict::new_with_mode(crate::diff_compress::CompressionMode::Auto);
-        let mut vi = VPlain::new_with_mode(crate::diff_compress::CompressionMode::Auto);
+        let mut vd = ForkHistory::new(VDict::new_with_mode(
+            crate::diff_compress::CompressionMode::Auto,
+        ));
+        let mut vi = ForkHistory::new(VPlain::new_with_mode(
+            crate::diff_compress::CompressionMode::Auto,
+        ));
         for _ in 0..N {
             vd.push(0);
             vi.push(0);
@@ -17048,8 +16478,14 @@ mod layered_selector_tests {
         let mut td = std::vec::Vec::new();
         let mut ti = std::vec::Vec::new();
         for k in 0..FRAMES {
-            td.push(vd.mark(ShrinkPolicy::Never));
-            ti.push(vi.mark(ShrinkPolicy::Never));
+            td.push(
+                vd.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
+            ti.push(
+                vi.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
             for i in 0..N {
                 let cell = (i * 37 + 11) % N;
                 let val = (i + k) % 4;
@@ -17076,8 +16512,8 @@ mod layered_selector_tests {
         );
 
         // Deep restore through the layered cold region: contents agree.
-        vd.restore(td[3]);
-        vi.restore(ti[3]);
+        assert!(vd.restore(td[3]), "restore: own live token");
+        assert!(vi.restore(ti[3]), "restore: own live token");
         assert_eq!(
             read_dict(&vd),
             read_plain(&vi),
@@ -17096,6 +16532,7 @@ mod adaptive_compaction_tests {
     // per-frame ColdFrame modes; restore is uniform over the mix (per-frame multiset).
     use super::{ShrinkPolicy, Vec};
     use crate::diff_compress::{CompressionMode, choose_mode};
+    use crate::group::ForkHistory;
     use crate::parallel_store::ParallelStore;
 
     type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
@@ -17137,8 +16574,8 @@ mod adaptive_compaction_tests {
         const N: u32 = 200;
         const FRAMES: u32 = 24;
 
-        let mut vc = V::new_with_mode(CompressionMode::Auto);
-        let mut vp = V::new_with_mode(CompressionMode::None);
+        let mut vc = ForkHistory::new(V::new_with_mode(CompressionMode::Auto));
+        let mut vp = ForkHistory::new(V::new_with_mode(CompressionMode::None));
         for _ in 0..N {
             vc.push(0);
             vp.push(0);
@@ -17148,23 +16585,41 @@ mod adaptive_compaction_tests {
         let mut tp = std::vec::Vec::new();
 
         // First frame: plain mark (no open frame to fold yet), then its writes.
-        tc.push(vc.mark(ShrinkPolicy::Never));
-        tp.push(vp.mark(ShrinkPolicy::Never));
+        tc.push(
+            vc.mark(ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness"),
+        );
+        tp.push(
+            vp.mark(ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness"),
+        );
         write_frame(&mut vc, &mut vp, 0, N);
         assert_eq!(read_back(&vc), read_back(&vp), "frame 0 diverged");
 
         for k in 1..FRAMES {
             // The selector chooses this frame's mode from its real captured diffs.
             let mode = frame_mode(&vc);
-            tc.push(vc.mark_and_compact_adaptive(mode, ShrinkPolicy::Never));
-            tp.push(vp.mark(ShrinkPolicy::Never));
+            tc.push(
+                vc.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
+            tp.push(
+                vp.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
             write_frame(&mut vc, &mut vp, k, N);
             assert_eq!(read_back(&vc), read_back(&vp), "frame {k} diverged");
         }
         // Fold the last open frame too.
         let mode = frame_mode(&vc);
-        tc.push(vc.mark_and_compact_adaptive(mode, ShrinkPolicy::Never));
-        tp.push(vp.mark(ShrinkPolicy::Never));
+        tc.push(
+            vc.mark(ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness"),
+        );
+        tp.push(
+            vp.mark(ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness"),
+        );
 
         // A4 heap check: per-frame-best encoding beats plain across the mix.
         assert!(
@@ -17175,8 +16630,8 @@ mod adaptive_compaction_tests {
         );
 
         // Deep restore through the mixed-mode cold region.
-        vc.restore(tc[3]);
-        vp.restore(tp[3]);
+        assert!(vc.restore(tc[3]), "restore: own live token");
+        assert!(vp.restore(tp[3]), "restore: own live token");
         assert_eq!(
             read_back(&vc),
             read_back(&vp),
@@ -17196,32 +16651,36 @@ mod restore_memcpy_timing {
     // The assertion is deliberately weak (memcpy not slower by more than 2x) so a
     // debug run stays green; the RECORDED comparison is the release print.
     use super::{ShrinkPolicy, Vec};
-    use crate::diff_compress::{CompressionMode, choose_mode};
+    use crate::diff_compress::CompressionMode;
+    use crate::group::ForkHistory;
     use crate::parallel_store::ParallelStore;
 
     type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
 
-    fn drive(mode: CompressionMode, n: u32, frames: u32) -> (V, std::vec::Vec<super::VecToken>) {
-        let mut v = V::new_with_mode(mode);
+    /// One column in a group of one, driven to `frames` marks with a full sweep
+    /// of writes per frame; returns the group and the checkpoints.
+    fn drive(
+        mode: CompressionMode,
+        n: u32,
+        frames: u32,
+    ) -> (ForkHistory<V>, std::vec::Vec<crate::history::GroupToken>) {
+        let mut v = ForkHistory::new(V::new_with_mode(mode));
         for _ in 0..n {
-            v.push(0);
+            v.member.push(0);
         }
         let mut ts = std::vec::Vec::new();
-        ts.push(v.mark(ShrinkPolicy::Never));
-        for k in 0..frames {
+        ts.push(
+            v.mark(ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness"),
+        );
+        for k in 1..=frames {
             for i in 0..n {
-                v.set(i, i.wrapping_add(k));
+                v.member.set(i, k);
             }
-            if matches!(mode, CompressionMode::Auto) {
-                let top = v.hot_stack.len() - 1;
-                let ds = v.hot_stack[top].start;
-                let nn = v.diff_log.len();
-                let diffs = super::log_subrange_vec(&v.diff_log, ds, nn);
-                let m = choose_mode(&diffs);
-                ts.push(v.mark_and_compact_adaptive(m, ShrinkPolicy::Never));
-            } else {
-                ts.push(v.mark(ShrinkPolicy::Never));
-            }
+            ts.push(
+                v.mark(ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness"),
+            );
         }
         (v, ts)
     }
@@ -17235,11 +16694,11 @@ mod restore_memcpy_timing {
         let (mut va, ta) = drive(CompressionMode::Auto, N, FRAMES);
 
         let t0 = std::time::Instant::now();
-        vp.restore(tp[0]);
+        assert!(vp.restore(tp[0]), "restore: own live token");
         let scattered = t0.elapsed();
 
         let t1 = std::time::Instant::now();
-        va.restore(ta[0]);
+        assert!(va.restore(ta[0]), "restore: own live token");
         let memcpy = t1.elapsed();
 
         println!(
@@ -17263,7 +16722,12 @@ mod restore_memcpy_timing {
 
 #[cfg(test)]
 mod forged_token_tests {
-    use super::{ShrinkPolicy, Vec, VecToken};
+    // The token authority is the group's `History`, so forgery is tested there:
+    // a column has no token of its own to forge. Each case drives a group of one
+    // and forges a `GroupToken` (its fields are crate-visible here).
+    use super::{ShrinkPolicy, Vec};
+    use crate::group::ForkHistory;
+    use crate::history::GroupToken;
     use crate::parallel_store::ParallelStore;
 
     type V = Vec<u32, u32, ParallelStore<u32, u32>, true>;
@@ -17274,112 +16738,82 @@ mod forged_token_tests {
             .collect()
     }
 
-    /// A token with a forged out-of-range frame index: rejected by the
-    /// frame-liveness guard before any state change.
+    /// A token with a forged out-of-range depth: refused, and nothing moves.
     #[test]
-    fn forged_frame_index_rejected_before_mutation() {
-        let mut v = V::new();
+    fn forged_depth_is_refused_before_mutation() {
+        let mut g = ForkHistory::new(V::new());
         for i in 0..8 {
-            v.push(i);
+            g.member.push(i);
         }
-        let genuine = v.mark(ShrinkPolicy::Never);
-        v.push(100);
+        let genuine = g.mark(ShrinkPolicy::Never).expect("mark");
+        g.member.push(100);
 
-        let forged = VecToken {
+        let forged = GroupToken {
             depth: 999,
             ..genuine
         };
-        assert!(
-            !v.is_valid_token(&forged),
-            "forged frame index must be invalid"
+        assert!(!g.is_valid(forged), "a forged depth must be invalid");
+
+        let before = read_back(&g.member);
+        assert!(!g.restore(forged), "a forged depth must be refused");
+        assert_eq!(
+            before,
+            read_back(&g.member),
+            "a refused restore must not mutate"
         );
 
-        let before = read_back(&v);
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            v.restore(forged);
-        }));
-        assert!(r.is_err(), "forged frame index must panic");
-        assert_eq!(before, read_back(&v), "rejected restore must not mutate");
-
         // The genuine token still restores.
-        v.restore(genuine);
-        assert_eq!(v.len(), 8);
+        assert!(g.restore(genuine), "restore: own live token");
+        assert_eq!(g.member.len(), 8);
     }
 
-    /// A group token with a forged generation (never minted): rejected by the
-    /// owning `History`'s O(1) generation check. Post-H2 the genealogy lives
-    /// on `History`, so the forgery test pairs the vec with one (a group of
-    /// one): validity is asked of the history, and only a valid group token's
-    /// depth is handed to the structural `restore`.
+    /// A token with a forged generation (never minted): refused by the
+    /// history's O(1) generation check.
     #[test]
-    fn forged_generation_rejected_by_history() {
-        let mut v = V::new();
-        let mut h = crate::history::History::new();
-        v.push(1);
-        let genuine_group = h.mark();
-        let genuine_vec = v.mark(ShrinkPolicy::Never);
-        v.push(2);
-        let forged = crate::history::GroupToken {
-            generation: genuine_group.generation + 7,
-            ..genuine_group
+    fn forged_generation_is_refused() {
+        let mut g = ForkHistory::new(V::new());
+        g.member.push(1);
+        let genuine = g.mark(ShrinkPolicy::Never).expect("mark");
+        g.member.push(2);
+
+        let forged = GroupToken {
+            generation: genuine.generation + 7,
+            ..genuine
         };
-        assert!(!h.is_valid(forged), "forged generation must be invalid");
-        // The valid pair restores; depths stay in lockstep.
-        assert!(h.is_valid(genuine_group));
-        v.restore(genuine_vec);
-        h.restore_to(genuine_group);
-        assert_eq!(v.len(), 1);
+        assert!(!g.is_valid(forged), "a forged generation must be invalid");
+        assert!(!g.restore(forged));
+
+        assert!(g.is_valid(genuine));
+        assert!(g.restore(genuine), "restore: own live token");
+        assert_eq!(g.member.len(), 1);
         assert_eq!(
-            h.depth(),
+            g.depth(),
             1,
             "semantics B: the checkpoint's frame stays open"
         );
     }
 
-    /// A stale group token from an abandoned future: `History::restore_to`
-    /// bumps the deeper generations, so the abandoned branch's token no
-    /// longer validates even though a frame exists at its depth again.
+    /// A stale token from an abandoned future stays refused even after a fresh
+    /// mark reoccupies its depth: the cut bumped the generation there.
     #[test]
-    fn abandoned_future_rejected_by_history() {
-        let mut v = V::new();
-        let mut h = crate::history::History::new();
-        v.push(1);
-        let outer_group = h.mark();
-        let outer_vec = v.mark(ShrinkPolicy::Never);
-        v.push(2);
-        let stale_group = h.mark();
-        let _stale_vec = v.mark(ShrinkPolicy::Never);
-        // Restore to the outer frame: the branch cut invalidates stale_group.
-        v.restore(outer_vec);
-        h.restore_to(outer_group);
+    fn a_token_from_an_abandoned_future_is_refused() {
+        let mut g = ForkHistory::new(V::new());
+        g.member.push(1);
+        let outer = g.mark(ShrinkPolicy::Never).expect("mark");
+        g.member.push(2);
+        let stale = g.mark(ShrinkPolicy::Never).expect("mark");
+        // Back to the outer checkpoint: the branch cut kills `stale`.
+        assert!(g.restore(outer), "restore: own live token");
+        assert!(!g.is_valid(stale));
         // Re-mark at the same depths on the new branch.
-        let _new_group = h.mark();
-        let _new_vec = v.mark(ShrinkPolicy::Never);
-        v.push(3);
-        let _deep_group = h.mark();
-        let _deep_vec = v.mark(ShrinkPolicy::Never);
+        let _new = g.mark(ShrinkPolicy::Never).expect("mark");
+        g.member.push(3);
+        let _deep = g.mark(ShrinkPolicy::Never).expect("mark");
         assert!(
-            !h.is_valid(stale_group),
+            !g.is_valid(stale),
             "a token from the abandoned future must not validate"
         );
-    }
-
-    /// A token pointing at a frame depth beyond the live stack: rejected (its
-    /// depth has no live stamp).
-    #[test]
-    fn forged_frame_idx_rejected() {
-        let mut v = V::new();
-        v.push(1);
-        let genuine = v.mark(ShrinkPolicy::Never);
-        v.push(2);
-        let forged = VecToken {
-            depth: genuine.depth + 100,
-            ..genuine
-        };
-        assert!(
-            !v.is_valid_token(&forged),
-            "forged frame idx must be invalid"
-        );
+        assert!(!g.restore(stale));
     }
 }
 
@@ -17439,16 +16873,18 @@ where
 mod restore_prefix_tests {
     #[test]
     fn zero_restore_clears_inert_compatibility_shadow() {
-        let mut v = crate::VecT::<u32, u32, true>::new_with_policy(crate::TierPolicy::smt());
-        v.try_push(7).unwrap();
-        let token = v.try_mark(crate::ShrinkPolicy::Never).unwrap();
+        let mut g = crate::group::ForkHistory::new(crate::VecT::<u32, u32, true>::new_with_policy(
+            crate::TierPolicy::smt(),
+        ));
+        g.member.try_push(7).unwrap();
+        let token = g.mark(crate::ShrinkPolicy::Never).expect("mark");
         // At nonzero depth the inert compatibility vector is unconstrained by
         // wf; restoration must use physical history and retire this shadow.
-        v.diff_log.push((99, 0));
-        v.set(0u32, 8);
-        v.try_restore(token).unwrap();
-        assert_eq!(v.get(0u32), 7);
-        assert!(v.diff_log.is_empty());
+        g.member.diff_log.push((99, 0));
+        g.member.set(0u32, 8);
+        assert!(g.restore(token), "restore: own live token");
+        assert_eq!(g.member.get(0u32), 7);
+        assert!(g.member.diff_log.is_empty());
     }
 }
 

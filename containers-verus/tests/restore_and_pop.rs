@@ -3,7 +3,6 @@
 //! costs what the legacy restore costs. These tests pin the equivalence on a
 //! column and a composite, the depth and token fate, and the refusal path.
 
-use semi_persistent_containers_verus::error::ContainerError;
 use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::map::SpMap;
 use semi_persistent_containers_verus::{ShrinkPolicy, VecP};

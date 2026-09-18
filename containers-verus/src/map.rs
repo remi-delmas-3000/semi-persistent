@@ -74,19 +74,6 @@ verus! {
 #[cfg(verus_keep_ghost)]
 use vstd::std_specs::hash::*;
 
-/// Opaque token for `SpMap::mark` / `SpMap::restore`.
-#[derive(Copy, Clone)]
-pub struct MapToken {
-    pub(crate) inner: VecToken,
-}
-
-impl MapToken {
-    /// Reconstruction coordinate (spec counterpart; the field is `pub(crate)`).
-    pub open(crate) spec fn frame_idx_spec(self) -> nat {
-        self.inner.depth as nat
-    }
-}
-
 /// `true` iff position `i` is the LAST occurrence of key `log[i].0` in `log`
 /// (no later entry repeats that key). The exec index points exactly here.
 pub open(crate) spec fn is_last_occurrence<K, V>(log: Seq<(K, V)>, i: int) -> bool {
@@ -177,15 +164,7 @@ where
         &&& self.prev_agrees()
     }
 
-    /// Token validity, delegated to the log.
-    pub open(crate) spec fn is_token_valid_spec(&self, token: MapToken) -> bool {
-        self.log.is_token_valid_spec(token.inner)
-    }
 
-    /// "Restorable now", delegated to the log (the map's single component).
-    pub open(crate) spec fn is_restorable_spec(&self, token: MapToken) -> bool {
-        self.log.is_restorable_spec(token.inner)
-    }
 
     /// Total constructor. The map is `wf` for every key type that conforms to
     /// the HashMap key model (`obeys_key_model`: vstd proves it for primitive
@@ -439,25 +418,6 @@ where
         id
     }
 
-    /// Mark, delegating to the log.
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: MapToken)
-        requires old(self).wf(), TRACK, old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).log_view() == old(self).log_view(),
-            final(self).index_view() == old(self).index_view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
-    {
-        broadcast use vstd::std_specs::hash::group_hash_axioms;
-        let inner = self.log.mark(shrink);
-        proof {
-            // log.mark preserves view() and the index is untouched, so the
-            // log/index agreement carries unchanged.
-            assert(self.log_view() == old(self).log_view());
-            assert(self.index@ == old(self).index@);
-        }
-        MapToken { inner }
-    }
 
     /// Push a frame without minting (what a typed group drives): the log
     /// seals its stratum, the index and the previous-occurrence column are
@@ -512,185 +472,12 @@ where
         }
     }
 
-    /// Total mark.
-    pub fn try_mark(&mut self, shrink: ShrinkPolicy)
-        -> (r: Result<MapToken, crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r matches Ok(token) ==> {
-                &&& final(self).log_view() == old(self).log_view()
-                &&& final(self).index_view() == old(self).index_view()
-                &&& token.frame_idx_spec() == old(self).depth_spec()
-            },
-            r is Err ==> final(self).log_view() == old(self).log_view()
-                && final(self).index_view() == old(self).index_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.log.frames.len() < (u32::MAX as usize)) {
-            return Err(crate::error::ContainerError::DepthLimit);
-        }
-        Ok(self.mark(shrink))
-    }
 
-    /// Total restore.
-    pub fn try_restore(&mut self, token: MapToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> final(self).log_view()
-                == old(self).log_snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec() + 1
-                && final(self).log_snapshots_view()
-                    == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
-            r is Err ==> *final(self) == *old(self),
-            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
-    {
-        if self.is_valid_token(&token) {
-            self.restore(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
-    /// container would refuse, with nothing changed.
-    pub fn try_restore_and_pop(&mut self, token: MapToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> final(self).log_view()
-                == old(self).log_snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec()
-                && final(self).log_snapshots_view()
-                    == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int),
-            r is Err ==> *final(self) == *old(self),
-            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
-    {
-        if self.is_valid_token(&token) {
-            self.restore_and_pop(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    /// Drop the open top frame, undoing its inserts (the SMT-LIB `pop`; that
-    /// frame's token dies). Refuses on an untracked map or an empty stack.
-    pub fn pop_scope(&mut self)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            (TRACK && old(self).depth_spec() >= 1) ==> {
-                &&& final(self).log_view() == old(self).log_snapshots_view()[old(self).depth_spec() - 1]
-                &&& final(self).depth_spec() == old(self).depth_spec() - 1
-                &&& final(self).log_snapshots_view()
-                    == old(self).log_snapshots_view().subrange(0, old(self).depth_spec() - 1)
-            },
-    {
-        if !TRACK {
-            crate::guard::refuse("pop_scope() called on untracked map");
-        }
-        if !(self.log.frames.len() >= 1) {
-            crate::guard::refuse("SpMap::pop_scope: no open frame");
-        }
-        self.pop_frame();
-    }
 
-    /// `pop_scope` as a `Result`: `Untracked` or `NoOpenFrame` instead of a refusal.
-    pub fn try_pop_scope(&mut self) -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> {
-                &&& old(self).depth_spec() >= 1
-                &&& final(self).log_view() == old(self).log_snapshots_view()[old(self).depth_spec() - 1]
-                &&& final(self).depth_spec() == old(self).depth_spec() - 1
-                &&& final(self).log_snapshots_view()
-                    == old(self).log_snapshots_view().subrange(0, old(self).depth_spec() - 1)
-            },
-            r is Err ==> *final(self) == *old(self),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.log.frames.len() >= 1) {
-            return Err(crate::error::ContainerError::NoOpenFrame);
-        }
-        self.pop_frame();
-        Ok(())
-    }
 
-    /// Whether the token is restorable now, delegated to the log. The log is
-    /// the map's only restorable component, so its verdict is the map's.
-    pub fn is_valid_token(&self, token: &MapToken) -> (b: bool)
-        requires self.wf(),
-        ensures b == self.is_restorable_spec(*token),
-    {
-        self.log.is_valid_token(&token.inner)
-    }
 
-    /// Restore: unwind the index over the entries the log restore is about to
-    /// discard (newest first, one hash operation per discarded entry, a key
-    /// clone only where the key survives at an earlier position), then
-    /// truncate the log and the `prev` column. When the discarded suffix
-    /// outnumbers the survivors, truncating first and rebuilding from the
-    /// survivors (`rebuild_index`) is the cheaper route and is taken instead.
-    /// Either way the log restore reproduces the marked contents (headline
-    /// theorem composes) and the index provably agrees with them.
-    pub(crate) fn restore(&mut self, token: MapToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).is_token_valid_spec(token),
-            token.frame_idx_spec() < old(self).depth_spec(),
-            old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).log_view() == old(self).log_snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec() + 1,
-            final(self).log_snapshots_view()
-                == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
-    {
-        let ghost old_log = self.log_view();
-        let ghost old_prev = self.prev@;
-        // The target frame's saved length: what the log restore truncates to.
-        let target = token.inner.depth as usize;
-        let saved_len = self.log.frames[target].as_usize();
-        let n = self.log.len().as_usize();
-        proof {
-            // The log's `wf`: a saved length is within the data and names the
-            // snapshot prefix.
-            assert(self.log.frames@[target as int].as_nat() <= n);
-            assert(old(self).log_snapshots_view()[target as int]
-                == old_log.subrange(0, saved_len as int));
-        }
-        if n - saved_len <= saved_len {
-            self.unwind_index(saved_len);
-            self.log.restore(token.inner);
-            self.prev.truncate(saved_len);
-            proof {
-                assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
-                lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
-            }
-        } else {
-            self.log.restore(token.inner);
-            self.prev.truncate(saved_len);
-            proof {
-                assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
-            }
-            self.rebuild_index();
-        }
-    }
 
     /// Semantics B, token-free (what a typed group drives): the log resets
     /// to its snapshot at `target` and keeps that frame open; the index is
@@ -742,60 +529,6 @@ where
         }
     }
 
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
-    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
-    /// token minted after it die. This is the SMT-LIB `pop` to the level below
-    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
-    /// is reopened once, so it costs what the legacy restore costs. `restore`
-    /// alone keeps the checkpoint's frame open instead.
-    pub(crate) fn restore_and_pop(&mut self, token: MapToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).is_token_valid_spec(token),
-            token.frame_idx_spec() < old(self).depth_spec(),
-            old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).log_view() == old(self).log_snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec(),
-            final(self).log_snapshots_view()
-                == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int),
-    {
-        let ghost old_log = self.log_view();
-        let ghost old_prev = self.prev@;
-        // The target frame's saved length: what the log restore truncates to.
-        let target = token.inner.depth as usize;
-        let saved_len = self.log.frames[target].as_usize();
-        let n = self.log.len().as_usize();
-        proof {
-            // The log's `wf`: a saved length is within the data and names the
-            // snapshot prefix.
-            assert(self.log.frames@[target as int].as_nat() <= n);
-            assert(old(self).log_snapshots_view()[target as int]
-                == old_log.subrange(0, saved_len as int));
-        }
-        if n - saved_len <= saved_len {
-            self.unwind_index(saved_len);
-            self.log.restore_and_pop(token.inner);
-            self.prev.truncate(saved_len);
-            proof {
-                assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
-                lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
-            }
-        } else {
-            self.log.restore_and_pop(token.inner);
-            self.prev.truncate(saved_len);
-            proof {
-                assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
-            }
-            self.rebuild_index();
-        }
-    }
 
     /// The structural pop core: undo and drop the open top frame (index
     /// maintenance exactly as a restore to the frame below).
@@ -1388,16 +1121,6 @@ fn clone_key_exact<K: Clone>(key: &K) -> (r: K)
 }
 
 } // verus!
-
-// prod-parity: production derives `Debug` on `MapToken`; manual here (composes a
-// `VecToken`, which is now `Debug`).
-impl core::fmt::Debug for MapToken {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("MapToken")
-            .field("inner", &self.inner)
-            .finish()
-    }
-}
 
 // prod-parity: production derives `Debug` on `Map`; the consumer's registries and
 // literal stores hold an `SpMap` in a `#[derive(Debug)]` struct

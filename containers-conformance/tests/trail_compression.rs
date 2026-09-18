@@ -12,6 +12,7 @@
 //! inert under overlay's first-entry-wins order).
 
 use semi_persistent_containers_verus as verus;
+use semi_persistent_containers_verus::group::ForkHistory;
 use verus::VecT;
 use verus::vec::ShrinkPolicy;
 
@@ -21,7 +22,7 @@ const REPS: usize = 4; // duplicate factor per index per frame
 
 #[test]
 fn trail_column_compresses_at_eviction_and_restores() {
-    let mut v: VecT<u64, u32> = VecT::new();
+    let mut v: ForkHistory<VecT<u64, u32>> = ForkHistory::new(VecT::new());
     for i in 0..LEN {
         v.try_push(i as u64).expect("push");
     }
@@ -34,7 +35,7 @@ fn trail_column_compresses_at_eviction_and_restores() {
     let mut seed: u64 = 0x9E3779B97F4A7C15;
     for _frame in 0..FRAMES {
         models.push(model.clone());
-        tokens.push(v.try_mark(ShrinkPolicy::Never).expect("mark"));
+        tokens.push(v.mark(ShrinkPolicy::Never).expect("mark"));
         // Duplicated writes: 32 writes over 4 cells per frame, values
         // changing every write. The trail appends all of them; only the
         // FIRST capture per cell per frame matters for restore, and the
@@ -70,7 +71,7 @@ fn trail_column_compresses_at_eviction_and_restores() {
     // with the model snapshot taken at its mark.
     while let Some(tok) = tokens.pop() {
         let want = models.pop().expect("model");
-        v.try_restore(tok).expect("restore");
+        assert!(v.restore(tok), "restore");
         for (i, w) in want.iter().enumerate() {
             assert_eq!(v.get_index(i as u32), *w, "cell {i} diverged after restore");
         }
@@ -83,14 +84,14 @@ fn trail_column_compresses_at_eviction_and_restores() {
 /// duplicates and break the equality.
 #[test]
 fn trail_appends_every_write_before_compression() {
-    let mut v: VecT<u64, u32> = VecT::new();
+    let mut v: ForkHistory<VecT<u64, u32>> = ForkHistory::new(VecT::new());
     for i in 0..16u64 {
         v.try_push(i).expect("push");
     }
     let mut writes = 0usize;
     // Stay at or below the buffer so compression never fires.
     for _frame in 0..4 {
-        v.try_mark(ShrinkPolicy::Never).expect("mark");
+        v.mark(ShrinkPolicy::Never).expect("mark");
         for rep in 0..5u64 {
             for j in 0..4u32 {
                 v.set_index(j, rep * 100 + j as u64);
@@ -110,16 +111,16 @@ fn trail_appends_every_write_before_compression() {
 /// check the chronologically first capture is what comes back.
 #[test]
 fn trail_hot_restore_is_first_entry_wins() {
-    let mut v: VecT<u64, u32> = VecT::new();
+    let mut v: ForkHistory<VecT<u64, u32>> = ForkHistory::new(VecT::new());
     for i in 0..8u64 {
         v.try_push(i * 10).expect("push");
     }
-    let t = v.try_mark(ShrinkPolicy::Never).expect("mark");
+    let t = v.mark(ShrinkPolicy::Never).expect("mark");
     // Cell 3 rewritten four times in one frame; the pre-frame value is 30.
     for rep in 0..4u64 {
         v.set_index(3u32, 1000 + rep);
     }
-    v.try_restore(t).expect("restore");
+    assert!(v.restore(t), "restore");
     assert_eq!(
         v.get_index(3u32),
         30,
@@ -133,7 +134,7 @@ fn trail_hot_restore_is_first_entry_wins() {
 #[test]
 fn trail_churn_below_buffer_tracks_model() {
     const LEN: usize = 32;
-    let mut v: VecT<u64, u32> = VecT::new();
+    let mut v: ForkHistory<VecT<u64, u32>> = ForkHistory::new(VecT::new());
     for i in 0..LEN {
         v.try_push(i as u64).expect("push");
     }
@@ -141,7 +142,7 @@ fn trail_churn_below_buffer_tracks_model() {
     let mut seed: u64 = 12345;
     for _round in 0..50 {
         let snap = model.clone();
-        let t = v.try_mark(ShrinkPolicy::Never).expect("mark");
+        let t = v.mark(ShrinkPolicy::Never).expect("mark");
         for _w in 0..12 {
             seed = seed
                 .wrapping_mul(6364136223846793005)
@@ -154,11 +155,11 @@ fn trail_churn_below_buffer_tracks_model() {
         // Half the rounds roll back immediately (churn), half keep going
         // one more frame deep before rolling back both.
         if seed.is_multiple_of(2) {
-            v.try_restore(t).expect("restore");
+            assert!(v.restore(t), "restore");
             model = snap.clone();
         } else {
             let snap2 = model.clone();
-            let t2 = v.try_mark(ShrinkPolicy::Never).expect("mark2");
+            let t2 = v.mark(ShrinkPolicy::Never).expect("mark2");
             for _w in 0..6 {
                 seed = seed
                     .wrapping_mul(6364136223846793005)
@@ -167,7 +168,7 @@ fn trail_churn_below_buffer_tracks_model() {
                 v.set_index(idx, seed);
                 model[idx as usize] = seed;
             }
-            v.try_restore(t2).expect("restore2");
+            assert!(v.restore(t2), "restore2");
             // Intermediate check: restore2 lands the state at t2 exactly.
             for (i, &expected) in snap2.iter().enumerate().take(LEN) {
                 assert_eq!(
@@ -176,7 +177,7 @@ fn trail_churn_below_buffer_tracks_model() {
                     "cell {i} diverged after restore2"
                 );
             }
-            v.try_restore(t).expect("restore1");
+            assert!(v.restore(t), "restore1");
             model = snap;
         }
         for (i, &expected) in model.iter().enumerate().take(LEN) {

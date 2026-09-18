@@ -111,52 +111,39 @@ mod union_find_shaped {
         cv::vec::Vec<DenseId31, u32, cv::inline_store::InlineStore<DenseId31, u32>, true>;
     type RankVec = cv::vec::Vec<u8, u32, cv::inline_store::InlineStore<u8, u32>, true>;
 
-    struct UnionFindShaped {
-        parent_fast: ParentVec,
-        rank: RankVec,
-        parent_proof: Option<ParentVec>,
-    }
-
-    struct UnionFindTokenShaped {
-        parent_fast: cv::vec::VecToken,
-        rank: cv::vec::VecToken,
-        parent_proof: Option<cv::vec::VecToken>,
-    }
+    /// The pair of columns a union-find keeps in lockstep, driven by one
+    /// external history: the shape a consumer writes now (the columns carry no
+    /// tokens of their own, the group mints one stamp for both).
+    type UnionFindShaped = cv::group::ForkHistory<cv::group::Pair<ParentVec, RankVec>>;
 
     pub fn smoke() {
-        let mut uf = UnionFindShaped {
-            parent_fast: ParentVec::new(),
-            rank: RankVec::new(),
-            parent_proof: None,
-        };
-        uf.parent_fast
+        let mut uf: UnionFindShaped =
+            cv::group::ForkHistory::new(cv::group::Pair::new(ParentVec::new(), RankVec::new()));
+        uf.member
+            .a
             .try_push(DenseId31::new(0))
             .expect("push: within index word");
-        uf.rank.try_push(0u8).expect("push: within index word");
-        // Composite mark: each member vec marks; token wraps them.
-        let tok = UnionFindTokenShaped {
-            parent_fast: uf
-                .parent_fast
-                .try_mark(cv::vec::ShrinkPolicy::Never)
-                .expect("mark: depth bounded by this harness"),
-            rank: uf
-                .rank
-                .try_mark(cv::vec::ShrinkPolicy::Never)
-                .expect("mark: depth bounded by this harness"),
-            parent_proof: None,
-        };
-        uf.parent_fast
+        uf.member.b.try_push(0u8).expect("push: within index word");
+        // One mark for the pair; both columns advance in lockstep.
+        let tok = uf
+            .mark(cv::vec::ShrinkPolicy::Never)
+            .expect("mark: depth bounded by this harness");
+        uf.member
+            .a
             .try_push(DenseId31::new(1))
             .expect("push: within index word");
-        uf.rank.try_push(1u8).expect("push: within index word");
-        // Two-phase restore: prevalidate ALL, then restore in reverse order.
-        assert!(uf.parent_fast.is_valid_token(&tok.parent_fast));
-        assert!(uf.rank.is_valid_token(&tok.rank));
-        uf.rank.try_restore(tok.rank).expect("restore: own token");
-        uf.parent_fast
-            .try_restore(tok.parent_fast)
-            .expect("restore: own token");
-        assert_eq!(uf.parent_fast.len(), 1);
+        uf.member.b.try_push(1u8).expect("push: within index word");
+        assert!(uf.is_valid(tok));
+        // One restore moves both columns; the checkpoint stays valid after it
+        // (semantics B).
+        assert!(uf.restore(tok), "restore: the group's own live token");
+        assert!(uf.is_valid(tok));
+        assert_eq!(uf.member.a.len(), 1);
+        assert_eq!(uf.member.b.len(), 1);
+        // The fused pop lands below the checkpoint and kills it.
+        assert!(uf.restore_and_pop(tok));
+        assert!(!uf.is_valid(tok));
+        assert_eq!(uf.depth(), 0);
     }
 }
 

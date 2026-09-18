@@ -12,6 +12,7 @@
 
 use proptest::prelude::*;
 use semi_persistent_containers_verus as verus;
+use semi_persistent_containers_verus::group::ForkHistory;
 use verus::VecT;
 use verus::vec::ShrinkPolicy;
 
@@ -61,7 +62,7 @@ proptest! {
     /// duplicate bursts, and pushes.
     #[test]
     fn trail_random_ops_track_snapshot_model(ops in proptest::collection::vec(op_strategy(), 1..250)) {
-        let mut v: VecT<u64, u32> = VecT::new();
+        let mut v: ForkHistory<VecT<u64, u32>> = ForkHistory::new(VecT::new());
         let mut model: Vec<u64> = (0..INIT_LEN as u64).collect();
         for i in 0..INIT_LEN {
             v.try_push(i as u64).expect("seed push");
@@ -89,7 +90,7 @@ proptest! {
                     }
                 }
                 Op::Mark => {
-                    let t = v.try_mark(ShrinkPolicy::Never).expect("mark");
+                    let t = v.mark(ShrinkPolicy::Never).expect("mark");
                     marks.push((t, model.clone()));
                 }
                 Op::Restore { sel } => {
@@ -97,7 +98,7 @@ proptest! {
                         let pick = (sel as usize) % marks.len();
                         let tok = marks[pick].0;
                         let snap = marks[pick].1.clone();
-                        v.try_restore(tok).expect("restore");
+                        assert!(v.restore(tok), "restore");
                         model = snap;
                         marks.truncate(pick);
                     }
@@ -121,7 +122,7 @@ proptest! {
     /// token; every level must reproduce its snapshot exactly.
     #[test]
     fn trail_deep_unwind_after_compression(seed in any::<u64>(), frames in 10usize..24) {
-        let mut v: VecT<u64, u32> = VecT::new();
+        let mut v: ForkHistory<VecT<u64, u32>> = ForkHistory::new(VecT::new());
         let mut model: Vec<u64> = (0..INIT_LEN as u64).collect();
         for i in 0..INIT_LEN {
             v.try_push(i as u64).expect("seed push");
@@ -129,7 +130,7 @@ proptest! {
         let mut marks: Vec<(verus::vec::VecToken, Vec<u64>)> = Vec::new();
         let mut s = seed | 1;
         for _f in 0..frames {
-            let t = v.try_mark(ShrinkPolicy::Never).expect("mark");
+            let t = v.mark(ShrinkPolicy::Never).expect("mark");
             marks.push((t, model.clone()));
             // Duplicate-heavy frame: 6 cells, 3 writes each.
             for _r in 0..3 {
@@ -142,7 +143,7 @@ proptest! {
             }
         }
         while let Some((tok, snap)) = marks.pop() {
-            v.try_restore(tok).expect("restore");
+            assert!(v.restore(tok), "restore");
             for (i, &expected) in snap.iter().enumerate().take(INIT_LEN) {
                 prop_assert_eq!(v.get_index(i as u32), expected, "cell {} diverged at depth {}", i, marks.len());
             }

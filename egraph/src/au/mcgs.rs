@@ -957,10 +957,6 @@ impl<A: AuIds, O: DenseId> OrStatsArena<A, O> {
         Member::pop_frame(&mut self.parent_and);
         Member::pop_frame(&mut self.parent_next);
     }
-
-    fn frame_depth(&self) -> usize {
-        Member::depth_exec(&self.or_ids)
-    }
 }
 
 /// AND statistics stored in aligned semi-persistent arenas. Child state is
@@ -1327,10 +1323,6 @@ impl<A: AuIds, O: DenseId> AndStatsArena<A, O> {
         Member::pop_frame(&mut self.transport_cell_map);
         Member::pop_frame(&mut self.closed);
         Member::pop_frame(&mut self.open_children);
-    }
-
-    fn frame_depth(&self) -> usize {
-        Member::depth_exec(&self.parent)
     }
 }
 

@@ -34,8 +34,6 @@ pub struct AppendOnlyVec<T, I: IndexLike = usize, const TRACK: bool = true> {
     /// Ghost snapshot stack: `snapshots[k]` is `data@` as of frame `k`'s mark,
     /// i.e. the length-`frames[k]` prefix. Parallel to `frames`.
     pub(crate) snapshots: Ghost<Seq<Seq<T>>>,
-    /// The vector's own token manager (a group of one).
-    pub(crate) genealogy: crate::history::Genealogy,
 }
 
 impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
@@ -82,14 +80,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     }
 
 
-    /// Structural token validity (H2): the genealogy (generation stamps,
-    /// container identity) lives on the owning group's `History`, so per-vec
-    /// validity reduces to frame liveness. Kept under its historical name so
-    /// composite validity chains read unchanged.
-    pub open(crate) spec fn is_token_valid_spec(&self, token: VecToken) -> bool {
-        &&& self.genealogy.valid_spec(token)
-        &&& token.depth < self.frames@.len()
-    }
 
     /// The mark-depth quantity the depth-headroom contracts are phrased over.
     /// Post-H2 the container tracks no genealogy, so this is the live frame
@@ -98,14 +88,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         self.frames@.len()
     }
 
-    /// The full runtime-checkable precondition of `restore`, which is what the
-    /// public `is_valid_token` answers.
-    pub open(crate) spec fn is_restorable_spec(&self, token: VecToken) -> bool {
-        &&& TRACK
-        &&& self.genealogy.valid_spec(token)
-        &&& token.depth < self.frames@.len()
-        &&& self.frames@.len() < u32::MAX
-    }
 
     /// Empty append-only vec.
     pub fn new() -> (v: Self)
@@ -116,7 +98,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             data: std::vec::Vec::new(),
             frames: std::vec::Vec::new(),
             snapshots: Ghost(Seq::empty()),
-            genealogy: crate::history::Genealogy::new(),
         }
     }
 
@@ -230,7 +211,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             final(self).view() == old(self).view(),
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
-            final(self).genealogy == old(self).genealogy,
     {
         crate::guard::check_precondition(TRACK, "mark() called on untracked AppendOnlyVec");
         crate::guard::check_precondition(
@@ -292,26 +272,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         }
     }
 
-    /// Mark: save the current length, returning a token. The new frame records
-    /// `data.len()` (>= every prior frame, since data only grew), keeping
-    /// `frames` monotone.
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
-        requires
-            old(self).wf(),
-            // Production permits marks only when tracking is enabled.
-            TRACK,
-            old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
-            final(self).depth_spec() == old(self).depth_spec() + 1,
-            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
-    {
-        self.push_frame(shrink);
-        let idx = self.frames.len() - 1;
-        self.genealogy.mint(idx)
-    }
 
     // ------------------------------------------------------------------
     // Total-operation shell, matching Vec's pattern.
@@ -352,100 +312,9 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         }
     }
 
-    /// Total mark: the error names which precondition failed.
-    pub fn try_mark(&mut self, shrink: ShrinkPolicy)
-        -> (r: Result<VecToken, crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r matches Ok(token) ==> {
-                &&& final(self).view() == old(self).view()
-                &&& token.frame_idx_spec() == old(self).depth_spec()
-                &&& final(self).depth_spec() == old(self).depth_spec() + 1
-                &&& final(self).snapshots_view()
-                    == old(self).snapshots_view().push(old(self).view())
-            },
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.frames.len() < (u32::MAX as usize)) {
-            return Err(crate::error::ContainerError::DepthLimit);
-        }
-        Ok(self.mark(shrink))
-    }
 
-    /// Total restore: `is_valid_token` answers exactly "would `restore`
-    /// succeed right now", so the wrapper is the check.
-    pub fn try_restore(&mut self, token: VecToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> final(self).view()
-                == old(self).snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec() + 1
-                && final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if self.is_valid_token(&token) {
-            self.restore(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
-    /// container would refuse, with nothing changed.
-    pub fn try_restore_and_pop(&mut self, token: VecToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> final(self).view()
-                == old(self).snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec()
-                && final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if self.is_valid_token(&token) {
-            self.restore_and_pop(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    /// The public token-validity check. True iff `restore(token)` would
-    /// succeed at this moment. Borrows the token, matching production.
-    pub fn is_valid_token(&self, token: &VecToken) -> (b: bool)
-        requires self.wf(),
-        ensures b == self.is_restorable_spec(*token),
-    {
-        if !TRACK {
-            return false;
-        }
-        if !self.genealogy.is_valid(token) {
-            return false;
-        }
-        if token.depth as usize >= self.frames.len() {
-            return false;
-        }
-        if self.frames.len() >= u32::MAX as usize {
-            return false;
-        }
-        true
-    }
 
     /// The structural core of a pop-style restore (the SMT-LIB `pop`, the
     /// group path): reconstruct to frame `target` and drop frames
@@ -460,7 +329,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             final(self).view() == old(self).snapshots_view()[target as int],
             final(self).depth_spec() == target as nat,
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target as int),
-            forall|u: VecToken| u.depth_spec() >= target as nat ==> !final(self).genealogy.valid_spec(u),
     {
         let saved_len = self.frames[target].as_usize();
         let ghost old_data = self.data@;
@@ -497,7 +365,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
                     =~= old_data.subrange(0, frames[k].as_nat() as int));
             }
         }
-        self.genealogy.cut_from(target);
     }
 
     /// Semantics B (design doc 08 §1): reconstruct to frame `target` and keep
@@ -515,7 +382,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             final(self).view() == old(self).snapshots_view()[target as int],
             final(self).depth_spec() == target as nat + 1,
             final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target as int + 1),
-            forall|u: VecToken| u.depth_spec() > target as nat ==> !final(self).genealogy.valid_spec(u),
     {
         let saved_len = self.frames[target].as_usize();
         let ghost old_data = self.data@;
@@ -552,7 +418,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
                     =~= old_data.subrange(0, frames[k].as_nat() as int));
             }
         }
-        self.genealogy.cut_from(target + 1);
     }
 
     /// Drop the open top frame, undoing its appends (the SMT-LIB `pop`); that
@@ -577,111 +442,9 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         self.restore_frame(d - 1);
     }
 
-    /// Restore to the version named by `token` and keep its frame open
-    /// (semantics B, design doc 08 §1): the contents are the snapshot at that
-    /// mark, `token` stays valid and can be restored to again, every token
-    /// minted after it is dead. The SMT-LIB `pop` is `restore(t)` then `pop()`.
-    pub(crate) fn restore(&mut self, token: VecToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            token.frame_idx_spec() < old(self).depth_spec(),
-            old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec() + 1,
-            final(self).snapshots_view()
-                == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
-    {
-        crate::guard::check_precondition(TRACK, "restore() called on untracked AppendOnlyVec");
-        if !self.genealogy.is_valid(&token) {
-            crate::guard::refuse("AppendOnlyVec::restore: token is foreign, stale or consumed");
-        }
-        crate::guard::check_precondition(
-            (token.depth as usize) < self.frames.len(),
-            "token points beyond frame stack",
-        );
-        crate::guard::check_precondition(
-            self.frames.len() < u32::MAX as usize,
-            "AppendOnlyVec::restore: frame-stack depth would overflow u32",
-        );
-        self.reset_frame(token.depth as usize);
-    }
 
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
-    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
-    /// token minted after it die. This is the SMT-LIB `pop` to the level below
-    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
-    /// is reopened once, so it costs what the legacy restore costs. `restore`
-    /// alone keeps the checkpoint's frame open instead.
-    pub(crate) fn restore_and_pop(&mut self, token: VecToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            token.frame_idx_spec() < old(self).depth_spec(),
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec(),
-            final(self).snapshots_view()
-                == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
-    {
-        crate::guard::check_precondition(TRACK, "restore_and_pop() called on untracked AppendOnlyVec");
-        if !self.genealogy.is_valid(&token) {
-            crate::guard::refuse("AppendOnlyVec::restore_and_pop: token is foreign, stale or consumed");
-        }
-        crate::guard::check_precondition(
-            (token.depth as usize) < self.frames.len(),
-            "token points beyond frame stack",
-        );
-        self.restore_frame(token.depth as usize);
-    }
 
-    /// Drop the open top frame, undoing its appends (the SMT-LIB `pop`; that
-    /// frame's token dies). Refuses on an untracked vector or an empty stack.
-    pub fn pop_scope(&mut self)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            (TRACK && old(self).depth_spec() >= 1) ==> {
-                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
-                &&& final(self).depth_spec() == old(self).depth_spec() - 1
-                &&& final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
-            },
-    {
-        if !TRACK {
-            crate::guard::refuse("pop_scope() called on untracked AppendOnlyVec");
-        }
-        self.pop_frame();
-    }
 
-    /// `pop_scope` as a `Result`: `Untracked` or `NoOpenFrame` instead of a refusal.
-    pub fn try_pop_scope(&mut self) -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> {
-                &&& old(self).depth_spec() >= 1
-                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
-                &&& final(self).depth_spec() == old(self).depth_spec() - 1
-                &&& final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
-            },
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.frames.len() >= 1) {
-            return Err(crate::error::ContainerError::NoOpenFrame);
-        }
-        self.pop_frame();
-        Ok(())
-    }
 }
 
 /// In a monotone non-decreasing frame-length sequence, `frames[k] <=

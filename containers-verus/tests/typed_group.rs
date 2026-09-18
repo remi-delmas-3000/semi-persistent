@@ -144,7 +144,7 @@ fn a_pair_of_columns_moves_as_one() {
 #[should_panic(expected = "already has open frames")]
 fn adopting_a_member_with_open_frames_is_refused() {
     let mut v = col(1);
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.push_frame(ShrinkPolicy::Never);
     let _g = ForkHistory::new(v);
 }
 
@@ -152,7 +152,7 @@ fn adopting_a_member_with_open_frames_is_refused() {
 #[should_panic(expected = "not at the same depth")]
 fn pairing_members_out_of_step_is_refused() {
     let mut v = col(1);
-    v.try_mark(ShrinkPolicy::Never).unwrap();
+    v.push_frame(ShrinkPolicy::Never);
     let _p = Pair::new(v, Log::new());
 }
 
