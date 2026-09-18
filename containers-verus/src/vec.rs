@@ -15908,10 +15908,10 @@ where
     /// and can be restored to again, while every frame above it is gone and
     /// every token minted after it is dead. Built from the pop core and a
     /// frame push: `runtime_restore_frame(target)` undoes and pops the strata
-    /// `target..`, `push_frame` reopens frame `target` on the restored
-    /// contents (the snapshot at `target` is the same contents, so the
-    /// snapshot stack is exactly the old prefix of length `target + 1`), and
-    /// the genealogy cut starts at `target + 1`.
+    /// `target..`, a deferred-rollover push reopens frame `target` on the
+    /// restored contents (the snapshot at `target` is the same contents, so
+    /// the snapshot stack is exactly the old prefix of length `target + 1`),
+    /// and the genealogy cut starts at `target + 1`.
     #[verifier::spinoff_prover]
     pub(crate) fn reset_frame(&mut self, target: usize)
         where T: core::default::Default
@@ -15936,8 +15936,12 @@ where
     }
 
     /// The physical half of `reset_frame`: undo and pop the strata `target..`,
-    /// then reopen frame `target` on the restored contents. `wf` stays hidden:
-    /// each step's contract carries it as a fact.
+    /// then reopen frame `target` on the restored contents with a `Defer`
+    /// rollover — a header push that converts no history. The pop core has
+    /// just made the parent stratum writable; sealing it again under the
+    /// configured rollover would migrate it (Trail → Hot dedupe, Hot → Cold)
+    /// on every restore, work the next `mark` does exactly once, as it always
+    /// did. `wf` stays hidden: each step's contract carries it as a fact.
     #[verifier::spinoff_prover]
     fn reset_frame_physical(&mut self, target: usize)
         where T: core::default::Default
@@ -15963,7 +15967,10 @@ where
         }
         self.evict_cold_frame();
         self.seal_open_frame_copy();
-        self.push_frame(ShrinkPolicy::Never);
+        self.push_frame_with_options(MarkOptions {
+            shrink: ShrinkPolicy::Never,
+            rollover: crate::tier_policy::RolloverPolicy::Defer,
+        });
         proof {
             // One snapshot per frame, so the prefix of length `target + 1` exists.
             pre.lemma_snapshots_len();

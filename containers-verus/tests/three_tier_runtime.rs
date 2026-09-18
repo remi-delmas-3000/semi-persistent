@@ -226,8 +226,10 @@ fn promote_write_remigrate_and_restore_older_history() {
     assert_eq!(values(&v), vec![10, 1, 2, 3, 4]);
     assert_eq!(
         v.tier_stats().trail_frames,
-        1,
-        "cold survivor is selected ingress"
+        2,
+        "cold survivor is selected ingress, then the checkpoint's frame is \
+         reopened on it by a deferred-rollover push (semantics B): the \
+         survivor migrates again at the next mark, not on the restore"
     );
 
     v.set(3u32, 99);

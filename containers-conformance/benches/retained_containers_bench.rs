@@ -154,6 +154,8 @@ fn bench_vec_mark_set_restore(c: &mut Criterion) {
                     v.set(idx, x);
                 }
                 v.try_restore(tok).expect("restore: own token");
+                // Legacy restore == verified restore + pop_scope (semantics B, design doc 08 §1).
+                v.pop_scope();
                 black_box(v.len());
             },
             BatchSize::LargeInput,
@@ -197,6 +199,7 @@ fn verus_restore_fixture() -> (VerusTrackedVec, verus::vec::VecToken) {
         v.set(i as u32, i as u64);
     }
     v.try_restore(warm).expect("restore: own token");
+    v.pop_scope();
 
     let token = v
         .try_mark(verus::vec::ShrinkPolicy::Never)
@@ -240,6 +243,7 @@ fn bench_vec_restore_replay(c: &mut Criterion) {
                 let mut total = 0usize;
                 for (v, token) in fixtures.iter_mut() {
                     v.try_restore(*token).expect("restore: own token");
+                    v.pop_scope();
                     total += v.len() as usize;
                 }
                 black_box(total)
@@ -556,6 +560,7 @@ fn bench_class_ring_merge_restore(c: &mut Criterion) {
                     .expect("mark: bounded depth");
                 verus_ring_merge_all(ring);
                 ring.try_restore(token).expect("restore: own token");
+                ring.pop_scope();
                 black_box(ring.len())
             },
             BatchSize::LargeInput,
@@ -633,6 +638,7 @@ fn bench_map_intern(c: &mut Criterion) {
                 }
             }
             m.try_restore(tok).expect("restore: own token");
+            m.pop_scope();
             black_box(m.len())
         })
     });
@@ -701,6 +707,7 @@ fn bench_sparse_set_churn(c: &mut Criterion) {
                 }
             }
             s.restore(tok);
+            s.pop_scope();
             black_box(s.len().raw())
         })
     });
@@ -753,6 +760,7 @@ fn bench_aov_log(c: &mut Criterion) {
                 acc = acc.wrapping_add(*x);
             }
             v.try_restore(tok).expect("restore: own token");
+            v.pop_scope();
             black_box((acc, v.len()))
         })
     });
@@ -919,6 +927,7 @@ fn bench_map_restore_small_suffix(c: &mut Criterion) {
                     .expect("insert: within index word");
             }
             m.try_restore(tok).expect("restore: own token");
+            m.pop_scope();
             black_box(m.len())
         })
     });
@@ -964,6 +973,7 @@ fn bench_map_restore_small_suffix(c: &mut Criterion) {
                     .expect("insert: within index word");
             }
             m.try_restore(tok).expect("restore: own token");
+            m.pop_scope();
             black_box(m.len())
         })
     });

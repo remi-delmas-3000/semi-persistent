@@ -489,6 +489,8 @@ fn bench_restore(c: &mut Criterion) {
             trail_restore_fixture,
             |(v, token)| {
                 v.try_restore(*token).expect("own token");
+                // Legacy restore == verified restore + pop_scope (semantics B, design doc 08 §1).
+                v.pop_scope();
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -499,6 +501,7 @@ fn bench_restore(c: &mut Criterion) {
             hot_restore_fixture,
             |(v, token)| {
                 v.try_restore(*token).expect("own token");
+                v.pop_scope();
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -509,6 +512,7 @@ fn bench_restore(c: &mut Criterion) {
             cold_restore_fixture,
             |(v, token)| {
                 v.try_restore(*token).expect("own token");
+                v.pop_scope();
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -519,6 +523,7 @@ fn bench_restore(c: &mut Criterion) {
             all_tiers_restore_fixture,
             |(v, token)| {
                 v.try_restore(*token).expect("own root token");
+                v.pop_scope();
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -569,9 +574,11 @@ fn bench_promotion(c: &mut Criterion) {
             promotion_fixture,
             |(v, ancestor)| {
                 v.try_restore(*ancestor).expect("own ancestor token");
+                v.pop_scope();
                 let inner = mark_verus(v);
                 write_verus(v, WRITES, 64, 17);
                 v.try_restore(inner).expect("new token after promotion");
+                v.pop_scope();
                 black_box(v.diff_log_len())
             },
             BatchSize::LargeInput,
@@ -608,6 +615,7 @@ fn run_smt_backtrack() -> usize {
         let token = mark_verus(&mut v);
         write_verus(&mut v, TRACE_WRITES, 8, frame);
         v.try_restore(token).expect("own token");
+        v.pop_scope();
     }
     v.len() as usize
 }
@@ -630,6 +638,7 @@ fn run_nested(kind: StoreKind, policy: TierPolicy) -> usize {
         mark_verus(&mut v);
     }
     v.try_restore(root).expect("own root token");
+    v.pop_scope();
     v.len() as usize
 }
 
@@ -749,6 +758,7 @@ macro_rules! verified_matrix_column {
             #[inline]
             fn restore(&mut self, token: Self::Token) {
                 self.0.try_restore(token).expect("own live matrix token");
+                self.0.pop_scope();
             }
 
             #[inline]

@@ -57,6 +57,8 @@ fn bench_mark(c: &mut Criterion) {
                     .expect("mark: depth bounded by this harness");
                 mutate_p(&mut v, n, k);
                 v.try_restore(t).expect("restore: own token");
+                // Legacy restore == verified restore + pop_scope (semantics B, design doc 08 §1).
+                v.pop_scope();
             });
         });
 
@@ -69,6 +71,7 @@ fn bench_mark(c: &mut Criterion) {
                     .expect("mark: depth bounded by this harness");
                 mutate_p(&mut v, n, k);
                 v.try_restore(t).expect("restore: own token");
+                v.pop_scope();
             });
         });
 
@@ -81,6 +84,7 @@ fn bench_mark(c: &mut Criterion) {
                     .expect("mark: depth bounded by this harness");
                 mutate_i(&mut v, n, k);
                 v.try_restore(t).expect("restore: own token");
+                v.pop_scope();
             });
         });
     }
@@ -108,6 +112,7 @@ fn bench_set(c: &mut Criterion) {
             }
         });
         v.try_restore(t).expect("restore: own token");
+        v.pop_scope();
     });
 
     group.bench_function("epoch", |b| {
@@ -122,6 +127,7 @@ fn bench_set(c: &mut Criterion) {
             }
         });
         v.try_restore(t).expect("restore: own token");
+        v.pop_scope();
     });
 
     group.bench_function("marked", |b| {
@@ -136,6 +142,7 @@ fn bench_set(c: &mut Criterion) {
             }
         });
         v.try_restore(t).expect("restore: own token");
+        v.pop_scope();
     });
 
     group.finish();
@@ -206,6 +213,7 @@ fn bench_backtrack(c: &mut Criterion) {
                     .expect("mark: depth bounded by this harness");
                 mutate_p(&mut v, n, k);
                 v.try_restore(t).expect("restore: own token");
+                v.pop_scope();
             });
         });
 
@@ -218,6 +226,7 @@ fn bench_backtrack(c: &mut Criterion) {
                     .expect("mark: depth bounded by this harness");
                 mutate_p(&mut v, n, k);
                 v.try_restore(t).expect("restore: own token");
+                v.pop_scope();
             });
         });
 
@@ -230,6 +239,7 @@ fn bench_backtrack(c: &mut Criterion) {
                     .expect("mark: depth bounded by this harness");
                 mutate_i(&mut v, n, k);
                 v.try_restore(t).expect("restore: own token");
+                v.pop_scope();
             });
         });
     }
@@ -265,6 +275,7 @@ fn bench_nested_mark_backtrack(c: &mut Criterion) {
             }
             // Backtrack all the way to the first mark.
             v.try_restore(tokens[0]).expect("restore: own token");
+            v.pop_scope();
         });
     });
 
@@ -285,6 +296,7 @@ fn bench_nested_mark_backtrack(c: &mut Criterion) {
                 }
             }
             v.try_restore(tokens[0]).expect("restore: own token");
+            v.pop_scope();
         });
     });
 
@@ -305,6 +317,7 @@ fn bench_nested_mark_backtrack(c: &mut Criterion) {
                 }
             }
             v.try_restore(tokens[0]).expect("restore: own token");
+            v.pop_scope();
         });
     });
 
