@@ -1833,6 +1833,116 @@ where
         }
     }
 
+    /// Semantics B, token-free (what a typed group drives): reset the parent
+    /// and rank columns (and, under `PROOFS`, the proof columns) to their
+    /// snapshot at `target`, keep frame `target` open, and recover the roots
+    /// and distances archived at that mark.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        where T: core::default::Default, J: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).parent_depth_spec() == old(self).rank_depth_spec(),
+            PROOFS ==> old(self).parent_proof->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            PROOFS ==> old(self).justification->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            (target as nat) < old(self).parent_depth_spec(),
+            old(self).parent_depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).parent_view() == old(self).parent_snapshots_view()[target as int],
+            final(self).rank_view() == old(self).rank_snapshots_view()[target as int],
+            final(self).roots_view() == old(self).roots_snapshots_view()[target as int],
+            final(self).roots_snapshots_view() == old(self).roots_snapshots_view()
+                .subrange(0, target as int + 1),
+            final(self).parent_snapshots_view() == old(self).parent_snapshots_view()
+                .subrange(0, target as int + 1),
+            final(self).parent_depth_spec() == target as nat + 1,
+            final(self).parent_depth_spec() == final(self).rank_depth_spec(),
+    {
+        let ghost f = target as int;
+        let ghost snap_roots = self.roots_snapshots@[f];
+        let ghost snap_dist = self.dist_snapshots@[f];
+        proof {
+            reveal(uf_archive_agrees);
+            assert(uf_archive_agrees(old(self).roots_snapshots@, old(self).dist_snapshots@,
+                old(self).parent.snapshots_view(), old(self).rank.snapshots_view()));
+        }
+        self.parent.reset_frame(target);
+        self.rank.reset_frame(target);
+        if PROOFS {
+            match (&mut self.parent_proof, &mut self.justification) {
+                (Some(pp), Some(j)) => {
+                    pp.reset_frame(target);
+                    j.reset_frame(target);
+                }
+                _ => crate::guard::refuse(
+                    "UnionFind::reset_frames: proof-column shape does not match the build"),
+            }
+        }
+        self.roots = Ghost(snap_roots);
+        self.dist = Ghost(snap_dist);
+        self.roots_snapshots = Ghost(self.roots_snapshots@.subrange(0, f + 1));
+        self.dist_snapshots = Ghost(self.dist_snapshots@.subrange(0, f + 1));
+        proof {
+            if PROOFS {
+                reveal(uf_proof_archive_agrees);
+                let opps = old(self).parent_proof->Some_0.snapshots_view();
+                let ojs = old(self).justification->Some_0.snapshots_view();
+                assert(uf_proof_archive_agrees(
+                    old(self).parent.snapshots_view(), opps, ojs));
+                let pps = self.parent_proof->Some_0.snapshots_view();
+                let js = self.justification->Some_0.snapshots_view();
+                // restored views are frame f's; the archive equates their
+                // lengths with the fast parent's at every frame.
+                assert(self.parent_proof->Some_0.view() == opps[f]);
+                assert(self.justification->Some_0.view() == ojs[f]);
+                assert(opps[f].len() == old(self).parent.snapshots_view()[f].len());
+                assert(ojs[f].len() == old(self).parent.snapshots_view()[f].len());
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] pps[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    assert(pps[k] == opps[k]);
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                }
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] js[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    assert(js[k] == ojs[k]);
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                }
+                assert(uf_proof_archive_agrees(
+                    self.parent.snapshots_view(), pps, js));
+            }
+            reveal(uf_archive_agrees);
+            assert(uf_model_wf(old(self).parent.snapshots_view()[f], snap_roots, snap_dist));
+            assert(self.parent_view() == old(self).parent.snapshots_view()[f]);
+            assert(self.rank_view() == old(self).rank.snapshots_view()[f]);
+            assert(self.parent.snapshots_view()
+                =~= old(self).parent.snapshots_view().subrange(0, f + 1));
+            assert(self.rank.snapshots_view()
+                =~= old(self).rank.snapshots_view().subrange(0, f + 1));
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies uf_model_wf(#[trigger] self.parent.snapshots_view()[k],
+                    self.roots_snapshots@[k], self.dist_snapshots@[k]) by {
+                assert(self.parent.snapshots_view()[k]
+                    == old(self).parent.snapshots_view()[k]);
+                assert(self.roots_snapshots@[k] == old(self).roots_snapshots@[k]);
+                assert(self.dist_snapshots@[k] == old(self).dist_snapshots@[k]);
+            }
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies (#[trigger] self.rank.snapshots_view()[k]).len()
+                    == self.parent.snapshots_view()[k].len() by {
+                assert(self.rank.snapshots_view()[k] == old(self).rank.snapshots_view()[k]);
+                assert(self.parent.snapshots_view()[k]
+                    == old(self).parent.snapshots_view()[k]);
+            }
+            assert(uf_archive_agrees(self.roots_snapshots@, self.dist_snapshots@,
+                self.parent.snapshots_view(), self.rank.snapshots_view()));
+        }
+    }
+
     /// Total restore: component restorability plus the same-mark frame
     /// agreement (a mixed token from two different marks refuses).
     pub fn try_restore(&mut self, token: UnionFindToken)

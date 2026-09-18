@@ -1380,6 +1380,7 @@ where
             old(self).depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
+            final(self).entries_view() == old(self).entries_view(),
             final(self).next_seq() == old(self).next_seq(),
             final(self).n_spec() == old(self).n_spec(),
             final(self).model_view() == old(self).model_view(),
@@ -1495,6 +1496,54 @@ where
                 ns[#[trigger] m[c][p] as int] == m[c][if p + 1 < m[c].len() { p + 1 } else { 0 }] by {
                 assert(ns[m[c][p] as int] == snap[m[c][p] as int].next.id_nat() as usize);
             }
+            assert forall|i: int| 0 <= i < self.n_spec() implies #[trigger] self.in_some_ring(i) by {
+                assert(idx_in_some_ring(snap_model, i));
+                let (c, p) = choose|c: int, p: int|
+                    0 <= c < snap_model.len() && 0 <= p < snap_model[c].len() && snap_model[c][p] == i;
+                assert(m[c][p] == i);
+            }
+        }
+    }
+
+    /// Semantics B, token-free (what a typed group drives): reset the entries
+    /// column to its snapshot at `target`, keep frame `target` open, and
+    /// recover the ring partition archived at that mark.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).entries_view() == old(self).entries_snapshots_view()[target as int],
+            final(self).model_view() == old(self).model_snapshots_view()[target as int],
+            final(self).entries_snapshots_view()
+                == old(self).entries_snapshots_view().subrange(0, target as int + 1),
+            final(self).model_snapshots_view()
+                == old(self).model_snapshots_view().subrange(0, target as int + 1),
+            final(self).depth_spec() == target as nat + 1,
+    {
+        proof { reveal(ring_archive_agrees); }
+        let ghost snap_model = self.model_snapshots@[target as int];
+        let ghost snap = old(self).entries.snapshots_view()[target as int];
+        self.entries.reset_frame(target);
+        self.model = Ghost(snap_model);
+        self.model_snapshots =
+            Ghost(self.model_snapshots@.subrange(0, target as int + 1));
+        proof {
+            assert(self.entries.view() == snap);
+            let m = self.model@;
+            let ns = self.next_seq();
+            assert(self.n_spec() == snap.len());
+            // bridge ring_snap_wf(snap_model, snap) to wf's clauses.
+            assert forall|c: int, p: int|
+                0 <= c < m.len() && 0 <= p < m[c].len() implies
+                ns[#[trigger] m[c][p] as int] == m[c][if p + 1 < m[c].len() { p + 1 } else { 0 }] by {
+                assert(ns[m[c][p] as int] == snap[m[c][p] as int].next.id_nat() as usize);
+            }
+            // covers: ring_snap_wf's covers clause is over idx_in_some_ring(snap_model);
+            // transfer to self.in_some_ring (same model, same witnesses).
             assert forall|i: int| 0 <= i < self.n_spec() implies #[trigger] self.in_some_ring(i) by {
                 assert(idx_in_some_ring(snap_model, i));
                 let (c, p) = choose|c: int, p: int|

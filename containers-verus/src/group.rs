@@ -25,6 +25,7 @@
 //! The dyn group of `sync_group` (`Box<dyn SyncMember>` members) is the
 //! predecessor; it stays until every consumer is on this one.
 
+use crate::diff_store::DiffStore;
 use crate::history::{GroupToken, History};
 use crate::vec::ShrinkPolicy;
 use vstd::prelude::*;
@@ -634,6 +635,937 @@ impl<A: Member, B: Member> Member for Pair<A, B> {
         self.a.pop_frame();
         self.b.pop_frame();
         proof {
+            assert(self.archive() =~= pre.archive().subrange(0, pre.depth_spec() - 1));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composite members: the composites' token-free cores drive the same protocol.
+// Each model is the tuple of the composite's abstract views; each archive the
+// tuple of its snapshot stacks, frame by frame.
+// ---------------------------------------------------------------------------
+
+impl<T, Idx, S, const TRACK: bool, VC, P> Member for crate::sparse_set::SparseSet<T, Idx, S, TRACK, VC, P>
+where
+    T: Sized + Copy + core::default::Default,
+    Idx: crate::index_like::IndexLike + crate::tagged::Tagged + core::default::Default,
+    S: crate::diff_store::DiffStore<T, Idx, TRACK>,
+    VC: crate::value_compressor::ValueCompressor<T>,
+    P: crate::store_policy::TaggedFamily<Idx, Idx, TRACK>,
+{
+    type Model = (Seq<T>, Seq<Idx>, Seq<Idx>);
+
+    open spec fn wf(&self) -> bool {
+        &&& crate::sparse_set::SparseSet::wf(self)
+        &&& TRACK
+        &&& self.dense_depth_spec() == self.sparse_depth_spec()
+        &&& self.dense_depth_spec() == self.indices_depth_spec()
+    }
+
+    open spec fn depth_spec(&self) -> nat {
+        self.dense_depth_spec()
+    }
+
+    open spec fn can_push(&self) -> bool {
+        self.can_mark_spec()
+    }
+
+    open spec fn model(&self) -> (Seq<T>, Seq<Idx>, Seq<Idx>) {
+        (self.dense_view(), self.sparse_view(), self.indices_view())
+    }
+
+    open spec fn archive(&self) -> Seq<(Seq<T>, Seq<Idx>, Seq<Idx>)> {
+        Seq::new(self.dense_snapshots_view().len(), |k: int| (
+            self.dense_snapshots_view()[k],
+            self.sparse_snapshots_view()[k],
+            self.indices_snapshots_view()[k],
+        ))
+    }
+
+    proof fn lemma_archive_depth(&self) {
+        self.dense.lemma_snapshots_len();
+    }
+
+    fn can_push_now(&self) -> (b: bool) {
+        self.dense.can_mark() && self.sparse.can_mark() && self.indices.can_mark()
+    }
+
+    fn depth_exec(&self) -> (d: usize) {
+        self.dense.depth_exec()
+    }
+
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        if !self.can_push_now() {
+            crate::guard::refuse("Member::push_frame: the sparse set cannot open another frame");
+        }
+        let ghost pre = *self;
+        self.push_frames(shrink);
+        proof {
+            assert(self.archive() =~= pre.archive().push(pre.model()));
+        }
+    }
+
+    fn restore_frame(&mut self, depth: usize) {
+        if !(depth < self.dense.depth_exec()) {
+            crate::guard::refuse("Member::restore_frame: depth is not below the sparse set's");
+        }
+        let ghost pre = *self;
+        proof {
+            self.dense.lemma_snapshots_len();
+            assert(crate::sparse_set::sparse_set_snap_wf(
+                self.dense.snapshots_view()[depth as int],
+                self.sparse.snapshots_view()[depth as int],
+                self.indices.snapshots_view()[depth as int]));
+        }
+        self.restore_frames(depth);
+        proof {
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int));
+        }
+    }
+
+    fn reset_frame(&mut self, depth: usize) {
+        if !(depth < self.dense.depth_exec()) {
+            crate::guard::refuse("Member::reset_frame: depth is not below the sparse set's");
+        }
+        if !(self.dense.depth_exec() < u32::MAX as usize) {
+            crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
+        }
+        let ghost pre = *self;
+        self.reset_frames(depth);
+        proof {
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int + 1));
+        }
+    }
+
+    fn pop_frame(&mut self) {
+        let d = self.dense.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("Member::pop_frame: no open frame");
+        }
+        let ghost pre = *self;
+        proof {
+            self.dense.lemma_snapshots_len();
+            assert(crate::sparse_set::sparse_set_snap_wf(
+                self.dense.snapshots_view()[d as int - 1],
+                self.sparse.snapshots_view()[d as int - 1],
+                self.indices.snapshots_view()[d as int - 1]));
+        }
+        self.restore_frames(d - 1);
+        proof {
+            assert(self.archive() =~= pre.archive().subrange(0, pre.depth_spec() - 1));
+        }
+    }
+}
+
+impl<T, N, const TRACK: bool, P> Member for crate::circular_list::CircularList<T, N, TRACK, P>
+where
+    T: Sized + Copy + core::default::Default + Send,
+    N: crate::opt::DenseId,
+    P: crate::store_policy::TaggedFamily<
+        crate::circular_list::CircularListNode<T, N>,
+        <N as crate::opt::DenseId>::Index,
+        TRACK,
+    >,
+{
+    type Model = (Seq<crate::circular_list::CircularListNode<T, N>>, Seq<Seq<usize>>);
+
+    open spec fn wf(&self) -> bool {
+        &&& crate::circular_list::CircularList::wf(self)
+        &&& TRACK
+    }
+
+    open spec fn depth_spec(&self) -> nat {
+        crate::circular_list::CircularList::depth_spec(self)
+    }
+
+    open spec fn can_push(&self) -> bool {
+        &&& self.n_spec() < usize::MAX
+        &&& crate::circular_list::CircularList::depth_spec(self) < u32::MAX as nat
+    }
+
+    open spec fn model(&self) -> (Seq<crate::circular_list::CircularListNode<T, N>>, Seq<Seq<usize>>) {
+        (self.entries_view(), self.model_view())
+    }
+
+    open spec fn archive(&self) -> Seq<(Seq<crate::circular_list::CircularListNode<T, N>>, Seq<Seq<usize>>)> {
+        Seq::new(self.entries_snapshots_view().len(), |k: int| (
+            self.entries_snapshots_view()[k],
+            self.model_snapshots_view()[k],
+        ))
+    }
+
+    proof fn lemma_archive_depth(&self) {
+        self.entries.lemma_snapshots_len();
+    }
+
+    fn can_push_now(&self) -> (b: bool) {
+        self.entries.store.raw_len() < usize::MAX
+            && self.entries.depth_exec() < (u32::MAX as usize)
+    }
+
+    fn depth_exec(&self) -> (d: usize) {
+        self.entries.depth_exec()
+    }
+
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        if !self.can_push_now() {
+            crate::guard::refuse("Member::push_frame: the ring cannot open another frame");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::circular_list::ring_archive_agrees); pre.entries.lemma_snapshots_len(); }
+        self.push_frames(shrink);
+        proof {
+            reveal(crate::circular_list::ring_archive_agrees);
+            self.entries.lemma_snapshots_len();
+            assert(self.archive().len() == pre.archive().len() + 1);
+            assert forall|k: int| 0 <= k < pre.archive().len()
+                implies self.archive()[k] == pre.archive().push(pre.model())[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive()[pre.archive().len() as int] == pre.model());
+            assert(self.archive() =~= pre.archive().push(pre.model()));
+        }
+    }
+
+    fn restore_frame(&mut self, depth: usize) {
+        if !(depth < self.entries.depth_exec()) {
+            crate::guard::refuse("Member::restore_frame: depth is not below the ring's");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::circular_list::ring_archive_agrees); pre.entries.lemma_snapshots_len(); }
+        self.restore_frames(depth);
+        proof {
+            reveal(crate::circular_list::ring_archive_agrees);
+            self.entries.lemma_snapshots_len();
+            assert(self.archive().len() == depth as int);
+            assert forall|k: int| 0 <= k < depth as int
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int));
+        }
+    }
+
+    fn reset_frame(&mut self, depth: usize) {
+        if !(depth < self.entries.depth_exec()) {
+            crate::guard::refuse("Member::reset_frame: depth is not below the ring's");
+        }
+        if !(self.entries.depth_exec() < u32::MAX as usize) {
+            crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::circular_list::ring_archive_agrees); pre.entries.lemma_snapshots_len(); }
+        self.reset_frames(depth);
+        proof {
+            reveal(crate::circular_list::ring_archive_agrees);
+            self.entries.lemma_snapshots_len();
+            assert(self.archive().len() == depth as int + 1);
+            assert forall|k: int| 0 <= k < depth as int + 1
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int + 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int + 1));
+        }
+    }
+
+    fn pop_frame(&mut self) {
+        let d = self.entries.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("Member::pop_frame: no open frame");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::circular_list::ring_archive_agrees); pre.entries.lemma_snapshots_len(); }
+        self.restore_frames(d - 1);
+        proof {
+            reveal(crate::circular_list::ring_archive_agrees);
+            self.entries.lemma_snapshots_len();
+            assert(self.archive().len() == pre.depth_spec() - 1);
+            assert forall|k: int| 0 <= k < pre.depth_spec() - 1
+                implies self.archive()[k] == pre.archive().subrange(0, pre.depth_spec() - 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, pre.depth_spec() - 1));
+        }
+    }
+}
+
+impl<T, L, N, const TRACK: bool, P> Member for crate::list::ListArena<T, L, N, TRACK, P>
+where
+    T: Sized + Copy + core::default::Default + crate::tagged::Tagged,
+    L: crate::opt::DenseId,
+    N: crate::opt::DenseId + crate::tagged::Tagged + core::default::Default,
+    P: crate::store_policy::TaggedFamily<crate::list::ListHead<N>, <L as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<crate::list::ListNode<T, N>, <N as crate::opt::DenseId>::Index, TRACK>,
+{
+    type Model = (Seq<crate::list::ListHead<N>>, Seq<crate::list::ListNode<T, N>>, Seq<Seq<usize>>);
+
+    open spec fn wf(&self) -> bool {
+        &&& crate::list::ListArena::wf(self)
+        &&& TRACK
+        &&& self.heads_depth_spec() == self.nodes_depth_spec()
+    }
+
+    open spec fn depth_spec(&self) -> nat {
+        self.heads_depth_spec()
+    }
+
+    open spec fn can_push(&self) -> bool {
+        &&& self.heads_view().len() < usize::MAX
+        &&& self.nodes_view().len() < usize::MAX
+        &&& self.heads_depth_spec() < u32::MAX as nat
+        &&& self.nodes_depth_spec() < u32::MAX as nat
+    }
+
+    open spec fn model(&self) -> (Seq<crate::list::ListHead<N>>, Seq<crate::list::ListNode<T, N>>, Seq<Seq<usize>>) {
+        (self.heads_view(), self.nodes_view(), self.model_view())
+    }
+
+    open spec fn archive(&self) -> Seq<(Seq<crate::list::ListHead<N>>, Seq<crate::list::ListNode<T, N>>, Seq<Seq<usize>>)> {
+        Seq::new(self.heads_snapshots_view().len(), |k: int| (
+            self.heads_snapshots_view()[k],
+            self.nodes_snapshots_view()[k],
+            self.model_snapshots_view()[k],
+        ))
+    }
+
+    proof fn lemma_archive_depth(&self) {
+        self.heads.lemma_snapshots_len();
+    }
+
+    fn can_push_now(&self) -> (b: bool) {
+        let hn = self.heads.store.raw_len();
+        let nn = self.nodes.store.raw_len();
+        hn < usize::MAX
+            && nn < usize::MAX
+            && self.heads.depth_exec() < u32::MAX as usize
+            && self.nodes.depth_exec() < u32::MAX as usize
+    }
+
+    fn depth_exec(&self) -> (d: usize) {
+        self.heads.depth_exec()
+    }
+
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        if !self.can_push_now() {
+            crate::guard::refuse("Member::push_frame: the list arena cannot open another frame");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::list::arena_archive_agrees); pre.heads.lemma_snapshots_len(); }
+        self.push_frames(shrink);
+        proof {
+            reveal(crate::list::arena_archive_agrees);
+            self.heads.lemma_snapshots_len();
+            assert(self.archive().len() == pre.archive().len() + 1);
+            assert forall|k: int| 0 <= k < pre.archive().len()
+                implies self.archive()[k] == pre.archive().push(pre.model())[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive()[pre.archive().len() as int] == pre.model());
+            assert(self.archive() =~= pre.archive().push(pre.model()));
+        }
+    }
+
+    fn restore_frame(&mut self, depth: usize) {
+        if !(depth < self.heads.depth_exec()) {
+            crate::guard::refuse("Member::restore_frame: depth is not below the list arena's");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::list::arena_archive_agrees); pre.heads.lemma_snapshots_len(); }
+        self.restore_frames(depth);
+        proof {
+            reveal(crate::list::arena_archive_agrees);
+            self.heads.lemma_snapshots_len();
+            assert(self.archive().len() == depth as int);
+            assert forall|k: int| 0 <= k < depth as int
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int));
+        }
+    }
+
+    fn reset_frame(&mut self, depth: usize) {
+        if !(depth < self.heads.depth_exec()) {
+            crate::guard::refuse("Member::reset_frame: depth is not below the list arena's");
+        }
+        if !(self.heads.depth_exec() < u32::MAX as usize) {
+            crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::list::arena_archive_agrees); pre.heads.lemma_snapshots_len(); }
+        self.reset_frames(depth);
+        proof {
+            reveal(crate::list::arena_archive_agrees);
+            self.heads.lemma_snapshots_len();
+            assert(self.archive().len() == depth as int + 1);
+            assert forall|k: int| 0 <= k < depth as int + 1
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int + 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int + 1));
+        }
+    }
+
+    fn pop_frame(&mut self) {
+        let d = self.heads.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("Member::pop_frame: no open frame");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::list::arena_archive_agrees); pre.heads.lemma_snapshots_len(); }
+        self.restore_frames(d - 1);
+        proof {
+            reveal(crate::list::arena_archive_agrees);
+            self.heads.lemma_snapshots_len();
+            assert(self.archive().len() == pre.depth_spec() - 1);
+            assert forall|k: int| 0 <= k < pre.depth_spec() - 1
+                implies self.archive()[k] == pre.archive().subrange(0, pre.depth_spec() - 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, pre.depth_spec() - 1));
+        }
+    }
+}
+
+impl<T, J, const TRACK: bool, const PROOFS: bool, P> Member for crate::union_find::UnionFind<T, J, TRACK, PROOFS, P>
+where
+    T: crate::opt::DenseId + core::default::Default,
+    J: crate::tagged::Tagged + Copy + core::default::Default,
+    P: crate::store_policy::TaggedFamily<T, <T as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<u8, <T as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<J, <T as crate::opt::DenseId>::Index, TRACK>,
+{
+    /// The forest and its roots; the rank column is bookkeeping the
+    /// operations keep in step (its own snapshot stack is not archived here).
+    type Model = (Seq<T>, Seq<usize>);
+
+    open spec fn wf(&self) -> bool {
+        &&& crate::union_find::UnionFind::wf(self)
+        &&& TRACK
+        &&& self.parent_depth_spec() == self.rank_depth_spec()
+    }
+
+    open spec fn depth_spec(&self) -> nat {
+        self.parent_depth_spec()
+    }
+
+    open spec fn can_push(&self) -> bool {
+        &&& self.parent_depth_spec() < u32::MAX as nat
+        &&& self.parent_view().len() < <<T as crate::opt::DenseId>::Index as crate::index_like::IndexLike>::max_nat()
+        &&& self.rank_depth_spec() < u32::MAX as nat
+        &&& self.rank_view().len() < <<T as crate::opt::DenseId>::Index as crate::index_like::IndexLike>::max_nat()
+    }
+
+    open spec fn model(&self) -> (Seq<T>, Seq<usize>) {
+        (self.parent_view(), self.roots_view())
+    }
+
+    open spec fn archive(&self) -> Seq<(Seq<T>, Seq<usize>)> {
+        Seq::new(self.parent_snapshots_view().len(), |k: int| (
+            self.parent_snapshots_view()[k],
+            self.roots_snapshots_view()[k],
+        ))
+    }
+
+    proof fn lemma_archive_depth(&self) {
+        self.parent.lemma_snapshots_len();
+    }
+
+    fn can_push_now(&self) -> (b: bool) {
+        self.parent.can_mark() && self.rank.can_mark()
+    }
+
+    fn depth_exec(&self) -> (d: usize) {
+        self.parent.depth_exec()
+    }
+
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        if !self.can_push_now() {
+            crate::guard::refuse("Member::push_frame: the union-find cannot open another frame");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::union_find::uf_archive_agrees); pre.parent.lemma_snapshots_len(); }
+        if PROOFS {
+            // The proof columns' depth is checked at runtime, as the
+            // composite's own `pop_scope` does (the archive agreement keeps
+            // them in step; the check is what the cores' contracts ask for).
+            match (&self.parent_proof, &self.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == self.parent.depth_exec()
+                        && j.depth_exec() == self.parent.depth_exec())
+                    {
+                        crate::guard::refuse("Member: union-find proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("Member: union-find proof-column shape does not match the build"),
+            }
+        }
+        self.push_frames(shrink);
+        proof {
+            reveal(crate::union_find::uf_archive_agrees);
+            self.parent.lemma_snapshots_len();
+            assert(self.archive().len() == pre.archive().len() + 1);
+            assert forall|k: int| 0 <= k < pre.archive().len()
+                implies self.archive()[k] == pre.archive().push(pre.model())[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive()[pre.archive().len() as int] == pre.model());
+            assert(self.archive() =~= pre.archive().push(pre.model()));
+        }
+    }
+
+    fn restore_frame(&mut self, depth: usize) {
+        if !(depth < self.parent.depth_exec()) {
+            crate::guard::refuse("Member::restore_frame: depth is not below the union-find's");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::union_find::uf_archive_agrees); pre.parent.lemma_snapshots_len(); }
+        if PROOFS {
+            // The proof columns' depth is checked at runtime, as the
+            // composite's own `pop_scope` does (the archive agreement keeps
+            // them in step; the check is what the cores' contracts ask for).
+            match (&self.parent_proof, &self.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == self.parent.depth_exec()
+                        && j.depth_exec() == self.parent.depth_exec())
+                    {
+                        crate::guard::refuse("Member: union-find proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("Member: union-find proof-column shape does not match the build"),
+            }
+        }
+        self.restore_frames(depth);
+        proof {
+            reveal(crate::union_find::uf_archive_agrees);
+            self.parent.lemma_snapshots_len();
+            assert(self.archive().len() == depth as int);
+            assert forall|k: int| 0 <= k < depth as int
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int));
+        }
+    }
+
+    fn reset_frame(&mut self, depth: usize) {
+        if !(depth < self.parent.depth_exec()) {
+            crate::guard::refuse("Member::reset_frame: depth is not below the union-find's");
+        }
+        if !(self.parent.depth_exec() < u32::MAX as usize) {
+            crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::union_find::uf_archive_agrees); pre.parent.lemma_snapshots_len(); }
+        if PROOFS {
+            // The proof columns' depth is checked at runtime, as the
+            // composite's own `pop_scope` does (the archive agreement keeps
+            // them in step; the check is what the cores' contracts ask for).
+            match (&self.parent_proof, &self.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == self.parent.depth_exec()
+                        && j.depth_exec() == self.parent.depth_exec())
+                    {
+                        crate::guard::refuse("Member: union-find proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("Member: union-find proof-column shape does not match the build"),
+            }
+        }
+        self.reset_frames(depth);
+        proof {
+            reveal(crate::union_find::uf_archive_agrees);
+            self.parent.lemma_snapshots_len();
+            assert(self.archive().len() == depth as int + 1);
+            assert forall|k: int| 0 <= k < depth as int + 1
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int + 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int + 1));
+        }
+    }
+
+    fn pop_frame(&mut self) {
+        let d = self.parent.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("Member::pop_frame: no open frame");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::union_find::uf_archive_agrees); pre.parent.lemma_snapshots_len(); }
+        if PROOFS {
+            // The proof columns' depth is checked at runtime, as the
+            // composite's own `pop_scope` does (the archive agreement keeps
+            // them in step; the check is what the cores' contracts ask for).
+            match (&self.parent_proof, &self.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == self.parent.depth_exec()
+                        && j.depth_exec() == self.parent.depth_exec())
+                    {
+                        crate::guard::refuse("Member: union-find proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("Member: union-find proof-column shape does not match the build"),
+            }
+        }
+        self.restore_frames(d - 1);
+        proof {
+            reveal(crate::union_find::uf_archive_agrees);
+            self.parent.lemma_snapshots_len();
+            assert(self.archive().len() == pre.depth_spec() - 1);
+            assert forall|k: int| 0 <= k < pre.depth_spec() - 1
+                implies self.archive()[k] == pre.archive().subrange(0, pre.depth_spec() - 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, pre.depth_spec() - 1));
+        }
+    }
+}
+
+impl<K, V, I, const TRACK: bool> Member for crate::map::SpMap<K, V, I, TRACK>
+where
+    K: Clone + core::hash::Hash + Eq,
+    I: crate::index_like::IndexLike,
+{
+    /// The log of insertions; the index is derived from it.
+    type Model = Seq<(K, V)>;
+
+    open spec fn wf(&self) -> bool {
+        &&& crate::map::SpMap::wf(self)
+        &&& TRACK
+    }
+
+    open spec fn depth_spec(&self) -> nat {
+        crate::map::SpMap::depth_spec(self)
+    }
+
+    open spec fn can_push(&self) -> bool {
+        crate::map::SpMap::depth_spec(self) < u32::MAX as nat
+    }
+
+    open spec fn model(&self) -> Seq<(K, V)> {
+        self.log_view()
+    }
+
+    open spec fn archive(&self) -> Seq<Seq<(K, V)>> {
+        self.log_snapshots_view()
+    }
+
+    proof fn lemma_archive_depth(&self) {
+    }
+
+    fn can_push_now(&self) -> (b: bool) {
+        self.log.depth() < u32::MAX as usize
+    }
+
+    fn depth_exec(&self) -> (d: usize) {
+        self.log.depth()
+    }
+
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        if !(self.log.depth() < u32::MAX as usize) {
+            crate::guard::refuse("Member::push_frame: the map cannot open another frame");
+        }
+        self.push_frames(shrink);
+    }
+
+    fn restore_frame(&mut self, depth: usize) {
+        if !(depth < self.log.depth()) {
+            crate::guard::refuse("Member::restore_frame: depth is not below the map's");
+        }
+        self.restore_frames(depth);
+    }
+
+    fn reset_frame(&mut self, depth: usize) {
+        if !(depth < self.log.depth()) {
+            crate::guard::refuse("Member::reset_frame: depth is not below the map's");
+        }
+        if !(self.log.depth() < u32::MAX as usize) {
+            crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
+        }
+        self.reset_frames(depth);
+    }
+
+    fn pop_frame(&mut self) {
+        if !(self.log.depth() >= 1) {
+            crate::guard::refuse("Member::pop_frame: no open frame");
+        }
+        crate::map::SpMap::pop_frame(self);
+    }
+}
+
+impl<K, L, S, const TRACK: bool, P> Member for crate::bplus::BPlusTreeSet<K, L, S, TRACK, P>
+where
+    K: crate::opt::DenseId,
+    L: crate::bplus_layout::NodeLayout<Word = <K as crate::opt::DenseId>::Index>,
+    S: crate::bplus_search::SearchKind,
+    P: crate::store_policy::TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
+    L::Node: core::default::Default,
+{
+    /// The node arena and the ghost tree it encodes.
+    type Model = (Seq<L::Node>, crate::bplus_tree::Tree);
+
+    open spec fn wf(&self) -> bool {
+        &&& crate::bplus::BPlusTreeSet::wf(self)
+        &&& TRACK
+    }
+
+    open spec fn depth_spec(&self) -> nat {
+        self.arena_depth_spec()
+    }
+
+    open spec fn can_push(&self) -> bool {
+        self.arena_depth_spec() < u32::MAX as nat
+    }
+
+    open spec fn model(&self) -> (Seq<L::Node>, crate::bplus_tree::Tree) {
+        (self.arena(), self.tree_spec())
+    }
+
+    open spec fn archive(&self) -> Seq<(Seq<L::Node>, crate::bplus_tree::Tree)> {
+        Seq::new(self.arena_snapshots_view().len(), |k: int| (
+            self.arena_snapshots_view()[k],
+            self.tree_snapshots_spec()[k],
+        ))
+    }
+
+    proof fn lemma_archive_depth(&self) {
+        self.nodes.lemma_snapshots_len();
+    }
+
+    fn can_push_now(&self) -> (b: bool) {
+        self.nodes.depth_exec() < u32::MAX as usize
+    }
+
+    fn depth_exec(&self) -> (d: usize) {
+        self.nodes.depth_exec()
+    }
+
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        if !(self.nodes.depth_exec() < u32::MAX as usize) {
+            crate::guard::refuse("Member::push_frame: the tree cannot open another frame");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::bplus::tree_archive_agrees); pre.nodes.lemma_snapshots_len(); }
+        self.push_frames(shrink);
+        proof {
+            reveal(crate::bplus::tree_archive_agrees);
+            self.nodes.lemma_snapshots_len();
+            assert(self.archive().len() == pre.archive().len() + 1);
+            assert forall|k: int| 0 <= k < pre.archive().len()
+                implies self.archive()[k] == pre.archive().push(Member::model(&pre))[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive()[pre.archive().len() as int] == Member::model(&pre));
+            assert(self.archive() =~= pre.archive().push(Member::model(&pre)));
+        }
+    }
+
+    fn restore_frame(&mut self, depth: usize) {
+        if !(depth < self.nodes.depth_exec()) {
+            crate::guard::refuse("Member::restore_frame: depth is not below the tree's");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::bplus::tree_archive_agrees); pre.nodes.lemma_snapshots_len(); }
+        self.restore_frames(depth);
+        proof {
+            reveal(crate::bplus::tree_archive_agrees);
+            self.nodes.lemma_snapshots_len();
+            assert(self.archive().len() == depth as int);
+            assert forall|k: int| 0 <= k < depth as int
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int));
+        }
+    }
+
+    fn reset_frame(&mut self, depth: usize) {
+        if !(depth < self.nodes.depth_exec()) {
+            crate::guard::refuse("Member::reset_frame: depth is not below the tree's");
+        }
+        if !(self.nodes.depth_exec() < u32::MAX as usize) {
+            crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::bplus::tree_archive_agrees); pre.nodes.lemma_snapshots_len(); }
+        self.reset_frames(depth);
+        proof {
+            reveal(crate::bplus::tree_archive_agrees);
+            self.nodes.lemma_snapshots_len();
+            assert(self.archive().len() == depth as int + 1);
+            assert forall|k: int| 0 <= k < depth as int + 1
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int + 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int + 1));
+        }
+    }
+
+    fn pop_frame(&mut self) {
+        let d = self.nodes.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("Member::pop_frame: no open frame");
+        }
+        let ghost pre = *self;
+        proof { reveal(crate::bplus::tree_archive_agrees); pre.nodes.lemma_snapshots_len(); }
+        self.restore_frames(d - 1);
+        proof {
+            reveal(crate::bplus::tree_archive_agrees);
+            self.nodes.lemma_snapshots_len();
+            assert(self.archive().len() == pre.depth_spec() - 1);
+            assert forall|k: int| 0 <= k < pre.depth_spec() - 1
+                implies self.archive()[k] == pre.archive().subrange(0, pre.depth_spec() - 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, pre.depth_spec() - 1));
+        }
+    }
+}
+
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P> Member
+    for crate::eclasses::EClasses<T, K, L, N, J, TRACK, PROOFS, P>
+where
+    T: crate::opt::DenseId,
+    K: crate::opt::DenseId<Index = <T as crate::opt::DenseId>::Index>,
+    L: crate::opt::DenseId,
+    N: crate::opt::DenseId + crate::tagged::Tagged + core::default::Default,
+    J: crate::tagged::Tagged + Copy + core::default::Default,
+    P: crate::store_policy::TaggedFamily<crate::circular_list::CircularListNode<crate::opt::Opt<K>, T>, <T as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<crate::eclasses::ClassData<L, T>, <T as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<<T as crate::opt::DenseId>::Index, <T as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<T, <T as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<u8, <T as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<J, <T as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<crate::list::ListHead<N>, <L as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::TaggedFamily<crate::list::ListNode<T, N>, <N as crate::opt::DenseId>::Index, TRACK>
+        + crate::store_policy::PlainFamily<crate::opt::Opt<T>, usize, TRACK>,
+{
+    /// Roots, ring partition, ring cells, class data, the repr set's sparse
+    /// and index columns, the use lists' partition, and the pool.
+    type Model = (Seq<usize>, Seq<Seq<usize>>, Seq<crate::circular_list::CircularListNode<crate::opt::Opt<K>, T>>, Seq<crate::eclasses::ClassData<L, T>>, Seq<<T as crate::opt::DenseId>::Index>, Seq<<T as crate::opt::DenseId>::Index>, Seq<Seq<usize>>, Seq<crate::opt::Opt<T>>);
+
+    open spec fn wf(&self) -> bool {
+        &&& crate::eclasses::EClasses::wf(self)
+        &&& TRACK
+    }
+
+    open spec fn depth_spec(&self) -> nat {
+        crate::eclasses::EClasses::depth_spec(self)
+    }
+
+    open spec fn can_push(&self) -> bool {
+        crate::eclasses::EClasses::depth_spec(self) < u32::MAX as nat
+    }
+
+    open spec fn model(&self) -> (Seq<usize>, Seq<Seq<usize>>, Seq<crate::circular_list::CircularListNode<crate::opt::Opt<K>, T>>, Seq<crate::eclasses::ClassData<L, T>>, Seq<<T as crate::opt::DenseId>::Index>, Seq<<T as crate::opt::DenseId>::Index>, Seq<Seq<usize>>, Seq<crate::opt::Opt<T>>) {
+        (
+            self.roots_view(),
+            self.entries_model_view(),
+            self.entries_nodes_view(),
+            self.reprs_dense_view(),
+            self.reprs_sparse_view(),
+            self.reprs_indices_view(),
+            self.uses_model_view(),
+            self.pool_view(),
+        )
+    }
+
+    open spec fn archive(&self) -> Seq<(Seq<usize>, Seq<Seq<usize>>, Seq<crate::circular_list::CircularListNode<crate::opt::Opt<K>, T>>, Seq<crate::eclasses::ClassData<L, T>>, Seq<<T as crate::opt::DenseId>::Index>, Seq<<T as crate::opt::DenseId>::Index>, Seq<Seq<usize>>, Seq<crate::opt::Opt<T>>)> {
+        Seq::new(self.pool_archive().len(), |k: int| (
+            self.roots_archive_view()[k],
+            self.entries_model_archive()[k],
+            self.entries_archive()[k],
+            self.reprs_dense_archive()[k],
+            self.reprs_sparse_archive()[k],
+            self.reprs_indices_archive()[k],
+            self.uses_model_archive()[k],
+            self.pool_archive()[k],
+        ))
+    }
+
+    proof fn lemma_archive_depth(&self) {
+    }
+
+    fn can_push_now(&self) -> (b: bool) {
+        proof { self.min_pool.lemma_snapshots_len(); }
+        self.min_pool.depth_exec() < u32::MAX as usize
+    }
+
+    fn depth_exec(&self) -> (d: usize) {
+        proof { self.min_pool.lemma_snapshots_len(); }
+        self.min_pool.depth_exec()
+    }
+
+    fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        if !self.can_push_now() {
+            crate::guard::refuse("Member::push_frame: the e-classes cannot open another frame");
+        }
+        let ghost pre = *self;
+        self.push_frames(shrink);
+        proof {
+            reveal(crate::eclasses::eg_archive_agrees);
+            assert(self.archive().len() == pre.archive().len() + 1);
+            assert forall|k: int| 0 <= k < pre.archive().len()
+                implies self.archive()[k] == pre.archive().push(pre.model())[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive()[pre.archive().len() as int] == pre.model());
+            assert(self.archive() =~= pre.archive().push(pre.model()));
+        }
+    }
+
+    fn restore_frame(&mut self, depth: usize) {
+        if !(depth < self.depth_exec()) {
+            crate::guard::refuse("Member::restore_frame: depth is not below the e-classes'");
+        }
+        let ghost pre = *self;
+        self.restore_frames(depth);
+        proof {
+            reveal(crate::eclasses::eg_archive_agrees);
+            assert(self.archive().len() == depth as int);
+            assert forall|k: int| 0 <= k < depth as int
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int));
+        }
+    }
+
+    fn reset_frame(&mut self, depth: usize) {
+        if !(depth < self.depth_exec()) {
+            crate::guard::refuse("Member::reset_frame: depth is not below the e-classes'");
+        }
+        if !(self.depth_exec() < u32::MAX as usize) {
+            crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
+        }
+        let ghost pre = *self;
+        self.reset_frames(depth);
+        proof {
+            reveal(crate::eclasses::eg_archive_agrees);
+            assert(self.archive().len() == depth as int + 1);
+            assert forall|k: int| 0 <= k < depth as int + 1
+                implies self.archive()[k] == pre.archive().subrange(0, depth as int + 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
+            assert(self.archive() =~= pre.archive().subrange(0, depth as int + 1));
+        }
+    }
+
+    fn pop_frame(&mut self) {
+        let d = self.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("Member::pop_frame: no open frame");
+        }
+        let ghost pre = *self;
+        self.restore_frames(d - 1);
+        proof {
+            reveal(crate::eclasses::eg_archive_agrees);
+            assert(self.archive().len() == pre.depth_spec() - 1);
+            assert forall|k: int| 0 <= k < pre.depth_spec() - 1
+                implies self.archive()[k] == pre.archive().subrange(0, pre.depth_spec() - 1)[k] by {
+                assert(self.archive()[k] == pre.archive()[k]);
+            }
             assert(self.archive() =~= pre.archive().subrange(0, pre.depth_spec() - 1));
         }
     }

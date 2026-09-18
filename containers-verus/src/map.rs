@@ -459,6 +459,26 @@ where
         MapToken { inner }
     }
 
+    /// Push a frame without minting (what a typed group drives): the log
+    /// seals its stratum, the index and the previous-occurrence column are
+    /// untouched.
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
+        requires old(self).wf(), TRACK, old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).log_view() == old(self).log_view(),
+            final(self).index_view() == old(self).index_view(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).log_snapshots_view() == old(self).log_snapshots_view().push(old(self).log_view()),
+    {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+        self.log.push_frame(shrink);
+        proof {
+            assert(self.log_view() == old(self).log_view());
+            assert(self.index@ == old(self).index@);
+        }
+    }
+
     // ------------------------------------------------------------------
     // Total-operation shell: the map
     // delegates every capacity/validity question to its single component.
@@ -672,6 +692,56 @@ where
         }
     }
 
+    /// Semantics B, token-free (what a typed group drives): the log resets
+    /// to its snapshot at `target` and keeps that frame open; the index is
+    /// unwound or rebuilt exactly as `restore` does.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).log_view() == old(self).log_snapshots_view()[target as int],
+            final(self).depth_spec() == target as nat + 1,
+            final(self).log_snapshots_view()
+                == old(self).log_snapshots_view().subrange(0, target as int + 1),
+    {
+        let ghost old_log = self.log_view();
+        let ghost old_prev = self.prev@;
+        // The target frame's saved length: what the log restore truncates to.
+        let saved_len = self.log.frames[target].as_usize();
+        let n = self.log.len().as_usize();
+        proof {
+            // The log's `wf`: a saved length is within the data and names the
+            // snapshot prefix.
+            assert(self.log.frames@[target as int].as_nat() <= n);
+            assert(old(self).log_snapshots_view()[target as int]
+                == old_log.subrange(0, saved_len as int));
+        }
+        if n - saved_len <= saved_len {
+            self.unwind_index(saved_len);
+            self.log.reset_frame(target);
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+        } else {
+            self.log.reset_frame(target);
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+            self.rebuild_index();
+        }
+    }
+
     /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
     /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
     /// token minted after it die. This is the SMT-LIB `pop` to the level below
@@ -766,6 +836,56 @@ where
             }
         } else {
             self.log.pop_frame();
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+            self.rebuild_index();
+        }
+    }
+
+    /// The legacy pop-restore, token-free (what a typed group drives): the
+    /// log restores to its snapshot at `target` and drops that frame with
+    /// everything above it; the index is unwound or rebuilt as `pop_frame`
+    /// does.
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).log_view() == old(self).log_snapshots_view()[target as int],
+            final(self).depth_spec() == target as nat,
+            final(self).log_snapshots_view()
+                == old(self).log_snapshots_view().subrange(0, target as int),
+    {
+        let ghost old_log = self.log_view();
+        let ghost old_prev = self.prev@;
+        // The target frame's saved length: what the log restore truncates to.
+        let saved_len = self.log.frames[target].as_usize();
+        let n = self.log.len().as_usize();
+        proof {
+            // The log's `wf`: a saved length is within the data and names the
+            // snapshot prefix.
+            assert(self.log.frames@[target as int].as_nat() <= n);
+            assert(old(self).log_snapshots_view()[target as int]
+                == old_log.subrange(0, saved_len as int));
+        }
+        if n - saved_len <= saved_len {
+            self.unwind_index(saved_len);
+            self.log.restore_frame(target);
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+        } else {
+            self.log.restore_frame(target);
             self.prev.truncate(saved_len);
             proof {
                 assert(self.log_view() == old_log.subrange(0, saved_len as int));

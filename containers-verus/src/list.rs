@@ -2555,6 +2555,70 @@ where
         }
     }
 
+    /// Semantics B, token-free (what a typed group drives): reset both arenas
+    /// to their snapshot at `target`, keep frame `target` open, and recover
+    /// the model archived at that mark.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).heads_depth_spec() == old(self).nodes_depth_spec(),
+            (target as nat) < old(self).heads_depth_spec(),
+            old(self).heads_depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).heads_view() == old(self).heads_snapshots_view()[target as int],
+            final(self).nodes_view() == old(self).nodes_snapshots_view()[target as int],
+            final(self).model_view() == old(self).model_snapshots_view()[target as int],
+            final(self).heads_snapshots_view()
+                == old(self).heads_snapshots_view().subrange(0, target as int + 1),
+            final(self).nodes_snapshots_view()
+                == old(self).nodes_snapshots_view().subrange(0, target as int + 1),
+            final(self).model_snapshots_view()
+                == old(self).model_snapshots_view().subrange(0, target as int + 1),
+            final(self).heads_depth_spec() == target as nat + 1,
+            final(self).heads_depth_spec() == final(self).nodes_depth_spec(),
+    {
+        let ghost snap_model = self.model_snapshots@[target as int];
+        self.heads.reset_frame(target);
+        self.nodes.reset_frame(target);
+        self.model = Ghost(snap_model);
+        // Truncate the archive in lockstep with the vec snapshot stacks
+        // (restore leaves frames@.len() == frame_idx on both).
+        self.model_snapshots =
+            Ghost(self.model_snapshots@.subrange(0, target as int + 1));
+        proof {
+            reveal(arena_archive_agrees);
+            let f = target as int;
+            // Old-frame agreement (reveal the old(self) instance).
+            assert(arena_archive_agrees(old(self).model_snapshots@,
+                old(self).heads.snapshots_view(), old(self).nodes.snapshots_view()));
+            // The archived model at frame f describes the restored views:
+            // this is BOTH the live-wf reconstruction (in-range/disjoint/
+            // cache clauses over the restored heads/nodes) AND the model
+            // ensures.
+            assert(arena_model_wf(snap_model,
+                old(self).heads.snapshots_view()[f], old(self).nodes.snapshots_view()[f]));
+            assert(self.heads_view() == old(self).heads.snapshots_view()[f]);
+            assert(self.nodes_view() == old(self).nodes.snapshots_view()[f]);
+            // Truncated archive agrees frame-wise with the truncated stacks.
+            assert(self.heads.snapshots_view()
+                =~= old(self).heads.snapshots_view().subrange(0, f + 1));
+            assert(self.nodes.snapshots_view()
+                =~= old(self).nodes.snapshots_view().subrange(0, f + 1));
+            assert forall|k: int| 0 <= k < self.model_snapshots@.len()
+                implies arena_model_wf(
+                    #[trigger] self.model_snapshots@[k],
+                    self.heads.snapshots_view()[k], self.nodes.snapshots_view()[k]) by {
+                assert(self.model_snapshots@[k] == old(self).model_snapshots@[k]);
+                assert(self.heads.snapshots_view()[k] == old(self).heads.snapshots_view()[k]);
+                assert(self.nodes.snapshots_view()[k] == old(self).nodes.snapshots_view()[k]);
+            }
+            assert(arena_archive_agrees(self.model_snapshots@,
+                self.heads.snapshots_view(), self.nodes.snapshots_view()));
+        }
+    }
+
     // =======================================================================
     // Typed-id API for the production surface. Each method converts the
     // typed handle to the verified usize core through the DenseId axioms:

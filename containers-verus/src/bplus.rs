@@ -10491,6 +10491,76 @@ impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
             }
         }
 
+    /// Push a frame without minting (what a typed group drives): the arena
+    /// seals its stratum and the header and ghost tree are archived.
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).arena_depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).arena() == old(self).arena(),
+            final(self).tree_spec() == old(self).tree_spec(),
+            final(self).model() == old(self).model(),
+            final(self).root_spec() == old(self).root_spec(),
+            final(self).nkeys_spec() == old(self).nkeys_spec(),
+            final(self).arena_depth_spec() == old(self).arena_depth_spec() + 1,
+            final(self).arena_snapshots_view()
+                == old(self).arena_snapshots_view().push(old(self).arena()),
+            final(self).tree_snapshots_spec()
+                == old(self).tree_snapshots_spec().push(old(self).tree_spec()),
+        {
+        // Total-with-documented-panic: the erased TRACK and depth requires
+        // become explicit refuse branches; ensures bind returning paths only.
+            self.nodes.push_frame(shrink);
+            // Archive the header and ghost tree alongside the arena
+            // snapshot the inner mark just pushed.
+            self.header_archive.push((self.root, self.nkeys, self.last_leaf));
+            self.tree_snapshots = Ghost(self.tree_snapshots@.push(self.tree@));
+            proof {
+                reveal(tree_archive_agrees);
+                assert(tree_archive_agrees::<K, L, S, TRACK, P>(
+                    old(self).header_archive@, old(self).tree_snapshots@,
+                    old(self).nodes.snapshots_view()));
+                let k_new = self.header_archive@.len() - 1;
+                assert(self.nodes.snapshots_view()[k_new] == old(self).arena());
+                self.root.lemma_as_nat_bounded();
+                assert(self.header_archive@[k_new].0.as_nat() == self.root.as_nat());
+                assert forall|k: int| 0 <= k < self.header_archive@.len()
+                    implies Self::tree_state_wf(
+                            self.nodes.snapshots_view()[k],
+                            (#[trigger] self.header_archive@[k]).0.as_nat(),
+                            self.tree_snapshots@[k],
+                            self.header_archive@[k].1 as nat) by {
+                    if k < k_new {
+                        assert(self.header_archive@[k] == old(self).header_archive@[k]);
+                        assert(self.tree_snapshots@[k] == old(self).tree_snapshots@[k]);
+                        assert(self.nodes.snapshots_view()[k]
+                            == old(self).nodes.snapshots_view()[k]);
+                    }
+                }
+                // the new `last_leaf` clauses: at k_new it is `self.last_leaf`,
+                // which `wf`'s `last_leaf_ok` pins to the archived tree's rightmost
+                // leaf (the tree just archived IS `self.tree@`); below k_new the
+                // entries are the old archive's, which already agreed.
+                self.last_leaf.lemma_as_nat_bounded();
+                assert forall|k: int| 0 <= k < self.header_archive@.len()
+                    implies (#[trigger] self.header_archive@[k]).2.as_nat()
+                        == crate::bplus_tree::last_leaf_id(self.tree_snapshots@[k]) by {
+                    if k < k_new {
+                        assert(self.header_archive@[k] == old(self).header_archive@[k]);
+                        assert(self.tree_snapshots@[k] == old(self).tree_snapshots@[k]);
+                    } else {
+                        assert(self.tree_snapshots@[k] == self.tree@);
+                    }
+                }
+                assert(tree_archive_agrees::<K, L, S, TRACK, P>(
+                    self.header_archive@, self.tree_snapshots@,
+                    self.nodes.snapshots_view()));
+            }
+        }
+
     /// Roll the whole tree back to the state captured by `token`. The arena Vec
     /// rolls back to its frame snapshot; `root`/`nkeys` come from the token; and
     /// the ghost model `tree@` is supplied as `snap_tree` (the ghost tree that was
@@ -10586,6 +10656,96 @@ impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
             proof {
                 reveal(tree_archive_agrees);
                 let f = token.nodes.frame_idx_spec() as int;
+                // nodes.restore put the arena at the snapshot; the archived
+                // agreement at frame f is tree_state_wf over exactly that
+                // snapshot + the archived header + tree.
+                assert(self.arena()
+                    == old(self).nodes.snapshots_view()[f]);
+                // Truncated archives agree with the truncated snapshot stack.
+                assert(self.nodes.snapshots_view()
+                    =~= old(self).nodes.snapshots_view().subrange(0, f + 1));
+                assert forall|k: int| 0 <= k < self.header_archive@.len()
+                    implies Self::tree_state_wf(
+                            self.nodes.snapshots_view()[k],
+                            (#[trigger] self.header_archive@[k]).0.as_nat(),
+                            self.tree_snapshots@[k],
+                            self.header_archive@[k].1 as nat) by {
+                    assert(self.header_archive@[k] == old(self).header_archive@[k]);
+                    assert(self.tree_snapshots@[k] == old(self).tree_snapshots@[k]);
+                    assert(self.nodes.snapshots_view()[k]
+                        == old(self).nodes.snapshots_view()[k]);
+                }
+                assert(tree_archive_agrees::<K, L, S, TRACK, P>(
+                    self.header_archive@, self.tree_snapshots@,
+                    self.nodes.snapshots_view()));
+            }
+        }
+
+    /// Semantics B, token-free (what a typed group drives): the arena resets
+    /// to its snapshot at `target` and keeps that frame open; the header and
+    /// ghost tree archived at that mark come back.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        where L::Node: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).arena_depth_spec(),
+            old(self).arena_depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).tree_spec() == old(self).tree_snapshots_spec()[target as int],
+            final(self).arena() == old(self).arena_snapshots_view()[target as int],
+            final(self).model() == crate::bplus_tree::tree_keys(
+                old(self).tree_snapshots_spec()[target as int]),
+            final(self).arena_snapshots_view()
+                == old(self).arena_snapshots_view().subrange(0, target as int + 1),
+            final(self).tree_snapshots_spec()
+                == old(self).tree_snapshots_spec().subrange(0, target as int + 1),
+            final(self).arena_depth_spec() == target as nat + 1,
+        {
+        // Total-with-documented-panic: is_valid_token answers exactly "would
+        // restore succeed now"; a stale/foreign token refuses here.
+            // Runtime guards, all before `self.nodes.restore`
+            // mutates the arena, so a bad token cannot leave the tree
+            // half-restored. The header comes from the internal archive (in
+            // lockstep with the vec frames — wf agreement), so no token
+            // header validation is needed: those fields are ignored.
+            proof {
+                reveal(tree_archive_agrees);
+                // Archive lengths equal the snapshot stack (wf agreement); the
+                // vec's own wf (wf_for_snap's parallel-stacks clause) gives
+                // snapshots.len() == frames.len(), so frame_idx indexes the
+                // archives.
+            }
+            let ghost snap_tree = self.tree_snapshots@[target as int];
+            // Recover the archived header. frame_idx < frames.len() ==
+            // header_archive.len() (agreement), so the indexing is in-bounds;
+            // the guard above pins it for unverified callers too.
+            crate::guard::check_precondition(
+                (target) < self.header_archive.len(),
+                "BPlusTreeSet::reset_frames: frame beyond header archive",
+            );
+            // The archive stores both indices at their own type, so recovering
+            // the header is three moves with no conversion that could fail: the
+            // two unreachable `try_from_usize` arms this replaced each needed an
+            // `assert(false)` to discharge.
+            let (saved_root, saved_nkeys, saved_last_leaf) =
+                self.header_archive[target];
+            self.nodes.reset_frame(target);
+            self.root = saved_root;
+            self.nkeys = saved_nkeys;
+            // `last_leaf` comes back with the rest of the header: the agreement
+            // clause pins it to the archived ghost tree's rightmost leaf, so
+            // `last_leaf_ok` is re-established from the archive alone.
+            self.last_leaf = saved_last_leaf;
+            self.tree = Ghost(snap_tree);
+            // Truncate the archives in lockstep with the vec snapshot stack.
+            self.header_archive.truncate(target + 1);
+            self.tree_snapshots =
+                Ghost(self.tree_snapshots@.subrange(0, target as int + 1));
+            proof {
+                reveal(tree_archive_agrees);
+                let f = target as int;
                 // nodes.restore put the arena at the snapshot; the archived
                 // agreement at frame f is tree_state_wf over exactly that
                 // snapshot + the archived header + tree.
@@ -10780,6 +10940,95 @@ impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
             proof {
                 reveal(tree_archive_agrees);
                 let f = d as int - 1;
+                // nodes.restore put the arena at the snapshot; the archived
+                // agreement at frame f is tree_state_wf over exactly that
+                // snapshot + the archived header + tree.
+                assert(self.arena()
+                    == old(self).nodes.snapshots_view()[f]);
+                // Truncated archives agree with the truncated snapshot stack.
+                assert(self.nodes.snapshots_view()
+                    =~= old(self).nodes.snapshots_view().subrange(0, f));
+                assert forall|k: int| 0 <= k < self.header_archive@.len()
+                    implies Self::tree_state_wf(
+                            self.nodes.snapshots_view()[k],
+                            (#[trigger] self.header_archive@[k]).0.as_nat(),
+                            self.tree_snapshots@[k],
+                            self.header_archive@[k].1 as nat) by {
+                    assert(self.header_archive@[k] == old(self).header_archive@[k]);
+                    assert(self.tree_snapshots@[k] == old(self).tree_snapshots@[k]);
+                    assert(self.nodes.snapshots_view()[k]
+                        == old(self).nodes.snapshots_view()[k]);
+                }
+                assert(tree_archive_agrees::<K, L, S, TRACK, P>(
+                    self.header_archive@, self.tree_snapshots@,
+                    self.nodes.snapshots_view()));
+            }
+        }
+
+    /// The legacy pop-restore, token-free (what a typed group drives): the
+    /// arena restores to its snapshot at `target` and drops that frame with
+    /// everything above it; the header and ghost tree archived at that mark
+    /// come back.
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        where L::Node: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).arena_depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).tree_spec() == old(self).tree_snapshots_spec()[target as int],
+            final(self).arena() == old(self).arena_snapshots_view()[target as int],
+            final(self).model() == crate::bplus_tree::tree_keys(
+                old(self).tree_snapshots_spec()[target as int]),
+            final(self).arena_snapshots_view()
+                == old(self).arena_snapshots_view().subrange(0, target as int),
+            final(self).tree_snapshots_spec()
+                == old(self).tree_snapshots_spec().subrange(0, target as int),
+            final(self).arena_depth_spec() == target as nat,
+        {
+        // Total-with-documented-panic: is_valid_token answers exactly "would
+        // restore succeed now"; a stale/foreign token refuses here.
+            // Runtime guards, all before `self.nodes.restore`
+            // mutates the arena, so a bad token cannot leave the tree
+            // half-restored. The header comes from the internal archive (in
+            // lockstep with the vec frames — wf agreement), so no token
+            // header validation is needed: those fields are ignored.
+            proof {
+                reveal(tree_archive_agrees);
+                // Archive lengths equal the snapshot stack (wf agreement); the
+                // vec's own wf (wf_for_snap's parallel-stacks clause) gives
+                // snapshots.len() == frames.len(), so frame_idx indexes the
+                // archives.
+            }
+            let ghost snap_tree = self.tree_snapshots@[target as int];
+            // Recover the archived header. frame_idx < frames.len() ==
+            // header_archive.len() (agreement), so the indexing is in-bounds;
+            // the guard above pins it for unverified callers too.
+            if !(target < self.header_archive.len()) {
+                crate::guard::refuse("BPlusTreeSet::restore_frames: header archive out of step");
+            }
+            // The archive stores both indices at their own type, so recovering
+            // the header is three moves with no conversion that could fail: the
+            // two unreachable `try_from_usize` arms this replaced each needed an
+            // `assert(false)` to discharge.
+            let (saved_root, saved_nkeys, saved_last_leaf) =
+                self.header_archive[target];
+            self.nodes.restore_frame(target);
+            self.root = saved_root;
+            self.nkeys = saved_nkeys;
+            // `last_leaf` comes back with the rest of the header: the agreement
+            // clause pins it to the archived ghost tree's rightmost leaf, so
+            // `last_leaf_ok` is re-established from the archive alone.
+            self.last_leaf = saved_last_leaf;
+            self.tree = Ghost(snap_tree);
+            // Truncate the archives in lockstep with the vec snapshot stack.
+            self.header_archive.truncate(target);
+            self.tree_snapshots =
+                Ghost(self.tree_snapshots@.subrange(0, target as int));
+            proof {
+                reveal(tree_archive_agrees);
+                let f = target as int;
                 // nodes.restore put the arena at the snapshot; the archived
                 // agreement at frame f is tree_state_wf over exactly that
                 // snapshot + the archived header + tree.

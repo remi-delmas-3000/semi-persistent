@@ -3040,6 +3040,177 @@ where
         }
     }
 
+    /// Push a frame on every component without minting (what a typed group
+    /// drives): `mark` minus the token bundling, over the components' own
+    /// structural pushes.
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
+        requires old(self).wf(), TRACK, old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).n_spec() == old(self).n_spec(),
+            final(self).roots_view() == old(self).roots_view(),
+            final(self).num_classes_spec() == old(self).num_classes_spec(),
+            final(self).min_width_spec() == old(self).min_width_spec(),
+            final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).entries_model_view() == old(self).entries_model_view(),
+            final(self).entries_nodes_view() == old(self).entries_nodes_view(),
+            final(self).reprs_dense_view() == old(self).reprs_dense_view(),
+            final(self).reprs_sparse_view() == old(self).reprs_sparse_view(),
+            final(self).reprs_indices_view() == old(self).reprs_indices_view(),
+            final(self).uses_model_view() == old(self).uses_model_view(),
+            final(self).pool_view() == old(self).pool_view(),
+            final(self).roots_archive_view() == old(self).roots_archive_view().push(old(self).roots_view()),
+            final(self).entries_model_archive() == old(self).entries_model_archive().push(old(self).entries_model_view()),
+            final(self).entries_archive() == old(self).entries_archive().push(old(self).entries_nodes_view()),
+            final(self).reprs_dense_archive() == old(self).reprs_dense_archive().push(old(self).reprs_dense_view()),
+            final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().push(old(self).reprs_sparse_view()),
+            final(self).reprs_indices_archive() == old(self).reprs_indices_archive().push(old(self).reprs_indices_view()),
+            final(self).uses_model_archive() == old(self).uses_model_archive().push(old(self).uses_model_view()),
+            final(self).pool_archive() == old(self).pool_archive().push(old(self).pool_view()),
+    {
+        let ghost o = *old(self);
+        let d = self.min_pool.depth_exec();
+        if !(self.entries.entries.depth_exec() == d
+            && self.reprs.dense.depth_exec() == d
+            && self.reprs.sparse.depth_exec() == d
+            && self.reprs.indices.depth_exec() == d
+            && self.uf.parent.depth_exec() == d
+            && self.uf.rank.depth_exec() == d
+            && self.uses.heads.depth_exec() == d
+            && self.uses.nodes.depth_exec() == d)
+        {
+            crate::guard::refuse("EClasses: components out of step");
+        }
+        if PROOFS {
+            match (&self.uf.parent_proof, &self.uf.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == d && j.depth_exec() == d) {
+                        crate::guard::refuse("EClasses: proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("EClasses: proof-column shape does not match the build"),
+            }
+        }
+        // Every component's own headroom, checked before any moves so a
+        // refusal cannot leave the aggregate out of step.
+        if !(self.entries.entries.store.raw_len() < usize::MAX
+            && self.entries.entries.depth_exec() < (u32::MAX as usize))
+        {
+            crate::guard::refuse("EClasses::push_frames: ring cannot open another frame");
+        }
+        if !(self.reprs.dense.can_mark() && self.reprs.sparse.can_mark() && self.reprs.indices.can_mark()) {
+            crate::guard::refuse("EClasses::push_frames: repr set cannot open another frame");
+        }
+        if !(self.uf.parent.can_mark() && self.uf.rank.can_mark()) {
+            crate::guard::refuse("EClasses::push_frames: union-find cannot open another frame");
+        }
+        if !(self.uses.heads.store.raw_len() < usize::MAX
+            && self.uses.nodes.store.raw_len() < usize::MAX
+            && self.uses.heads.depth_exec() < u32::MAX as usize
+            && self.uses.nodes.depth_exec() < u32::MAX as usize)
+        {
+            crate::guard::refuse("EClasses::push_frames: use lists cannot open another frame");
+        }
+        if !self.min_pool.can_mark() {
+            crate::guard::refuse("EClasses::push_frames: pool cannot open another frame");
+        }
+        self.entries.push_frames(shrink);
+        self.reprs.push_frames(shrink);
+        self.uf.push_frames(shrink);
+        self.uses.push_frames(shrink);
+        self.min_pool.push_frame(shrink);
+        proof {
+            reveal(eg_archive_agrees);
+            assert(eg_archive_agrees::<T, K, L, N>(
+                o.entries.model_snapshots_view(),
+                o.entries.entries_snapshots_view(),
+                o.uf.roots_snapshots_view(),
+                o.reprs.dense_snapshots_view(),
+                o.reprs.sparse_snapshots_view(),
+                o.reprs.indices_snapshots_view(),
+                o.uses.model_snapshots_view(),
+                o.uses.nodes_snapshots_view(),
+                o.min_pool.snapshots_view(),
+                o.min_width as nat));
+            let k_new = self.entries.model_snapshots_view().len() - 1;
+            // the pushed frame archives the live views; the live joint
+            // invariant IS eg_model_wf over them. The payload projection of
+            // the pushed cell snapshot is the live payload_seq.
+            assert(ring_payloads(self.entries.entries_snapshots_view()[k_new])
+                =~= o.entries.payload_seq());
+            assert(eg_model_wf::<T, K, L, N>(
+                self.entries.model_snapshots_view()[k_new],
+                ring_payloads(self.entries.entries_snapshots_view()[k_new]),
+                self.uf.roots_snapshots_view()[k_new],
+                self.reprs.dense_snapshots_view()[k_new],
+                self.reprs.sparse_snapshots_view()[k_new],
+                self.reprs.indices_snapshots_view()[k_new],
+                self.uses.model_snapshots_view()[k_new],
+                self.uses.nodes_snapshots_view()[k_new],
+                self.min_pool.snapshots_view()[k_new],
+                self.min_width as nat));
+            assert(crate::sparse_set::sparse_set_snap_wf(
+                self.reprs.dense_snapshots_view()[k_new],
+                self.reprs.sparse_snapshots_view()[k_new],
+                self.reprs.indices_snapshots_view()[k_new]));
+            assert forall|k: int| 0 <= k < self.entries.model_snapshots_view().len()
+                implies eg_model_wf::<T, K, L, N>(
+                    #[trigger] self.entries.model_snapshots_view()[k],
+                    ring_payloads(self.entries.entries_snapshots_view()[k]),
+                    self.uf.roots_snapshots_view()[k],
+                    self.reprs.dense_snapshots_view()[k],
+                    self.reprs.sparse_snapshots_view()[k],
+                    self.reprs.indices_snapshots_view()[k],
+                    self.uses.model_snapshots_view()[k],
+                    self.uses.nodes_snapshots_view()[k],
+                    self.min_pool.snapshots_view()[k],
+                    self.min_width as nat)
+                && crate::sparse_set::sparse_set_snap_wf(
+                    self.reprs.dense_snapshots_view()[k],
+                    self.reprs.sparse_snapshots_view()[k],
+                    self.reprs.indices_snapshots_view()[k]) by {
+                if k < k_new {
+                    assert(self.entries.model_snapshots_view()[k]
+                        == o.entries.model_snapshots_view()[k]);
+                    assert(self.entries.entries_snapshots_view()[k]
+                        == o.entries.entries_snapshots_view()[k]);
+                    assert(self.uf.roots_snapshots_view()[k]
+                        == o.uf.roots_snapshots_view()[k]);
+                    assert(self.reprs.dense_snapshots_view()[k]
+                        == o.reprs.dense_snapshots_view()[k]);
+                    assert(self.reprs.sparse_snapshots_view()[k]
+                        == o.reprs.sparse_snapshots_view()[k]);
+                    assert(self.reprs.indices_snapshots_view()[k]
+                        == o.reprs.indices_snapshots_view()[k]);
+                    assert(self.uses.model_snapshots_view()[k]
+                        == o.uses.model_snapshots_view()[k]);
+                    assert(self.uses.nodes_snapshots_view()[k]
+                        == o.uses.nodes_snapshots_view()[k]);
+                    assert(self.min_pool.snapshots_view()[k]
+                        == o.min_pool.snapshots_view()[k]);
+                }
+            }
+            // pool monotonicity: old pairs carry; pairs ending at the new
+            // frame are bounded by the live length it archives.
+            assert forall|k1: int, k2: int|
+                0 <= k1 <= k2 < self.min_pool.snapshots_view().len()
+                implies (#[trigger] self.min_pool.snapshots_view()[k1]).len()
+                    <= (#[trigger] self.min_pool.snapshots_view()[k2]).len() by {
+                if k2 < k_new {
+                    assert(self.min_pool.snapshots_view()[k1]
+                        == o.min_pool.snapshots_view()[k1]);
+                    assert(self.min_pool.snapshots_view()[k2]
+                        == o.min_pool.snapshots_view()[k2]);
+                } else if k1 < k_new {
+                    assert(self.min_pool.snapshots_view()[k1]
+                        == o.min_pool.snapshots_view()[k1]);
+                    assert(self.min_pool.snapshots_view()[k1].len()
+                        <= o.min_pool.view().len());
+                }
+            }
+        }
+    }
+
     /// Shared-history mark (doc 10): one genealogy write in `History`, then a
     /// frame push on every member via the history-free `push_frames`/`push_frame`
     /// primitives — so the branch genealogy lives once for the whole e-graph
@@ -3364,6 +3535,162 @@ where
         }
     }
 
+    /// Semantics B, token-free (what a typed group drives): every component
+    /// resets to its snapshot at `target` and keeps that frame open; the
+    /// aggregate's archive at `target` is the jointly valid state it lands in.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).min_width_spec() == old(self).min_width_spec(),
+            ({
+                let f = target as int;
+                &&& final(self).roots_view() == old(self).roots_archive_view()[f]
+                &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
+                &&& final(self).depth_spec() == target as nat + 1
+                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f + 1)
+                &&& final(self).entries_model_view() == old(self).entries_model_archive()[f]
+                &&& final(self).entries_nodes_view() == old(self).entries_archive()[f]
+                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f + 1)
+                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f + 1)
+                &&& final(self).reprs_dense_view() == old(self).reprs_dense_archive()[f]
+                &&& final(self).reprs_sparse_view() == old(self).reprs_sparse_archive()[f]
+                &&& final(self).reprs_indices_view() == old(self).reprs_indices_archive()[f]
+                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f + 1)
+                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f + 1)
+                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f + 1)
+                &&& final(self).uses_model_view() == old(self).uses_model_archive()[f]
+                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f + 1)
+                &&& final(self).pool_view() == old(self).pool_archive()[f]
+                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f + 1)
+            }),
+    {
+        let d = self.min_pool.depth_exec();
+        if !(self.entries.entries.depth_exec() == d
+            && self.reprs.dense.depth_exec() == d
+            && self.reprs.sparse.depth_exec() == d
+            && self.reprs.indices.depth_exec() == d
+            && self.uf.parent.depth_exec() == d
+            && self.uf.rank.depth_exec() == d
+            && self.uses.heads.depth_exec() == d
+            && self.uses.nodes.depth_exec() == d)
+        {
+            crate::guard::refuse("EClasses: components out of step");
+        }
+        if PROOFS {
+            match (&self.uf.parent_proof, &self.uf.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == d && j.depth_exec() == d) {
+                        crate::guard::refuse("EClasses: proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("EClasses: proof-column shape does not match the build"),
+            }
+        }
+        if !(target < d) {
+            crate::guard::refuse("EClasses::reset_frames: target is not below the depth");
+        }
+        let ghost o = *old(self);
+        let ghost f = target as int;
+        proof {
+            reveal(eg_archive_agrees);
+            assert(eg_archive_agrees::<T, K, L, N>(
+                o.entries.model_snapshots_view(),
+                o.entries.entries_snapshots_view(),
+                o.uf.roots_snapshots_view(),
+                o.reprs.dense_snapshots_view(),
+                o.reprs.sparse_snapshots_view(),
+                o.reprs.indices_snapshots_view(),
+                o.uses.model_snapshots_view(),
+                o.uses.nodes_snapshots_view(),
+                o.min_pool.snapshots_view(),
+                o.min_width as nat));
+            // the archived frame f is a jointly-valid state; in particular
+            // the repr triple is sparse-set well-formed, which is
+            // SparseSet::restore's precondition.
+            assert(crate::sparse_set::sparse_set_snap_wf(
+                o.reprs.dense_snapshots_view()[f],
+                o.reprs.sparse_snapshots_view()[f],
+                o.reprs.indices_snapshots_view()[f]));
+        }
+        self.entries.reset_frames(target);
+        self.reprs.reset_frames(target);
+        self.uf.reset_frames(target);
+        self.uses.reset_frames(target);
+        self.min_pool.reset_frame(target);
+        proof {
+            reveal(eg_archive_agrees);
+            // restored views are the archived frame-f views.
+            assert(self.entries.model_view() == o.entries.model_snapshots_view()[f]);
+            assert(self.entries.payload_seq()
+                =~= ring_payloads(o.entries.entries_snapshots_view()[f]));
+            assert(self.uf.roots_view() == o.uf.roots_snapshots_view()[f]);
+            assert(eg_model_wf::<T, K, L, N>(
+                self.entries.model_view(), self.entries.payload_seq(),
+                self.uf.roots_view(), self.reprs.dense_view(),
+                self.reprs.sparse_view(), self.reprs.indices_view(),
+                self.uses.model_view(), self.uses.nodes_view(),
+                self.min_pool.view(), self.min_width as nat));
+            // truncated stacks agree per frame below f.
+            assert forall|k: int| 0 <= k < self.entries.model_snapshots_view().len()
+                implies eg_model_wf::<T, K, L, N>(
+                    #[trigger] self.entries.model_snapshots_view()[k],
+                    ring_payloads(self.entries.entries_snapshots_view()[k]),
+                    self.uf.roots_snapshots_view()[k],
+                    self.reprs.dense_snapshots_view()[k],
+                    self.reprs.sparse_snapshots_view()[k],
+                    self.reprs.indices_snapshots_view()[k],
+                    self.uses.model_snapshots_view()[k],
+                    self.uses.nodes_snapshots_view()[k],
+                    self.min_pool.snapshots_view()[k],
+                    self.min_width as nat)
+                && crate::sparse_set::sparse_set_snap_wf(
+                    self.reprs.dense_snapshots_view()[k],
+                    self.reprs.sparse_snapshots_view()[k],
+                    self.reprs.indices_snapshots_view()[k]) by {
+                assert(self.entries.model_snapshots_view()[k]
+                    == o.entries.model_snapshots_view()[k]);
+                assert(self.entries.entries_snapshots_view()[k]
+                    == o.entries.entries_snapshots_view()[k]);
+                assert(self.uf.roots_snapshots_view()[k]
+                    == o.uf.roots_snapshots_view()[k]);
+                assert(self.reprs.dense_snapshots_view()[k]
+                    == o.reprs.dense_snapshots_view()[k]);
+                assert(self.reprs.sparse_snapshots_view()[k]
+                    == o.reprs.sparse_snapshots_view()[k]);
+                assert(self.reprs.indices_snapshots_view()[k]
+                    == o.reprs.indices_snapshots_view()[k]);
+                assert(self.uses.model_snapshots_view()[k]
+                    == o.uses.model_snapshots_view()[k]);
+                assert(self.uses.nodes_snapshots_view()[k]
+                    == o.uses.nodes_snapshots_view()[k]);
+                assert(self.min_pool.snapshots_view()[k]
+                    == o.min_pool.snapshots_view()[k]);
+            }
+            assert forall|k1: int, k2: int|
+                0 <= k1 <= k2 < self.min_pool.snapshots_view().len()
+                implies (#[trigger] self.min_pool.snapshots_view()[k1]).len()
+                    <= (#[trigger] self.min_pool.snapshots_view()[k2]).len() by {
+                assert(self.min_pool.snapshots_view()[k1]
+                    == o.min_pool.snapshots_view()[k1]);
+                assert(self.min_pool.snapshots_view()[k2]
+                    == o.min_pool.snapshots_view()[k2]);
+            }
+            // archived pools below f are bounded by the restored pool
+            // (monotonicity at (k, f)).
+            assert forall|k: int| 0 <= k < self.min_pool.snapshots_view().len()
+                implies (#[trigger] self.min_pool.snapshots_view()[k]).len()
+                    <= self.min_pool.view().len() by {
+                assert(o.min_pool.snapshots_view()[k].len()
+                    <= o.min_pool.snapshots_view()[f].len());
+            }
+        }
+    }
+
     /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
     /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
     /// token minted after it die. This is the SMT-LIB `pop` to the level below
@@ -3582,6 +3909,161 @@ where
         self.uf.pop_scope();
         self.uses.pop_scope();
         self.min_pool.pop_scope();
+        proof {
+            reveal(eg_archive_agrees);
+            // restored views are the archived frame-f views.
+            assert(self.entries.model_view() == o.entries.model_snapshots_view()[f]);
+            assert(self.entries.payload_seq()
+                =~= ring_payloads(o.entries.entries_snapshots_view()[f]));
+            assert(self.uf.roots_view() == o.uf.roots_snapshots_view()[f]);
+            assert(eg_model_wf::<T, K, L, N>(
+                self.entries.model_view(), self.entries.payload_seq(),
+                self.uf.roots_view(), self.reprs.dense_view(),
+                self.reprs.sparse_view(), self.reprs.indices_view(),
+                self.uses.model_view(), self.uses.nodes_view(),
+                self.min_pool.view(), self.min_width as nat));
+            // truncated stacks agree per frame below f.
+            assert forall|k: int| 0 <= k < self.entries.model_snapshots_view().len()
+                implies eg_model_wf::<T, K, L, N>(
+                    #[trigger] self.entries.model_snapshots_view()[k],
+                    ring_payloads(self.entries.entries_snapshots_view()[k]),
+                    self.uf.roots_snapshots_view()[k],
+                    self.reprs.dense_snapshots_view()[k],
+                    self.reprs.sparse_snapshots_view()[k],
+                    self.reprs.indices_snapshots_view()[k],
+                    self.uses.model_snapshots_view()[k],
+                    self.uses.nodes_snapshots_view()[k],
+                    self.min_pool.snapshots_view()[k],
+                    self.min_width as nat)
+                && crate::sparse_set::sparse_set_snap_wf(
+                    self.reprs.dense_snapshots_view()[k],
+                    self.reprs.sparse_snapshots_view()[k],
+                    self.reprs.indices_snapshots_view()[k]) by {
+                assert(self.entries.model_snapshots_view()[k]
+                    == o.entries.model_snapshots_view()[k]);
+                assert(self.entries.entries_snapshots_view()[k]
+                    == o.entries.entries_snapshots_view()[k]);
+                assert(self.uf.roots_snapshots_view()[k]
+                    == o.uf.roots_snapshots_view()[k]);
+                assert(self.reprs.dense_snapshots_view()[k]
+                    == o.reprs.dense_snapshots_view()[k]);
+                assert(self.reprs.sparse_snapshots_view()[k]
+                    == o.reprs.sparse_snapshots_view()[k]);
+                assert(self.reprs.indices_snapshots_view()[k]
+                    == o.reprs.indices_snapshots_view()[k]);
+                assert(self.uses.model_snapshots_view()[k]
+                    == o.uses.model_snapshots_view()[k]);
+                assert(self.uses.nodes_snapshots_view()[k]
+                    == o.uses.nodes_snapshots_view()[k]);
+                assert(self.min_pool.snapshots_view()[k]
+                    == o.min_pool.snapshots_view()[k]);
+            }
+            assert forall|k1: int, k2: int|
+                0 <= k1 <= k2 < self.min_pool.snapshots_view().len()
+                implies (#[trigger] self.min_pool.snapshots_view()[k1]).len()
+                    <= (#[trigger] self.min_pool.snapshots_view()[k2]).len() by {
+                assert(self.min_pool.snapshots_view()[k1]
+                    == o.min_pool.snapshots_view()[k1]);
+                assert(self.min_pool.snapshots_view()[k2]
+                    == o.min_pool.snapshots_view()[k2]);
+            }
+            // archived pools below f are bounded by the restored pool
+            // (monotonicity at (k, f)).
+            assert forall|k: int| 0 <= k < self.min_pool.snapshots_view().len()
+                implies (#[trigger] self.min_pool.snapshots_view()[k]).len()
+                    <= self.min_pool.view().len() by {
+                assert(o.min_pool.snapshots_view()[k].len()
+                    <= o.min_pool.snapshots_view()[f].len());
+            }
+        }
+    }
+
+    /// The legacy pop-restore, token-free (what a typed group drives): every
+    /// component restores to its snapshot at `target` and drops that frame
+    /// with everything above it.
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).min_width_spec() == old(self).min_width_spec(),
+            ({
+                let f = target as int;
+                &&& final(self).roots_view() == old(self).roots_archive_view()[f]
+                &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
+                &&& final(self).depth_spec() == target as nat
+                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f)
+                &&& final(self).entries_model_view() == old(self).entries_model_archive()[f]
+                &&& final(self).entries_nodes_view() == old(self).entries_archive()[f]
+                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f)
+                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f)
+                &&& final(self).reprs_dense_view() == old(self).reprs_dense_archive()[f]
+                &&& final(self).reprs_sparse_view() == old(self).reprs_sparse_archive()[f]
+                &&& final(self).reprs_indices_view() == old(self).reprs_indices_archive()[f]
+                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f)
+                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f)
+                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f)
+                &&& final(self).uses_model_view() == old(self).uses_model_archive()[f]
+                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f)
+                &&& final(self).pool_view() == old(self).pool_archive()[f]
+                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f)
+            }),
+    {
+        let d = self.min_pool.depth_exec();
+        if !(self.entries.entries.depth_exec() == d
+            && self.reprs.dense.depth_exec() == d
+            && self.reprs.sparse.depth_exec() == d
+            && self.reprs.indices.depth_exec() == d
+            && self.uf.parent.depth_exec() == d
+            && self.uf.rank.depth_exec() == d
+            && self.uses.heads.depth_exec() == d
+            && self.uses.nodes.depth_exec() == d)
+        {
+            crate::guard::refuse("EClasses: components out of step");
+        }
+        if PROOFS {
+            match (&self.uf.parent_proof, &self.uf.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == d && j.depth_exec() == d) {
+                        crate::guard::refuse("EClasses: proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("EClasses: proof-column shape does not match the build"),
+            }
+        }
+        if !(target < d) {
+            crate::guard::refuse("EClasses::restore_frames: target is not below the depth");
+        }
+        let ghost o = *old(self);
+        let ghost f = target as int;
+        proof {
+            reveal(eg_archive_agrees);
+            assert(eg_archive_agrees::<T, K, L, N>(
+                o.entries.model_snapshots_view(),
+                o.entries.entries_snapshots_view(),
+                o.uf.roots_snapshots_view(),
+                o.reprs.dense_snapshots_view(),
+                o.reprs.sparse_snapshots_view(),
+                o.reprs.indices_snapshots_view(),
+                o.uses.model_snapshots_view(),
+                o.uses.nodes_snapshots_view(),
+                o.min_pool.snapshots_view(),
+                o.min_width as nat));
+            // the archived frame f is a jointly-valid state; in particular
+            // the repr triple is sparse-set well-formed, which is
+            // SparseSet::restore's precondition.
+            assert(crate::sparse_set::sparse_set_snap_wf(
+                o.reprs.dense_snapshots_view()[f],
+                o.reprs.sparse_snapshots_view()[f],
+                o.reprs.indices_snapshots_view()[f]));
+        }
+        self.entries.restore_frames(target);
+        self.reprs.restore_frames(target);
+        self.uf.restore_frames(target);
+        self.uses.restore_frames(target);
+        self.min_pool.restore_frame(target);
         proof {
             reveal(eg_archive_agrees);
             // restored views are the archived frame-f views.

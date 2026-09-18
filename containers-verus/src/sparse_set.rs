@@ -113,6 +113,14 @@ where
         self.dense.depth_spec()
     }
 
+    pub open(crate) spec fn sparse_depth_spec(&self) -> nat {
+        self.sparse.depth_spec()
+    }
+
+    pub open(crate) spec fn indices_depth_spec(&self) -> nat {
+        self.indices.depth_spec()
+    }
+
     pub open(crate) spec fn sparse_view(&self) -> Seq<Idx> {
         self.sparse.view()
     }
@@ -1344,6 +1352,47 @@ where
         self.dense.restore_frame(target);
         self.sparse.restore_frame(target);
         self.indices.restore_frame(target);
+    }
+
+    /// Semantics B, token-free (what a typed group drives): reset the three
+    /// columns to their snapshot at `target` and keep frame `target` open. The
+    /// archive clause of `wf` at `target` is the restored triple's validity.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        where T: core::default::Default, Idx: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).dense.depth_spec() == old(self).sparse.depth_spec(),
+            old(self).dense.depth_spec() == old(self).indices.depth_spec(),
+            (target as nat) < old(self).dense.depth_spec(),
+            old(self).dense.depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).dense_view() == old(self).dense.snapshots_view()[target as int],
+            final(self).sparse_view() == old(self).sparse.snapshots_view()[target as int],
+            final(self).indices_view() == old(self).indices.snapshots_view()[target as int],
+            final(self).dense_snapshots_view()
+                == old(self).dense_snapshots_view().subrange(0, target as int + 1),
+            final(self).sparse_snapshots_view()
+                == old(self).sparse_snapshots_view().subrange(0, target as int + 1),
+            final(self).indices_snapshots_view()
+                == old(self).indices_snapshots_view().subrange(0, target as int + 1),
+            final(self).dense.depth_spec() == target as nat + 1,
+            final(self).dense.depth_spec() == final(self).sparse.depth_spec(),
+            final(self).dense.depth_spec() == final(self).indices.depth_spec(),
+    {
+        proof {
+            self.dense.lemma_partition_counts();
+            self.sparse.lemma_partition_counts();
+            self.indices.lemma_partition_counts();
+            assert(sparse_set_snap_wf(
+                self.dense.snapshots_view()[target as int],
+                self.sparse.snapshots_view()[target as int],
+                self.indices.snapshots_view()[target as int]));
+        }
+        self.dense.reset_frame(target);
+        self.sparse.reset_frame(target);
+        self.indices.reset_frame(target);
     }
 }
 
