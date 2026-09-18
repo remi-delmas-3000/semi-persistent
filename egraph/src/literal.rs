@@ -150,6 +150,11 @@ impl<L: LitVal, V: DenseId, const TRACK: bool> LitValStore<L, V, TRACK> {
             .try_restore(token.0)
             .expect("literal restore: token minted by this container's own mark");
     }
+
+    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.map.pop_scope();
+    }
 }
 
 /// Sort-dispatched literal parser.

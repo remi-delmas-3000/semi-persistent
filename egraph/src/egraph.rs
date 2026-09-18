@@ -3313,41 +3313,41 @@ where
         self.lits_marks.truncate(d + 1);
         self.unit_node_marks.truncate(d + 1);
         self.inverse_op_marks.truncate(d + 1);
-        let classes = self
+        let classes = *self
             .classes_marks
-            .pop()
+            .last()
             .expect("restore: member stack tracks history depth");
-        let nodes = self
+        let nodes = *self
             .nodes_marks
-            .pop()
+            .last()
             .expect("restore: member stack tracks history depth");
-        let sorts = self
+        let sorts = *self
             .sorts_marks
-            .pop()
+            .last()
             .expect("restore: member stack tracks history depth");
-        let ops = self
+        let ops = *self
             .ops_marks
-            .pop()
+            .last()
             .expect("restore: member stack tracks history depth");
-        let rules = self
+        let rules = *self
             .rules_marks
-            .pop()
+            .last()
             .expect("restore: member stack tracks history depth");
-        let axioms = self
+        let axioms = *self
             .axioms_marks
-            .pop()
+            .last()
             .expect("restore: member stack tracks history depth");
-        let lits = self
+        let lits = *self
             .lits_marks
-            .pop()
+            .last()
             .expect("restore: member stack tracks history depth");
-        let unit_node = self
+        let unit_node = *self
             .unit_node_marks
-            .pop()
+            .last()
             .expect("restore: member stack tracks history depth");
-        let inverse_op = self
+        let inverse_op = *self
             .inverse_op_marks
-            .pop()
+            .last()
             .expect("restore: member stack tracks history depth");
         if par {
             let (c, n, so, o, r, a, l) = (
@@ -3432,7 +3432,9 @@ where
         if *RESTORE_PROF_ON {
             restore_prof_record(7, t);
         }
-        // One branch-cut record for the whole set.
+        // One branch-cut record for the whole set. Semantics B (design doc 08
+        // §1): the checkpoint's frame stays open on every member, so its member
+        // tokens stay on the stacks; `history` cuts the tokens minted after it.
         self.history.restore_to(token.group);
         // Roll the outcome back with the graph: the mark-time value describes exactly the
         // restored state (mark() rebuilds first), so a post-restore reader never sees an
@@ -3444,6 +3446,36 @@ where
         // The repair watermark is a pair of counters over the *pre-restore* graph, and
         // restore moves both (touched cleared, classes regrown). Drop it so the next
         // `rebuild` rescans rather than trusting a comparison against a discarded state.
+        self.repair_state = None;
+    }
+
+    /// Drop the open top scope (the SMT-LIB `pop`): every member undoes and
+    /// drops its top frame and the scope's token dies. Panics on an empty
+    /// scope stack (the interpreter refuses a pop without push before this).
+    pub fn pop_scope(&mut self) {
+        assert!(self.history.depth() >= 1, "pop_scope: no open scope");
+        self.classes_marks.pop();
+        self.nodes_marks.pop();
+        self.sorts_marks.pop();
+        self.ops_marks.pop();
+        self.rules_marks.pop();
+        self.axioms_marks.pop();
+        self.lits_marks.pop();
+        self.unit_node_marks.pop();
+        self.inverse_op_marks.pop();
+        self.classes.pop_scope();
+        self.nodes.pop_scope();
+        self.sorts.pop_scope();
+        self.ops.pop_scope();
+        self.rules.pop_scope();
+        self.axioms.pop_scope();
+        self.lits.pop_scope();
+        self.unit_node.pop_scope();
+        self.inverse_op.pop_scope();
+        self.history.pop();
+        self.worklist.clear();
+        self.collisions.clear();
+        self.touched.clear();
         self.repair_state = None;
     }
 

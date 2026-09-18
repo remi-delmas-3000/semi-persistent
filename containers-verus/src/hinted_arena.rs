@@ -376,7 +376,7 @@ where
             r is Ok ==> final(self).view()
                     == old(self).snapshots_view()[token.frame_idx_spec() as int]
                 && final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
             r is Err ==> final(self).view() == old(self).view()
                 && final(self).snapshots_view() == old(self).snapshots_view(),
     {
@@ -413,7 +413,7 @@ where
                     implies self.hinted((#[trigger] self.snapshots_view()[k][j]).fp_spec(),
                         j as nat) by {
                     assert(self.snapshots_view()
-                        =~= pre.snapshots_view().subrange(0, ti));
+                        =~= pre.snapshots_view().subrange(0, ti + 1));
                     assert(self.snapshots_view()[k] == pre.snapshots_view()[k]);
                     assert(pre.hinted(pre.snapshots_view()[k][j].fp_spec(), j as nat));
                 }

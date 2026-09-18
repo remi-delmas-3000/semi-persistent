@@ -3239,22 +3239,22 @@ where
                 let f = token.frame_idx_spec() as int;
                 &&& final(self).roots_view() == old(self).roots_archive_view()[f]
                 &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
-                &&& final(self).depth_spec() == token.frame_idx_spec()
-                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f)
+                &&& final(self).depth_spec() == token.frame_idx_spec() + 1
+                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f + 1)
                 &&& final(self).entries_model_view() == old(self).entries_model_archive()[f]
                 &&& final(self).entries_nodes_view() == old(self).entries_archive()[f]
-                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f)
-                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f)
+                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f + 1)
+                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f + 1)
                 &&& final(self).reprs_dense_view() == old(self).reprs_dense_archive()[f]
                 &&& final(self).reprs_sparse_view() == old(self).reprs_sparse_archive()[f]
                 &&& final(self).reprs_indices_view() == old(self).reprs_indices_archive()[f]
-                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f)
-                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f)
-                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f)
+                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f + 1)
+                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f + 1)
+                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f + 1)
                 &&& final(self).uses_model_view() == old(self).uses_model_archive()[f]
-                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f)
+                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f + 1)
                 &&& final(self).pool_view() == old(self).pool_archive()[f]
-                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f)
+                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f + 1)
             }),
     {
         if !(self.entries.is_valid_token(&token.entries)
@@ -3364,51 +3364,58 @@ where
         }
     }
 
-    /// Shared-history restore (doc 10): reconstruct every member to frame
-    /// `t.depth` via the history-free `restore_frames`/`restore_frame`
-    /// primitives, then record the branch cut ONCE in `History`. The composite
-    /// archive proof is `restore`'s with `f = t.depth`. Additive; `restore`'s
-    /// `EClassesToken` path + theorems untouched. Synced-depth group invariant
-    /// carried explicitly.
-    #[allow(dead_code)]
-    pub(crate) fn restore_with_history(
-        &mut self,
-        history: &mut crate::history::History,
-        t: crate::history::GroupToken,
-    )
-        where T: core::default::Default, J: core::default::Default
-        requires
-            old(self).wf(),
-            old(history).wf(),
-            TRACK,
-            old(self).entries.depth_spec() == old(history).depth_spec(),
-            old(self).reprs.dense.depth_spec() == old(history).depth_spec(),
-            old(self).reprs.sparse.depth_spec() == old(history).depth_spec(),
-            old(self).reprs.indices.depth_spec() == old(history).depth_spec(),
-            old(self).uf.parent_depth_spec() == old(history).depth_spec(),
-            old(self).uf.rank_depth_spec() == old(history).depth_spec(),
-            PROOFS ==> old(self).uf.parent_proof->Some_0.depth_spec()
-                == old(history).depth_spec(),
-            PROOFS ==> old(self).uf.justification->Some_0.depth_spec()
-                == old(history).depth_spec(),
-            old(self).uses.heads_depth_spec() == old(history).depth_spec(),
-            old(self).uses.nodes_depth_spec() == old(history).depth_spec(),
-            old(self).min_pool.depth_spec() == old(history).depth_spec(),
-            old(history).valid_spec(t),
-            (t.depth as nat) < old(history).depth_spec(),
+
+    /// Drop the open top frame of every component, undoing its writes (the
+    /// SMT-LIB `pop`; that frame's token dies). Refuses on an untracked
+    /// structure or an empty frame stack.
+    pub fn pop_scope(&mut self)
+        requires old(self).wf(),
         ensures
             final(self).wf(),
-            final(history).wf(),
             final(self).min_width_spec() == old(self).min_width_spec(),
-            final(self).roots_view()
-                == old(self).roots_archive_view()[t.depth as int],
-            final(self).n_spec()
-                == old(self).roots_archive_view()[t.depth as int].len(),
-            final(self).depth_spec() == final(history).depth_spec(),
-            final(history).depth_spec() == t.depth as nat,
+            (TRACK && old(self).depth_spec() >= 1) ==> ({
+                let f = old(self).depth_spec() - 1;
+                &&& final(self).roots_view() == old(self).roots_archive_view()[f]
+                &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
+                &&& final(self).depth_spec() == f
+                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f)
+                &&& final(self).entries_model_view() == old(self).entries_model_archive()[f]
+                &&& final(self).entries_nodes_view() == old(self).entries_archive()[f]
+                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f)
+                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f)
+                &&& final(self).reprs_dense_view() == old(self).reprs_dense_archive()[f]
+                &&& final(self).reprs_sparse_view() == old(self).reprs_sparse_archive()[f]
+                &&& final(self).reprs_indices_view() == old(self).reprs_indices_archive()[f]
+                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f)
+                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f)
+                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f)
+                &&& final(self).uses_model_view() == old(self).uses_model_archive()[f]
+                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f)
+                &&& final(self).pool_view() == old(self).pool_archive()[f]
+                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f)
+            }),
     {
+        if !TRACK {
+            crate::guard::refuse("pop_scope() called on untracked EClasses");
+        }
+        let d = self.min_pool.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("EClasses::pop_scope: no open frame");
+        }
+        // Lockstep of the components (the group discipline): refuse otherwise.
+        if !(self.entries.entries.depth_exec() == d
+            && self.reprs.dense.depth_exec() == d
+            && self.reprs.sparse.depth_exec() == d
+            && self.reprs.indices.depth_exec() == d
+            && self.uf.parent.depth_exec() == d
+            && self.uf.rank.depth_exec() == d
+            && self.uses.heads.depth_exec() == d
+            && self.uses.nodes.depth_exec() == d)
+        {
+            crate::guard::refuse("EClasses::pop_scope: components out of step");
+        }
         let ghost o = *old(self);
-        let ghost f = t.depth as int;
+        let ghost f = d as int - 1;
         proof {
             reveal(eg_archive_agrees);
             assert(eg_archive_agrees::<T, K, L, N>(
@@ -3422,18 +3429,22 @@ where
                 o.uses.nodes_snapshots_view(),
                 o.min_pool.snapshots_view(),
                 o.min_width as nat));
+            // the archived frame f is a jointly-valid state; in particular
+            // the repr triple is sparse-set well-formed, which is
+            // SparseSet::restore's precondition.
             assert(crate::sparse_set::sparse_set_snap_wf(
                 o.reprs.dense_snapshots_view()[f],
                 o.reprs.sparse_snapshots_view()[f],
                 o.reprs.indices_snapshots_view()[f]));
         }
-        self.entries.restore_frames(t.depth as usize);
-        self.reprs.restore_frames(t.depth as usize);
-        self.uf.restore_frames(t.depth as usize);
-        self.uses.restore_frames(t.depth as usize);
-        self.min_pool.restore_frame(t.depth as usize);
+        self.entries.pop_scope();
+        self.reprs.pop_scope();
+        self.uf.pop_scope();
+        self.uses.pop_scope();
+        self.min_pool.pop_scope();
         proof {
             reveal(eg_archive_agrees);
+            // restored views are the archived frame-f views.
             assert(self.entries.model_view() == o.entries.model_snapshots_view()[f]);
             assert(self.entries.payload_seq()
                 =~= ring_payloads(o.entries.entries_snapshots_view()[f]));
@@ -3444,6 +3455,7 @@ where
                 self.reprs.sparse_view(), self.reprs.indices_view(),
                 self.uses.model_view(), self.uses.nodes_view(),
                 self.min_pool.view(), self.min_width as nat));
+            // truncated stacks agree per frame below f.
             assert forall|k: int| 0 <= k < self.entries.model_snapshots_view().len()
                 implies eg_model_wf::<T, K, L, N>(
                     #[trigger] self.entries.model_snapshots_view()[k],
@@ -3488,6 +3500,8 @@ where
                 assert(self.min_pool.snapshots_view()[k2]
                     == o.min_pool.snapshots_view()[k2]);
             }
+            // archived pools below f are bounded by the restored pool
+            // (monotonicity at (k, f)).
             assert forall|k: int| 0 <= k < self.min_pool.snapshots_view().len()
                 implies (#[trigger] self.min_pool.snapshots_view()[k]).len()
                     <= self.min_pool.view().len() by {
@@ -3495,8 +3509,9 @@ where
                     <= o.min_pool.snapshots_view()[f].len());
             }
         }
-        history.restore_to(t);
     }
+
+
 
     /// The full runtime-checkable restore precondition (spec counterpart of
     /// `is_valid_token` plus the frame agreement).
@@ -3528,22 +3543,22 @@ where
                 &&& old(self).is_restorable_full_spec(token)
                 &&& final(self).roots_view() == old(self).roots_archive_view()[f]
                 &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
-                &&& final(self).depth_spec() == token.frame_idx_spec()
-                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f)
+                &&& final(self).depth_spec() == token.frame_idx_spec() + 1
+                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f + 1)
                 &&& final(self).entries_model_view() == old(self).entries_model_archive()[f]
                 &&& final(self).entries_nodes_view() == old(self).entries_archive()[f]
-                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f)
-                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f)
+                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f + 1)
+                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f + 1)
                 &&& final(self).reprs_dense_view() == old(self).reprs_dense_archive()[f]
                 &&& final(self).reprs_sparse_view() == old(self).reprs_sparse_archive()[f]
                 &&& final(self).reprs_indices_view() == old(self).reprs_indices_archive()[f]
-                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f)
-                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f)
-                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f)
+                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f + 1)
+                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f + 1)
+                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f + 1)
                 &&& final(self).uses_model_view() == old(self).uses_model_archive()[f]
-                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f)
+                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f + 1)
                 &&& final(self).pool_view() == old(self).pool_archive()[f]
-                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f)
+                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f + 1)
             }),
             r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,

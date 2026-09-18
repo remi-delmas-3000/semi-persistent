@@ -2181,9 +2181,10 @@ where
                 &&& final(self).heads_view() == old(self).heads_snapshots_view()[f]
                 &&& final(self).nodes_view() == old(self).nodes_snapshots_view()[f]
                 &&& final(self).model_view() == old(self).model_snapshots_view()[f]
-                &&& final(self).heads_snapshots_view() == old(self).heads_snapshots_view().subrange(0, f)
-                &&& final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view().subrange(0, f)
-                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f)
+                &&& final(self).heads_snapshots_view() == old(self).heads_snapshots_view().subrange(0, f + 1)
+                &&& final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view().subrange(0, f + 1)
+                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f + 1)
+                &&& final(self).heads_depth_spec() == f + 1
             }),
             r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
@@ -2230,11 +2231,12 @@ where
             // internally, with no caller-supplied ghost.
             final(self).model_view() == old(self).model_snapshots_view()[token.heads_frame_idx_spec() as int],
             final(self).heads_snapshots_view() == old(self).heads_snapshots_view()
-                .subrange(0, token.heads_frame_idx_spec() as int),
+                .subrange(0, token.heads_frame_idx_spec() as int + 1),
             final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view()
-                .subrange(0, token.nodes_frame_idx_spec() as int),
+                .subrange(0, token.nodes_frame_idx_spec() as int + 1),
             final(self).model_snapshots_view() == old(self).model_snapshots_view()
-                .subrange(0, token.heads_frame_idx_spec() as int),
+                .subrange(0, token.heads_frame_idx_spec() as int + 1),
+            final(self).heads_depth_spec() == token.heads_frame_idx_spec() + 1,
     {
         // Prevalidate both constituent tokens before restoring either. Heads
         // rolled back without nodes
@@ -2256,7 +2258,7 @@ where
         // Truncate the archive in lockstep with the vec snapshot stacks
         // (restore leaves frames@.len() == frame_idx on both).
         self.model_snapshots =
-            Ghost(self.model_snapshots@.subrange(0, token.heads.depth as int));
+            Ghost(self.model_snapshots@.subrange(0, token.heads.depth as int + 1));
         proof {
             reveal(arena_archive_agrees);
             let f = token.heads.depth as int;
@@ -2273,9 +2275,9 @@ where
             assert(self.nodes_view() == old(self).nodes.snapshots_view()[f]);
             // Truncated archive agrees frame-wise with the truncated stacks.
             assert(self.heads.snapshots_view()
-                =~= old(self).heads.snapshots_view().subrange(0, f));
+                =~= old(self).heads.snapshots_view().subrange(0, f + 1));
             assert(self.nodes.snapshots_view()
-                =~= old(self).nodes.snapshots_view().subrange(0, f));
+                =~= old(self).nodes.snapshots_view().subrange(0, f + 1));
             assert forall|k: int| 0 <= k < self.model_snapshots@.len()
                 implies arena_model_wf(
                     #[trigger] self.model_snapshots@[k],
@@ -2352,6 +2354,37 @@ where
             assert(arena_archive_agrees(self.model_snapshots@,
                 self.heads.snapshots_view(), self.nodes.snapshots_view()));
         }
+    }
+
+    /// Drop the open top frame, undoing its writes (the SMT-LIB `pop`; that
+    /// frame's token dies). Refuses on an untracked arena, an empty frame
+    /// stack, or columns out of step.
+    pub fn pop_scope(&mut self)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            (TRACK && old(self).heads_depth_spec() >= 1) ==> ({
+                let f = old(self).heads_depth_spec() - 1;
+                &&& final(self).heads_view() == old(self).heads_snapshots_view()[f]
+                &&& final(self).nodes_view() == old(self).nodes_snapshots_view()[f]
+                &&& final(self).model_view() == old(self).model_snapshots_view()[f]
+                &&& final(self).heads_snapshots_view() == old(self).heads_snapshots_view().subrange(0, f)
+                &&& final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view().subrange(0, f)
+                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f)
+                &&& final(self).heads_depth_spec() == f
+            }),
+    {
+        if !TRACK {
+            crate::guard::refuse("pop_scope() called on untracked ListArena");
+        }
+        let d = self.heads.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("ListArena::pop_scope: no open frame");
+        }
+        if !(self.nodes.depth_exec() == d) {
+            crate::guard::refuse("ListArena::pop_scope: columns out of step");
+        }
+        self.restore_frames(d - 1);
     }
 
     #[allow(dead_code)]

@@ -392,6 +392,18 @@ impl VerifiedVec {
         }
     }
 
+    /// Drop the open top frame (the SMT-LIB pop). The verified restore keeps
+    /// the checkpoint open (semantics B, design doc 08 §1) while production
+    /// pops it, so the paired discipline pops after every verified restore.
+    fn pop_scope(&mut self) {
+        match self {
+            Self::Inline(vec) => vec.pop_scope(),
+            Self::Parallel(vec) => vec.pop_scope(),
+            Self::Trail(vec) => vec.pop_scope(),
+            Self::Dynamic(vec) => vec.pop_scope(),
+        }
+    }
+
     fn is_valid_token(&self, token: &verus::vec::VecToken) -> bool {
         match self {
             Self::Inline(vec) => vec.is_valid_token(token),
@@ -734,6 +746,11 @@ impl Harness {
                     self.verified
                         .try_restore(triple.1)
                         .expect("oracle-selected token is structurally live");
+                    prop_assert!(
+                        self.verified.is_valid_token(&triple.1),
+                        "restored checkpoint stays valid (semantics B)"
+                    );
+                    self.verified.pop_scope();
                     self.oracle.restore(triple.2);
                     self.last_restored = Some(triple);
                 }
@@ -796,6 +813,11 @@ impl Harness {
                     self.verified
                         .try_restore(triple.1)
                         .expect("deep-unwind token is live");
+                    prop_assert!(
+                        self.verified.is_valid_token(&triple.1),
+                        "restored checkpoint stays valid (semantics B)"
+                    );
+                    self.verified.pop_scope();
                     self.oracle.restore(triple.2);
                     self.last_restored = Some(triple);
                     self.check(step)?;
@@ -984,6 +1006,11 @@ fn repeated_restore_failure_matches_each_documented_api() {
 
     production.restore(production_token);
     verified.try_restore(verified_token).unwrap();
+    // Semantics B: the verified checkpoint stays open and valid; the paired
+    // discipline pops it to match production's pop.
+    assert!(verified.is_valid_token(&verified_token));
+    assert_eq!(verified.try_restore(verified_token), Ok(()));
+    verified.pop_scope();
 
     assert!(
         production.is_valid_token(&production_token),

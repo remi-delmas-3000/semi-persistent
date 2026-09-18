@@ -93,8 +93,11 @@ fn consumed_token_refuses_as_err() {
         .try_mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     v.try_push(2).expect("push: within index word");
-    v.try_restore(tok).expect("first restore: live frame"); // consumes the frame
-    let e = v.try_restore(tok).unwrap_err(); // frame is gone
+    v.try_restore(tok).expect("first restore: live frame"); // semantics B: frame stays open
+    v.try_restore(tok)
+        .expect("second restore: the checkpoint is reusable");
+    v.pop_scope(); // drop the frame: now the token is dead
+    let e = v.try_restore(tok).unwrap_err();
     assert_eq!(
         e,
         semi_persistent_containers_verus::error::ContainerError::InvalidToken,
@@ -112,12 +115,16 @@ fn consumed_token_reported_invalid_and_rejected_before_mutation() {
     v.try_push(2).expect("push: within index word");
     assert!(v.is_valid_token(&tok), "live token is restorable");
     v.try_restore(tok).expect("restore: own token");
-    // The consumed-token gap (design doc 08): the public is_valid_token must
-    // now report NOT restorable (frame liveness), even though the branch
-    // genealogy alone would still consider it on-path.
+    // Semantics B (design doc 08 §1): the restored frame stays open, so the
+    // token is still restorable; only dropping the frame kills it.
+    assert!(
+        v.is_valid_token(&tok),
+        "restored checkpoint stays restorable"
+    );
+    v.pop_scope();
     assert!(
         !v.is_valid_token(&tok),
-        "consumed token must report not-restorable"
+        "popped frame's token must report not-restorable"
     );
 
     let before = read_back(&v);
@@ -195,21 +202,25 @@ fn standalone_vec_refuses_abandoned_branch_token() {
         .expect("mark: depth bounded by this harness");
     v.try_push(3).expect("push: within index word");
     v.try_restore(base).expect("restore: own token");
-    assert!(!v.is_valid_token(&base), "the consumed token is spent");
+    assert!(
+        v.is_valid_token(&base),
+        "the checkpoint stays valid (semantics B)"
+    );
+    assert!(!v.is_valid_token(&abandoned), "the abandoned future is cut");
     v.try_push(20).expect("push: within index word");
     let _f1 = v
         .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness"); // depth 0 again
+        .expect("mark: depth bounded by this harness"); // depth 1 again, fresh stamp
     let _f2 = v
         .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness"); // depth 1 live again
+        .expect("mark: depth bounded by this harness"); // depth 2
     assert!(
         !v.is_valid_token(&abandoned),
-        "abandoned-branch token must be refused"
+        "abandoned-branch token must be refused after a re-mark at its depth"
     );
     assert!(
-        !v.is_valid_token(&base),
-        "the consumed token stays refused after a re-mark"
+        v.is_valid_token(&base),
+        "the checkpoint stays valid across re-marks above it"
     );
     let len_before = v.len();
     assert!(v.try_restore(abandoned).is_err(), "refused restore");
@@ -344,6 +355,9 @@ fn aov_consumed_token_refuses_as_err() {
         .expect("mark: depth bounded by this harness");
     v.try_push(2).expect("push: within index word");
     v.try_restore(tok).expect("first restore: live frame");
+    v.try_restore(tok)
+        .expect("second restore: the checkpoint is reusable");
+    v.pop_scope();
     assert_eq!(
         v.try_restore(tok).unwrap_err(),
         semi_persistent_containers_verus::error::ContainerError::InvalidToken,
@@ -360,6 +374,11 @@ fn aov_consumed_token_reported_invalid() {
         .expect("mark: depth bounded by this harness");
     assert!(v.is_valid_token(&tok));
     v.try_restore(tok).expect("restore: own token");
+    assert!(
+        v.is_valid_token(&tok),
+        "semantics B: the checkpoint stays valid"
+    );
+    v.pop_scope();
     assert!(!v.is_valid_token(&tok));
 }
 
@@ -379,9 +398,11 @@ fn map_consumed_token_reported_invalid_and_state_preserved() {
     assert!(m.is_valid_token(&tok));
     m.try_restore(tok).expect("restore: own token");
     assert!(
-        !m.is_valid_token(&tok),
-        "consumed map token must be invalid"
+        m.is_valid_token(&tok),
+        "semantics B: the checkpoint stays valid"
     );
+    m.pop_scope();
+    assert!(!m.is_valid_token(&tok), "popped map token must be invalid");
 
     let before_log = m.log_len();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -413,8 +434,13 @@ fn sparse_set_atomic_restore_rejects_consumed_compound() {
     assert!(s.is_valid_token(&tok));
     s.restore(tok);
     assert!(
+        s.is_valid_token(&tok),
+        "semantics B: the checkpoint stays valid"
+    );
+    s.pop_scope();
+    assert!(
         !s.is_valid_token(&tok),
-        "consumed compound token must be invalid"
+        "popped compound token must be invalid"
     );
 
     // A second restore with the consumed compound token must be rejected
@@ -507,8 +533,9 @@ fn try_restore_rejects_a_foreign_token_as_err() {
     // Consumed token: valid once, then Err.
     a.try_restore(tok_a).unwrap();
     assert_eq!(
-        a.try_restore(tok_a).unwrap_err(),
-        ContainerError::InvalidToken
+        a.try_restore(tok_a),
+        Ok(()),
+        "semantics B: the checkpoint restores again"
     );
 }
 
@@ -526,9 +553,12 @@ fn aov_total_shell_refuses_and_round_trips() {
     );
     let tok = a.try_mark(ShrinkPolicy::Never).unwrap();
     assert_eq!(a.try_restore(tok), Ok(()), "fresh token restores");
+    assert_eq!(a.try_restore(tok), Ok(()), "the checkpoint restores again");
+    assert_eq!(a.try_pop_scope(), Ok(()), "the frame drops");
     assert_eq!(
         a.try_restore(tok).unwrap_err(),
         ContainerError::InvalidToken,
-        "consumed token refuses as Err"
+        "a popped frame's token refuses as Err"
     );
+    assert_eq!(a.try_pop_scope().unwrap_err(), ContainerError::NoOpenFrame);
 }

@@ -1155,11 +1155,11 @@ where
             final(self).sparse_view() == old(self).snap_at(token).1,
             final(self).indices_view() == old(self).snap_at(token).2,
             final(self).dense_snapshots_view() == old(self).dense_snapshots_view()
-                .subrange(0, token.dense_frame_idx_spec() as int),
+                .subrange(0, token.dense_frame_idx_spec() as int + 1),
             final(self).sparse_snapshots_view() == old(self).sparse_snapshots_view()
-                .subrange(0, token.sparse_frame_idx_spec() as int),
+                .subrange(0, token.sparse_frame_idx_spec() as int + 1),
             final(self).indices_snapshots_view() == old(self).indices_snapshots_view()
-                .subrange(0, token.indices_frame_idx_spec() as int),
+                .subrange(0, token.indices_frame_idx_spec() as int + 1),
     {
         // Prevalidate all constituent tokens before restoring any of them:
         // a partially restored sparse set
@@ -1225,6 +1225,43 @@ where
         self.sparse.push_frame(shrink);
         self.indices.push_frame(shrink);
         proof { self.lemma_archive_after_push(old(self)); }
+    }
+
+    /// Drop the open top frame, undoing its writes (the SMT-LIB `pop`; that
+    /// frame's token dies). Refuses on an untracked set, an empty frame stack,
+    /// or columns out of step.
+    pub fn pop_scope(&mut self)
+        where T: core::default::Default, Idx: core::default::Default
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            (TRACK && old(self).dense_snapshots_view().len() >= 1) ==> ({
+                let f = old(self).dense_snapshots_view().len() - 1;
+                &&& final(self).dense_view() == old(self).dense_snapshots_view()[f]
+                &&& final(self).sparse_view() == old(self).sparse_snapshots_view()[f]
+                &&& final(self).indices_view() == old(self).indices_snapshots_view()[f]
+                &&& final(self).dense_snapshots_view() == old(self).dense_snapshots_view().subrange(0, f)
+                &&& final(self).sparse_snapshots_view() == old(self).sparse_snapshots_view().subrange(0, f)
+                &&& final(self).indices_snapshots_view() == old(self).indices_snapshots_view().subrange(0, f)
+            }),
+    {
+        if !TRACK {
+            crate::guard::refuse("pop_scope() called on untracked SparseSet");
+        }
+        let d = self.dense.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("SparseSet::pop_scope: no open frame");
+        }
+        if !(self.sparse.depth_exec() == d && self.indices.depth_exec() == d) {
+            crate::guard::refuse("SparseSet::pop_scope: columns out of step");
+        }
+        proof {
+            assert(sparse_set_snap_wf(
+                self.dense.snapshots_view()[d as int - 1],
+                self.sparse.snapshots_view()[d as int - 1],
+                self.indices.snapshots_view()[d as int - 1]));
+        }
+        self.restore_frames(d - 1);
     }
 
     #[allow(dead_code)]

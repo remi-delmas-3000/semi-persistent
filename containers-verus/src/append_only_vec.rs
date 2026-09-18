@@ -370,9 +370,9 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             final(self).wf(),
             r is Ok ==> final(self).view()
                 == old(self).snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec()
+                && final(self).depth_spec() == token.frame_idx_spec() + 1
                 && final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
             r is Err ==> final(self).view() == old(self).view()
                 && final(self).depth_spec() == old(self).depth_spec()
                 && final(self).snapshots_view() == old(self).snapshots_view(),
@@ -406,9 +406,140 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         true
     }
 
-    /// Restore to the state the token names: truncate `data` to the saved
-    /// length and the frame/snapshot stacks to the target, then record the
-    /// branch cut. Reproduces `snapshots[token.frame_idx]` exactly.
+    /// The structural core of a pop-style restore (the SMT-LIB `pop`, the
+    /// group path): reconstruct to frame `target` and drop frames
+    /// `target..`; the cut starts at `target` (that frame's token dies).
+    pub(crate) fn restore_frame(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[target as int],
+            final(self).depth_spec() == target as nat,
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target as int),
+            forall|u: VecToken| u.depth_spec() >= target as nat ==> !final(self).genealogy.valid_spec(u),
+    {
+        let saved_len = self.frames[target].as_usize();
+        let ghost old_data = self.data@;
+        let ghost old_frames = self.frames@;
+        let ghost old_snaps = self.snapshots@;
+        proof {
+            assert(old_snaps[target as int] == old_data.subrange(0, saved_len as int));
+            assert(saved_len <= old_data.len());
+        }
+        self.data.truncate(saved_len);
+        self.frames.truncate(target);
+        self.snapshots = Ghost(self.snapshots@.subrange(0, target as int));
+        proof {
+            let data = self.data@;
+            let frames = self.frames@;
+            let snaps = self.snapshots@;
+            assert(data =~= old_data.subrange(0, saved_len as int));
+            assert(data =~= old_snaps[target as int]);
+            assert(snaps =~= old_snaps.subrange(0, target as int));
+            assert(frames =~= old_frames.subrange(0, target as int));
+            assert forall|k: int| 0 <= k < frames.len() implies
+                #[trigger] frames[k].as_nat() <= data.len() by {
+                assert(frames[k] == old_frames[k]);
+                assert(k < target);
+                lemma_aov_frames_le(old_frames, k, target as int);
+            }
+            assert forall|k: int| 0 <= k < frames.len() implies
+                #[trigger] snaps[k] == data.subrange(0, frames[k].as_nat() as int) by {
+                assert(snaps[k] == old_snaps[k]);
+                assert(old_snaps[k] == old_data.subrange(0, frames[k].as_nat() as int));
+                lemma_aov_frames_le(old_frames, k, target as int);
+                assert(frames[k].as_nat() <= saved_len);
+                assert(data.subrange(0, frames[k].as_nat() as int)
+                    =~= old_data.subrange(0, frames[k].as_nat() as int));
+            }
+        }
+        self.genealogy.cut_from(target);
+    }
+
+    /// Semantics B (design doc 08 §1): reconstruct to frame `target` and keep
+    /// that frame open — frames `target + 1..` are gone, frame `target` stays
+    /// (its saved length is the restored length), so its token stays valid and
+    /// every later token dies (the cut starts at `target + 1`).
+    pub(crate) fn reset_frame(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[target as int],
+            final(self).depth_spec() == target as nat + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target as int + 1),
+            forall|u: VecToken| u.depth_spec() > target as nat ==> !final(self).genealogy.valid_spec(u),
+    {
+        let saved_len = self.frames[target].as_usize();
+        let ghost old_data = self.data@;
+        let ghost old_frames = self.frames@;
+        let ghost old_snaps = self.snapshots@;
+        proof {
+            assert(old_snaps[target as int] == old_data.subrange(0, saved_len as int));
+            assert(saved_len <= old_data.len());
+        }
+        self.data.truncate(saved_len);
+        self.frames.truncate(target + 1);
+        self.snapshots = Ghost(self.snapshots@.subrange(0, target as int + 1));
+        proof {
+            let data = self.data@;
+            let frames = self.frames@;
+            let snaps = self.snapshots@;
+            assert(data =~= old_data.subrange(0, saved_len as int));
+            assert(data =~= old_snaps[target as int]);
+            assert(snaps =~= old_snaps.subrange(0, target as int + 1));
+            assert(frames =~= old_frames.subrange(0, target as int + 1));
+            assert forall|k: int| 0 <= k < frames.len() implies
+                #[trigger] frames[k].as_nat() <= data.len() by {
+                assert(frames[k] == old_frames[k]);
+                assert(k <= target);
+                lemma_aov_frames_le(old_frames, k, target as int);
+            }
+            assert forall|k: int| 0 <= k < frames.len() implies
+                #[trigger] snaps[k] == data.subrange(0, frames[k].as_nat() as int) by {
+                assert(snaps[k] == old_snaps[k]);
+                assert(old_snaps[k] == old_data.subrange(0, frames[k].as_nat() as int));
+                lemma_aov_frames_le(old_frames, k, target as int);
+                assert(frames[k].as_nat() <= saved_len);
+                assert(data.subrange(0, frames[k].as_nat() as int)
+                    =~= old_data.subrange(0, frames[k].as_nat() as int));
+            }
+        }
+        self.genealogy.cut_from(target + 1);
+    }
+
+    /// Drop the open top frame, undoing its appends (the SMT-LIB `pop`); that
+    /// frame's token dies. Refuses on an empty frame stack.
+    pub(crate) fn pop_frame(&mut self)
+        requires
+            old(self).wf(),
+            TRACK,
+        ensures
+            final(self).wf(),
+            old(self).depth_spec() >= 1 ==> {
+                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
+            },
+    {
+        let d = self.frames.len();
+        if !(d >= 1) {
+            crate::guard::refuse("AppendOnlyVec::pop_scope: no open frame");
+        }
+        self.restore_frame(d - 1);
+    }
+
+    /// Restore to the version named by `token` and keep its frame open
+    /// (semantics B, design doc 08 §1): the contents are the snapshot at that
+    /// mark, `token` stays valid and can be restored to again, every token
+    /// minted after it is dead. The SMT-LIB `pop` is `restore(t)` then `pop()`.
     pub(crate) fn restore(&mut self, token: VecToken)
         requires
             old(self).wf(),
@@ -418,13 +549,10 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         ensures
             final(self).wf(),
             final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec(),
-            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            final(self).depth_spec() == token.frame_idx_spec() + 1,
+            final(self).snapshots_view()
+                == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
     {
-        // Check the full restorable predicate, mirroring the proven requires
-        // for unverified callers, before reading
-        // frames[token.frame_idx] or mutating anything. Production message
-        // parity for the token cases.
         crate::guard::check_precondition(TRACK, "restore() called on untracked AppendOnlyVec");
         if !self.genealogy.is_valid(&token) {
             crate::guard::refuse("AppendOnlyVec::restore: token is foreign, stale or consumed");
@@ -437,55 +565,52 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             self.frames.len() < u32::MAX as usize,
             "AppendOnlyVec::restore: frame-stack depth would overflow u32",
         );
-        let target = token.depth as usize;
-        let saved_len = self.frames[target].as_usize();
+        self.reset_frame(token.depth as usize);
+    }
 
-        let ghost old_data = self.data@;
-        let ghost old_frames = self.frames@;
-        let ghost old_snaps = self.snapshots@;
-        proof {
-            // target frame length, for the result.
-            assert(old_snaps[target as int] == old_data.subrange(0, saved_len as int));
-            assert(saved_len <= old_data.len());
+    /// Drop the open top frame, undoing its appends (the SMT-LIB `pop`; that
+    /// frame's token dies). Refuses on an untracked vector or an empty stack.
+    pub fn pop_scope(&mut self)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            (TRACK && old(self).depth_spec() >= 1) ==> {
+                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
+            },
+    {
+        if !TRACK {
+            crate::guard::refuse("pop_scope() called on untracked AppendOnlyVec");
         }
+        self.pop_frame();
+    }
 
-        self.data.truncate(saved_len);
-        self.frames.truncate(target);
-        self.snapshots = Ghost(self.snapshots@.subrange(0, target as int));
-
-        proof {
-            let data = self.data@;
-            let frames = self.frames@;
-            let snaps = self.snapshots@;
-            // view == old data prefix [0, saved_len) == old snapshot[target].
-            assert(data =~= old_data.subrange(0, saved_len as int));
-            assert(data =~= old_snaps[target as int]);
-            assert(snaps =~= old_snaps.subrange(0, target as int));
-            assert(frames =~= old_frames.subrange(0, target as int));
-            // wf of the truncated stacks: prefixes of the old (still-valid)
-            // facts; each surviving frame's length <= saved_len == data.len(),
-            // and its prefix is unchanged by the data truncation.
-            assert forall|k: int| 0 <= k < frames.len() implies
-                #[trigger] frames[k].as_nat() <= data.len() by {
-                assert(frames[k] == old_frames[k]);
-                assert(k < target);
-                // old monotone: frames[k] <= old_frames[target] == saved_len.
-                lemma_aov_frames_le(old_frames, k, target as int);
-            }
-            assert forall|k: int| 0 <= k < frames.len() implies
-                #[trigger] snaps[k] == data.subrange(0, frames[k].as_nat() as int) by {
-                assert(snaps[k] == old_snaps[k]);
-                assert(old_snaps[k] == old_data.subrange(0, frames[k].as_nat() as int));
-                lemma_aov_frames_le(old_frames, k, target as int);
-                assert(frames[k].as_nat() <= saved_len);
-                // data == old_data prefix [0,saved_len); for m < frames[k] <= saved_len
-                // the two prefixes agree.
-                assert(data.subrange(0, frames[k].as_nat() as int)
-                    =~= old_data.subrange(0, frames[k].as_nat() as int));
-            }
+    /// `pop_scope` as a `Result`: `Untracked` or `NoOpenFrame` instead of a refusal.
+    pub fn try_pop_scope(&mut self) -> (r: Result<(), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> {
+                &&& old(self).depth_spec() >= 1
+                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
+            },
+            r is Err ==> final(self).view() == old(self).view()
+                && final(self).depth_spec() == old(self).depth_spec()
+                && final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        if !TRACK {
+            return Err(crate::error::ContainerError::Untracked);
         }
-        // The cut: the consumed token and every deeper one are dead for good.
-        self.genealogy.cut_from(target);
+        if !(self.frames.len() >= 1) {
+            return Err(crate::error::ContainerError::NoOpenFrame);
+        }
+        self.pop_frame();
+        Ok(())
     }
 }
 

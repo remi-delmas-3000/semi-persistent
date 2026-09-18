@@ -24,6 +24,8 @@ pub enum ContainerError {
     InvalidToken,
     /// The operation needs TRACK=true (mark/restore on an untracked container).
     Untracked,
+    /// `pop` on an empty frame stack: there is no open frame to drop.
+    NoOpenFrame,
     /// An index beyond the current length.
     IndexOutOfBounds,
     /// Input violates an ordering/shape requirement (e.g. `from_sorted` on
@@ -44,6 +46,7 @@ impl core::fmt::Display for ContainerError {
             ContainerError::ForkLimit => "fork count at u32 ceiling",
             ContainerError::InvalidToken => "token does not name a restorable frame",
             ContainerError::Untracked => "operation requires a tracked (TRACK=true) container",
+            ContainerError::NoOpenFrame => "pop on an empty frame stack: no open frame to drop",
             ContainerError::IndexOutOfBounds => "index beyond current length",
             ContainerError::NotSorted => "input keys not strictly ascending",
             ContainerError::UnsupportedKey => "key type lacks a required static property",

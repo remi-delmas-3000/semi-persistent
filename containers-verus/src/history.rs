@@ -233,17 +233,22 @@ impl History {
         self.genealogy.is_valid(&t)
     }
 
-    /// Restore to `t`: cut the genealogy at `t.depth` (the consumed token and
-    /// every token minted after it die for good; `t`'s ancestors stay valid)
-    /// and set the depth to the token's. One write, no per-restore growth, no
-    /// overflow precondition: the stamp counter only grows and refuses at its
-    /// ceiling.
+    /// Restore to `t` (semantics B, design doc 08 §1): the group goes back to
+    /// the checkpoint `t` names and stays in that scope — the cut starts at
+    /// `t.depth + 1`, so `t` stays valid and every token minted after it dies
+    /// for good; the depth becomes `t.depth + 1` (frame `t.depth` is open
+    /// again). One write, no per-restore growth, no overflow precondition:
+    /// the stamp counter only grows and refuses at its ceiling.
     pub fn restore_to(&mut self, t: GroupToken)
         requires
             old(self).wf(),
         ensures
             final(self).wf(),
-            final(self).depth_spec() == t.depth_spec(),
+            final(self).depth_spec() == t.depth_spec() + 1,
+            final(self).valid_spec(t),
+            forall|u: GroupToken| u.depth_spec() > t.depth_spec() ==> !final(self).valid_spec(u),
+            forall|u: GroupToken| u.depth_spec() <= t.depth_spec()
+                ==> final(self).valid_spec(u) == old(self).valid_spec(u),
     {
         // Total: a stale or reused token, or one at or above the live depth,
         // is the documented trap (production's expect messages).
@@ -253,13 +258,31 @@ impl History {
         if !(t.depth < self.depth) {
             crate::guard::refuse("History::restore_to: token depth is not below the live depth");
         }
-        // The cut starts AT the target depth: this restore removes frame
-        // `t.depth` itself, so the token that named it is consumed for good
-        // (a later mark at that depth mints a fresh generation) and every
-        // deeper token is the abandoned future. Bumping from `t.depth + 1`
-        // would let the consumed token alias the next frame at its depth.
-        self.genealogy.cut_from(t.depth as usize);
-        self.depth = t.depth;
+        let d1 = t.depth + 1;
+        self.genealogy.cut_from(d1 as usize);
+        self.depth = d1;
+    }
+
+    /// Drop the open top scope (the SMT-LIB `pop`): the depth decreases by
+    /// one and the popped frame's token dies (the cut starts at its depth).
+    /// Refuses on an empty stack.
+    pub fn pop(&mut self)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            old(self).depth_spec() >= 1 ==> final(self).depth_spec() == old(self).depth_spec() - 1,
+            forall|u: GroupToken| old(self).depth_spec() >= 1 && u.depth_spec() >= old(self).depth_spec() - 1
+                ==> !final(self).valid_spec(u),
+            forall|u: GroupToken| old(self).depth_spec() >= 1 && u.depth_spec() < old(self).depth_spec() - 1
+                ==> final(self).valid_spec(u) == old(self).valid_spec(u),
+    {
+        if !(self.depth >= 1) {
+            crate::guard::refuse("History::pop: no open scope");
+        }
+        let d = self.depth - 1;
+        self.genealogy.cut_from(d as usize);
+        self.depth = d;
     }
 }
 
@@ -325,12 +348,13 @@ where
             TRACK,
             old(self).history.valid_spec(t),
             (t.depth as nat) < old(self).history.depth_spec(),
+            old(self).history.depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
             final(self).view() == old(self).vec.snapshots_view()[t.depth as int],
-            final(self).vec.depth_spec() == t.depth as nat,
+            final(self).vec.depth_spec() == t.depth as nat + 1,
     {
-        self.vec.restore_frame(t.depth as usize);
+        self.vec.reset_frame(t.depth as usize);
         self.history.restore_to(t);
     }
 }
@@ -397,14 +421,15 @@ where
             TRACK,
             old(self).history.valid_spec(t),
             (t.depth as nat) < old(self).history.depth_spec(),
+            old(self).history.depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
             final(self).a.view() == old(self).a.snapshots_view()[t.depth as int],
             final(self).b.view() == old(self).b.snapshots_view()[t.depth as int],
-            final(self).a.depth_spec() == t.depth as nat,
+            final(self).a.depth_spec() == t.depth as nat + 1,
     {
-        self.a.restore_frame(t.depth as usize);
-        self.b.restore_frame(t.depth as usize);
+        self.a.reset_frame(t.depth as usize);
+        self.b.reset_frame(t.depth as usize);
         self.history.restore_to(t);
     }
 }

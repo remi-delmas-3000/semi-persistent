@@ -281,6 +281,11 @@ impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
             .try_restore(token.0)
             .expect("restore: token minted by this container's own mark");
     }
+
+    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.map.pop_scope();
+    }
 }
 
 /// Which completion segment an op belongs to: the two segments of the completion column
@@ -724,6 +729,17 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
         }
     }
 
+    /// Drop the open top frame of both columns (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.map.pop_scope();
+        self.completion.pop_scope();
+        debug_assert_eq!(
+            self.completion.len().as_usize(),
+            self.map.log_len().as_usize(),
+            "pop left the completion column out of step with the map"
+        );
+    }
+
     pub fn restore(&mut self, token: OpRegistryToken) {
         self.map
             .try_restore(token.map)
@@ -823,6 +839,11 @@ impl<const TRACK: bool> RuleRegistry<TRACK> {
             .try_restore(token.0)
             .expect("restore: token minted by this container's own mark");
     }
+
+    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.map.pop_scope();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -903,6 +924,11 @@ impl<G: Copy + DenseId, const TRACK: bool> AxiomRegistry<G, TRACK> {
         self.map
             .try_restore(token.0)
             .expect("restore: token minted by this container's own mark");
+    }
+
+    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.map.pop_scope();
     }
 }
 

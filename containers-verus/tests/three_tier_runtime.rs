@@ -126,8 +126,11 @@ fn restore_targets_trail_hot_and_cold_with_nonmonotone_lengths() {
     assert_eq!((s.cold_frames, s.hot_frames, s.trail_frames), (1, 1, 2));
 
     v.try_restore(t3).unwrap();
+
+    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![20, 30, 2, 3, 60]);
     v.try_restore(t2).unwrap();
+    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![20, 1, 2, 3]);
     assert_eq!(
         v.tier_stats().trail_frames,
@@ -135,6 +138,7 @@ fn restore_targets_trail_hot_and_cold_with_nonmonotone_lengths() {
         "hot survivor promoted to trail ingress"
     );
     v.try_restore(t1).unwrap();
+    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![10, 1, 2, 3, 4, 5]);
     assert_eq!(
         v.tier_stats().trail_frames,
@@ -142,6 +146,7 @@ fn restore_targets_trail_hot_and_cold_with_nonmonotone_lengths() {
         "cold survivor promoted to trail ingress"
     );
     v.try_restore(t0).unwrap();
+    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![0, 1, 2, 3, 4, 5]);
     assert_eq!(v.depth(), 0);
 }
@@ -295,6 +300,8 @@ fn scattered_cold_runs_promote_unique_survivor_and_keep_tokens_live() {
     assert!(v.is_valid_token(&middle));
 
     v.try_restore(middle).unwrap();
+
+    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), vec![0, 10, 2, 30, 4, 5, 60, 7]);
     assert!(v.is_valid_token(&root));
     assert!(!v.is_valid_token(&middle));
@@ -312,6 +319,7 @@ fn scattered_cold_runs_promote_unique_survivor_and_keep_tokens_live() {
         "promoted survivor remigrates"
     );
     v.try_restore(root).unwrap();
+    v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
     assert_eq!(values(&v), (0..8).collect::<Vec<_>>());
     assert!(!v.is_valid_token(&root));
 }
@@ -620,6 +628,8 @@ fn mark_rollover_force_both_preserves_empty_frames_and_restore() {
     assert_eq!(v.depth(), 3);
     v.try_restore(root).unwrap();
     assert_eq!(values(&v), vec![5]);
+    assert_eq!(v.depth(), 1, "semantics B: the root's frame stays open");
+    v.pop_scope();
     assert_eq!(v.depth(), 0);
 }
 
@@ -990,7 +1000,10 @@ fn try_mark_adaptive_opens_replacement_first_and_preserves_token_semantics() {
     v.set(0u32, 999);
     v.try_restore(token).unwrap();
     assert_eq!(values(&v), after_writes);
-    assert!(!v.is_valid_token(&token));
+    assert!(
+        v.is_valid_token(&token),
+        "semantics B: the restored checkpoint stays valid"
+    );
     assert!(v.is_valid_token(&root));
     v.try_restore(root).unwrap();
     assert_eq!(values(&v), (0..8).collect::<Vec<_>>());
@@ -1276,18 +1289,26 @@ fn unique_defer_restores_surviving_prefix_and_zero() {
         assert_eq!(hot.hot_entries, 5, "{kind:?}");
 
         v.try_restore(newest).unwrap();
+
+        v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
         assert_eq!(values(&v), vec![9, 11, 20], "{kind:?}");
         assert_eq!(v.depth(), 3, "{kind:?}");
 
         v.try_restore(empty).unwrap();
+
+        v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
         assert_eq!(values(&v), vec![9, 11, 20], "{kind:?}");
         assert_eq!(v.depth(), 2, "{kind:?}");
 
         v.try_restore(middle).unwrap();
+
+        v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
         assert_eq!(values(&v), vec![0, 11], "{kind:?}");
         assert_eq!(v.depth(), 1, "{kind:?}");
 
         v.try_restore(root).unwrap();
+
+        v.pop_scope(); // pop parity: this test pins the tier mechanics of the pop path
         assert_eq!(values(&v), vec![0, 1, 2, 3], "{kind:?}");
         assert_eq!(v.depth(), 0, "{kind:?}");
         let physical = v.tier_stats();
@@ -1333,7 +1354,8 @@ fn hot_survivor_promotion_copies_values_without_calling_clone() {
         v.try_restore(newer).unwrap();
         assert_eq!(
             (v.tier_stats().hot_frames, v.tier_stats().trail_frames),
-            (0, 1)
+            (0, 2),
+            "semantics B: the survivor plus the reopened frame of the mark"
         );
         assert_eq!(v.get(0u32), CopyOnly(if populated { 10 } else { 0 }));
         v.set(0u32, CopyOnly(20));

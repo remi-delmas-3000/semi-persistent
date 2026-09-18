@@ -563,6 +563,21 @@ where
         self.set.restore(token.set);
         self.lit.restore(token.lit);
     }
+
+    /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.routing.pop_scope();
+        self.plain0.pop_scope();
+        self.plain1.pop_scope();
+        self.plain2.pop_scope();
+        self.plain3.pop_scope();
+        self.spair.pop_scope();
+        self.plain_n.pop_scope();
+        self.seq.pop_scope();
+        self.mset.pop_scope();
+        self.set.pop_scope();
+        self.lit.pop_scope();
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

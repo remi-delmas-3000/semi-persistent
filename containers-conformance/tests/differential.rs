@@ -89,6 +89,9 @@ fn vec_trace_inline(seed: u64, steps: usize) {
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
                 v.try_restore(tv).expect("restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                v.pop_scope();
                 marks.truncate(idx);
                 len = p.len() as usize;
             }
@@ -172,6 +175,9 @@ fn vec_trace_parallel(seed: u64, steps: usize) {
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
                 v.try_restore(tv).expect("restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                v.pop_scope();
                 marks.truncate(idx);
                 len = p.len() as usize;
             }
@@ -235,6 +241,9 @@ fn aov_trace(seed: u64, steps: usize) {
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
                 v.try_restore(tv).expect("restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                v.pop_scope();
                 marks.truncate(idx);
             }
         }
@@ -313,6 +322,9 @@ fn map_trace(seed: u64, steps: usize) {
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
                 v.try_restore(tv).expect("restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                v.pop_scope();
                 marks.truncate(idx);
             }
         }
@@ -392,6 +404,9 @@ fn bplus_trace(seed: u64, steps: usize) {
                 let (tp, tv) = marks[idx].clone();
                 p.restore(tp);
                 v.restore(tv);
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                v.pop_scope();
                 marks.truncate(idx);
             }
         }
@@ -479,6 +494,9 @@ fn bplus_ascending_trace(seed: u64, steps: usize) {
                     let (tp, tv) = marks[idx].clone();
                     p.restore(tp);
                     v.restore(tv);
+                    // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                    assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                    v.pop_scope();
                     marks.truncate(idx);
                     assert_eq!(p.len(), v.len(), "step {step}: len diverged after restore");
                 }
@@ -670,6 +688,9 @@ fn map_string_trace(seed: u64, steps: usize) {
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
                 v.try_restore(tv).expect("restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                v.pop_scope();
                 marks.truncate(idx);
             }
         }
@@ -763,6 +784,9 @@ fn sparse_set_trace(seed: u64, steps: usize) {
                 let (tp, tv, snap_ids) = marks[idx].clone();
                 p.restore(tp);
                 v.restore(tv);
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                v.pop_scope();
                 live_ids = snap_ids;
                 marks.truncate(idx);
             }
@@ -858,6 +882,9 @@ fn bytes_trace(seed: u64, steps: usize) {
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
                 v.try_restore(tv).expect("restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                v.pop_scope();
                 marks.truncate(idx);
                 len = p.len() as usize;
             }
@@ -992,6 +1019,9 @@ fn class_ring_bytes_trace(seed: u64, steps: usize) {
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
                 v.try_restore(tv).expect("restore");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                v.pop_scope();
                 marks.truncate(idx);
             }
         }

@@ -523,9 +523,9 @@ where
             final(self).wf(),
             r is Ok ==> final(self).log_view()
                 == old(self).log_snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec()
+                && final(self).depth_spec() == token.frame_idx_spec() + 1
                 && final(self).log_snapshots_view()
-                    == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int),
+                    == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
             r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
     {
@@ -535,6 +535,52 @@ where
         } else {
             Err(crate::error::ContainerError::InvalidToken)
         }
+    }
+
+    /// Drop the open top frame, undoing its inserts (the SMT-LIB `pop`; that
+    /// frame's token dies). Refuses on an untracked map or an empty stack.
+    pub fn pop_scope(&mut self)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            (TRACK && old(self).depth_spec() >= 1) ==> {
+                &&& final(self).log_view() == old(self).log_snapshots_view()[old(self).depth_spec() - 1]
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).log_snapshots_view()
+                    == old(self).log_snapshots_view().subrange(0, old(self).depth_spec() - 1)
+            },
+    {
+        if !TRACK {
+            crate::guard::refuse("pop_scope() called on untracked map");
+        }
+        if !(self.log.frames.len() >= 1) {
+            crate::guard::refuse("SpMap::pop_scope: no open frame");
+        }
+        self.pop_frame();
+    }
+
+    /// `pop_scope` as a `Result`: `Untracked` or `NoOpenFrame` instead of a refusal.
+    pub fn try_pop_scope(&mut self) -> (r: Result<(), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> {
+                &&& old(self).depth_spec() >= 1
+                &&& final(self).log_view() == old(self).log_snapshots_view()[old(self).depth_spec() - 1]
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).log_snapshots_view()
+                    == old(self).log_snapshots_view().subrange(0, old(self).depth_spec() - 1)
+            },
+            r is Err ==> *final(self) == *old(self),
+    {
+        if !TRACK {
+            return Err(crate::error::ContainerError::Untracked);
+        }
+        if !(self.log.frames.len() >= 1) {
+            return Err(crate::error::ContainerError::NoOpenFrame);
+        }
+        self.pop_frame();
+        Ok(())
     }
 
     /// Whether the token is restorable now, delegated to the log. The log is
@@ -564,9 +610,9 @@ where
         ensures
             final(self).wf(),
             final(self).log_view() == old(self).log_snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec(),
+            final(self).depth_spec() == token.frame_idx_spec() + 1,
             final(self).log_snapshots_view()
-                == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int),
+                == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
     {
         let ghost old_log = self.log_view();
         let ghost old_prev = self.prev@;
@@ -593,6 +639,55 @@ where
             }
         } else {
             self.log.restore(token.inner);
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+            self.rebuild_index();
+        }
+    }
+
+    /// The structural pop core: undo and drop the open top frame (index
+    /// maintenance exactly as a restore to the frame below).
+    pub(crate) fn pop_frame(&mut self)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).depth_spec() >= 1,
+        ensures
+            final(self).wf(),
+            final(self).log_view() == old(self).log_snapshots_view()[old(self).depth_spec() - 1],
+            final(self).depth_spec() == old(self).depth_spec() - 1,
+            final(self).log_snapshots_view()
+                == old(self).log_snapshots_view().subrange(0, old(self).depth_spec() - 1),
+    {
+        let ghost old_log = self.log_view();
+        let ghost old_prev = self.prev@;
+        // The target frame's saved length: what the log restore truncates to.
+        let target = self.log.frames.len() - 1;
+        let saved_len = self.log.frames[target].as_usize();
+        let n = self.log.len().as_usize();
+        proof {
+            // The log's `wf`: a saved length is within the data and names the
+            // snapshot prefix.
+            assert(self.log.frames@[target as int].as_nat() <= n);
+            assert(old(self).log_snapshots_view()[target as int]
+                == old_log.subrange(0, saved_len as int));
+        }
+        if n - saved_len <= saved_len {
+            self.unwind_index(saved_len);
+            self.log.pop_frame();
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+        } else {
+            self.log.pop_frame();
             self.prev.truncate(saved_len);
             proof {
                 assert(self.log_view() == old_log.subrange(0, saved_len as int));

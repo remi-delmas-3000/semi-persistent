@@ -80,6 +80,32 @@ pub trait SyncMember: Send {
             final(self).depth_spec() == depth as nat,
             final(self).model() == old(self).archive()[depth as int],
             final(self).archive() == old(self).archive().subrange(0, depth as int);
+    /// Semantics B (design doc 08 §1): reconstruct this member to its snapshot
+    /// at `depth` and keep frame `depth` open and empty, so the group stays in
+    /// that scope. Total: refuses a depth at or above the member's, or a
+    /// member at the u32 depth ceiling.
+    fn reset_frame(&mut self, depth: usize)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            ((depth as nat) < old(self).depth_spec() && old(self).depth_spec() < u32::MAX as nat) ==> {
+                &&& final(self).depth_spec() == depth as nat + 1
+                &&& final(self).model() == old(self).archive()[depth as int]
+                &&& final(self).archive() == old(self).archive().subrange(0, depth as int + 1)
+            };
+    /// Drop the open top frame, undoing it (the SMT-LIB `pop`). Total: refuses
+    /// on an empty frame stack.
+    fn pop_frame(&mut self)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            old(self).depth_spec() >= 1 ==> {
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).model() == old(self).archive()[old(self).depth_spec() - 1]
+                &&& final(self).archive() == old(self).archive().subrange(0, old(self).depth_spec() - 1)
+            };
 
     /// Diagnostic: sealed (cold) frame count, to observe that a group mark
     /// actually sealed (H1.2) rather than only bumping depths.
@@ -177,6 +203,29 @@ where
         crate::vec::Vec::restore_frame(self, depth);
         proof {
             assert(self.archive() =~= old(self).archive().subrange(0, depth as int));
+        }
+    }
+
+    fn reset_frame(&mut self, depth: usize) {
+        if !(depth < self.depth_exec()) {
+            crate::guard::refuse("SyncMember::reset_frame: depth is not below the member's");
+        }
+        if !(self.depth_exec() < u32::MAX as usize) {
+            crate::guard::refuse("SyncMember::reset_frame: frame-stack depth at the u32 ceiling");
+        }
+        crate::vec::Vec::reset_frame(self, depth);
+        proof {
+            assert(self.archive() =~= old(self).archive().subrange(0, depth as int + 1));
+        }
+    }
+
+    fn pop_frame(&mut self) {
+        if !(self.depth_exec() >= 1) {
+            crate::guard::refuse("SyncMember::pop_frame: no open frame");
+        }
+        crate::vec::Vec::pop_frame(self);
+        proof {
+            assert(self.archive() =~= old(self).archive().subrange(0, old(self).depth_spec() - 1));
         }
     }
 
@@ -361,12 +410,13 @@ impl ForkHistory {
         ensures
             final(self).wf(),
             final(self).members@.len() == old(self).members@.len(),
-            r ==> final(self).depth_spec() == t.depth_spec(),
+            r ==> final(self).depth_spec() == t.depth_spec() + 1,
+            r ==> final(self).history.valid_spec(t),
             r ==> forall|k: int| 0 <= k < old(self).members@.len() ==> {
                 &&& (#[trigger] final(self).members@[k]).model()
                     == old(self).members@[k].archive()[t.depth_spec() as int]
                 &&& final(self).members@[k].archive()
-                    == old(self).members@[k].archive().subrange(0, t.depth_spec() as int)
+                    == old(self).members@[k].archive().subrange(0, t.depth_spec() as int + 1)
             },
             !r ==> *final(self) == *old(self),
     {
@@ -376,9 +426,12 @@ impl ForkHistory {
         if !(t.depth < self.history.depth()) {
             return false;
         }
+        if !(self.history.depth() < u32::MAX) {
+            return false;
+        }
         let n = self.members.len();
-        // Fan out: each member reconstructs. This loop is what restore_parallel
-        // runs concurrently.
+        // Fan out: each member resets to the checkpoint (semantics B). This
+        // loop is what restore_parallel runs concurrently.
         let ghost pre_depth = self.history.depth_spec();
         let mut j: usize = 0;
         while j < n
@@ -390,13 +443,14 @@ impl ForkHistory {
                 self.history.valid_spec(t),
                 (t.depth as nat) < self.history.depth_spec(),
                 forall|k: int| 0 <= k < n ==> (#[trigger] self.members@[k]).wf(),
+                self.history.depth_spec() < u32::MAX as nat,
                 forall|k: int| 0 <= k < j
-                    ==> (#[trigger] self.members@[k]).depth_spec() == t.depth as nat,
+                    ==> (#[trigger] self.members@[k]).depth_spec() == t.depth as nat + 1,
                 forall|k: int| 0 <= k < j ==> {
                     &&& (#[trigger] self.members@[k]).model()
                         == old(self).members@[k].archive()[t.depth as int]
                     &&& self.members@[k].archive()
-                        == old(self).members@[k].archive().subrange(0, t.depth as int)
+                        == old(self).members@[k].archive().subrange(0, t.depth as int + 1)
                 },
                 forall|k: int| j <= k < n
                     ==> #[trigger] self.members@[k] == old(self).members@[k],
@@ -405,11 +459,67 @@ impl ForkHistory {
             decreases n - j,
         {
             let m = &mut self.members[j];
-            m.restore_frame(t.depth as usize);
+            m.reset_frame(t.depth as usize);
             j = j + 1;
         }
         // One branch-cut record.
         self.history.restore_to(t);
+        true
+    }
+
+    /// Drop the open top scope of the whole group (the SMT-LIB `pop`): every
+    /// member undoes and drops its top frame, the history's depth decreases by
+    /// one and the popped scope's token dies. `false` (nothing changes) on an
+    /// empty stack.
+    pub fn pop(&mut self) -> (r: bool)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).members@.len() == old(self).members@.len(),
+            r ==> old(self).depth_spec() >= 1,
+            r ==> final(self).depth_spec() == old(self).depth_spec() - 1,
+            r ==> forall|k: int| 0 <= k < old(self).members@.len() ==> {
+                &&& (#[trigger] final(self).members@[k]).model()
+                    == old(self).members@[k].archive()[old(self).depth_spec() - 1]
+                &&& final(self).members@[k].archive()
+                    == old(self).members@[k].archive().subrange(0, old(self).depth_spec() - 1)
+            },
+            !r ==> *final(self) == *old(self),
+    {
+        if !(self.history.depth() >= 1) {
+            return false;
+        }
+        let n = self.members.len();
+        let ghost d0 = self.history.depth_spec();
+        let mut j: usize = 0;
+        while j < n
+            invariant
+                0 <= j <= n,
+                n == self.members@.len(),
+                self.history == old(self).history,
+                self.history.wf(),
+                d0 == self.history.depth_spec(),
+                d0 >= 1,
+                forall|k: int| 0 <= k < n ==> (#[trigger] self.members@[k]).wf(),
+                forall|k: int| 0 <= k < j
+                    ==> (#[trigger] self.members@[k]).depth_spec() == d0 - 1,
+                forall|k: int| 0 <= k < j ==> {
+                    &&& (#[trigger] self.members@[k]).model()
+                        == old(self).members@[k].archive()[d0 - 1]
+                    &&& self.members@[k].archive()
+                        == old(self).members@[k].archive().subrange(0, d0 - 1)
+                },
+                forall|k: int| j <= k < n
+                    ==> #[trigger] self.members@[k] == old(self).members@[k],
+                forall|k: int| j <= k < n
+                    ==> (#[trigger] self.members@[k]).depth_spec() == d0,
+            decreases n - j,
+        {
+            let m = &mut self.members[j];
+            m.pop_frame();
+            j = j + 1;
+        }
+        self.history.pop();
         true
     }
 
@@ -475,12 +585,13 @@ impl ForkHistory {
         ensures
             final(self).wf(),
             final(self).members@.len() == old(self).members@.len(),
-            r ==> final(self).depth_spec() == t.depth_spec(),
+            r ==> final(self).depth_spec() == t.depth_spec() + 1,
+            r ==> final(self).history.valid_spec(t),
             r ==> forall|k: int| 0 <= k < old(self).members@.len() ==> {
                 &&& (#[trigger] final(self).members@[k]).model()
                     == old(self).members@[k].archive()[t.depth_spec() as int]
                 &&& final(self).members@[k].archive()
-                    == old(self).members@[k].archive().subrange(0, t.depth_spec() as int)
+                    == old(self).members@[k].archive().subrange(0, t.depth_spec() as int + 1)
             },
             !r ==> *final(self) == *old(self),
     {
@@ -499,7 +610,7 @@ impl ForkHistory {
             self.members.par_iter_mut().for_each(|m| {
                 #[cfg(test)]
                 witness_thread();
-                m.restore_frame(depth);
+                m.reset_frame(depth);
             });
         }
         self.history.restore_to(t);
@@ -812,12 +923,12 @@ mod fork_history_tests {
             let half = toks[depth / 2];
             shared.restore_to(half);
             for m in per_member.iter_mut() {
-                m.cut_from(depth / 2);
+                m.cut_from(depth / 2 + 1); // semantics B: the checkpoint's level stays live
             }
             for k in 0..depth / 2 {
                 toks.push(shared.mark());
                 for m in per_member.iter_mut() {
-                    let _ = m.mint_at(depth / 2 + k);
+                    let _ = m.mint_at(depth / 2 + 1 + k);
                 }
             }
             let shared_bytes = shared.heap_bytes();
@@ -908,12 +1019,21 @@ mod fork_history_tests {
                             let k = k % live.len();
                             let (t, depth, snap) = live[k].clone();
                             prop_assert!(g.restore(t), "live token must restore");
-                            prop_assert_eq!(g.depth(), depth, "restore lands on the mark's depth");
-                            prop_assert!(!g.restore(t), "the consumed token is spent");
+                            prop_assert_eq!(
+                                g.depth(),
+                                depth + 1,
+                                "restore keeps the mark's frame open (semantics B)"
+                            );
+                            prop_assert!(g.restore(t), "the checkpoint is reusable");
+                            prop_assert_eq!(
+                                g.depth(),
+                                depth + 1,
+                                "a repeated restore lands on the same depth"
+                            );
                             oracles = snap;
-                            // The consumed token and the deeper ones (the abandoned
-                            // future) are refused forever.
-                            for t in live.drain(k..) {
+                            // The checkpoint stays live; the deeper tokens (the
+                            // abandoned future) are refused forever.
+                            for t in live.drain(k + 1..) {
                                 stale.push(t.0);
                             }
                         }
@@ -954,16 +1074,32 @@ mod fork_history_tests {
         g.members[0].poke(1, 2); // S2
         assert!(g.restore(t0), "t0 is live");
         assert_eq!(g.members[0].checksum(), fnv(&[0, 0, 0, 0]), "back to S0");
-        assert!(!g.restore(t0), "consumed: spent by its own restore");
+        assert_eq!(g.depth(), 1, "semantics B: the restored frame stays open");
+        assert!(g.restore(t0), "the checkpoint is reusable");
         assert!(!g.restore(t1), "abandoned future: refused");
-        g.members[0].poke(2, 3); // S3
-        let t0b = g.mark(ShrinkPolicy::Never).expect("re-mark at depth 0");
+        g.members[0].poke(2, 3); // S3, in t0's reopened frame
+        let t0b = g
+            .mark(ShrinkPolicy::Never)
+            .expect("mark above the checkpoint"); // depth 1
         g.members[0].poke(3, 4); // S4
         assert!(
-            !g.restore(t0),
-            "a re-mark at the same depth does not revive the spent token"
+            !g.restore(t1),
+            "the abandoned token stays refused after a re-mark at its depth"
         );
-        assert!(!g.restore(t1), "the deeper token stays refused");
+        assert!(g.restore(t0b), "the new mark's own token restores");
+        assert_eq!(g.members[0].checksum(), fnv(&[0, 0, 3, 0]), "to S3");
+        assert!(g.restore(t0), "the checkpoint below is still valid");
+        assert_eq!(
+            g.members[0].checksum(),
+            fnv(&[0, 0, 0, 0]),
+            "back to S0 again"
+        );
+        assert!(!g.restore(t0b), "restoring below it cut the newer token");
+        assert!(g.pop(), "drop the checkpoint's frame");
+        assert_eq!(g.depth(), 0);
+        assert!(!g.restore(t0), "a popped frame's token is refused");
+        g.members[0].poke(2, 3); // S3 again, for the provenance check below
+        let t0b = g.mark(ShrinkPolicy::Never).expect("mark");
         assert!(g.restore(t0b), "the new mark's own token restores");
         assert_eq!(g.members[0].checksum(), fnv(&[0, 0, 3, 0]), "to S3");
         // Provenance: a token minted by another history, even at the same
@@ -972,6 +1108,9 @@ mod fork_history_tests {
         let mut m2 = V32::new_with_mode(CompressionMode::Auto);
         m2.push(0);
         other.add_member(Box::new(m2));
+        while other.depth() < g.depth() {
+            other.mark(ShrinkPolicy::Never).expect("mark");
+        }
         let foreign = other.mark(ShrinkPolicy::Never).expect("mark");
         let _own = g.mark(ShrinkPolicy::Never).expect("mark");
         assert_eq!(other.depth(), g.depth(), "same depth on both histories");

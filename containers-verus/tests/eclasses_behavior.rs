@@ -169,7 +169,10 @@ fn mark_restore_round_trip() {
     assert_eq!(ec.num_classes().as_usize(), 2);
     assert_ne!(ec.find(a).to_usize(), ec.find(b).to_usize());
     assert!(ec.repr_id(a).is_some() && ec.repr_id(b).is_some());
-    // the token is consumed.
+    // semantics B: the checkpoint is reusable; dropping its frame kills it.
+    ec.try_restore(token)
+        .expect("the checkpoint restores again");
+    ec.pop_scope();
     assert_eq!(
         ec.try_restore(token).unwrap_err(),
         ContainerError::InvalidToken

@@ -169,6 +169,12 @@ impl<G: DenseId<Index = I::Index>, I: NodeIds, const TRACK: bool> TypedRouting<G
             .expect("routing restore: token minted by this container's own mark");
         self.reserved = false;
     }
+
+    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.entries.pop_scope();
+        self.reserved = false;
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

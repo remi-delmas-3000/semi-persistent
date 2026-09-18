@@ -1203,10 +1203,10 @@ where
                     == old(self).model_snapshots_view()[token.frame_idx_spec() as int]
                 && final(self).entries_snapshots_view()
                     == old(self).entries_snapshots_view()
-                        .subrange(0, token.frame_idx_spec() as int)
+                        .subrange(0, token.frame_idx_spec() as int + 1)
                 && final(self).model_snapshots_view()
                     == old(self).model_snapshots_view()
-                        .subrange(0, token.frame_idx_spec() as int),
+                        .subrange(0, token.frame_idx_spec() as int + 1),
             r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
     {
@@ -1239,9 +1239,10 @@ where
             // Restored to the ring partition archived at that mark.
             final(self).model_view() == old(self).model_snapshots_view()[token.frame_idx_spec() as int],
             final(self).entries_snapshots_view()
-                == old(self).entries_snapshots_view().subrange(0, token.frame_idx_spec() as int),
+                == old(self).entries_snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
             final(self).model_snapshots_view()
-                == old(self).model_snapshots_view().subrange(0, token.frame_idx_spec() as int),
+                == old(self).model_snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
+            final(self).depth_spec() == token.frame_idx_spec() + 1,
     {
         // Check the full restorable predicate before mutation.
         crate::guard::check_precondition(
@@ -1254,7 +1255,7 @@ where
         self.entries.restore(token.entries);
         self.model = Ghost(snap_model);
         self.model_snapshots =
-            Ghost(self.model_snapshots@.subrange(0, token.entries.frame_idx_spec() as int));
+            Ghost(self.model_snapshots@.subrange(0, token.entries.frame_idx_spec() as int + 1));
         proof {
             assert(self.entries.view() == snap);
             let m = self.model@;
@@ -1347,6 +1348,31 @@ where
                 }
             }
         }
+    }
+
+    /// Drop the open top frame, undoing its writes (the SMT-LIB `pop`; that
+    /// frame's token dies). Refuses on an untracked list or an empty stack.
+    pub fn pop_scope(&mut self)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            (TRACK && old(self).depth_spec() >= 1) ==> ({
+                let f = old(self).depth_spec() - 1;
+                &&& final(self).entries_view() == old(self).entries_snapshots_view()[f]
+                &&& final(self).model_view() == old(self).model_snapshots_view()[f]
+                &&& final(self).entries_snapshots_view() == old(self).entries_snapshots_view().subrange(0, f)
+                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f)
+                &&& final(self).depth_spec() == f
+            }),
+    {
+        if !TRACK {
+            crate::guard::refuse("pop_scope() called on untracked CircularList");
+        }
+        let d = self.entries.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("CircularList::pop_scope: no open frame");
+        }
+        self.restore_frames(d - 1);
     }
 
     #[allow(dead_code)]

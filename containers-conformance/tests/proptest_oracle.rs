@@ -504,6 +504,9 @@ macro_rules! vec_property {
 
                         p.restore(tp);
                         v.try_restore(tv).expect("restore: own token");
+                        // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                        assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                        v.pop_scope();
                         o.restore(to);
                     }
                 }
@@ -759,6 +762,9 @@ macro_rules! aov_property {
                             prop_assert!(v.is_valid_token(&tv), "step {}: verus rejects live token", step);
                             p.restore(tp);
                             v.try_restore(tv).expect("restore: own token");
+                            // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                            assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                            v.pop_scope();
                             o.restore(to);
                         }
                     }
@@ -902,6 +908,9 @@ macro_rules! map_property {
                             prop_assert!(v.is_valid_token(&tv), "step {}: verus rejects live map token", step);
                             p.restore(tp);
                             v.try_restore(tv).expect("restore: own token");
+                            // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                            assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                            v.pop_scope();
                             o.restore(to);
                         }
                     }
@@ -1078,6 +1087,9 @@ macro_rules! sparse_set_property {
                             );
                             p.restore(tp);
                             v.restore(tv);
+                            // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                            assert!(v.is_valid_token(&tv), "restored checkpoint stays valid (B)");
+                            v.pop_scope();
                             o.restore(to);
                         }
                     }

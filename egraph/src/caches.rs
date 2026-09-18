@@ -624,11 +624,25 @@ impl<
             h.try_restore(tok)
                 .expect("restore: token minted by this container's own mark");
         }
-        self.frames.truncate(token.frame_index);
+        self.frames.truncate(token.frame_index + 1); // semantics B: the mark's frame stays open
         #[cfg(debug_assertions)]
         debug_assert!(
             self.index_is_complete(),
             "restore left the hashcons hint index incomplete"
+        );
+    }
+
+    /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.nodes.pop_scope();
+        if let Some(h) = &mut self.history {
+            h.pop_scope();
+        }
+        self.frames.pop().expect("pop_scope: no open cache frame");
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "pop left the hint index incomplete"
         );
     }
 
@@ -1062,11 +1076,29 @@ impl<
             h.try_restore(tok)
                 .expect("restore: token minted by this container's own mark");
         }
-        self.frames.truncate(token.frame_index);
+        self.frames.truncate(token.frame_index + 1); // semantics B: the mark's frame stays open
         #[cfg(debug_assertions)]
         debug_assert!(
             self.index_is_complete(),
             "restore left the hashcons hint index incomplete"
+        );
+    }
+
+    /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.nodes.pop_scope();
+        self.children.pop_scope();
+        if let Some(h) = &mut self.history_nodes {
+            h.pop_scope();
+        }
+        if let Some(h) = &mut self.history_children {
+            h.pop_scope();
+        }
+        self.frames.pop().expect("pop_scope: no open cache frame");
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "pop left the hint index incomplete"
         );
     }
 
@@ -1291,11 +1323,22 @@ where
         self.nodes
             .try_restore(token.nodes)
             .expect("restore: token minted by this container's own mark");
-        self.frames.truncate(token.frame_index);
+        self.frames.truncate(token.frame_index + 1); // semantics B: the mark's frame stays open
         #[cfg(debug_assertions)]
         debug_assert!(
             self.index_is_complete(),
             "restore left the literal hint index incomplete"
+        );
+    }
+
+    /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
+    pub fn pop_scope(&mut self) {
+        self.nodes.pop_scope();
+        self.frames.pop().expect("pop_scope: no open cache frame");
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "pop left the hint index incomplete"
         );
     }
 

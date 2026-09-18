@@ -1443,9 +1443,10 @@ where
             final(self).roots_view()
                 == old(self).roots_snapshots_view()[token.parent_frame_idx_spec() as int],
             final(self).roots_snapshots_view() == old(self).roots_snapshots_view()
-                .subrange(0, token.parent_frame_idx_spec() as int),
+                .subrange(0, token.parent_frame_idx_spec() as int + 1),
             final(self).parent_snapshots_view() == old(self).parent_snapshots_view()
-                .subrange(0, token.parent_frame_idx_spec() as int),
+                .subrange(0, token.parent_frame_idx_spec() as int + 1),
+            final(self).parent_depth_spec() == token.parent_frame_idx_spec() + 1,
     {
         // Atomic compound restore: prevalidate BOTH constituent tokens before
         // restoring either (a parent column rolled back without its rank
@@ -1493,8 +1494,8 @@ where
         }
         self.roots = Ghost(snap_roots);
         self.dist = Ghost(snap_dist);
-        self.roots_snapshots = Ghost(self.roots_snapshots@.subrange(0, f));
-        self.dist_snapshots = Ghost(self.dist_snapshots@.subrange(0, f));
+        self.roots_snapshots = Ghost(self.roots_snapshots@.subrange(0, f + 1));
+        self.dist_snapshots = Ghost(self.dist_snapshots@.subrange(0, f + 1));
         proof {
             if PROOFS {
                 reveal(uf_proof_archive_agrees);
@@ -1532,9 +1533,9 @@ where
             assert(self.parent_view() == old(self).parent.snapshots_view()[f]);
             assert(self.rank_view() == old(self).rank.snapshots_view()[f]);
             assert(self.parent.snapshots_view()
-                =~= old(self).parent.snapshots_view().subrange(0, f));
+                =~= old(self).parent.snapshots_view().subrange(0, f + 1));
             assert(self.rank.snapshots_view()
-                =~= old(self).rank.snapshots_view().subrange(0, f));
+                =~= old(self).rank.snapshots_view().subrange(0, f + 1));
             assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
                 implies uf_model_wf(#[trigger] self.parent.snapshots_view()[k],
                     self.roots_snapshots@[k], self.dist_snapshots@[k]) by {
@@ -1559,6 +1560,47 @@ where
     /// to frame `t.depth` via `restore_frame`, recover the roots/dist archive, and
     /// record the branch cut once in `History`. The archive proofs are the same as
     /// `restore` with `f = t.depth`. Additive; `restore`'s API + theorems untouched.
+    /// Drop the open top frame, undoing its writes (the SMT-LIB `pop`; that
+    /// frame's token dies). Refuses on an untracked structure, an empty frame
+    /// stack, or columns out of step.
+    pub fn pop_scope(&mut self)
+        where T: core::default::Default, J: core::default::Default
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            (TRACK && old(self).parent_depth_spec() >= 1) ==> ({
+                let f = old(self).parent_depth_spec() - 1;
+                &&& final(self).parent_view() == old(self).parent_snapshots_view()[f]
+                &&& final(self).rank_view() == old(self).rank_snapshots_view()[f]
+                &&& final(self).roots_view() == old(self).roots_snapshots_view()[f]
+                &&& final(self).roots_snapshots_view() == old(self).roots_snapshots_view().subrange(0, f)
+                &&& final(self).parent_snapshots_view() == old(self).parent_snapshots_view().subrange(0, f)
+                &&& final(self).parent_depth_spec() == f
+            }),
+    {
+        if !TRACK {
+            crate::guard::refuse("pop_scope() called on untracked UnionFind");
+        }
+        let d = self.parent.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("UnionFind::pop_scope: no open frame");
+        }
+        if !(self.rank.depth_exec() == d) {
+            crate::guard::refuse("UnionFind::pop_scope: columns out of step");
+        }
+        if PROOFS {
+            match (&self.parent_proof, &self.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == d && j.depth_exec() == d) {
+                        crate::guard::refuse("UnionFind::pop_scope: proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("UnionFind::pop_scope: proof-column shape does not match the build"),
+            }
+        }
+        self.restore_frames(d - 1);
+    }
+
     #[allow(dead_code)]
     pub(crate) fn restore_frames(&mut self, target: usize)
         where T: core::default::Default, J: core::default::Default
@@ -1671,8 +1713,8 @@ where
                 &&& final(self).roots_view() == old(self).roots_snapshots_view()[f]
                 &&& final(self).parent_view() == old(self).parent_snapshots_view()[f]
                 &&& final(self).rank_view() == old(self).rank_snapshots_view()[f]
-                &&& final(self).roots_snapshots_view() == old(self).roots_snapshots_view().subrange(0, f)
-                &&& final(self).parent_snapshots_view() == old(self).parent_snapshots_view().subrange(0, f)
+                &&& final(self).roots_snapshots_view() == old(self).roots_snapshots_view().subrange(0, f + 1)
+                &&& final(self).parent_snapshots_view() == old(self).parent_snapshots_view().subrange(0, f + 1)
             }),
             r is Err ==> *final(self) == *old(self),
             r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,

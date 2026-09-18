@@ -13858,9 +13858,9 @@ where
             final(self).wf(),
             r is Ok ==> final(self).view()
                 == old(self).snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec()
+                && final(self).depth_spec() == token.frame_idx_spec() + 1
                 && final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
             r is Err ==> final(self).view() == old(self).view()
                 && final(self).depth_spec() == old(self).depth_spec()
                 && final(self).snapshots_view() == old(self).snapshots_view(),
@@ -14326,11 +14326,12 @@ where
         assert(self.snapshots_view() == s0.push(v0).push(v1) && self.depth_spec() == d0 + 2);
         self.set_index(i, b);
         // Restore to the second mark: the write of `b` is undone.
+        // Semantics B (design doc 08 §1): a restore keeps the token's frame open.
         match self.try_restore(t2) {
             Ok(()) => {
                 assert(self.view() == v1);
-                assert(self.depth_spec() == d0 + 1);
-                assert(self.snapshots_view() == s0.push(v0));
+                assert(self.depth_spec() == d0 + 2);
+                assert(self.snapshots_view() == s0.push(v0).push(v1));
             }
             Err(_) => { return; }
         }
@@ -14338,13 +14339,13 @@ where
         self.set_index(i, b);
         self.apply_tier_policy();
         assert(self.view() == v1.update(i.as_nat() as int, b));
-        assert(self.snapshots_view() == s0.push(v0));
-        // Restore to the older mark: back to the original view.
+        assert(self.snapshots_view() == s0.push(v0).push(v1));
+        // Restore to the older mark: back to the original view, its frame open.
         match self.try_restore(t1) {
             Ok(()) => {
                 assert(self.view() == v0);
-                assert(self.depth_spec() == d0);
-                assert(self.snapshots_view() == s0);
+                assert(self.depth_spec() == d0 + 1);
+                assert(self.snapshots_view() == s0.push(v0));
             }
             Err(_) => {}
         }
@@ -15901,11 +15902,125 @@ where
         proof { self.lemma_genealogy_framing(physical); }
     }
 
+    /// Semantics B (design doc 08 §1): reconstruct to the version at frame
+    /// `target` and keep that frame open and empty — the writable frame is
+    /// `target` again, not its parent — so the token of that mark stays valid
+    /// and can be restored to again, while every frame above it is gone and
+    /// every token minted after it is dead. Built from the pop core and a
+    /// frame push: `runtime_restore_frame(target)` undoes and pops the strata
+    /// `target..`, `push_frame` reopens frame `target` on the restored
+    /// contents (the snapshot at `target` is the same contents, so the
+    /// snapshot stack is exactly the old prefix of length `target + 1`), and
+    /// the genealogy cut starts at `target + 1`.
+    #[verifier::spinoff_prover]
+    pub(crate) fn reset_frame(&mut self, target: usize)
+        where T: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[target as int],
+            final(self).depth_spec() == target as nat + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target as int + 1),
+            forall|u: VecToken| u.depth_spec() > target as nat ==> !final(self).genealogy.valid_spec(u),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        self.reset_frame_physical(target);
+        let ghost physical = *self;
+        self.genealogy.cut_from(target + 1);
+        proof { self.lemma_genealogy_framing(physical); }
+    }
 
-    /// Restore to the frame named by `token`: reconstruct via `restore_frame`.
-    /// The standalone (non-`SyncGroup`) entry point. Structural only (H2): the
-    /// branch cut and abandoned-future invalidation are the owning `History`'s
-    /// (`History::restore_to`), recorded once for the whole group.
+    /// The physical half of `reset_frame`: undo and pop the strata `target..`,
+    /// then reopen frame `target` on the restored contents. `wf` stays hidden:
+    /// each step's contract carries it as a fact.
+    #[verifier::spinoff_prover]
+    fn reset_frame_physical(&mut self, target: usize)
+        where T: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[target as int],
+            final(self).depth_spec() == target as nat + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target as int + 1),
+    {
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        let ghost pre = *self;
+        self.runtime_restore_frame(target);
+        proof {
+            // The restored contents fit the index word: the store's own bound.
+            self.lemma_store_wf();
+            self.store.lemma_wf_data_len();
+        }
+        self.evict_cold_frame();
+        self.seal_open_frame_copy();
+        self.push_frame(ShrinkPolicy::Never);
+        proof {
+            // One snapshot per frame, so the prefix of length `target + 1` exists.
+            pre.lemma_snapshots_len();
+            assert(pre.snapshots_view().subrange(0, target as int)
+                .push(pre.snapshots_view()[target as int])
+                =~= pre.snapshots_view().subrange(0, target as int + 1));
+        }
+    }
+
+    /// One snapshot per frame (an accessor for bodies that keep `wf` hidden).
+    pub(crate) proof fn lemma_snapshots_len(&self)
+        requires self.wf(),
+        ensures self.snapshots_view().len() == self.depth_spec(),
+    {
+    }
+
+    /// `wf` implies the store's own well-formedness (an accessor for bodies
+    /// that keep `wf` hidden).
+    pub(crate) proof fn lemma_store_wf(&self)
+        requires self.wf(),
+        ensures self.store.wf(),
+    {
+    }
+
+    /// Drop the open top frame: undo its stratum and make the parent frame
+    /// writable again (the SMT-LIB `pop`). The popped frame's token dies with
+    /// it (the cut starts at its depth). Refuses on an empty frame stack.
+    #[verifier::spinoff_prover]
+    pub(crate) fn pop_frame(&mut self)
+        where T: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+        ensures
+            final(self).wf(),
+            old(self).depth_spec() >= 1 ==> {
+                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
+            },
+    {
+        let d = self.depth_exec();
+        if !(d >= 1) {
+            crate::guard::refuse("Vec::pop_scope: no open frame");
+        }
+        self.restore_frame(d - 1);
+    }
+
+
+    /// Restore to the version named by `token` and keep its frame open
+    /// (design doc 08 §1, semantics B): the contents are the snapshot taken at
+    /// that mark, the writable frame is the token's own again — so `token`
+    /// stays valid and can be restored to again — and every token minted
+    /// after it is dead for good. The SMT-LIB `pop` is `restore(t)` followed
+    /// by `pop()`. The standalone entry point; a group drives its members
+    /// through `reset_frame` and records the cut once (`History::restore_to`).
     #[verifier::spinoff_prover]
     pub(crate) fn restore(&mut self, token: VecToken)
         where T: core::default::Default
@@ -15917,8 +16032,9 @@ where
         ensures
             final(self).wf(),
             final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec(),
-            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            final(self).depth_spec() == token.frame_idx_spec() + 1,
+            final(self).snapshots_view()
+                == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
     {
         // Structural guards — the parts `restore_frame` deliberately omits.
         crate::guard::check_precondition(TRACK, "restore() called on untracked vec");
@@ -15934,7 +16050,55 @@ where
             self.depth_exec() < u32::MAX as usize,
             "Vec::restore: frame-stack depth would overflow u32",
         );
-        self.restore_frame(token.depth as usize);
+        self.reset_frame(token.depth as usize);
+    }
+
+    /// Drop the open top frame, undoing its writes, and make the parent frame
+    /// writable again (the SMT-LIB `pop`; that frame's token dies). Refuses on
+    /// an untracked vector or an empty frame stack.
+    pub fn pop_scope(&mut self)
+        where T: core::default::Default
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            (TRACK && old(self).depth_spec() >= 1) ==> {
+                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
+            },
+    {
+        if !TRACK {
+            crate::guard::refuse("pop_scope() called on untracked vec");
+        }
+        self.pop_frame();
+    }
+
+    /// `pop_scope` as a `Result`: `Untracked` or `NoOpenFrame` instead of a refusal.
+    pub fn try_pop_scope(&mut self) -> (r: Result<(), crate::error::ContainerError>)
+        where T: core::default::Default
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> {
+                &&& old(self).depth_spec() >= 1
+                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
+            },
+            r is Err ==> final(self).view() == old(self).view()
+                && final(self).depth_spec() == old(self).depth_spec()
+                && final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        if !TRACK {
+            return Err(crate::error::ContainerError::Untracked);
+        }
+        if !(self.depth_exec() >= 1) {
+            return Err(crate::error::ContainerError::NoOpenFrame);
+        }
+        self.pop_frame();
+        Ok(())
     }
 }
 
@@ -16994,7 +17158,11 @@ mod forged_token_tests {
         v.restore(genuine_vec);
         h.restore_to(genuine_group);
         assert_eq!(v.len(), 1);
-        assert_eq!(h.depth(), 0);
+        assert_eq!(
+            h.depth(),
+            1,
+            "semantics B: the checkpoint's frame stays open"
+        );
     }
 
     /// A stale group token from an abandoned future: `History::restore_to`
@@ -17088,9 +17256,12 @@ mod mixed_component_token_tests {
         // franken.dense (tok1, live ancestor frame) is valid but
         // franken.sparse/indices (tok2, just consumed) are not.
         s.restore(tok2);
+        // Semantics B keeps every component of tok2 valid, so component-wise
+        // validity holds for the frankentoken; the atomic refusal is the
+        // frame-agreement check of `restore` itself (below).
         assert!(
-            !s.is_valid_token(&franken),
-            "mixed/consumed compound must be invalid"
+            s.is_valid_token(&tok2),
+            "the restored checkpoint stays valid"
         );
 
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

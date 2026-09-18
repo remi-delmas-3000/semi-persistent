@@ -246,6 +246,12 @@ fn restores_remaining_tracks_depth_not_restore_count() {
         v.try_restore(t).expect("restore: own token");
         assert_eq!(
             v.restores_remaining(),
+            u32::MAX as usize - 1,
+            "semantics B: the restored frame stays open; after {k}"
+        );
+        v.pop_scope();
+        assert_eq!(
+            v.restores_remaining(),
             u32::MAX as usize,
             "restores must leave NO headroom residue (genealogy on History); after {k}"
         );
