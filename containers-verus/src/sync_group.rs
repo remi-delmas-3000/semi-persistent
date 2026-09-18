@@ -837,4 +837,145 @@ mod fork_history_tests {
             );
         }
     }
+
+    /// Grouped history, randomized (the "no member drifts, no gaps" property
+    /// the proofs state, exercised on the real containers): three members of
+    /// different widths under one `ForkHistory`, driven by random marks,
+    /// erased writes and restores to any live token. After every restore each
+    /// member must equal its own typed oracle snapshot taken at that mark, the
+    /// group must sit at the depth it had when the token was minted, and the
+    /// consumed token and every token minted after it must be refused forever
+    /// (the cut starts at the token's own depth).
+    #[test]
+    fn grouped_history_random_sequences_land_in_lockstep() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+
+        #[derive(Clone, Debug)]
+        enum Op {
+            Mark,
+            Poke(usize, usize, usize),
+            Restore(usize),
+        }
+        const N: usize = 64;
+        let strat = proptest::collection::vec(
+            prop_oneof![
+                2 => Just(Op::Mark),
+                6 => (0..3usize, 0..N, 0..61usize).prop_map(|(m, i, v)| Op::Poke(m, i, v)),
+                2 => (0..16usize).prop_map(Op::Restore),
+            ],
+            1..96,
+        );
+        let mut runner = TestRunner::new(Config {
+            cases: 256,
+            ..Config::default()
+        });
+        runner
+            .run(&strat, |ops| {
+                let mut m32 = V32::new_with_mode(CompressionMode::Auto);
+                let mut m64 = V64::new_with_mode(CompressionMode::Auto);
+                let mut m16 = V16::new_with_mode(CompressionMode::Auto);
+                for _ in 0..N {
+                    m32.push(0);
+                    m64.push(0);
+                    m16.push(0);
+                }
+                let mut oracles: [Vec<usize>; 3] = [vec![0; N], vec![0; N], vec![0; N]];
+                let mut g = ForkHistory::new();
+                g.add_member(Box::new(m32));
+                g.add_member(Box::new(m64));
+                g.add_member(Box::new(m16));
+                // Live tokens with the depth before the mark and the oracle
+                // snapshot at the mark; tokens the restores abandon go stale.
+                let mut live: Vec<(GroupToken, u32, [Vec<usize>; 3])> = Vec::new();
+                let mut stale: Vec<GroupToken> = Vec::new();
+                for op in ops {
+                    match op {
+                        Op::Mark => {
+                            let depth = g.depth();
+                            let t = g.mark(ShrinkPolicy::Never).expect("mark headroom");
+                            prop_assert_eq!(g.depth(), depth + 1, "mark bumps the group depth");
+                            live.push((t, depth, oracles.clone()));
+                        }
+                        Op::Poke(m, i, v) => {
+                            g.members[m].poke(i, v);
+                            oracles[m][i] = v;
+                        }
+                        Op::Restore(k) => {
+                            if live.is_empty() {
+                                continue;
+                            }
+                            let k = k % live.len();
+                            let (t, depth, snap) = live[k].clone();
+                            prop_assert!(g.restore(t), "live token must restore");
+                            prop_assert_eq!(g.depth(), depth, "restore lands on the mark's depth");
+                            prop_assert!(!g.restore(t), "the consumed token is spent");
+                            oracles = snap;
+                            // The consumed token and the deeper ones (the abandoned
+                            // future) are refused forever.
+                            for t in live.drain(k..) {
+                                stale.push(t.0);
+                            }
+                        }
+                    }
+                    // Lockstep contents after every step.
+                    for m in 0..3 {
+                        prop_assert_eq!(
+                            g.members[m].checksum(),
+                            fnv(&oracles[m]),
+                            "member {} diverged from its oracle",
+                            m
+                        );
+                    }
+                    // The abandoned future stays refused, forever.
+                    for &t in &stale {
+                        prop_assert!(!g.restore(t), "stale token must be refused");
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// A consumed token is spent for good (the restore cut starts at its own
+    /// depth), so a NEW mark at that depth never revives it; and a token
+    /// minted by another history is foreign and refused whatever its numbers.
+    #[test]
+    fn consumed_and_foreign_tokens_are_refused() {
+        let mut m = V32::new_with_mode(CompressionMode::Auto);
+        for _ in 0..4 {
+            m.push(0);
+        }
+        let mut g = ForkHistory::new();
+        g.add_member(Box::new(m));
+        let t0 = g.mark(ShrinkPolicy::Never).expect("mark"); // depth 0, state S0
+        g.members[0].poke(0, 1); // S1
+        let t1 = g.mark(ShrinkPolicy::Never).expect("mark"); // depth 1
+        g.members[0].poke(1, 2); // S2
+        assert!(g.restore(t0), "t0 is live");
+        assert_eq!(g.members[0].checksum(), fnv(&[0, 0, 0, 0]), "back to S0");
+        assert!(!g.restore(t0), "consumed: spent by its own restore");
+        assert!(!g.restore(t1), "abandoned future: refused");
+        g.members[0].poke(2, 3); // S3
+        let t0b = g.mark(ShrinkPolicy::Never).expect("re-mark at depth 0");
+        g.members[0].poke(3, 4); // S4
+        assert!(
+            !g.restore(t0),
+            "a re-mark at the same depth does not revive the spent token"
+        );
+        assert!(!g.restore(t1), "the deeper token stays refused");
+        assert!(g.restore(t0b), "the new mark's own token restores");
+        assert_eq!(g.members[0].checksum(), fnv(&[0, 0, 3, 0]), "to S3");
+        // Provenance: a token minted by another history, even at the same
+        // depth and generation, is foreign.
+        let mut other = ForkHistory::new();
+        let mut m2 = V32::new_with_mode(CompressionMode::Auto);
+        m2.push(0);
+        other.add_member(Box::new(m2));
+        let foreign = other.mark(ShrinkPolicy::Never).expect("mark");
+        let _own = g.mark(ShrinkPolicy::Never).expect("mark");
+        assert_eq!(other.depth(), g.depth(), "same depth on both histories");
+        assert!(!g.restore(foreign), "a foreign history's token is refused");
+        assert!(other.restore(foreign), "and still restores its own history");
+    }
 }
