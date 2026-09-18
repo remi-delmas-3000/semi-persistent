@@ -13873,6 +13873,31 @@ where
         }
     }
 
+    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
+    /// container would refuse, with nothing changed.
+    pub fn try_restore_and_pop(&mut self, token: VecToken)
+        -> (r: Result<(), crate::error::ContainerError>)
+        where T: core::default::Default
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> final(self).view()
+                == old(self).snapshots_view()[token.frame_idx_spec() as int]
+                && final(self).depth_spec() == token.frame_idx_spec()
+                && final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            r is Err ==> final(self).view() == old(self).view()
+                && final(self).depth_spec() == old(self).depth_spec()
+                && final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        if self.is_valid_token(&token) {
+            self.restore_and_pop(token);
+            Ok(())
+        } else {
+            Err(crate::error::ContainerError::InvalidToken)
+        }
+    }
+
     /// The index column of the diff-log strata a `restore(token)` would pop:
     /// entries `[frames[token.frame_idx].diff_start, diff_log.len())`. Each
     /// returned index names a slot whose content the restore will roll back
@@ -16058,6 +16083,43 @@ where
             "Vec::restore: frame-stack depth would overflow u32",
         );
         self.reset_frame(token.depth as usize);
+    }
+
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    #[verifier::spinoff_prover]
+    pub(crate) fn restore_and_pop(&mut self, token: VecToken)
+        where T: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            token.frame_idx_spec() < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
+            final(self).depth_spec() == token.frame_idx_spec(),
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+    {
+        // Structural guards — the parts `restore_frame` deliberately omits.
+        crate::guard::check_precondition(TRACK, "restore_and_pop() called on untracked vec");
+        // Provenance: minted by this vector's own manager, and not cut since.
+        if !self.genealogy.is_valid(&token) {
+            crate::guard::refuse("Vec::restore_and_pop: token is foreign, stale or consumed");
+        }
+        crate::guard::check_precondition(
+            (token.depth as usize) < self.depth_exec(),
+            "token points beyond frame stack",
+        );
+        crate::guard::check_precondition(
+            self.depth_exec() < u32::MAX as usize,
+            "Vec::restore_and_pop: frame-stack depth would overflow u32",
+        );
+        self.restore_frame(token.depth as usize);
     }
 
     /// Drop the open top frame, undoing its writes, and make the parent frame

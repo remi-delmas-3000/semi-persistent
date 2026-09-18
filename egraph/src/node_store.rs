@@ -564,6 +564,49 @@ where
         self.lit.restore(token.lit);
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
+    /// to the level below `t`, on one pop core per column, so it costs what the
+    /// legacy restore costs. `t` and every later token die.
+    pub fn restore_and_pop(&mut self, token: NodeStoreToken) {
+        if node_prof_enabled() {
+            let mut t = std::time::Instant::now();
+            self.routing.restore_and_pop(token.routing);
+            node_prof_record(0, &mut t);
+            self.plain0.restore_and_pop(token.plain0);
+            node_prof_record(1, &mut t);
+            self.plain1.restore_and_pop(token.plain1);
+            node_prof_record(2, &mut t);
+            self.plain2.restore_and_pop(token.plain2);
+            node_prof_record(3, &mut t);
+            self.plain3.restore_and_pop(token.plain3);
+            node_prof_record(4, &mut t);
+            self.spair.restore_and_pop(token.spair);
+            node_prof_record(5, &mut t);
+            self.plain_n.restore_and_pop(token.plain_n);
+            node_prof_record(6, &mut t);
+            self.seq.restore_and_pop(token.seq);
+            node_prof_record(7, &mut t);
+            self.mset.restore_and_pop(token.mset);
+            node_prof_record(8, &mut t);
+            self.set.restore_and_pop(token.set);
+            node_prof_record(9, &mut t);
+            self.lit.restore_and_pop(token.lit);
+            node_prof_record(10, &mut t);
+            return;
+        }
+        self.routing.restore_and_pop(token.routing);
+        self.plain0.restore_and_pop(token.plain0);
+        self.plain1.restore_and_pop(token.plain1);
+        self.plain2.restore_and_pop(token.plain2);
+        self.plain3.restore_and_pop(token.plain3);
+        self.spair.restore_and_pop(token.spair);
+        self.plain_n.restore_and_pop(token.plain_n);
+        self.seq.restore_and_pop(token.seq);
+        self.mset.restore_and_pop(token.mset);
+        self.set.restore_and_pop(token.set);
+        self.lit.restore_and_pop(token.lit);
+    }
+
     /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
     pub fn pop_scope(&mut self) {
         self.routing.pop_scope();

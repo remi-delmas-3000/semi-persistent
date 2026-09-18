@@ -80,9 +80,8 @@ fn veci_verus(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
                     let idx = (x % n as u64) as u32;
                     v.set_index(idx, (x as u32) & 0x7FFF_FFFF);
                 }
-                v.try_restore(tok).expect("restore: own token");
-                // Legacy restore == verified restore + pop_scope (semantics B, design doc 08 §1).
-                v.pop_scope();
+                // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
+                v.try_restore_and_pop(tok).expect("restore: own token");
             }
             black_box(v.len());
         },
@@ -141,8 +140,7 @@ fn vecp_verus(b: &mut criterion::Bencher<'_>, n: usize, marks: usize) {
                     let idx = (x % n as u64) as u32;
                     v.set_index(idx, x);
                 }
-                v.try_restore(tok).expect("restore: own token");
-                v.pop_scope();
+                v.try_restore_and_pop(tok).expect("restore: own token");
             }
             black_box(v.len());
         },

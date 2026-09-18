@@ -438,6 +438,83 @@ where
         r
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    pub fn restore_and_pop(&mut self, token: VecToken) -> (r: Result<(), ContainerError>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).complete(),
+            r is Ok ==> final(self).view()
+                    == old(self).snapshots_view()[token.frame_idx_spec() as int]
+                && final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            r is Err ==> final(self).view() == old(self).view()
+                && final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        // Total: a token outside the live frame stack is refused, like the
+        // column's own `try_restore`.
+        if !self.col.is_valid_token(&token) {
+            return Err(ContainerError::InvalidToken);
+        }
+        let ghost pre = *self;
+        let r = self.col.try_restore_and_pop(token);
+        proof {
+            assert(pre.complete());
+            // The index is untouched, so every hint the old state had, the
+            // new state has - literally the same buckets.
+            assert(self.index == pre.index && self.spill == pre.spill);
+            assert forall|f2: u32, j2: nat| pre.hinted(f2, j2)
+                implies #[trigger] self.hinted(f2, j2) by {
+                assert(self.bucket_spec(f2) == pre.bucket_spec(f2));
+            }
+            if r is Ok {
+                let ti = token.frame_idx_spec() as int;
+                // try_restore's Ok arm pins the restored view to snapshot ti,
+                // which is therefore in range of the old stack.
+                assert(self.view() == pre.snapshots_view()[ti]);
+                assert(0 <= ti < pre.snapshots_view().len());
+                assert forall|j: int| 0 <= j < self.view().len()
+                    implies self.hinted((#[trigger] self.view()[j]).fp_spec(), j as nat) by {
+                    // The restored view IS a covered snapshot.
+                    assert(pre.hinted(pre.snapshots_view()[ti][j].fp_spec(), j as nat));
+                }
+                assert forall|k: int, j: int|
+                    0 <= k < self.snapshots_view().len()
+                        && 0 <= j < self.snapshots_view()[k].len()
+                    implies self.hinted((#[trigger] self.snapshots_view()[k][j]).fp_spec(),
+                        j as nat) by {
+                    assert(self.snapshots_view()
+                        =~= pre.snapshots_view().subrange(0, ti));
+                    assert(self.snapshots_view()[k] == pre.snapshots_view()[k]);
+                    assert(pre.hinted(pre.snapshots_view()[k][j].fp_spec(), j as nat));
+                }
+            } else {
+                // Rejected token: nothing moved, so the invariant is the old
+                // one restated over the identical state.
+                assert(self.view() == pre.view());
+                assert(self.snapshots_view() == pre.snapshots_view());
+                assert forall|j: int| 0 <= j < self.view().len()
+                    implies self.hinted((#[trigger] self.view()[j]).fp_spec(), j as nat) by {
+                    assert(pre.hinted(pre.view()[j].fp_spec(), j as nat));
+                }
+                assert forall|k: int, j: int|
+                    0 <= k < self.snapshots_view().len()
+                        && 0 <= j < self.snapshots_view()[k].len()
+                    implies self.hinted((#[trigger] self.snapshots_view()[k][j]).fp_spec(),
+                        j as nat) by {
+                    assert(pre.hinted(pre.snapshots_view()[k][j].fp_spec(), j as nat));
+                }
+            }
+        }
+        r
+    }
+
     /// THE COLLISION THEOREM. Scan the fingerprint's hint bucket, validating
     /// each candidate against the column's CURRENT content:
     ///

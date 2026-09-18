@@ -1189,6 +1189,55 @@ where
         self.indices.restore(token.indices);
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    pub fn restore_and_pop(&mut self, token: SparseSetToken)
+        where T: core::default::Default, Idx: core::default::Default
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).dense_view() == old(self).snap_at(token).0,
+            final(self).sparse_view() == old(self).snap_at(token).1,
+            final(self).indices_view() == old(self).snap_at(token).2,
+            final(self).dense_snapshots_view() == old(self).dense_snapshots_view()
+                .subrange(0, token.dense_frame_idx_spec() as int),
+            final(self).sparse_snapshots_view() == old(self).sparse_snapshots_view()
+                .subrange(0, token.sparse_frame_idx_spec() as int),
+            final(self).indices_snapshots_view() == old(self).indices_snapshots_view()
+                .subrange(0, token.indices_frame_idx_spec() as int),
+    {
+        // Prevalidate all constituent tokens before restoring any of them:
+        // a partially restored sparse set
+        // (dense rolled back, sparse/indices not) violates the permutation
+        // invariant unrecoverably. Both guards are the documented traps.
+        if !self.is_valid_token(&token) {
+            crate::guard::refuse(
+                "SparseSet::restore_and_pop: invalid, foreign, stale, consumed, or abandoned token component",
+            );
+        }
+        if !(token.dense.depth == token.sparse.depth
+            && token.dense.depth == token.indices.depth)
+        {
+            crate::guard::refuse("SparseSet::restore_and_pop: token frame indices disagree across columns");
+        }
+        proof {
+            // depth == archived snapshot count on every column; the archive
+            // clause of `wf` at the token's frame is the restored triple.
+            self.dense.lemma_partition_counts();
+            self.sparse.lemma_partition_counts();
+            self.indices.lemma_partition_counts();
+            assert(sparse_set_snap_wf(
+                self.snap_at(token).0, self.snap_at(token).1, self.snap_at(token).2));
+        }
+        self.dense.restore_and_pop(token.dense);
+        self.sparse.restore_and_pop(token.sparse);
+        self.indices.restore_and_pop(token.indices);
+    }
+
     // --------------------------------------------------------------------
     // Shared-history variants (doc 10): the same three-member fan-out driven by
     // ONE external `History` via the genealogy-free `push_frame`/`restore_frame`

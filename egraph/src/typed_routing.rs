@@ -170,6 +170,16 @@ impl<G: DenseId<Index = I::Index>, I: NodeIds, const TRACK: bool> TypedRouting<G
         self.reserved = false;
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
+    /// to the level below `t`, on one pop core per column, so it costs what the
+    /// legacy restore costs. `t` and every later token die.
+    pub fn restore_and_pop(&mut self, token: RoutingToken) {
+        self.entries
+            .try_restore_and_pop(token.entries)
+            .expect("routing restore_and_pop: token minted by this container's own mark");
+        self.reserved = false;
+    }
+
     /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
     pub fn pop_scope(&mut self) {
         self.entries.pop_scope();

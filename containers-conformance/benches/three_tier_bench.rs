@@ -488,9 +488,8 @@ fn bench_restore(c: &mut Criterion) {
         b.iter_batched_ref(
             trail_restore_fixture,
             |(v, token)| {
-                v.try_restore(*token).expect("own token");
-                // Legacy restore == verified restore + pop_scope (semantics B, design doc 08 §1).
-                v.pop_scope();
+                // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
+                v.try_restore_and_pop(*token).expect("own token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -500,8 +499,7 @@ fn bench_restore(c: &mut Criterion) {
         b.iter_batched_ref(
             hot_restore_fixture,
             |(v, token)| {
-                v.try_restore(*token).expect("own token");
-                v.pop_scope();
+                v.try_restore_and_pop(*token).expect("own token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -511,8 +509,7 @@ fn bench_restore(c: &mut Criterion) {
         b.iter_batched_ref(
             cold_restore_fixture,
             |(v, token)| {
-                v.try_restore(*token).expect("own token");
-                v.pop_scope();
+                v.try_restore_and_pop(*token).expect("own token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -522,8 +519,29 @@ fn bench_restore(c: &mut Criterion) {
         b.iter_batched_ref(
             all_tiers_restore_fixture,
             |(v, token)| {
-                v.try_restore(*token).expect("own root token");
-                v.pop_scope();
+                v.try_restore_and_pop(*token).expect("own root token");
+                black_box(v.len())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    // Semantics B on its own (design doc 08 §1): the restore keeps the
+    // checkpoint's frame open — the SAT core's backjump. No legacy pair.
+    group.bench_function("hot_one_frame_keep_open", |b| {
+        b.iter_batched_ref(
+            hot_restore_fixture,
+            |(v, token)| {
+                v.try_restore(*token).expect("own token");
+                black_box(v.len())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    group.bench_function("cold_one_frame_keep_open", |b| {
+        b.iter_batched_ref(
+            cold_restore_fixture,
+            |(v, token)| {
+                v.try_restore(*token).expect("own token");
                 black_box(v.len())
             },
             BatchSize::LargeInput,
@@ -573,12 +591,12 @@ fn bench_promotion(c: &mut Criterion) {
         b.iter_batched_ref(
             promotion_fixture,
             |(v, ancestor)| {
-                v.try_restore(*ancestor).expect("own ancestor token");
-                v.pop_scope();
+                v.try_restore_and_pop(*ancestor)
+                    .expect("own ancestor token");
                 let inner = mark_verus(v);
                 write_verus(v, WRITES, 64, 17);
-                v.try_restore(inner).expect("new token after promotion");
-                v.pop_scope();
+                v.try_restore_and_pop(inner)
+                    .expect("new token after promotion");
                 black_box(v.diff_log_len())
             },
             BatchSize::LargeInput,
@@ -614,8 +632,7 @@ fn run_smt_backtrack() -> usize {
     for frame in 0..64 {
         let token = mark_verus(&mut v);
         write_verus(&mut v, TRACE_WRITES, 8, frame);
-        v.try_restore(token).expect("own token");
-        v.pop_scope();
+        v.try_restore_and_pop(token).expect("own token");
     }
     v.len() as usize
 }
@@ -637,8 +654,7 @@ fn run_nested(kind: StoreKind, policy: TierPolicy) -> usize {
         write_verus(&mut v, TRACE_WRITES, 16, frame);
         mark_verus(&mut v);
     }
-    v.try_restore(root).expect("own root token");
-    v.pop_scope();
+    v.try_restore_and_pop(root).expect("own root token");
     v.len() as usize
 }
 
@@ -757,8 +773,9 @@ macro_rules! verified_matrix_column {
 
             #[inline]
             fn restore(&mut self, token: Self::Token) {
-                self.0.try_restore(token).expect("own live matrix token");
-                self.0.pop_scope();
+                self.0
+                    .try_restore_and_pop(token)
+                    .expect("own live matrix token");
             }
 
             #[inline]

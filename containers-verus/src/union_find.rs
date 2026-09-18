@@ -1556,6 +1556,139 @@ where
         }
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    pub(crate) fn restore_and_pop(&mut self, token: UnionFindToken)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).restore_pre_spec(token),
+            token.parent_frame_idx_spec() == token.rank_frame_idx_spec(),
+        ensures
+            final(self).wf(),
+            final(self).parent_view()
+                == old(self).parent_snapshots_view()[token.parent_frame_idx_spec() as int],
+            final(self).rank_view()
+                == old(self).rank_snapshots_view()[token.rank_frame_idx_spec() as int],
+            final(self).roots_view()
+                == old(self).roots_snapshots_view()[token.parent_frame_idx_spec() as int],
+            final(self).roots_snapshots_view() == old(self).roots_snapshots_view()
+                .subrange(0, token.parent_frame_idx_spec() as int),
+            final(self).parent_snapshots_view() == old(self).parent_snapshots_view()
+                .subrange(0, token.parent_frame_idx_spec() as int),
+    {
+        // Atomic compound restore: prevalidate BOTH constituent tokens before
+        // restoring either (a parent column rolled back without its rank
+        // column desyncs the lengths unrecoverably), and pin the same-mark
+        // frame agreement.
+        crate::guard::check_precondition(
+            self.is_valid_token(&token),
+            "UnionFind::restore_and_pop: invalid, foreign, stale, consumed, or abandoned token component",
+        );
+        crate::guard::check_precondition(
+            token.parent.depth == token.rank.depth,
+            "UnionFind::restore_and_pop: token components name different marks",
+        );
+        let ghost f = token.parent.depth as int;
+        let ghost snap_roots = self.roots_snapshots@[f];
+        let ghost snap_dist = self.dist_snapshots@[f];
+        proof {
+            reveal(uf_archive_agrees);
+            assert(uf_archive_agrees(old(self).roots_snapshots@, old(self).dist_snapshots@,
+                old(self).parent.snapshots_view(), old(self).rank.snapshots_view()));
+        }
+        if !self.proof_tokens_valid(&token) {
+            crate::guard::refuse(
+                "UnionFind::restore_and_pop: proof-column token component invalid or from a different mark");
+        }
+        self.parent.restore_and_pop(token.parent);
+        self.rank.restore_and_pop(token.rank);
+        match (&mut self.parent_proof, token.parent_proof) {
+            (Some(pp), Some(t)) => match pp.try_restore_and_pop(t) {
+                Ok(()) => (),
+                Err(_) => crate::guard::refuse("restore_and_pop: own token"),
+            },
+            (None, None) => (),
+            _ => crate::guard::refuse(
+                "UnionFind::restore_and_pop: proof-token shape does not match the build"),
+        }
+        match (&mut self.justification, token.justification) {
+            (Some(j), Some(t)) => match j.try_restore_and_pop(t) {
+                Ok(()) => (),
+                Err(_) => crate::guard::refuse("restore_and_pop: own token"),
+            },
+            (None, None) => (),
+            _ => crate::guard::refuse(
+                "UnionFind::restore_and_pop: proof-token shape does not match the build"),
+        }
+        self.roots = Ghost(snap_roots);
+        self.dist = Ghost(snap_dist);
+        self.roots_snapshots = Ghost(self.roots_snapshots@.subrange(0, f));
+        self.dist_snapshots = Ghost(self.dist_snapshots@.subrange(0, f));
+        proof {
+            if PROOFS {
+                reveal(uf_proof_archive_agrees);
+                let opps = old(self).parent_proof->Some_0.snapshots_view();
+                let ojs = old(self).justification->Some_0.snapshots_view();
+                assert(uf_proof_archive_agrees(
+                    old(self).parent.snapshots_view(), opps, ojs));
+                let pps = self.parent_proof->Some_0.snapshots_view();
+                let js = self.justification->Some_0.snapshots_view();
+                // restored views are frame f's; the archive equates their
+                // lengths with the fast parent's at every frame.
+                assert(self.parent_proof->Some_0.view() == opps[f]);
+                assert(self.justification->Some_0.view() == ojs[f]);
+                assert(opps[f].len() == old(self).parent.snapshots_view()[f].len());
+                assert(ojs[f].len() == old(self).parent.snapshots_view()[f].len());
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] pps[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    assert(pps[k] == opps[k]);
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                }
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] js[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    assert(js[k] == ojs[k]);
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                }
+                assert(uf_proof_archive_agrees(
+                    self.parent.snapshots_view(), pps, js));
+            }
+            reveal(uf_archive_agrees);
+            assert(uf_model_wf(old(self).parent.snapshots_view()[f], snap_roots, snap_dist));
+            assert(self.parent_view() == old(self).parent.snapshots_view()[f]);
+            assert(self.rank_view() == old(self).rank.snapshots_view()[f]);
+            assert(self.parent.snapshots_view()
+                =~= old(self).parent.snapshots_view().subrange(0, f));
+            assert(self.rank.snapshots_view()
+                =~= old(self).rank.snapshots_view().subrange(0, f));
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies uf_model_wf(#[trigger] self.parent.snapshots_view()[k],
+                    self.roots_snapshots@[k], self.dist_snapshots@[k]) by {
+                assert(self.parent.snapshots_view()[k]
+                    == old(self).parent.snapshots_view()[k]);
+                assert(self.roots_snapshots@[k] == old(self).roots_snapshots@[k]);
+                assert(self.dist_snapshots@[k] == old(self).dist_snapshots@[k]);
+            }
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies (#[trigger] self.rank.snapshots_view()[k]).len()
+                    == self.parent.snapshots_view()[k].len() by {
+                assert(self.rank.snapshots_view()[k] == old(self).rank.snapshots_view()[k]);
+                assert(self.parent.snapshots_view()[k]
+                    == old(self).parent.snapshots_view()[k]);
+            }
+            assert(uf_archive_agrees(self.roots_snapshots@, self.dist_snapshots@,
+                self.parent.snapshots_view(), self.rank.snapshots_view()));
+        }
+    }
+
     /// Shared-history restore: reconstruct parent/rank (+ optional proof columns)
     /// to frame `t.depth` via `restore_frame`, recover the roots/dist archive, and
     /// record the branch cut once in `History`. The archive proofs are the same as
@@ -1723,6 +1856,35 @@ where
             && token.parent.depth == token.rank.depth
         {
             self.restore(token);
+            Ok(())
+        } else {
+            Err(crate::error::ContainerError::InvalidToken)
+        }
+    }
+
+    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
+    /// container would refuse, with nothing changed.
+    pub fn try_restore_and_pop(&mut self, token: UnionFindToken)
+        -> (r: Result<(), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> ({
+                let f = token.parent_frame_idx_spec() as int;
+                &&& token.parent_frame_idx_spec() == token.rank_frame_idx_spec()
+                &&& final(self).roots_view() == old(self).roots_snapshots_view()[f]
+                &&& final(self).parent_view() == old(self).parent_snapshots_view()[f]
+                &&& final(self).rank_view() == old(self).rank_snapshots_view()[f]
+                &&& final(self).roots_snapshots_view() == old(self).roots_snapshots_view().subrange(0, f)
+                &&& final(self).parent_snapshots_view() == old(self).parent_snapshots_view().subrange(0, f)
+            }),
+            r is Err ==> *final(self) == *old(self),
+            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
+    {
+        if self.is_valid_token(&token)
+            && token.parent.depth == token.rank.depth
+        {
+            self.restore_and_pop(token);
             Ok(())
         } else {
             Err(crate::error::ContainerError::InvalidToken)

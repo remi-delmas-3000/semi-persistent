@@ -385,6 +385,30 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         }
     }
 
+    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
+    /// container would refuse, with nothing changed.
+    pub fn try_restore_and_pop(&mut self, token: VecToken)
+        -> (r: Result<(), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> final(self).view()
+                == old(self).snapshots_view()[token.frame_idx_spec() as int]
+                && final(self).depth_spec() == token.frame_idx_spec()
+                && final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            r is Err ==> final(self).view() == old(self).view()
+                && final(self).depth_spec() == old(self).depth_spec()
+                && final(self).snapshots_view() == old(self).snapshots_view(),
+    {
+        if self.is_valid_token(&token) {
+            self.restore_and_pop(token);
+            Ok(())
+        } else {
+            Err(crate::error::ContainerError::InvalidToken)
+        }
+    }
+
     /// The public token-validity check. True iff `restore(token)` would
     /// succeed at this moment. Borrows the token, matching production.
     pub fn is_valid_token(&self, token: &VecToken) -> (b: bool)
@@ -566,6 +590,35 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             "AppendOnlyVec::restore: frame-stack depth would overflow u32",
         );
         self.reset_frame(token.depth as usize);
+    }
+
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    pub(crate) fn restore_and_pop(&mut self, token: VecToken)
+        requires
+            old(self).wf(),
+            TRACK,
+            token.frame_idx_spec() < old(self).depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
+            final(self).depth_spec() == token.frame_idx_spec(),
+            final(self).snapshots_view()
+                == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+    {
+        crate::guard::check_precondition(TRACK, "restore_and_pop() called on untracked AppendOnlyVec");
+        if !self.genealogy.is_valid(&token) {
+            crate::guard::refuse("AppendOnlyVec::restore_and_pop: token is foreign, stale or consumed");
+        }
+        crate::guard::check_precondition(
+            (token.depth as usize) < self.frames.len(),
+            "token points beyond frame stack",
+        );
+        self.restore_frame(token.depth as usize);
     }
 
     /// Drop the open top frame, undoing its appends (the SMT-LIB `pop`; that

@@ -798,10 +798,10 @@ where
             }
             CCommand::Pop => {
                 let mark = self.marks.pop().ok_or(InterpError::PopWithoutPush)?;
-                // SMT-LIB pop: back to the checkpoint, then drop its scope
-                // (the verified restore keeps the scope open, design doc 08 §1).
-                self.eg.restore(mark.token);
-                self.eg.pop_scope();
+                // SMT-LIB pop: back to the checkpoint, then drop its scope —
+                // fused, so it costs one pop core per column (design doc 08 §1;
+                // the verified `restore` alone keeps the scope open).
+                self.eg.restore_and_pop(mark.token);
                 self.rules.truncate(mark.rules_len);
                 self.globals.truncate(mark.globals_len);
             }

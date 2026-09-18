@@ -2199,6 +2199,36 @@ where
         }
     }
 
+    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
+    /// container would refuse, with nothing changed.
+    pub fn try_restore_and_pop(&mut self, token: ListArenaToken)
+        -> (r: Result<(), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> ({
+                let f = token.heads_frame_idx_spec() as int;
+                &&& token.heads_frame_idx_spec() == token.nodes_frame_idx_spec()
+                &&& final(self).heads_view() == old(self).heads_snapshots_view()[f]
+                &&& final(self).nodes_view() == old(self).nodes_snapshots_view()[f]
+                &&& final(self).model_view() == old(self).model_snapshots_view()[f]
+                &&& final(self).heads_snapshots_view() == old(self).heads_snapshots_view().subrange(0, f)
+                &&& final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view().subrange(0, f)
+                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f)
+            }),
+            r is Err ==> *final(self) == *old(self),
+            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
+    {
+        if self.is_valid_token(&token)
+            && token.heads.depth == token.nodes.depth
+        {
+            self.restore_and_pop(token);
+            Ok(())
+        } else {
+            Err(crate::error::ContainerError::InvalidToken)
+        }
+    }
+
     /// Whether the composite token is restorable now.
     pub fn is_valid_token(&self, token: &ListArenaToken) -> (b: bool)
         requires self.wf(),
@@ -2278,6 +2308,91 @@ where
                 =~= old(self).heads.snapshots_view().subrange(0, f + 1));
             assert(self.nodes.snapshots_view()
                 =~= old(self).nodes.snapshots_view().subrange(0, f + 1));
+            assert forall|k: int| 0 <= k < self.model_snapshots@.len()
+                implies arena_model_wf(
+                    #[trigger] self.model_snapshots@[k],
+                    self.heads.snapshots_view()[k], self.nodes.snapshots_view()[k]) by {
+                assert(self.model_snapshots@[k] == old(self).model_snapshots@[k]);
+                assert(self.heads.snapshots_view()[k] == old(self).heads.snapshots_view()[k]);
+                assert(self.nodes.snapshots_view()[k] == old(self).nodes.snapshots_view()[k]);
+            }
+            assert(arena_archive_agrees(self.model_snapshots@,
+                self.heads.snapshots_view(), self.nodes.snapshots_view()));
+        }
+    }
+
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    pub(crate) fn restore_and_pop(&mut self, token: ListArenaToken)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).restore_pre_spec(token),
+            // The two component tokens name the SAME mark: one mark pushes
+            // one frame on each vec (wf keeps the stacks in lockstep), so a
+            // genuine ListArenaToken always satisfies this; a mixed
+            // frankentoken does not.
+            token.heads_frame_idx_spec() == token.nodes_frame_idx_spec(),
+        ensures
+            final(self).wf(),
+            final(self).heads_view()
+                == old(self).heads_snapshots_view()[token.heads_frame_idx_spec() as int],
+            final(self).nodes_view()
+                == old(self).nodes_snapshots_view()[token.nodes_frame_idx_spec() as int],
+            // The restored model is the one archived at that mark and recovered
+            // internally, with no caller-supplied ghost.
+            final(self).model_view() == old(self).model_snapshots_view()[token.heads_frame_idx_spec() as int],
+            final(self).heads_snapshots_view() == old(self).heads_snapshots_view()
+                .subrange(0, token.heads_frame_idx_spec() as int),
+            final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view()
+                .subrange(0, token.nodes_frame_idx_spec() as int),
+            final(self).model_snapshots_view() == old(self).model_snapshots_view()
+                .subrange(0, token.heads_frame_idx_spec() as int),
+    {
+        // Prevalidate both constituent tokens before restoring either. Heads
+        // rolled back without nodes
+        // breaks the model invariants unrecoverably. Also pin the same-mark
+        // frame agreement at runtime (frankentoken defense; free for genuine
+        // tokens).
+        crate::guard::check_precondition(
+            self.is_valid_token(&token),
+            "ListArena::restore_and_pop: invalid, foreign, stale, consumed, or abandoned token component",
+        );
+        crate::guard::check_precondition(
+            token.heads.depth == token.nodes.depth,
+            "ListArena::restore_and_pop: token components name different marks",
+        );
+        let ghost snap_model = self.model_snapshots@[token.heads.depth as int];
+        self.heads.restore_and_pop(token.heads);
+        self.nodes.restore_and_pop(token.nodes);
+        self.model = Ghost(snap_model);
+        // Truncate the archive in lockstep with the vec snapshot stacks
+        // (restore leaves frames@.len() == frame_idx on both).
+        self.model_snapshots =
+            Ghost(self.model_snapshots@.subrange(0, token.heads.depth as int));
+        proof {
+            reveal(arena_archive_agrees);
+            let f = token.heads.depth as int;
+            // Old-frame agreement (reveal the old(self) instance).
+            assert(arena_archive_agrees(old(self).model_snapshots@,
+                old(self).heads.snapshots_view(), old(self).nodes.snapshots_view()));
+            // The archived model at frame f describes the restored views:
+            // this is BOTH the live-wf reconstruction (in-range/disjoint/
+            // cache clauses over the restored heads/nodes) AND the model
+            // ensures.
+            assert(arena_model_wf(snap_model,
+                old(self).heads.snapshots_view()[f], old(self).nodes.snapshots_view()[f]));
+            assert(self.heads_view() == old(self).heads.snapshots_view()[f]);
+            assert(self.nodes_view() == old(self).nodes.snapshots_view()[f]);
+            // Truncated archive agrees frame-wise with the truncated stacks.
+            assert(self.heads.snapshots_view()
+                =~= old(self).heads.snapshots_view().subrange(0, f));
+            assert(self.nodes.snapshots_view()
+                =~= old(self).nodes.snapshots_view().subrange(0, f));
             assert forall|k: int| 0 <= k < self.model_snapshots@.len()
                 implies arena_model_wf(
                     #[trigger] self.model_snapshots@[k],

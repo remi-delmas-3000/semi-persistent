@@ -467,6 +467,69 @@ impl ForkHistory {
         true
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    pub fn restore_and_pop(&mut self, t: GroupToken) -> (r: bool)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).members@.len() == old(self).members@.len(),
+            r ==> final(self).depth_spec() == t.depth_spec(),
+            r ==> forall|k: int| 0 <= k < old(self).members@.len() ==> {
+                &&& (#[trigger] final(self).members@[k]).model()
+                    == old(self).members@[k].archive()[t.depth_spec() as int]
+                &&& final(self).members@[k].archive()
+                    == old(self).members@[k].archive().subrange(0, t.depth_spec() as int)
+            },
+            !r ==> *final(self) == *old(self),
+    {
+        if !self.history.is_valid(t) {
+            return false;
+        }
+        if !(t.depth < self.history.depth()) {
+            return false;
+        }
+        let n = self.members.len();
+        // Fan out: each member reconstructs. This loop is what restore_parallel
+        // runs concurrently.
+        let ghost pre_depth = self.history.depth_spec();
+        let mut j: usize = 0;
+        while j < n
+            invariant
+                0 <= j <= n,
+                n == self.members@.len(),
+                self.history == old(self).history,
+                self.history.wf(),
+                self.history.valid_spec(t),
+                (t.depth as nat) < self.history.depth_spec(),
+                forall|k: int| 0 <= k < n ==> (#[trigger] self.members@[k]).wf(),
+                forall|k: int| 0 <= k < j
+                    ==> (#[trigger] self.members@[k]).depth_spec() == t.depth as nat,
+                forall|k: int| 0 <= k < j ==> {
+                    &&& (#[trigger] self.members@[k]).model()
+                        == old(self).members@[k].archive()[t.depth as int]
+                    &&& self.members@[k].archive()
+                        == old(self).members@[k].archive().subrange(0, t.depth as int)
+                },
+                forall|k: int| j <= k < n
+                    ==> #[trigger] self.members@[k] == old(self).members@[k],
+                forall|k: int| j <= k < n
+                    ==> (#[trigger] self.members@[k]).depth_spec() == self.history.depth_spec(),
+            decreases n - j,
+        {
+            let m = &mut self.members[j];
+            m.restore_frame(t.depth as usize);
+            j = j + 1;
+        }
+        // One branch-cut record.
+        self.history.restore_and_pop(t);
+        true
+    }
+
     /// Drop the open top scope of the whole group (the SMT-LIB `pop`): every
     /// member undoes and drops its top frame, the history's depth decreases by
     /// one and the popped scope's token dies. `false` (nothing changes) on an

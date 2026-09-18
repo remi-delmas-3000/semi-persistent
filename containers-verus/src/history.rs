@@ -284,6 +284,35 @@ impl History {
         self.genealogy.cut_from(d as usize);
         self.depth = d;
     }
+
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    pub fn restore_and_pop(&mut self, t: GroupToken)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).depth_spec() == t.depth_spec(),
+            !final(self).valid_spec(t),
+            forall|u: GroupToken| u.depth_spec() >= t.depth_spec() ==> !final(self).valid_spec(u),
+            forall|u: GroupToken| u.depth_spec() < t.depth_spec()
+                ==> final(self).valid_spec(u) == old(self).valid_spec(u),
+    {
+        if !self.is_valid(t) {
+            crate::guard::refuse("History::restore_and_pop: token is stale (its frame was cut)");
+        }
+        if !(t.depth < self.depth) {
+            crate::guard::refuse("History::restore_and_pop: token depth is not below the live depth");
+        }
+        // The cut starts AT the target depth: frame `t.depth` itself goes, so
+        // `t` dies with it (a later mark at that depth mints a fresh stamp).
+        self.genealogy.cut_from(t.depth as usize);
+        self.depth = t.depth;
+    }
 }
 
 /// One `Vec` bundled with its own `History`: reproduces the standalone

@@ -282,6 +282,15 @@ impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
             .expect("restore: token minted by this container's own mark");
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
+    /// to the level below `t`, on one pop core per column, so it costs what the
+    /// legacy restore costs. `t` and every later token die.
+    pub fn restore_and_pop(&mut self, token: SortRegistryToken) {
+        self.map
+            .try_restore_and_pop(token.0)
+            .expect("restore_and_pop: token minted by this container's own mark");
+    }
+
     /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
     pub fn pop_scope(&mut self) {
         self.map.pop_scope();
@@ -753,6 +762,23 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
             "the completion table is truncated with the op log"
         );
     }
+
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
+    /// to the level below `t`, on one pop core per column, so it costs what the
+    /// legacy restore costs. `t` and every later token die.
+    pub fn restore_and_pop(&mut self, token: OpRegistryToken) {
+        self.map
+            .try_restore_and_pop(token.map)
+            .expect("restore_and_pop: token minted by this container's own mark");
+        self.completion
+            .try_restore_and_pop(token.completion)
+            .expect("restore_and_pop: token minted by this container's own mark");
+        debug_assert_eq!(
+            self.completion.len().as_usize(),
+            self.map.log_len().as_usize(),
+            "the completion table is truncated with the op log"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -840,6 +866,15 @@ impl<const TRACK: bool> RuleRegistry<TRACK> {
             .expect("restore: token minted by this container's own mark");
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
+    /// to the level below `t`, on one pop core per column, so it costs what the
+    /// legacy restore costs. `t` and every later token die.
+    pub fn restore_and_pop(&mut self, token: RuleRegistryToken) {
+        self.map
+            .try_restore_and_pop(token.0)
+            .expect("restore_and_pop: token minted by this container's own mark");
+    }
+
     /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
     pub fn pop_scope(&mut self) {
         self.map.pop_scope();
@@ -924,6 +959,15 @@ impl<G: Copy + DenseId, const TRACK: bool> AxiomRegistry<G, TRACK> {
         self.map
             .try_restore(token.0)
             .expect("restore: token minted by this container's own mark");
+    }
+
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
+    /// to the level below `t`, on one pop core per column, so it costs what the
+    /// legacy restore costs. `t` and every later token die.
+    pub fn restore_and_pop(&mut self, token: AxiomRegistryToken) {
+        self.map
+            .try_restore_and_pop(token.0)
+            .expect("restore_and_pop: token minted by this container's own mark");
     }
 
     /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).

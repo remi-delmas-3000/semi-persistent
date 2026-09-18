@@ -10611,6 +10611,107 @@ impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
             }
         }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    pub fn restore_and_pop(&mut self, token: BPlusToken)
+        where L::Node: core::default::Default
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            // Restored to the state archived at that mark: header and ghost tree
+            // are recovered internally; the token's header copies
+            // are NOT consulted; forged header fields are inert).
+            final(self).tree_spec() == old(self).tree_snapshots_spec()[token.frame_idx_spec() as int],
+            final(self).arena() == old(self).arena_snapshots_view()[token.frame_idx_spec() as int],
+            final(self).model() == crate::bplus_tree::tree_keys(
+                old(self).tree_snapshots_spec()[token.frame_idx_spec() as int]),
+            // Retained archives: both columns are cut to the token's frame.
+            final(self).arena_snapshots_view()
+                == old(self).arena_snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            final(self).tree_snapshots_spec()
+                == old(self).tree_snapshots_spec().subrange(0, token.frame_idx_spec() as int),
+        {
+        // Total-with-documented-panic: is_valid_token answers exactly "would
+        // restore succeed now"; a stale/foreign token refuses here.
+        if !self.is_valid_token(&token) {
+            crate::guard::refuse("BPlusTreeSet::restore_and_pop: token does not name a restorable frame");
+        }
+            // Runtime guards, all before `self.nodes.restore`
+            // mutates the arena, so a bad token cannot leave the tree
+            // half-restored. The header comes from the internal archive (in
+            // lockstep with the vec frames — wf agreement), so no token
+            // header validation is needed: those fields are ignored.
+            crate::guard::check_precondition(TRACK, "restore_and_pop() called on untracked tree");
+            crate::guard::check_precondition(
+                self.is_valid_token(&token),
+                "BPlusTreeSet::restore_and_pop: invalid, foreign, stale, consumed, or abandoned token",
+            );
+            proof {
+                reveal(tree_archive_agrees);
+                // Archive lengths equal the snapshot stack (wf agreement); the
+                // vec's own wf (wf_for_snap's parallel-stacks clause) gives
+                // snapshots.len() == frames.len(), so frame_idx indexes the
+                // archives.
+            }
+            let ghost snap_tree = self.tree_snapshots@[token.nodes.frame_idx_spec() as int];
+            // Recover the archived header. frame_idx < frames.len() ==
+            // header_archive.len() (agreement), so the indexing is in-bounds;
+            // the guard above pins it for unverified callers too.
+            crate::guard::check_precondition(
+                (token.nodes.depth as usize) < self.header_archive.len(),
+                "BPlusTreeSet::restore_and_pop: token frame beyond header archive",
+            );
+            // The archive stores both indices at their own type, so recovering
+            // the header is three moves with no conversion that could fail: the
+            // two unreachable `try_from_usize` arms this replaced each needed an
+            // `assert(false)` to discharge.
+            let (saved_root, saved_nkeys, saved_last_leaf) =
+                self.header_archive[token.nodes.depth as usize];
+            self.nodes.restore_and_pop(token.nodes);
+            self.root = saved_root;
+            self.nkeys = saved_nkeys;
+            // `last_leaf` comes back with the rest of the header: the agreement
+            // clause pins it to the archived ghost tree's rightmost leaf, so
+            // `last_leaf_ok` is re-established from the archive alone.
+            self.last_leaf = saved_last_leaf;
+            self.tree = Ghost(snap_tree);
+            // Truncate the archives in lockstep with the vec snapshot stack.
+            self.header_archive.truncate(token.nodes.depth as usize);
+            self.tree_snapshots =
+                Ghost(self.tree_snapshots@.subrange(0, token.nodes.frame_idx_spec() as int));
+            proof {
+                reveal(tree_archive_agrees);
+                let f = token.nodes.frame_idx_spec() as int;
+                // nodes.restore put the arena at the snapshot; the archived
+                // agreement at frame f is tree_state_wf over exactly that
+                // snapshot + the archived header + tree.
+                assert(self.arena()
+                    == old(self).nodes.snapshots_view()[f]);
+                // Truncated archives agree with the truncated snapshot stack.
+                assert(self.nodes.snapshots_view()
+                    =~= old(self).nodes.snapshots_view().subrange(0, f));
+                assert forall|k: int| 0 <= k < self.header_archive@.len()
+                    implies Self::tree_state_wf(
+                            self.nodes.snapshots_view()[k],
+                            (#[trigger] self.header_archive@[k]).0.as_nat(),
+                            self.tree_snapshots@[k],
+                            self.header_archive@[k].1 as nat) by {
+                    assert(self.header_archive@[k] == old(self).header_archive@[k]);
+                    assert(self.tree_snapshots@[k] == old(self).tree_snapshots@[k]);
+                    assert(self.nodes.snapshots_view()[k]
+                        == old(self).nodes.snapshots_view()[k]);
+                }
+                assert(tree_archive_agrees::<K, L, S, TRACK, P>(
+                    self.header_archive@, self.tree_snapshots@,
+                    self.nodes.snapshots_view()));
+            }
+        }
+
     /// Drop the open top frame, undoing its writes (the SMT-LIB `pop`; that
     /// frame's token dies). Refuses on an untracked tree or an empty frame
     /// stack. Contract: the restore-to-parent facts of `restore`, prefix cut

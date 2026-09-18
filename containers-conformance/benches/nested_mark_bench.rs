@@ -88,9 +88,8 @@ fn bench_nested_mark(c: &mut Criterion) {
                         *v,
                         |vv: &mut V, s| vv.try_mark(s).expect("mark: bounded depth"),
                         |vv: &mut V, t| {
-                            vv.try_restore(t).expect("restore: own token");
-                            // Legacy restore == verified restore + pop_scope (semantics B, design doc 08 §1).
-                            vv.pop_scope();
+                            // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
+                            vv.try_restore_and_pop(t).expect("restore: own token");
                         },
                         verus::ShrinkPolicy::Never,
                         set_index,

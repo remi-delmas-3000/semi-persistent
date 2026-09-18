@@ -3157,6 +3157,19 @@ where
         self.restore_with(token, par);
     }
 
+    /// `restore(t)` then `pop_scope()`, fused: the SMT-LIB `pop` to the level
+    /// below `t`, at the legacy restore's cost (one pop core per column).
+    pub fn restore_and_pop(&mut self, token: EGraphToken) {
+        let par = self.fanout_enabled();
+        if *PROF_ON {
+            let t = std::time::Instant::now();
+            self.restore_and_pop_with(token, par);
+            prof_record(&RESTORE_NS, &RESTORE_CALLS, t);
+            return;
+        }
+        self.restore_and_pop_with(token, par);
+    }
+
     /// Heap bytes of the ONE shared genealogy (H4b.3 measurement): the
     /// counterfactual per-member duplication is this times the number of
     /// semi-persistent columns the members hold (each carried its own
@@ -3436,6 +3449,170 @@ where
         // §1): the checkpoint's frame stays open on every member, so its member
         // tokens stay on the stacks; `history` cuts the tokens minted after it.
         self.history.restore_to(token.group);
+        // Roll the outcome back with the graph: the mark-time value describes exactly the
+        // restored state (mark() rebuilds first), so a post-restore reader never sees an
+        // outcome computed for the discarded scope.
+        self.completion_outcome = token.completion_outcome;
+        self.worklist.clear();
+        self.collisions.clear();
+        self.touched.clear();
+        // The repair watermark is a pair of counters over the *pre-restore* graph, and
+        // restore moves both (touched cleared, classes regrown). Drop it so the next
+        // `rebuild` rescans rather than trusting a comparison against a discarded state.
+        self.repair_state = None;
+    }
+
+    /// `restore_with` then `pop_scope`, fused (design doc 08 §1): every member
+    /// runs its own fused pop-restore (one pop core per column), the checkpoint's
+    /// member tokens leave the stacks, and `history` cuts at the token's depth.
+    pub fn restore_and_pop_with(&mut self, token: EGraphToken, par: bool) {
+        // The ONE validity check for the whole member set: the group token's
+        // generation still matches the live stamp at its depth, and its frame
+        // is not already spent. History::restore_to below records the branch
+        // cut once, invalidating every deeper token.
+        assert!(
+            self.history.is_valid(token.group),
+            "restore: token minted by this container's own mark"
+        );
+        let depth32 = token.group.depth();
+        assert!(
+            depth32 < self.history.depth(),
+            "restore: token minted by this container's own mark, and not already spent"
+        );
+        let d = depth32 as usize;
+        // Pop each member's structural token at the target depth (its frame goes
+        // with the pop); the deeper entries are the abandoned future.
+        self.classes_marks.truncate(d + 1);
+        self.nodes_marks.truncate(d + 1);
+        self.sorts_marks.truncate(d + 1);
+        self.ops_marks.truncate(d + 1);
+        self.rules_marks.truncate(d + 1);
+        self.axioms_marks.truncate(d + 1);
+        self.lits_marks.truncate(d + 1);
+        self.unit_node_marks.truncate(d + 1);
+        self.inverse_op_marks.truncate(d + 1);
+        let classes = self
+            .classes_marks
+            .pop()
+            .expect("restore: member stack tracks history depth");
+        let nodes = self
+            .nodes_marks
+            .pop()
+            .expect("restore: member stack tracks history depth");
+        let sorts = self
+            .sorts_marks
+            .pop()
+            .expect("restore: member stack tracks history depth");
+        let ops = self
+            .ops_marks
+            .pop()
+            .expect("restore: member stack tracks history depth");
+        let rules = self
+            .rules_marks
+            .pop()
+            .expect("restore: member stack tracks history depth");
+        let axioms = self
+            .axioms_marks
+            .pop()
+            .expect("restore: member stack tracks history depth");
+        let lits = self
+            .lits_marks
+            .pop()
+            .expect("restore: member stack tracks history depth");
+        let unit_node = self
+            .unit_node_marks
+            .pop()
+            .expect("restore: member stack tracks history depth");
+        let inverse_op = self
+            .inverse_op_marks
+            .pop()
+            .expect("restore: member stack tracks history depth");
+        if par {
+            let (c, n, so, o, r, a, l) = (
+                &mut self.classes,
+                &mut self.nodes,
+                &mut self.sorts,
+                &mut self.ops,
+                &mut self.rules,
+                &mut self.axioms,
+                &mut self.lits,
+            );
+            rayon::scope(|s| {
+                s.spawn(|_| {
+                    fanout_witness();
+                    c.restore_and_pop(classes);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    n.restore_and_pop(nodes);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    so.restore_and_pop(sorts);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    o.restore_and_pop(ops);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    r.restore_and_pop(rules);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    a.restore_and_pop(axioms);
+                });
+                s.spawn(|_| {
+                    fanout_witness();
+                    l.restore_and_pop(lits);
+                });
+            });
+        } else if *RESTORE_PROF_ON {
+            // Per-member accounting (SEMPER_RESTORE_PROF): where inside one
+            // restore the time goes, member by member.
+            let t = std::time::Instant::now();
+            self.classes.restore_and_pop(classes);
+            restore_prof_record(0, t);
+            let t = std::time::Instant::now();
+            self.nodes.restore_and_pop(nodes);
+            restore_prof_record(1, t);
+            let t = std::time::Instant::now();
+            self.sorts.restore_and_pop(sorts);
+            restore_prof_record(2, t);
+            let t = std::time::Instant::now();
+            self.ops.restore_and_pop(ops);
+            restore_prof_record(3, t);
+            let t = std::time::Instant::now();
+            self.rules.restore_and_pop(rules);
+            restore_prof_record(4, t);
+            let t = std::time::Instant::now();
+            self.axioms.restore_and_pop(axioms);
+            restore_prof_record(5, t);
+            let t = std::time::Instant::now();
+            self.lits.restore_and_pop(lits);
+            restore_prof_record(6, t);
+        } else {
+            self.classes.restore_and_pop(classes);
+            self.nodes.restore_and_pop(nodes);
+            self.sorts.restore_and_pop(sorts);
+            self.ops.restore_and_pop(ops);
+            self.rules.restore_and_pop(rules);
+            self.axioms.restore_and_pop(axioms);
+            self.lits.restore_and_pop(lits);
+        }
+        let t = std::time::Instant::now();
+        self.unit_node
+            .try_restore_and_pop(unit_node)
+            .expect("restore: token minted by this container's own mark");
+        self.inverse_op
+            .try_restore_and_pop(inverse_op)
+            .expect("restore: token minted by this container's own mark");
+        if *RESTORE_PROF_ON {
+            restore_prof_record(7, t);
+        }
+        // One branch-cut record for the whole set: the checkpoint's frame went
+        // with the pop on every member, so its member tokens leave the stacks.
+        self.history.restore_and_pop(token.group);
         // Roll the outcome back with the graph: the mark-time value describes exactly the
         // restored state (mark() rebuilds first), so a post-restore reader never sees an
         // outcome computed for the discarded scope.

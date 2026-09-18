@@ -204,9 +204,8 @@ fn bench_mark_merge_restore(c: &mut Criterion) {
                 for i in 1..256 {
                     ec.merge(ids[0], ids[i]);
                 }
-                ec.try_restore(tok).expect("own token");
-                // Legacy restore == verified restore + pop_scope (semantics B, design doc 08 §1).
-                ec.pop_scope();
+                // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
+                ec.try_restore_and_pop(tok).expect("own token");
                 black_box(ec.num_classes())
             },
             BatchSize::LargeInput,

@@ -537,6 +537,29 @@ where
         }
     }
 
+    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
+    /// container would refuse, with nothing changed.
+    pub fn try_restore_and_pop(&mut self, token: MapToken)
+        -> (r: Result<(), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> final(self).log_view()
+                == old(self).log_snapshots_view()[token.frame_idx_spec() as int]
+                && final(self).depth_spec() == token.frame_idx_spec()
+                && final(self).log_snapshots_view()
+                    == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            r is Err ==> *final(self) == *old(self),
+            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
+    {
+        if self.is_valid_token(&token) {
+            self.restore_and_pop(token);
+            Ok(())
+        } else {
+            Err(crate::error::ContainerError::InvalidToken)
+        }
+    }
+
     /// Drop the open top frame, undoing its inserts (the SMT-LIB `pop`; that
     /// frame's token dies). Refuses on an untracked map or an empty stack.
     pub fn pop_scope(&mut self)
@@ -639,6 +662,61 @@ where
             }
         } else {
             self.log.restore(token.inner);
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+            self.rebuild_index();
+        }
+    }
+
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
+    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
+    /// token minted after it die. This is the SMT-LIB `pop` to the level below
+    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
+    /// is reopened once, so it costs what the legacy restore costs. `restore`
+    /// alone keeps the checkpoint's frame open instead.
+    pub(crate) fn restore_and_pop(&mut self, token: MapToken)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).is_token_valid_spec(token),
+            token.frame_idx_spec() < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).log_view() == old(self).log_snapshots_view()[token.frame_idx_spec() as int],
+            final(self).depth_spec() == token.frame_idx_spec(),
+            final(self).log_snapshots_view()
+                == old(self).log_snapshots_view().subrange(0, token.frame_idx_spec() as int),
+    {
+        let ghost old_log = self.log_view();
+        let ghost old_prev = self.prev@;
+        // The target frame's saved length: what the log restore truncates to.
+        let target = token.inner.depth as usize;
+        let saved_len = self.log.frames[target].as_usize();
+        let n = self.log.len().as_usize();
+        proof {
+            // The log's `wf`: a saved length is within the data and names the
+            // snapshot prefix.
+            assert(self.log.frames@[target as int].as_nat() <= n);
+            assert(old(self).log_snapshots_view()[target as int]
+                == old_log.subrange(0, saved_len as int));
+        }
+        if n - saved_len <= saved_len {
+            self.unwind_index(saved_len);
+            self.log.restore_and_pop(token.inner);
+            self.prev.truncate(saved_len);
+            proof {
+                assert(self.log_view() == old_log.subrange(0, saved_len as int));
+                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
+                lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
+                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
+            }
+        } else {
+            self.log.restore_and_pop(token.inner);
             self.prev.truncate(saved_len);
             proof {
                 assert(self.log_view() == old_log.subrange(0, saved_len as int));

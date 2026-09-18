@@ -632,6 +632,44 @@ impl<
         );
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
+    /// to the level below `t`, on one pop core per column, so it costs what the
+    /// legacy restore costs. `t` and every later token die.
+    pub fn restore_and_pop(&mut self, token: CacheToken) {
+        let _frame = *self.frames.get(token.frame_index).expect(
+            "restore_and_pop: token minted by this cache's own mark, and not already spent",
+        );
+        assert!(
+            self.nodes.is_valid_token(&token.nodes),
+            "restore_and_pop: node-arena token is not restorable"
+        );
+        if let (Some(h), Some(tok)) = (&self.history, token.history.as_ref()) {
+            assert!(
+                h.is_valid_token(tok),
+                "restore_and_pop: history token is not restorable"
+            );
+        }
+        // The index needs NO maintenance here: hints self-correct. Rolling
+        // the arena back revalidates every pre-mark hint (the content it
+        // points at returns) and invalidates every post-mark one (its content
+        // is gone or reverted, so the probe's content compare skips it).
+        // Truncated ids fail the probe's bounds check until a fresh intern
+        // reuses the slot and pushes a fresh hint.
+        self.nodes
+            .try_restore_and_pop(token.nodes)
+            .expect("restore_and_pop: token minted by this container's own mark");
+        if let (Some(h), Some(tok)) = (&mut self.history, token.history) {
+            h.try_restore_and_pop(tok)
+                .expect("restore_and_pop: token minted by this container's own mark");
+        }
+        self.frames.truncate(token.frame_index); // the mark's frame goes with the pop
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "restore left the hashcons hint index incomplete"
+        );
+    }
+
     /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
     pub fn pop_scope(&mut self) {
         self.nodes.pop_scope();
@@ -1084,6 +1122,59 @@ impl<
         );
     }
 
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
+    /// to the level below `t`, on one pop core per column, so it costs what the
+    /// legacy restore costs. `t` and every later token die.
+    pub fn restore_and_pop(&mut self, token: PoolCacheToken) {
+        let _frame = *self.frames.get(token.frame_index).expect(
+            "restore_and_pop: token minted by this cache's own mark, and not already spent",
+        );
+        assert!(
+            self.nodes.is_valid_token(&token.nodes),
+            "restore_and_pop: node-arena token is not restorable"
+        );
+        assert!(
+            self.children.is_valid_token(&token.children),
+            "restore_and_pop: child-pool token is not restorable"
+        );
+        if let (Some(h), Some(tok)) = (&self.history_nodes, token.history_nodes.as_ref()) {
+            assert!(
+                h.is_valid_token(tok),
+                "restore_and_pop: history token is not restorable"
+            );
+        }
+        if let (Some(h), Some(tok)) = (&self.history_children, token.history_children.as_ref()) {
+            assert!(
+                h.is_valid_token(tok),
+                "restore_and_pop: history token is not restorable"
+            );
+        }
+        // No index maintenance: hints self-correct against the rolled-back
+        // arena and child pool (see the fixed-arity restore above). A
+        // pool-only recanonize is covered because validity reads through the
+        // span into the pool, which rolls back here too.
+        self.nodes
+            .try_restore_and_pop(token.nodes)
+            .expect("restore_and_pop: token minted by this container's own mark");
+        self.children
+            .try_restore_and_pop(token.children)
+            .expect("restore_and_pop: token minted by this container's own mark");
+        if let (Some(h), Some(tok)) = (&mut self.history_nodes, token.history_nodes) {
+            h.try_restore_and_pop(tok)
+                .expect("restore_and_pop: token minted by this container's own mark");
+        }
+        if let (Some(h), Some(tok)) = (&mut self.history_children, token.history_children) {
+            h.try_restore_and_pop(tok)
+                .expect("restore_and_pop: token minted by this container's own mark");
+        }
+        self.frames.truncate(token.frame_index); // the mark's frame goes with the pop
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "restore left the hashcons hint index incomplete"
+        );
+    }
+
     /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
     pub fn pop_scope(&mut self) {
         self.nodes.pop_scope();
@@ -1324,6 +1415,25 @@ where
             .try_restore(token.nodes)
             .expect("restore: token minted by this container's own mark");
         self.frames.truncate(token.frame_index + 1); // semantics B: the mark's frame stays open
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "restore left the literal hint index incomplete"
+        );
+    }
+
+    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
+    /// to the level below `t`, on one pop core per column, so it costs what the
+    /// legacy restore costs. `t` and every later token die.
+    pub fn restore_and_pop(&mut self, token: CacheToken) {
+        let _frame = *self.frames.get(token.frame_index).expect(
+            "restore_and_pop: token minted by this cache's own mark, and not already spent",
+        );
+        // No index maintenance: truncated ids fail the probe's bounds check.
+        self.nodes
+            .try_restore_and_pop(token.nodes)
+            .expect("restore_and_pop: token minted by this container's own mark");
+        self.frames.truncate(token.frame_index); // the mark's frame goes with the pop
         #[cfg(debug_assertions)]
         debug_assert!(
             self.index_is_complete(),
