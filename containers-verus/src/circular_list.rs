@@ -162,19 +162,6 @@ impl<T: Copy + core::default::Default + Send, N: DenseId> Tagged for CircularLis
     }
 }
 
-/// Token for mark/restore (delegates to the inner vector's token).
-#[derive(Copy, Clone)]
-pub struct CircularListToken {
-    pub(crate) entries: VecToken,
-}
-
-impl CircularListToken {
-    /// Reconstruction coordinate (spec counterpart).
-    pub open(crate) spec fn frame_idx_spec(self) -> nat {
-        self.entries.depth as nat
-    }
-}
-
 /// `rotate(s, k)` = `s` cyclically left-rotated by `k`: `s[k..] ++ s[..k]`.
 /// `rotate(s, k)[p] == s[(k + p) mod len]`.
 pub open(crate) spec fn rotate(s: Seq<usize>, k: int) -> Seq<usize> {
@@ -254,15 +241,7 @@ where
         self.entries.view()
     }
 
-    /// Token validity, delegated to the entries component.
-    pub open(crate) spec fn is_token_valid_spec(&self, token: CircularListToken) -> bool {
-        self.entries.is_token_valid_spec(token.entries)
-    }
 
-    /// "Restorable now", delegated to the entries component.
-    pub open(crate) spec fn is_restorable_spec(&self, token: CircularListToken) -> bool {
-        self.entries.is_restorable_spec(token.entries)
-    }
 
     pub open(crate) spec fn model_view(&self) -> Seq<Seq<usize>> {
         self.model@
@@ -1080,289 +1059,12 @@ where
 
     // ---- semi-persistence: delegate to the inner vector ----
 
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: CircularListToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).n_spec() < usize::MAX,
-            // inner Vec's u32 depth-cast bound (propagated; guarded there).
-            old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).next_seq() == old(self).next_seq(),
-            final(self).n_spec() == old(self).n_spec(),
-            final(self).model_view() == old(self).model_view(),
-            final(self).payload_seq() == old(self).payload_seq(),
-            final(self).entries_snapshots_view()
-                == old(self).entries_snapshots_view().push(old(self).entries_view()),
-            final(self).model_snapshots_view()
-                == old(self).model_snapshots_view().push(old(self).model_view()),
-            token.frame_idx_spec() == final(self).entries_snapshots_view().len() - 1,
-    {
-        // The node count fits the index word (store `wf`, via its lemma).
-        proof { self.entries.store.lemma_wf_data_len(); }
-        let entries = self.entries.mark(shrink);
-        // Archive the live ring partition alongside the vec snapshot.
-        self.model_snapshots = Ghost(self.model_snapshots@.push(self.model@));
-        proof {
-            assert(self.entries.view() == old(self).entries.view());
-            assert(self.model@ == old(self).model@);  // ghost assign touched only model_snapshots
-            assert(self.next_seq() =~= old(self).next_seq());
-            // model + view unchanged ⟹ covers carries (same witnesses).
-            assert forall|i: int| 0 <= i < self.n_spec() implies #[trigger] self.in_some_ring(i) by {
-                assert(old(self).in_some_ring(i));
-                let (c, p) = choose|c: int, p: int|
-                    0 <= c < old(self).model@.len() && 0 <= p < old(self).model@[c].len()
-                        && old(self).model@[c][p] == i;
-                assert(self.model@[c][p] == i);
-            }
-            reveal(ring_archive_agrees);
-            // The new archive frame: ring_snap_wf(model, just-pushed snapshot)
-            // — exactly the live wf clauses over the live view (the snapshot
-            // IS the view at mark). Old frames carry over unchanged.
-            let k_new = self.model_snapshots@.len() - 1;
-            assert(self.entries.snapshots_view()[k_new] == old(self).entries.view());
-            assert forall|i: int| 0 <= i < old(self).entries.view().len()
-                implies #[trigger] idx_in_some_ring(self.model@, i) by {
-                assert(old(self).in_some_ring(i));
-            }
-            // ring_snap_wf's cyclic clause is over `snap[m[c][p]].next.id_nat()`;
-            // model_cyclic (now triggered on the next-pointer READ `ns[m[c][p]]`)
-            // gives the same equation via snap == live view. Feed each (c,p) the
-            // read term so the retriggered quantifier fires.
-            let ghost snap_kn = self.entries.snapshots_view()[k_new];
-            assert forall|c: int, p: int|
-                0 <= c < self.model@.len() && 0 <= p < self.model@[c].len() implies
-                (#[trigger] snap_kn[self.model@[c][p] as int]).next.id_nat() as usize
-                    == self.model@[c][if p + 1 < self.model@[c].len() { p + 1 } else { 0 }] by {
-                assert(self.next_seq()[self.model@[c][p] as int]
-                    == self.model@[c][if p + 1 < self.model@[c].len() { p + 1 } else { 0 }]);
-                assert(snap_kn[self.model@[c][p] as int] == self.entries.view()[self.model@[c][p] as int]);
-            }
-            assert(ring_snap_wf(self.model@, self.entries.snapshots_view()[k_new]));
-            assert forall|k: int| 0 <= k < self.model_snapshots@.len()
-                implies ring_snap_wf(
-                    #[trigger] self.model_snapshots@[k],
-                    self.entries.snapshots_view()[k]) by {
-                if k < k_new {
-                    assert(self.model_snapshots@[k] == old(self).model_snapshots@[k]);
-                    assert(self.entries.snapshots_view()[k]
-                        == old(self).entries.snapshots_view()[k]);
-                }
-            }
-        }
-        CircularListToken { entries }
-    }
 
-    /// Restore to the marked snapshot. The restored entries, together with the
-    /// ghost model live at the mark, must form a valid ring partition.
-    /// Whether the token is restorable now.
-    /// Total mark (Vec's pilot pattern; single component).
-    pub fn try_mark(&mut self, shrink: ShrinkPolicy)
-        -> (r: Result<CircularListToken, crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r matches Ok(token) ==> {
-                &&& final(self).next_seq() == old(self).next_seq()
-                &&& final(self).n_spec() == old(self).n_spec()
-                &&& final(self).model_view() == old(self).model_view()
-                &&& final(self).payload_seq() == old(self).payload_seq()
-                &&& final(self).entries_snapshots_view()
-                    == old(self).entries_snapshots_view().push(old(self).entries_view())
-                &&& final(self).model_snapshots_view()
-                    == old(self).model_snapshots_view().push(old(self).model_view())
-                &&& token.frame_idx_spec()
-                    == final(self).entries_snapshots_view().len() - 1
-            },
-            r is Err ==> final(self).model_view() == old(self).model_view()
-                && final(self).next_seq() == old(self).next_seq(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.entries.store.raw_len() < usize::MAX) {
-            return Err(crate::error::ContainerError::CapacityExhausted);
-        }
-        if !(self.entries.depth_exec() < (u32::MAX as usize)) {
-            return Err(crate::error::ContainerError::DepthLimit);
-        }
-        Ok(self.mark(shrink))
-    }
 
-    /// Total restore: `is_valid_token` answers exactly "would restore
-    /// succeed now" (delegated to the entries component).
-    pub fn try_restore(&mut self, token: CircularListToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> final(self).entries_view()
-                == old(self).entries_snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).model_view()
-                    == old(self).model_snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).entries_snapshots_view()
-                    == old(self).entries_snapshots_view()
-                        .subrange(0, token.frame_idx_spec() as int + 1)
-                && final(self).model_snapshots_view()
-                    == old(self).model_snapshots_view()
-                        .subrange(0, token.frame_idx_spec() as int + 1),
-            r is Err ==> *final(self) == *old(self),
-            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
-    {
-        if self.is_valid_token(&token) {
-            self.restore(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
-    /// container would refuse, with nothing changed.
-    pub fn try_restore_and_pop(&mut self, token: CircularListToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> final(self).entries_view()
-                == old(self).entries_snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).model_view()
-                    == old(self).model_snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).entries_snapshots_view()
-                    == old(self).entries_snapshots_view()
-                        .subrange(0, token.frame_idx_spec() as int)
-                && final(self).model_snapshots_view()
-                    == old(self).model_snapshots_view()
-                        .subrange(0, token.frame_idx_spec() as int),
-            r is Err ==> *final(self) == *old(self),
-            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
-    {
-        if self.is_valid_token(&token) {
-            self.restore_and_pop(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    pub fn is_valid_token(&self, token: &CircularListToken) -> (b: bool)
-        requires self.wf(),
-        ensures b == self.is_restorable_spec(*token),
-    {
-        self.entries.is_valid_token(&token.entries)
-    }
 
-    pub(crate) fn restore(&mut self, token: CircularListToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).is_token_valid_spec(token),
-            token.frame_idx_spec() < old(self).depth_spec(),
-            old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).entries_view()
-                == old(self).entries_snapshots_view()[token.frame_idx_spec() as int],
-            // Restored to the ring partition archived at that mark.
-            final(self).model_view() == old(self).model_snapshots_view()[token.frame_idx_spec() as int],
-            final(self).entries_snapshots_view()
-                == old(self).entries_snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
-            final(self).model_snapshots_view()
-                == old(self).model_snapshots_view().subrange(0, token.frame_idx_spec() as int + 1),
-            final(self).depth_spec() == token.frame_idx_spec() + 1,
-    {
-        // Check the full restorable predicate before mutation.
-        crate::guard::check_precondition(
-            self.is_valid_token(&token),
-            "CircularList::restore: invalid, foreign, stale, consumed, or abandoned token",
-        );
-        proof { reveal(ring_archive_agrees); }
-        let ghost snap_model = self.model_snapshots@[token.entries.frame_idx_spec() as int];
-        let ghost snap = old(self).entries.snapshots_view()[token.entries.frame_idx_spec() as int];
-        self.entries.restore(token.entries);
-        self.model = Ghost(snap_model);
-        self.model_snapshots =
-            Ghost(self.model_snapshots@.subrange(0, token.entries.frame_idx_spec() as int + 1));
-        proof {
-            assert(self.entries.view() == snap);
-            let m = self.model@;
-            let ns = self.next_seq();
-            assert(self.n_spec() == snap.len());
-            // bridge ring_snap_wf(snap_model, snap) to wf's clauses.
-            assert forall|c: int, p: int|
-                0 <= c < m.len() && 0 <= p < m[c].len() implies
-                ns[#[trigger] m[c][p] as int] == m[c][if p + 1 < m[c].len() { p + 1 } else { 0 }] by {
-                assert(ns[m[c][p] as int] == snap[m[c][p] as int].next.id_nat() as usize);
-            }
-            // covers: ring_snap_wf's covers clause is over idx_in_some_ring(snap_model);
-            // transfer to self.in_some_ring (same model, same witnesses).
-            assert forall|i: int| 0 <= i < self.n_spec() implies #[trigger] self.in_some_ring(i) by {
-                assert(idx_in_some_ring(snap_model, i));
-                let (c, p) = choose|c: int, p: int|
-                    0 <= c < snap_model.len() && 0 <= p < snap_model[c].len() && snap_model[c][p] == i;
-                assert(m[c][p] == i);
-            }
-        }
-    }
 
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
-    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
-    /// token minted after it die. This is the SMT-LIB `pop` to the level below
-    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
-    /// is reopened once, so it costs what the legacy restore costs. `restore`
-    /// alone keeps the checkpoint's frame open instead.
-    pub(crate) fn restore_and_pop(&mut self, token: CircularListToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).is_token_valid_spec(token),
-            token.frame_idx_spec() < old(self).depth_spec(),
-            old(self).depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).entries_view()
-                == old(self).entries_snapshots_view()[token.frame_idx_spec() as int],
-            // Restored to the ring partition archived at that mark.
-            final(self).model_view() == old(self).model_snapshots_view()[token.frame_idx_spec() as int],
-            final(self).entries_snapshots_view()
-                == old(self).entries_snapshots_view().subrange(0, token.frame_idx_spec() as int),
-            final(self).model_snapshots_view()
-                == old(self).model_snapshots_view().subrange(0, token.frame_idx_spec() as int),
-    {
-        // Check the full restorable predicate before mutation.
-        crate::guard::check_precondition(
-            self.is_valid_token(&token),
-            "CircularList::restore_and_pop: invalid, foreign, stale, consumed, or abandoned token",
-        );
-        proof { reveal(ring_archive_agrees); }
-        let ghost snap_model = self.model_snapshots@[token.entries.frame_idx_spec() as int];
-        let ghost snap = old(self).entries.snapshots_view()[token.entries.frame_idx_spec() as int];
-        self.entries.restore_and_pop(token.entries);
-        self.model = Ghost(snap_model);
-        self.model_snapshots =
-            Ghost(self.model_snapshots@.subrange(0, token.entries.frame_idx_spec() as int));
-        proof {
-            assert(self.entries.view() == snap);
-            let m = self.model@;
-            let ns = self.next_seq();
-            assert(self.n_spec() == snap.len());
-            // bridge ring_snap_wf(snap_model, snap) to wf's clauses.
-            assert forall|c: int, p: int|
-                0 <= c < m.len() && 0 <= p < m[c].len() implies
-                ns[#[trigger] m[c][p] as int] == m[c][if p + 1 < m[c].len() { p + 1 } else { 0 }] by {
-                assert(ns[m[c][p] as int] == snap[m[c][p] as int].next.id_nat() as usize);
-            }
-            // covers: ring_snap_wf's covers clause is over idx_in_some_ring(snap_model);
-            // transfer to self.in_some_ring (same model, same witnesses).
-            assert forall|i: int| 0 <= i < self.n_spec() implies #[trigger] self.in_some_ring(i) by {
-                assert(idx_in_some_ring(snap_model, i));
-                let (c, p) = choose|c: int, p: int|
-                    0 <= c < snap_model.len() && 0 <= p < snap_model[c].len() && snap_model[c][p] == i;
-                assert(m[c][p] == i);
-            }
-        }
-    }
 
     // --------------------------------------------------------------------
     // Shared-history variants (doc 10): the single-member fan-out driven by one
@@ -1437,30 +1139,6 @@ where
         }
     }
 
-    /// Drop the open top frame, undoing its writes (the SMT-LIB `pop`; that
-    /// frame's token dies). Refuses on an untracked list or an empty stack.
-    pub fn pop_scope(&mut self)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            (TRACK && old(self).depth_spec() >= 1) ==> ({
-                let f = old(self).depth_spec() - 1;
-                &&& final(self).entries_view() == old(self).entries_snapshots_view()[f]
-                &&& final(self).model_view() == old(self).model_snapshots_view()[f]
-                &&& final(self).entries_snapshots_view() == old(self).entries_snapshots_view().subrange(0, f)
-                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f)
-                &&& final(self).depth_spec() == f
-            }),
-    {
-        if !TRACK {
-            crate::guard::refuse("pop_scope() called on untracked CircularList");
-        }
-        let d = self.entries.depth_exec();
-        if !(d >= 1) {
-            crate::guard::refuse("CircularList::pop_scope: no open frame");
-        }
-        self.restore_frames(d - 1);
-    }
 
     #[allow(dead_code)]
     pub(crate) fn restore_frames(&mut self, target: usize)
@@ -2478,17 +2156,6 @@ pub open(crate) spec fn ring_snap_wf<T, N: DenseId>(model: Seq<Seq<usize>>, entr
 }
 
 } // verus!
-
-// prod-parity: the consumer's `EClassesToken` derives `Debug` and bundles this
-// token, so it must be `Debug` (matching `VecToken`/`ListArenaToken`). Manual,
-// not derived — `#[derive(Debug)]` inside `verus!{}` is unsupported.
-impl core::fmt::Debug for CircularListToken {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("CircularListToken")
-            .field("entries", &self.entries)
-            .finish()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Trusted glue (outside verus!{}; trust ledger group E): std Iterator via a

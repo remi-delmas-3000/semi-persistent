@@ -13,6 +13,7 @@
 use containers_conformance::Rng;
 use semi_persistent_containers as prod;
 use semi_persistent_containers_verus as verus;
+use semi_persistent_containers_verus::group::ForkHistory;
 
 prod::define_id31! { pub struct PElem / StoredPElem, "e"; }
 prod::define_id31! { pub struct PList / StoredPList, "l"; }
@@ -23,7 +24,8 @@ verus::define_id31! { pub struct VNode / StoredVNode, "n"; }
 
 fn list_arena_trace(seed: u64, steps: usize) {
     let mut p: prod::ListArena<PElem, PList, PNode, true> = prod::ListArena::new();
-    let mut v: verus::ListArena<VElem, VList, VNode, true> = verus::ListArena::new();
+    let mut v: ForkHistory<verus::ListArena<VElem, VList, VNode, true>> =
+        ForkHistory::new(verus::ListArena::new());
 
     let mut rng = Rng::new(seed);
     let mut lists: usize = 0;
@@ -33,7 +35,7 @@ fn list_arena_trace(seed: u64, steps: usize) {
     let mut nodes_pushed: usize = 0;
     // (prod token, verus token, list count at mark time): restore rolls the
     // heads vec back, so the number of live lists reverts with it.
-    let mut marks: Vec<(prod::ListArenaToken, verus::ListArenaToken, usize)> = Vec::new();
+    let mut marks: Vec<(prod::ListArenaToken, verus::history::GroupToken, usize)> = Vec::new();
 
     for step in 0..steps {
         match rng.below(100) {
@@ -102,7 +104,7 @@ fn list_arena_trace(seed: u64, steps: usize) {
                 }
                 let tp = p.mark(prod::ShrinkPolicy::Never);
                 let tv = v
-                    .try_mark(verus::ShrinkPolicy::Never)
+                    .mark(verus::ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 marks.push((tp, tv, lists));
             }
@@ -113,7 +115,7 @@ fn list_arena_trace(seed: u64, steps: usize) {
                 let idx = rng.below(marks.len() as u64) as usize;
                 let (tp, tv, count_at_mark) = marks[idx];
                 p.restore(tp);
-                v.try_restore(tv).expect("restore: own token");
+                assert!(v.restore(tv), "restore: own live token");
                 marks.truncate(idx);
                 lists = count_at_mark;
             }

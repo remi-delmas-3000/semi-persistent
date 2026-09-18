@@ -521,24 +521,6 @@ impl<N: DenseId + Tagged> Tagged for ListHead<N> {
     }
 }
 
-/// Token bundling the two inner-vector tokens.
-#[derive(Copy, Clone)]
-pub struct ListArenaToken {
-    pub(crate) heads: VecToken,
-    pub(crate) nodes: VecToken,
-}
-
-impl ListArenaToken {
-    /// Reconstruction coordinates of the two components (spec counterparts).
-    pub open(crate) spec fn heads_frame_idx_spec(self) -> nat {
-        self.heads.depth as nat
-    }
-
-    pub open(crate) spec fn nodes_frame_idx_spec(self) -> nat {
-        self.nodes.depth as nat
-    }
-}
-
 /// Typed-id list arena (production parity: `ListArena<T, L, N, TRACK, P>` with
 /// `L` the list-handle id type and `N` the node id type). The verified CORE
 /// operates on `usize` rows (the ghost model and every proof below); `L`/`N`
@@ -840,28 +822,8 @@ where
         self.model_snapshots@
     }
 
-    /// Per-component token validity (composite).
-    pub open(crate) spec fn is_token_valid_spec(&self, token: ListArenaToken) -> bool {
-        &&& self.heads.is_token_valid_spec(token.heads)
-        &&& self.nodes.is_token_valid_spec(token.nodes)
-    }
 
-    /// "Restorable now" for the composite token.
-    pub open(crate) spec fn is_restorable_spec(&self, token: ListArenaToken) -> bool {
-        &&& self.heads.is_restorable_spec(token.heads)
-        &&& self.nodes.is_restorable_spec(token.nodes)
-    }
 
-    /// Composite restore preconditions (everything except the same-mark
-    /// frame agreement, which restore states explicitly).
-    pub open(crate) spec fn restore_pre_spec(&self, token: ListArenaToken) -> bool {
-        &&& self.heads.is_token_valid_spec(token.heads)
-        &&& token.heads.frame_idx_spec() < self.heads.depth_spec()
-        &&& self.heads.depth_spec() < u32::MAX
-        &&& self.nodes.is_token_valid_spec(token.nodes)
-        &&& token.nodes.frame_idx_spec() < self.nodes.depth_spec()
-        &&& self.nodes.depth_spec() < u32::MAX
-    }
 
     pub open(crate) spec fn model_view(&self) -> Seq<Seq<usize>> {
         self.model@
@@ -1951,70 +1913,6 @@ where
 
     // ---- semi-persistence: delegate to the two inner vectors ----
 
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: ListArenaToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).heads_view().len() < usize::MAX,
-            old(self).nodes_view().len() < usize::MAX,
-            old(self).heads_depth_spec() < u32::MAX,
-            old(self).nodes_depth_spec() < u32::MAX,
-        ensures
-            final(self).wf(),
-            final(self).heads_view() == old(self).heads_view(),
-            final(self).nodes_view() == old(self).nodes_view(),
-            final(self).model_view() == old(self).model_view(),
-            token.heads_frame_idx_spec() == old(self).heads_depth_spec(),
-            token.nodes_frame_idx_spec() == old(self).nodes_depth_spec(),
-            final(self).heads_snapshots_view()
-                == old(self).heads_snapshots_view().push(old(self).heads_view()),
-            final(self).nodes_snapshots_view()
-                == old(self).nodes_snapshots_view().push(old(self).nodes_view()),
-            final(self).model_snapshots_view()
-                == old(self).model_snapshots_view().push(old(self).model_view()),
-            token.heads_frame_idx_spec() == final(self).heads_snapshots_view().len() - 1,
-            token.nodes_frame_idx_spec() == final(self).nodes_snapshots_view().len() - 1,
-    {
-        // Column lengths fit their index words (store `wf`, via its lemma).
-        proof {
-            self.heads.store.lemma_wf_data_len();
-            self.nodes.store.lemma_wf_data_len();
-        }
-        let heads = self.heads.mark(shrink);
-        let nodes = self.nodes.mark(shrink);
-        // Archive the live model alongside the vec snapshots: the
-        // new frame's arena_model_wf obligation is exactly the live wf
-        // clauses over the just-pushed snapshot (== the live views).
-        self.model_snapshots = Ghost(self.model_snapshots@.push(self.model@));
-        proof {
-            reveal(arena_archive_agrees);
-            // Old-frame agreement (reveal the old(self) instance).
-            assert(arena_archive_agrees(old(self).model_snapshots@,
-                old(self).heads.snapshots_view(), old(self).nodes.snapshots_view()));
-            let k_new = self.model_snapshots@.len() - 1;
-            // The pushed frame archives the live views; the live wf clauses
-            // ARE arena_model_wf over them.
-            assert(self.heads.snapshots_view()[k_new] == old(self).heads_view());
-            assert(self.nodes.snapshots_view()[k_new] == old(self).nodes_view());
-            assert(arena_model_wf(self.model@,
-                self.heads.snapshots_view()[k_new], self.nodes.snapshots_view()[k_new]));
-            assert forall|k: int| 0 <= k < self.model_snapshots@.len()
-                implies arena_model_wf(
-                    #[trigger] self.model_snapshots@[k],
-                    self.heads.snapshots_view()[k], self.nodes.snapshots_view()[k]) by {
-                if k < k_new {
-                    assert(self.model_snapshots@[k] == old(self).model_snapshots@[k]);
-                    assert(self.heads.snapshots_view()[k]
-                        == old(self).heads.snapshots_view()[k]);
-                    assert(self.nodes.snapshots_view()[k]
-                        == old(self).nodes.snapshots_view()[k]);
-                }
-            }
-            assert(arena_archive_agrees(self.model_snapshots@,
-                self.heads.snapshots_view(), self.nodes.snapshots_view()));
-        }
-        ListArenaToken { heads, nodes }
-    }
 
     // ------------------------------------------------------------------
     // Total-operation shell.
@@ -2127,284 +2025,11 @@ where
         }
     }
 
-    /// Total mark.
-    pub fn try_mark(&mut self, shrink: ShrinkPolicy)
-        -> (r: Result<ListArenaToken, crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r matches Ok(token) ==> {
-                &&& final(self).model_view() == old(self).model_view()
-                &&& final(self).heads_view() == old(self).heads_view()
-                &&& final(self).nodes_view() == old(self).nodes_view()
-                &&& token.heads_frame_idx_spec() == old(self).heads_depth_spec()
-                &&& token.nodes_frame_idx_spec() == old(self).nodes_depth_spec()
-                &&& final(self).heads_snapshots_view()
-                    == old(self).heads_snapshots_view().push(old(self).heads_view())
-                &&& final(self).nodes_snapshots_view()
-                    == old(self).nodes_snapshots_view().push(old(self).nodes_view())
-                &&& final(self).model_snapshots_view()
-                    == old(self).model_snapshots_view().push(old(self).model_view())
-                &&& token.heads_frame_idx_spec()
-                    == final(self).heads_snapshots_view().len() - 1
-                &&& token.nodes_frame_idx_spec()
-                    == final(self).nodes_snapshots_view().len() - 1
-            },
-            r is Err ==> final(self).model_view() == old(self).model_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        let hn = self.heads.store.raw_len();
-        let nn = self.nodes.store.raw_len();
-        if !(hn < usize::MAX && nn < usize::MAX) {
-            return Err(crate::error::ContainerError::CapacityExhausted);
-        }
-        if !(self.heads.depth_exec() < u32::MAX as usize
-            && self.nodes.depth_exec() < u32::MAX as usize)
-        {
-            return Err(crate::error::ContainerError::DepthLimit);
-        }
-        Ok(self.mark(shrink))
-    }
 
-    /// Total restore: component restorability plus the same-mark frame
-    /// agreement (a mixed token from two different marks refuses).
-    pub fn try_restore(&mut self, token: ListArenaToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> ({
-                let f = token.heads_frame_idx_spec() as int;
-                &&& token.heads_frame_idx_spec() == token.nodes_frame_idx_spec()
-                &&& final(self).heads_view() == old(self).heads_snapshots_view()[f]
-                &&& final(self).nodes_view() == old(self).nodes_snapshots_view()[f]
-                &&& final(self).model_view() == old(self).model_snapshots_view()[f]
-                &&& final(self).heads_snapshots_view() == old(self).heads_snapshots_view().subrange(0, f + 1)
-                &&& final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view().subrange(0, f + 1)
-                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f + 1)
-                &&& final(self).heads_depth_spec() == f + 1
-            }),
-            r is Err ==> *final(self) == *old(self),
-            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
-    {
-        if self.is_valid_token(&token)
-            && token.heads.depth == token.nodes.depth
-        {
-            self.restore(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    /// Total form of `restore_and_pop`: `Err(InvalidToken)` on a token the
-    /// container would refuse, with nothing changed.
-    pub fn try_restore_and_pop(&mut self, token: ListArenaToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> ({
-                let f = token.heads_frame_idx_spec() as int;
-                &&& token.heads_frame_idx_spec() == token.nodes_frame_idx_spec()
-                &&& final(self).heads_view() == old(self).heads_snapshots_view()[f]
-                &&& final(self).nodes_view() == old(self).nodes_snapshots_view()[f]
-                &&& final(self).model_view() == old(self).model_snapshots_view()[f]
-                &&& final(self).heads_snapshots_view() == old(self).heads_snapshots_view().subrange(0, f)
-                &&& final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view().subrange(0, f)
-                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f)
-            }),
-            r is Err ==> *final(self) == *old(self),
-            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
-    {
-        if self.is_valid_token(&token)
-            && token.heads.depth == token.nodes.depth
-        {
-            self.restore_and_pop(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    /// Whether the composite token is restorable now.
-    pub fn is_valid_token(&self, token: &ListArenaToken) -> (b: bool)
-        requires self.wf(),
-        ensures b == self.is_restorable_spec(*token),
-    {
-        self.heads.is_valid_token(&token.heads) && self.nodes.is_valid_token(&token.nodes)
-    }
 
-    /// Restore both arenas to the marked snapshot. The restored snapshots must
-    /// jointly form a valid arena *for the current ghost model* — i.e. the
-    /// model still describes them (`arena_model_wf`). Semi-persistence composes
-    /// from the two inner `Vec`s.
-    pub(crate) fn restore(&mut self, token: ListArenaToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).restore_pre_spec(token),
-            // The two component tokens name the SAME mark: one mark pushes
-            // one frame on each vec (wf keeps the stacks in lockstep), so a
-            // genuine ListArenaToken always satisfies this; a mixed
-            // frankentoken does not.
-            token.heads_frame_idx_spec() == token.nodes_frame_idx_spec(),
-        ensures
-            final(self).wf(),
-            final(self).heads_view()
-                == old(self).heads_snapshots_view()[token.heads_frame_idx_spec() as int],
-            final(self).nodes_view()
-                == old(self).nodes_snapshots_view()[token.nodes_frame_idx_spec() as int],
-            // The restored model is the one archived at that mark and recovered
-            // internally, with no caller-supplied ghost.
-            final(self).model_view() == old(self).model_snapshots_view()[token.heads_frame_idx_spec() as int],
-            final(self).heads_snapshots_view() == old(self).heads_snapshots_view()
-                .subrange(0, token.heads_frame_idx_spec() as int + 1),
-            final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view()
-                .subrange(0, token.nodes_frame_idx_spec() as int + 1),
-            final(self).model_snapshots_view() == old(self).model_snapshots_view()
-                .subrange(0, token.heads_frame_idx_spec() as int + 1),
-            final(self).heads_depth_spec() == token.heads_frame_idx_spec() + 1,
-    {
-        // Prevalidate both constituent tokens before restoring either. Heads
-        // rolled back without nodes
-        // breaks the model invariants unrecoverably. Also pin the same-mark
-        // frame agreement at runtime (frankentoken defense; free for genuine
-        // tokens).
-        crate::guard::check_precondition(
-            self.is_valid_token(&token),
-            "ListArena::restore: invalid, foreign, stale, consumed, or abandoned token component",
-        );
-        crate::guard::check_precondition(
-            token.heads.depth == token.nodes.depth,
-            "ListArena::restore: token components name different marks",
-        );
-        let ghost snap_model = self.model_snapshots@[token.heads.depth as int];
-        self.heads.restore(token.heads);
-        self.nodes.restore(token.nodes);
-        self.model = Ghost(snap_model);
-        // Truncate the archive in lockstep with the vec snapshot stacks
-        // (restore leaves frames@.len() == frame_idx on both).
-        self.model_snapshots =
-            Ghost(self.model_snapshots@.subrange(0, token.heads.depth as int + 1));
-        proof {
-            reveal(arena_archive_agrees);
-            let f = token.heads.depth as int;
-            // Old-frame agreement (reveal the old(self) instance).
-            assert(arena_archive_agrees(old(self).model_snapshots@,
-                old(self).heads.snapshots_view(), old(self).nodes.snapshots_view()));
-            // The archived model at frame f describes the restored views:
-            // this is BOTH the live-wf reconstruction (in-range/disjoint/
-            // cache clauses over the restored heads/nodes) AND the model
-            // ensures.
-            assert(arena_model_wf(snap_model,
-                old(self).heads.snapshots_view()[f], old(self).nodes.snapshots_view()[f]));
-            assert(self.heads_view() == old(self).heads.snapshots_view()[f]);
-            assert(self.nodes_view() == old(self).nodes.snapshots_view()[f]);
-            // Truncated archive agrees frame-wise with the truncated stacks.
-            assert(self.heads.snapshots_view()
-                =~= old(self).heads.snapshots_view().subrange(0, f + 1));
-            assert(self.nodes.snapshots_view()
-                =~= old(self).nodes.snapshots_view().subrange(0, f + 1));
-            assert forall|k: int| 0 <= k < self.model_snapshots@.len()
-                implies arena_model_wf(
-                    #[trigger] self.model_snapshots@[k],
-                    self.heads.snapshots_view()[k], self.nodes.snapshots_view()[k]) by {
-                assert(self.model_snapshots@[k] == old(self).model_snapshots@[k]);
-                assert(self.heads.snapshots_view()[k] == old(self).heads.snapshots_view()[k]);
-                assert(self.nodes.snapshots_view()[k] == old(self).nodes.snapshots_view()[k]);
-            }
-            assert(arena_archive_agrees(self.model_snapshots@,
-                self.heads.snapshots_view(), self.nodes.snapshots_view()));
-        }
-    }
 
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
-    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
-    /// token minted after it die. This is the SMT-LIB `pop` to the level below
-    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
-    /// is reopened once, so it costs what the legacy restore costs. `restore`
-    /// alone keeps the checkpoint's frame open instead.
-    pub(crate) fn restore_and_pop(&mut self, token: ListArenaToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).restore_pre_spec(token),
-            // The two component tokens name the SAME mark: one mark pushes
-            // one frame on each vec (wf keeps the stacks in lockstep), so a
-            // genuine ListArenaToken always satisfies this; a mixed
-            // frankentoken does not.
-            token.heads_frame_idx_spec() == token.nodes_frame_idx_spec(),
-        ensures
-            final(self).wf(),
-            final(self).heads_view()
-                == old(self).heads_snapshots_view()[token.heads_frame_idx_spec() as int],
-            final(self).nodes_view()
-                == old(self).nodes_snapshots_view()[token.nodes_frame_idx_spec() as int],
-            // The restored model is the one archived at that mark and recovered
-            // internally, with no caller-supplied ghost.
-            final(self).model_view() == old(self).model_snapshots_view()[token.heads_frame_idx_spec() as int],
-            final(self).heads_snapshots_view() == old(self).heads_snapshots_view()
-                .subrange(0, token.heads_frame_idx_spec() as int),
-            final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view()
-                .subrange(0, token.nodes_frame_idx_spec() as int),
-            final(self).model_snapshots_view() == old(self).model_snapshots_view()
-                .subrange(0, token.heads_frame_idx_spec() as int),
-    {
-        // Prevalidate both constituent tokens before restoring either. Heads
-        // rolled back without nodes
-        // breaks the model invariants unrecoverably. Also pin the same-mark
-        // frame agreement at runtime (frankentoken defense; free for genuine
-        // tokens).
-        crate::guard::check_precondition(
-            self.is_valid_token(&token),
-            "ListArena::restore_and_pop: invalid, foreign, stale, consumed, or abandoned token component",
-        );
-        crate::guard::check_precondition(
-            token.heads.depth == token.nodes.depth,
-            "ListArena::restore_and_pop: token components name different marks",
-        );
-        let ghost snap_model = self.model_snapshots@[token.heads.depth as int];
-        self.heads.restore_and_pop(token.heads);
-        self.nodes.restore_and_pop(token.nodes);
-        self.model = Ghost(snap_model);
-        // Truncate the archive in lockstep with the vec snapshot stacks
-        // (restore leaves frames@.len() == frame_idx on both).
-        self.model_snapshots =
-            Ghost(self.model_snapshots@.subrange(0, token.heads.depth as int));
-        proof {
-            reveal(arena_archive_agrees);
-            let f = token.heads.depth as int;
-            // Old-frame agreement (reveal the old(self) instance).
-            assert(arena_archive_agrees(old(self).model_snapshots@,
-                old(self).heads.snapshots_view(), old(self).nodes.snapshots_view()));
-            // The archived model at frame f describes the restored views:
-            // this is BOTH the live-wf reconstruction (in-range/disjoint/
-            // cache clauses over the restored heads/nodes) AND the model
-            // ensures.
-            assert(arena_model_wf(snap_model,
-                old(self).heads.snapshots_view()[f], old(self).nodes.snapshots_view()[f]));
-            assert(self.heads_view() == old(self).heads.snapshots_view()[f]);
-            assert(self.nodes_view() == old(self).nodes.snapshots_view()[f]);
-            // Truncated archive agrees frame-wise with the truncated stacks.
-            assert(self.heads.snapshots_view()
-                =~= old(self).heads.snapshots_view().subrange(0, f));
-            assert(self.nodes.snapshots_view()
-                =~= old(self).nodes.snapshots_view().subrange(0, f));
-            assert forall|k: int| 0 <= k < self.model_snapshots@.len()
-                implies arena_model_wf(
-                    #[trigger] self.model_snapshots@[k],
-                    self.heads.snapshots_view()[k], self.nodes.snapshots_view()[k]) by {
-                assert(self.model_snapshots@[k] == old(self).model_snapshots@[k]);
-                assert(self.heads.snapshots_view()[k] == old(self).heads.snapshots_view()[k]);
-                assert(self.nodes.snapshots_view()[k] == old(self).nodes.snapshots_view()[k]);
-            }
-            assert(arena_archive_agrees(self.model_snapshots@,
-                self.heads.snapshots_view(), self.nodes.snapshots_view()));
-        }
-    }
 
     // ------------------------------------------------------------------
     // Shared-history variants (doc 10): the two-member fan-out driven by one
@@ -2471,36 +2096,6 @@ where
         }
     }
 
-    /// Drop the open top frame, undoing its writes (the SMT-LIB `pop`; that
-    /// frame's token dies). Refuses on an untracked arena, an empty frame
-    /// stack, or columns out of step.
-    pub fn pop_scope(&mut self)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            (TRACK && old(self).heads_depth_spec() >= 1) ==> ({
-                let f = old(self).heads_depth_spec() - 1;
-                &&& final(self).heads_view() == old(self).heads_snapshots_view()[f]
-                &&& final(self).nodes_view() == old(self).nodes_snapshots_view()[f]
-                &&& final(self).model_view() == old(self).model_snapshots_view()[f]
-                &&& final(self).heads_snapshots_view() == old(self).heads_snapshots_view().subrange(0, f)
-                &&& final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view().subrange(0, f)
-                &&& final(self).model_snapshots_view() == old(self).model_snapshots_view().subrange(0, f)
-                &&& final(self).heads_depth_spec() == f
-            }),
-    {
-        if !TRACK {
-            crate::guard::refuse("pop_scope() called on untracked ListArena");
-        }
-        let d = self.heads.depth_exec();
-        if !(d >= 1) {
-            crate::guard::refuse("ListArena::pop_scope: no open frame");
-        }
-        if !(self.nodes.depth_exec() == d) {
-            crate::guard::refuse("ListArena::pop_scope: columns out of step");
-        }
-        self.restore_frames(d - 1);
-    }
 
     #[allow(dead_code)]
     pub(crate) fn restore_frames(&mut self, target: usize)
@@ -3315,17 +2910,6 @@ pub(crate) proof fn splice_cache_node<T, L, N, const TRACK: bool, P>(
 }
 
 } // verus!
-
-// prod-parity: production derives `Debug` on `ListArenaToken`; manual here
-// (composes two `VecToken`s, now `Debug`).
-impl core::fmt::Debug for ListArenaToken {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ListArenaToken")
-            .field("heads", &self.heads)
-            .field("nodes", &self.nodes)
-            .finish()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // White-box oracle access (plain Rust; see bplus.rs's matching comment).

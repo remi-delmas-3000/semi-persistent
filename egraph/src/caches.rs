@@ -13,7 +13,7 @@ use crate::canon::{FixedCanon, VarCanon};
 use crate::containers::DenseId;
 use crate::containers::IndexLike; // prod-parity: L::min() (was L::MIN)
 use crate::containers::Tagged;
-use crate::containers::{DiffStore, ShrinkPolicy, TaggedFamily, VecI, VecToken};
+use crate::containers::{DiffStore, ShrinkPolicy, TaggedFamily, VecI};
 use crate::node_types::{FixedArityNode, LitNode, VariableArityNode};
 
 // ---------------------------------------------------------------------------
@@ -171,22 +171,6 @@ pub(crate) fn restore_incrementally(
     saved_len: usize,
 ) -> bool {
     REBUILD_RATIO * (suffix_len + pending_len) <= saved_len
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct CacheToken {
-    nodes: VecToken,
-    history: Option<VecToken>,
-    frame_index: usize,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct PoolCacheToken {
-    nodes: VecToken,
-    children: VecToken,
-    history_nodes: Option<VecToken>,
-    history_children: Option<VecToken>,
-    frame_index: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -579,110 +563,6 @@ impl<
             }
         }
         None
-    }
-
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> CacheToken {
-        let token = CacheToken {
-            nodes: self
-                .nodes
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-            history: self.history.as_mut().map(|h| {
-                h.try_mark(shrink)
-                    .expect("mark: frame depth is bounded by the saturation driver")
-            }),
-            frame_index: self.frames.len(),
-        };
-        self.frames.push(CacheFrame);
-        token
-    }
-
-    pub fn restore(&mut self, token: CacheToken) {
-        let _frame = *self
-            .frames
-            .get(token.frame_index)
-            .expect("restore: token minted by this cache's own mark, and not already spent");
-        assert!(
-            self.nodes.is_valid_token(&token.nodes),
-            "restore: node-arena token is not restorable"
-        );
-        if let (Some(h), Some(tok)) = (&self.history, token.history.as_ref()) {
-            assert!(
-                h.is_valid_token(tok),
-                "restore: history token is not restorable"
-            );
-        }
-        // The index needs NO maintenance here: hints self-correct. Rolling
-        // the arena back revalidates every pre-mark hint (the content it
-        // points at returns) and invalidates every post-mark one (its content
-        // is gone or reverted, so the probe's content compare skips it).
-        // Truncated ids fail the probe's bounds check until a fresh intern
-        // reuses the slot and pushes a fresh hint.
-        self.nodes
-            .try_restore(token.nodes)
-            .expect("restore: token minted by this container's own mark");
-        if let (Some(h), Some(tok)) = (&mut self.history, token.history) {
-            h.try_restore(tok)
-                .expect("restore: token minted by this container's own mark");
-        }
-        self.frames.truncate(token.frame_index + 1); // semantics B: the mark's frame stays open
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.index_is_complete(),
-            "restore left the hashcons hint index incomplete"
-        );
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: CacheToken) {
-        let _frame = *self.frames.get(token.frame_index).expect(
-            "restore_and_pop: token minted by this cache's own mark, and not already spent",
-        );
-        assert!(
-            self.nodes.is_valid_token(&token.nodes),
-            "restore_and_pop: node-arena token is not restorable"
-        );
-        if let (Some(h), Some(tok)) = (&self.history, token.history.as_ref()) {
-            assert!(
-                h.is_valid_token(tok),
-                "restore_and_pop: history token is not restorable"
-            );
-        }
-        // The index needs NO maintenance here: hints self-correct. Rolling
-        // the arena back revalidates every pre-mark hint (the content it
-        // points at returns) and invalidates every post-mark one (its content
-        // is gone or reverted, so the probe's content compare skips it).
-        // Truncated ids fail the probe's bounds check until a fresh intern
-        // reuses the slot and pushes a fresh hint.
-        self.nodes
-            .try_restore_and_pop(token.nodes)
-            .expect("restore_and_pop: token minted by this container's own mark");
-        if let (Some(h), Some(tok)) = (&mut self.history, token.history) {
-            h.try_restore_and_pop(tok)
-                .expect("restore_and_pop: token minted by this container's own mark");
-        }
-        self.frames.truncate(token.frame_index); // the mark's frame goes with the pop
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.index_is_complete(),
-            "restore left the hashcons hint index incomplete"
-        );
-    }
-
-    /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.nodes.pop_scope();
-        if let Some(h) = &mut self.history {
-            h.pop_scope();
-        }
-        self.frames.pop().expect("pop_scope: no open cache frame");
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.index_is_complete(),
-            "pop left the hint index incomplete"
-        );
     }
 
     // Structural frame operations: the typed-group member protocol forwarded
@@ -1101,152 +981,6 @@ impl<
         false
     }
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> PoolCacheToken {
-        let token = PoolCacheToken {
-            nodes: self
-                .nodes
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-            children: self
-                .children
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-            history_nodes: self.history_nodes.as_mut().map(|h| {
-                h.try_mark(shrink)
-                    .expect("mark: frame depth is bounded by the saturation driver")
-            }),
-            history_children: self.history_children.as_mut().map(|h| {
-                h.try_mark(shrink)
-                    .expect("mark: frame depth is bounded by the saturation driver")
-            }),
-            frame_index: self.frames.len(),
-        };
-        self.frames.push(CacheFrame);
-        token
-    }
-
-    pub fn restore(&mut self, token: PoolCacheToken) {
-        let _frame = *self
-            .frames
-            .get(token.frame_index)
-            .expect("restore: token minted by this cache's own mark, and not already spent");
-        assert!(
-            self.nodes.is_valid_token(&token.nodes),
-            "restore: node-arena token is not restorable"
-        );
-        assert!(
-            self.children.is_valid_token(&token.children),
-            "restore: child-pool token is not restorable"
-        );
-        if let (Some(h), Some(tok)) = (&self.history_nodes, token.history_nodes.as_ref()) {
-            assert!(
-                h.is_valid_token(tok),
-                "restore: history token is not restorable"
-            );
-        }
-        if let (Some(h), Some(tok)) = (&self.history_children, token.history_children.as_ref()) {
-            assert!(
-                h.is_valid_token(tok),
-                "restore: history token is not restorable"
-            );
-        }
-        // No index maintenance: hints self-correct against the rolled-back
-        // arena and child pool (see the fixed-arity restore above). A
-        // pool-only recanonize is covered because validity reads through the
-        // span into the pool, which rolls back here too.
-        self.nodes
-            .try_restore(token.nodes)
-            .expect("restore: token minted by this container's own mark");
-        self.children
-            .try_restore(token.children)
-            .expect("restore: token minted by this container's own mark");
-        if let (Some(h), Some(tok)) = (&mut self.history_nodes, token.history_nodes) {
-            h.try_restore(tok)
-                .expect("restore: token minted by this container's own mark");
-        }
-        if let (Some(h), Some(tok)) = (&mut self.history_children, token.history_children) {
-            h.try_restore(tok)
-                .expect("restore: token minted by this container's own mark");
-        }
-        self.frames.truncate(token.frame_index + 1); // semantics B: the mark's frame stays open
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.index_is_complete(),
-            "restore left the hashcons hint index incomplete"
-        );
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: PoolCacheToken) {
-        let _frame = *self.frames.get(token.frame_index).expect(
-            "restore_and_pop: token minted by this cache's own mark, and not already spent",
-        );
-        assert!(
-            self.nodes.is_valid_token(&token.nodes),
-            "restore_and_pop: node-arena token is not restorable"
-        );
-        assert!(
-            self.children.is_valid_token(&token.children),
-            "restore_and_pop: child-pool token is not restorable"
-        );
-        if let (Some(h), Some(tok)) = (&self.history_nodes, token.history_nodes.as_ref()) {
-            assert!(
-                h.is_valid_token(tok),
-                "restore_and_pop: history token is not restorable"
-            );
-        }
-        if let (Some(h), Some(tok)) = (&self.history_children, token.history_children.as_ref()) {
-            assert!(
-                h.is_valid_token(tok),
-                "restore_and_pop: history token is not restorable"
-            );
-        }
-        // No index maintenance: hints self-correct against the rolled-back
-        // arena and child pool (see the fixed-arity restore above). A
-        // pool-only recanonize is covered because validity reads through the
-        // span into the pool, which rolls back here too.
-        self.nodes
-            .try_restore_and_pop(token.nodes)
-            .expect("restore_and_pop: token minted by this container's own mark");
-        self.children
-            .try_restore_and_pop(token.children)
-            .expect("restore_and_pop: token minted by this container's own mark");
-        if let (Some(h), Some(tok)) = (&mut self.history_nodes, token.history_nodes) {
-            h.try_restore_and_pop(tok)
-                .expect("restore_and_pop: token minted by this container's own mark");
-        }
-        if let (Some(h), Some(tok)) = (&mut self.history_children, token.history_children) {
-            h.try_restore_and_pop(tok)
-                .expect("restore_and_pop: token minted by this container's own mark");
-        }
-        self.frames.truncate(token.frame_index); // the mark's frame goes with the pop
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.index_is_complete(),
-            "restore left the hashcons hint index incomplete"
-        );
-    }
-
-    /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.nodes.pop_scope();
-        self.children.pop_scope();
-        if let Some(h) = &mut self.history_nodes {
-            h.pop_scope();
-        }
-        if let Some(h) = &mut self.history_children {
-            h.pop_scope();
-        }
-        self.frames.pop().expect("pop_scope: no open cache frame");
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.index_is_complete(),
-            "pop left the hint index incomplete"
-        );
-    }
-
     // Structural frame operations: the typed-group member protocol forwarded
     // to the columns (`History::*_member` drives them; no tokens).
     pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
@@ -1513,66 +1247,6 @@ where
         }
         let lid = self.insert(global_id, op, lit);
         InsertResult::Inserted { local_id: lid }
-    }
-
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> CacheToken {
-        let token = CacheToken {
-            nodes: self
-                .nodes
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-            history: None,
-            frame_index: self.frames.len(),
-        };
-        self.frames.push(CacheFrame);
-        token
-    }
-
-    pub fn restore(&mut self, token: CacheToken) {
-        let _frame = *self
-            .frames
-            .get(token.frame_index)
-            .expect("restore: token minted by this cache's own mark, and not already spent");
-        // No index maintenance: truncated ids fail the probe's bounds check.
-        self.nodes
-            .try_restore(token.nodes)
-            .expect("restore: token minted by this container's own mark");
-        self.frames.truncate(token.frame_index + 1); // semantics B: the mark's frame stays open
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.index_is_complete(),
-            "restore left the literal hint index incomplete"
-        );
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: CacheToken) {
-        let _frame = *self.frames.get(token.frame_index).expect(
-            "restore_and_pop: token minted by this cache's own mark, and not already spent",
-        );
-        // No index maintenance: truncated ids fail the probe's bounds check.
-        self.nodes
-            .try_restore_and_pop(token.nodes)
-            .expect("restore_and_pop: token minted by this container's own mark");
-        self.frames.truncate(token.frame_index); // the mark's frame goes with the pop
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.index_is_complete(),
-            "restore left the literal hint index incomplete"
-        );
-    }
-
-    /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.nodes.pop_scope();
-        self.frames.pop().expect("pop_scope: no open cache frame");
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.index_is_complete(),
-            "pop left the hint index incomplete"
-        );
     }
 
     // Structural frame operations: the typed-group member protocol forwarded
@@ -1923,11 +1597,12 @@ mod tests {
         let mut c = FixedArityCache::<ENodeId, OpId, Plain2Id, 2>::new();
         let op = OpId::new(0);
         c.probe_or_insert(id(10), op, [id(1), id(2)]);
-        let token = c.mark(SHRINK);
+        let token = c.frame_depth();
+        c.push_frame(SHRINK);
         c.probe_or_insert(id(20), op, [id(3), id(4)]);
         assert!(c.probe(&op, &[id(3), id(4)]).is_some());
 
-        c.restore(token);
+        c.reset_frame(token);
         assert_eq!(c.len(), Plain2Id::new(1));
         assert_eq!(c.probe(&op, &[id(1), id(2)]), Some(id(10)));
         assert!(c.probe(&op, &[id(3), id(4)]).is_none());
@@ -1944,7 +1619,8 @@ mod tests {
         let mut c = FixedArityCache::<ENodeId, OpId, Plain2Id, 2>::new();
         let op = OpId::new(0);
         c.probe_or_insert(id(10), op, [id(1), id(2)]);
-        let token = c.mark(SHRINK);
+        let token = c.frame_depth();
+        c.push_frame(SHRINK);
         c.recanonize_node::<PlainCanon>(
             Plain2Id::new(0),
             |g| if g == id(2) { id(1) } else { g },
@@ -1954,7 +1630,7 @@ mod tests {
         assert!(c.probe(&op, &[id(1), id(1)]).is_some());
         assert!(c.probe(&op, &[id(1), id(2)]).is_none());
 
-        c.restore(token);
+        c.reset_frame(token);
         assert_eq!(c.probe(&op, &[id(1), id(2)]), Some(id(10)));
         assert!(c.probe(&op, &[id(1), id(1)]).is_none());
     }
@@ -1966,7 +1642,8 @@ mod tests {
         let mut c = VariableArityCache::<ENodeId, OpId, ENodeId, SetNodeId>::new();
         let op = OpId::new(0);
         c.probe_or_insert(id(10), op, &[id(1), id(2), id(3)]);
-        let token = c.mark(SHRINK);
+        let token = c.frame_depth();
+        c.push_frame(SHRINK);
         c.recanonize_node::<SetCanon>(
             SetNodeId::new(0),
             |g| if g == id(2) { id(1) } else { g },
@@ -1977,7 +1654,7 @@ mod tests {
         );
         assert!(c.probe(op, &[id(1), id(3)]).is_some());
 
-        c.restore(token);
+        c.reset_frame(token);
         assert_eq!(c.probe(op, &[id(1), id(2), id(3)]), Some(id(10)));
         assert!(c.probe(op, &[id(1), id(3)]).is_none());
     }
@@ -1990,9 +1667,11 @@ mod tests {
         let mut c = FixedArityCache::<ENodeId, OpId, Plain2Id, 2>::new();
         let op = OpId::new(0);
         c.probe_or_insert(id(10), op, [id(1), id(2)]);
-        let outer = c.mark(SHRINK);
+        let outer = c.frame_depth();
+        c.push_frame(SHRINK);
         c.probe_or_insert(id(20), op, [id(3), id(4)]);
-        let _inner = c.mark(SHRINK);
+        let _inner = c.frame_depth();
+        c.push_frame(SHRINK);
         c.probe_or_insert(id(30), op, [id(5), id(6)]);
         c.recanonize_node::<PlainCanon>(
             Plain2Id::new(0),
@@ -2001,7 +1680,7 @@ mod tests {
             &mut Vec::new(),
         );
 
-        c.restore(outer);
+        c.reset_frame(outer);
         assert_eq!(c.len(), Plain2Id::new(1));
         assert_eq!(c.probe(&op, &[id(1), id(2)]), Some(id(10)));
         assert!(c.probe(&op, &[id(1), id(7)]).is_none());
@@ -2021,9 +1700,11 @@ mod tests {
         let mut c = FixedArityCache::<ENodeId, OpId, Plain2Id, 2>::new();
         let op = OpId::new(0);
         c.probe_or_insert(id(10), op, [id(1), id(2)]);
-        let outer = c.mark(SHRINK);
+        let outer = c.frame_depth();
+        c.push_frame(SHRINK);
         c.probe_or_insert(id(20), op, [id(3), id(4)]);
-        let _inner = c.mark(SHRINK);
+        let _inner = c.frame_depth();
+        c.push_frame(SHRINK);
         // Re-key the post-outer-mark node: its local id (1) passes the inner
         // frame's saved_len filter (2) but not the outer's (1).
         c.recanonize_node::<PlainCanon>(
@@ -2034,7 +1715,7 @@ mod tests {
         );
         assert!(c.probe(&op, &[id(3), id(5)]).is_some());
 
-        c.restore(outer);
+        c.reset_frame(outer);
         assert_eq!(c.len(), Plain2Id::new(1));
         assert_eq!(c.probe(&op, &[id(1), id(2)]), Some(id(10)));
         assert!(c.probe(&op, &[id(3), id(4)]).is_none());
@@ -2047,9 +1728,11 @@ mod tests {
         let mut c = VariableArityCache::<ENodeId, OpId, ENodeId, SetNodeId>::new();
         let op = OpId::new(0);
         c.probe_or_insert(id(10), op, &[id(1), id(2), id(3)]);
-        let outer = c.mark(SHRINK);
+        let outer = c.frame_depth();
+        c.push_frame(SHRINK);
         c.probe_or_insert(id(20), op, &[id(4), id(5), id(6)]);
-        let _inner = c.mark(SHRINK);
+        let _inner = c.frame_depth();
+        c.push_frame(SHRINK);
         c.recanonize_node::<SetCanon>(
             SetNodeId::new(1),
             |g| if g == id(6) { id(7) } else { g },
@@ -2060,7 +1743,7 @@ mod tests {
         );
         assert!(c.probe(op, &[id(4), id(5), id(7)]).is_some());
 
-        c.restore(outer);
+        c.reset_frame(outer);
         assert_eq!(c.probe(op, &[id(1), id(2), id(3)]), Some(id(10)));
         assert!(c.probe(op, &[id(4), id(5), id(6)]).is_none());
         assert!(c.probe(op, &[id(4), id(5), id(7)]).is_none());
@@ -2073,13 +1756,14 @@ mod tests {
         let mut c = FixedArityCache::<ENodeId, OpId, Plain2Id, 2>::new();
         let op = OpId::new(0);
         c.probe_or_insert(id(10), op, [id(1), id(2)]);
-        let token = c.mark(SHRINK);
+        let token = c.frame_depth();
+        c.push_frame(SHRINK);
         for k in 0..10 {
             c.probe_or_insert(id(100 + k), op, [id(200 + k), id(0)]);
         }
         assert!(!restore_incrementally(10, 0, 1));
 
-        c.restore(token);
+        c.reset_frame(token);
         assert_eq!(c.len(), Plain2Id::new(1));
         assert_eq!(c.probe(&op, &[id(1), id(2)]), Some(id(10)));
         assert!(c.probe(&op, &[id(200), id(0)]).is_none());

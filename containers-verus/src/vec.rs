@@ -16575,32 +16575,6 @@ where
         self.mark(shrink)
     }
 
-    /// Genealogy-agnostic seal: close the open frame (compressing it per-frame when
-    /// the column is adaptive and aligned, choosing the mode from the frame's own
-    /// statistics) and open the next. This is the member-side half of a group
-    /// `mark`: the group's `ForkHistory` writes the genealogy once, and each member
-    /// only seals. All fast-fold preconditions are probed at runtime
-    /// (`adaptive_aligned`) with the frame's uniqueness derived from `wf`, so the
-    /// caller carries only the structural bounds.
-    #[verifier::rlimit(600)]
-    #[verifier::spinoff_prover]
-    pub(crate) fn seal_frame(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).depth_spec() < u32::MAX,
-            old(self).view().len() < I::max_nat(),
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
-            final(self).depth_spec() == old(self).depth_spec() + 1,
-            final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
-    {
-        // Ruled design: sealing per mark is retired; compression cadence is
-        // the hot_buffer policy inside mark. seal_frame is a plain mark.
-        self.mark(shrink)
-    }
 }
 
 // Concrete constructors, mirroring production's two `new()` impls.
@@ -17406,72 +17380,6 @@ mod forged_token_tests {
             !v.is_valid_token(&forged),
             "forged frame idx must be invalid"
         );
-    }
-}
-
-#[cfg(test)]
-mod mixed_component_token_tests {
-    use super::ShrinkPolicy;
-    use crate::dense_id::DenseId31;
-    use crate::inline_store::InlineStore;
-    use crate::parallel_store::ParallelStore;
-    use crate::sparse_set::{SparseSet, SparseSetToken};
-    use crate::vec::Vec as SpVec;
-
-    type Set = SparseSet<u32, DenseId31, ParallelStore<u32, DenseId31>, true>;
-
-    fn empty_set() -> Set {
-        SparseSet {
-            dense: SpVec::<u32, DenseId31, ParallelStore<u32, DenseId31>, true>::new(),
-            sparse: SpVec::<DenseId31, DenseId31, InlineStore<DenseId31, DenseId31>, true>::new(),
-            indices: SpVec::<DenseId31, DenseId31, InlineStore<DenseId31, DenseId31>, true>::new(),
-        }
-    }
-
-    /// A compound token whose components come from DIFFERENT marks (dense
-    /// from mark 1, sparse/indices from mark 2): the atomic prevalidation
-    /// must reject it before restoring any component. (Frankentokens are
-    /// constructible here because the module sees the token fields.)
-    #[test]
-    fn mixed_mark_compound_token_rejected_atomically() {
-        let mut s = empty_set();
-        let id1 = s.add(10);
-        let tok1 = s.mark(ShrinkPolicy::Never);
-        let id2 = s.add(20);
-        let tok2 = s.mark(ShrinkPolicy::Never);
-        let id3 = s.add(30);
-
-        // Consume tok2's frame entirely on the dense component only... no —
-        // build the frankentoken directly: dense from tok1, rest from tok2.
-        let franken = SparseSetToken {
-            dense: tok1.dense,
-            sparse: tok2.sparse,
-            indices: tok2.indices,
-        };
-        // Restore with tok2 first, consuming tok2's frames (and cutting
-        // tok1's branch? No: tok1 is an ancestor, still valid). After this,
-        // franken.dense (tok1, live ancestor frame) is valid but
-        // franken.sparse/indices (tok2, just consumed) are not.
-        s.restore(tok2);
-        // Semantics B keeps every component of tok2 valid, so component-wise
-        // validity holds for the frankentoken; the atomic refusal is the
-        // frame-agreement check of `restore` itself (below).
-        assert!(
-            s.is_valid_token(&tok2),
-            "the restored checkpoint stays valid"
-        );
-
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            s.restore(franken);
-        }));
-        assert!(r.is_err(), "mixed compound restore must panic");
-        // Atomicity: the set is exactly the tok2 state — dense was NOT
-        // restored to tok1's snapshot before the panic.
-        assert!(s.contains(id1));
-        assert!(s.contains(id2));
-        assert!(!s.contains(id3));
-        assert_eq!(s.get(id1), 10);
-        assert_eq!(s.get(id2), 20);
     }
 }
 

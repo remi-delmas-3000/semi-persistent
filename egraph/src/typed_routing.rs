@@ -9,7 +9,6 @@ use crate::containers::AppendOnlyVec;
 use crate::containers::DenseId;
 use crate::containers::IndexLike;
 use crate::containers::ShrinkPolicy;
-use crate::containers::VecToken;
 use crate::containers::group::Member;
 
 /// Bundle of local DenseId types — one per node kind.
@@ -155,38 +154,6 @@ impl<G: DenseId<Index = I::Index>, I: NodeIds, const TRACK: bool> TypedRouting<G
         self.entries.is_empty()
     }
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> RoutingToken {
-        RoutingToken {
-            entries: self
-                .entries
-                .try_mark(shrink)
-                .expect("routing mark: depth is bounded by the saturation driver"),
-        }
-    }
-
-    pub fn restore(&mut self, token: RoutingToken) {
-        self.entries
-            .try_restore(token.entries)
-            .expect("routing restore: token minted by this container's own mark");
-        self.reserved = false;
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: RoutingToken) {
-        self.entries
-            .try_restore_and_pop(token.entries)
-            .expect("routing restore_and_pop: token minted by this container's own mark");
-        self.reserved = false;
-    }
-
-    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.entries.pop_scope();
-        self.reserved = false;
-    }
-
     // Structural frame operations: the typed-group member protocol forwarded
     // to the columns (`History::*_member` drives them; no tokens).
     pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
@@ -211,11 +178,6 @@ impl<G: DenseId<Index = I::Index>, I: NodeIds, const TRACK: bool> TypedRouting<G
     pub fn frame_depth(&self) -> usize {
         Member::depth_exec(&self.entries)
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct RoutingToken {
-    entries: VecToken,
 }
 
 #[cfg(test)]
@@ -269,11 +231,12 @@ mod tests {
         let mut rt = RT::new();
         let id0 = rt.reserve();
         rt.finalize(id0, NodeRef::Plain1(Plain1Id::new(0)));
-        let token = rt.mark(ShrinkPolicy::Never);
+        let token = rt.frame_depth();
+        rt.push_frame(ShrinkPolicy::Never);
         let id1 = rt.reserve();
         rt.finalize(id1, NodeRef::SPair(SPairNodeId::new(0)));
         assert_eq!(rt.len(), 2);
-        rt.restore(token);
+        rt.reset_frame(token);
         assert_eq!(rt.len(), 1);
         assert_eq!(rt.get(id0), NodeRef::Plain1(Plain1Id::new(0)));
     }

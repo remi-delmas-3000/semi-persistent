@@ -14,7 +14,7 @@ use crate::containers::ShrinkPolicy;
 use crate::containers::Tagged;
 use crate::multiplicity::Multiplicity;
 use crate::registry::{Clamp, OpKind, OpRegistry};
-use crate::typed_routing::{NodeIds, NodeRef, RoutingToken, TypedRouting};
+use crate::typed_routing::{NodeIds, NodeRef, TypedRouting};
 
 /// SpMap an MSet op's descriptor `Clamp` to the canonizer's [`crate::canon::MSetClamp`]. An MSet op
 /// carries `Clamp::None` (plain AC) or `Clamp::Nilpotent` (`Idempotent` is the Set partition, and
@@ -508,120 +508,6 @@ where
     // Semi-persistence
     // -----------------------------------------------------------------------
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> NodeStoreToken {
-        NodeStoreToken {
-            routing: self.routing.mark(shrink),
-            plain0: self.plain0.mark(shrink),
-            plain1: self.plain1.mark(shrink),
-            plain2: self.plain2.mark(shrink),
-            plain3: self.plain3.mark(shrink),
-            spair: self.spair.mark(shrink),
-            plain_n: self.plain_n.mark(shrink),
-            seq: self.seq.mark(shrink),
-            mset: self.mset.mark(shrink),
-            set: self.set.mark(shrink),
-            lit: self.lit.mark(shrink),
-        }
-    }
-
-    pub fn restore(&mut self, token: NodeStoreToken) {
-        if node_prof_enabled() {
-            let mut t = std::time::Instant::now();
-            self.routing.restore(token.routing);
-            node_prof_record(0, &mut t);
-            self.plain0.restore(token.plain0);
-            node_prof_record(1, &mut t);
-            self.plain1.restore(token.plain1);
-            node_prof_record(2, &mut t);
-            self.plain2.restore(token.plain2);
-            node_prof_record(3, &mut t);
-            self.plain3.restore(token.plain3);
-            node_prof_record(4, &mut t);
-            self.spair.restore(token.spair);
-            node_prof_record(5, &mut t);
-            self.plain_n.restore(token.plain_n);
-            node_prof_record(6, &mut t);
-            self.seq.restore(token.seq);
-            node_prof_record(7, &mut t);
-            self.mset.restore(token.mset);
-            node_prof_record(8, &mut t);
-            self.set.restore(token.set);
-            node_prof_record(9, &mut t);
-            self.lit.restore(token.lit);
-            node_prof_record(10, &mut t);
-            return;
-        }
-        self.routing.restore(token.routing);
-        self.plain0.restore(token.plain0);
-        self.plain1.restore(token.plain1);
-        self.plain2.restore(token.plain2);
-        self.plain3.restore(token.plain3);
-        self.spair.restore(token.spair);
-        self.plain_n.restore(token.plain_n);
-        self.seq.restore(token.seq);
-        self.mset.restore(token.mset);
-        self.set.restore(token.set);
-        self.lit.restore(token.lit);
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: NodeStoreToken) {
-        if node_prof_enabled() {
-            let mut t = std::time::Instant::now();
-            self.routing.restore_and_pop(token.routing);
-            node_prof_record(0, &mut t);
-            self.plain0.restore_and_pop(token.plain0);
-            node_prof_record(1, &mut t);
-            self.plain1.restore_and_pop(token.plain1);
-            node_prof_record(2, &mut t);
-            self.plain2.restore_and_pop(token.plain2);
-            node_prof_record(3, &mut t);
-            self.plain3.restore_and_pop(token.plain3);
-            node_prof_record(4, &mut t);
-            self.spair.restore_and_pop(token.spair);
-            node_prof_record(5, &mut t);
-            self.plain_n.restore_and_pop(token.plain_n);
-            node_prof_record(6, &mut t);
-            self.seq.restore_and_pop(token.seq);
-            node_prof_record(7, &mut t);
-            self.mset.restore_and_pop(token.mset);
-            node_prof_record(8, &mut t);
-            self.set.restore_and_pop(token.set);
-            node_prof_record(9, &mut t);
-            self.lit.restore_and_pop(token.lit);
-            node_prof_record(10, &mut t);
-            return;
-        }
-        self.routing.restore_and_pop(token.routing);
-        self.plain0.restore_and_pop(token.plain0);
-        self.plain1.restore_and_pop(token.plain1);
-        self.plain2.restore_and_pop(token.plain2);
-        self.plain3.restore_and_pop(token.plain3);
-        self.spair.restore_and_pop(token.spair);
-        self.plain_n.restore_and_pop(token.plain_n);
-        self.seq.restore_and_pop(token.seq);
-        self.mset.restore_and_pop(token.mset);
-        self.set.restore_and_pop(token.set);
-        self.lit.restore_and_pop(token.lit);
-    }
-
-    /// Drop the open top frame of every column (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.routing.pop_scope();
-        self.plain0.pop_scope();
-        self.plain1.pop_scope();
-        self.plain2.pop_scope();
-        self.plain3.pop_scope();
-        self.spair.pop_scope();
-        self.plain_n.pop_scope();
-        self.seq.pop_scope();
-        self.mset.pop_scope();
-        self.set.pop_scope();
-        self.lit.pop_scope();
-    }
-
     // Structural frame operations: the typed-group member protocol forwarded
     // to the columns (`History::*_member` drives them; no tokens).
     pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
@@ -639,6 +525,34 @@ where
     }
 
     pub fn reset_frame(&mut self, depth: usize) {
+        // Per-column restore profiling (`SEMPER_RESTORE_PROF`), indexed as
+        // `NODE_PROF_PARTS`: the group drives restores through here now.
+        if node_prof_enabled() {
+            let mut t = std::time::Instant::now();
+            self.routing.reset_frame(depth);
+            node_prof_record(0, &mut t);
+            self.plain0.reset_frame(depth);
+            node_prof_record(1, &mut t);
+            self.plain1.reset_frame(depth);
+            node_prof_record(2, &mut t);
+            self.plain2.reset_frame(depth);
+            node_prof_record(3, &mut t);
+            self.plain3.reset_frame(depth);
+            node_prof_record(4, &mut t);
+            self.spair.reset_frame(depth);
+            node_prof_record(5, &mut t);
+            self.plain_n.reset_frame(depth);
+            node_prof_record(6, &mut t);
+            self.seq.reset_frame(depth);
+            node_prof_record(7, &mut t);
+            self.mset.reset_frame(depth);
+            node_prof_record(8, &mut t);
+            self.set.reset_frame(depth);
+            node_prof_record(9, &mut t);
+            self.lit.reset_frame(depth);
+            node_prof_record(10, &mut t);
+            return;
+        }
         self.routing.reset_frame(depth);
         self.plain0.reset_frame(depth);
         self.plain1.reset_frame(depth);
@@ -683,21 +597,6 @@ where
     pub fn frame_depth(&self) -> usize {
         self.routing.frame_depth()
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct NodeStoreToken {
-    routing: RoutingToken,
-    plain0: CacheToken,
-    plain1: CacheToken,
-    plain2: CacheToken,
-    plain3: CacheToken,
-    spair: CacheToken,
-    plain_n: PoolCacheToken,
-    seq: PoolCacheToken,
-    mset: PoolCacheToken,
-    set: PoolCacheToken,
-    lit: CacheToken,
 }
 
 #[cfg(test)]

@@ -8,13 +8,10 @@ use crate::config::EGraphConfig;
 use crate::containers::DenseId;
 use crate::containers::IndexLike;
 use crate::containers::ShrinkPolicy;
-use crate::literal::{LitVal, LitValStore, LitValStoreToken};
+use crate::literal::{LitVal, LitValStore};
 use crate::multiplicity::MultiplicityLike;
-use crate::node_store::{Added, NodeStore, NodeStoreToken};
-use crate::registry::{
-    AxiomRegistry, AxiomRegistryToken, OpKind, OpRegistry, OpRegistryToken, RuleRegistry,
-    RuleRegistryToken, SortRegistry, SortRegistryToken,
-};
+use crate::node_store::{Added, NodeStore};
+use crate::registry::{AxiomRegistry, OpKind, OpRegistry, RuleRegistry, SortRegistry};
 use crate::typed_routing::NodeRef;
 use crate::union_find::{Justification, ProofBuf};
 

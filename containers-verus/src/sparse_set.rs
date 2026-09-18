@@ -44,28 +44,6 @@ use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
 
 verus! {
 
-/// Token bundling one `VecToken` per inner vector.
-#[derive(Copy, Clone)]
-pub struct SparseSetToken {
-    pub(crate) dense: VecToken,
-    pub(crate) sparse: VecToken,
-    pub(crate) indices: VecToken,
-}
-
-impl SparseSetToken {
-    pub open(crate) spec fn dense_frame_idx_spec(self) -> nat {
-        self.dense.depth as nat
-    }
-
-    pub open(crate) spec fn sparse_frame_idx_spec(self) -> nat {
-        self.sparse.depth as nat
-    }
-
-    pub open(crate) spec fn indices_frame_idx_spec(self) -> nat {
-        self.indices.depth as nat
-    }
-}
-
 /// Semi-persistent sparse set with stable IDs.
 pub struct SparseSet<T, Idx, S, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression, P = HotFirst>
 where
@@ -130,13 +108,6 @@ where
         &self.dense
     }
 
-    /// Per-component restorability of the composite token — the atomic
-    /// prevalidation predicate `is_valid_token` answers.
-    pub open(crate) spec fn is_restorable_spec(&self, token: SparseSetToken) -> bool {
-        &&& self.dense.is_restorable_spec(token.dense)
-        &&& self.sparse.is_restorable_spec(token.sparse)
-        &&& self.indices.is_restorable_spec(token.indices)
-    }
 
     /// Composite mark preconditions (headrooms on all three columns).
     pub open(crate) spec fn can_mark_spec(&self) -> bool {
@@ -148,28 +119,7 @@ where
         &&& self.indices.depth_spec() < u32::MAX
     }
 
-    /// Composite restore preconditions: per-component validity + structural
-    /// coordinates + headrooms (everything in `restore`'s requires except
-    /// the snapshot-wf clause, which quantifies over the actual snapshots).
-    pub open(crate) spec fn restore_pre_spec(&self, token: SparseSetToken) -> bool {
-        &&& self.dense.is_token_valid_spec(token.dense)
-        &&& token.dense_frame_idx_spec() < self.dense.depth_spec()
-        &&& self.dense.depth_spec() < u32::MAX
-        &&& self.sparse.is_token_valid_spec(token.sparse)
-        &&& token.sparse_frame_idx_spec() < self.sparse.depth_spec()
-        &&& self.sparse.depth_spec() < u32::MAX
-        &&& self.indices.is_token_valid_spec(token.indices)
-        &&& token.indices_frame_idx_spec() < self.indices.depth_spec()
-        &&& self.indices.depth_spec() < u32::MAX
-    }
 
-    /// The three column snapshots a token names (spec counterpart for restore's
-    /// contract).
-    pub open(crate) spec fn snap_at(&self, token: SparseSetToken) -> (Seq<T>, Seq<Idx>, Seq<Idx>) {
-        (self.dense.snapshots_view()[token.dense_frame_idx_spec() as int],
-         self.sparse.snapshots_view()[token.sparse_frame_idx_spec() as int],
-         self.indices.snapshots_view()[token.indices_frame_idx_spec() as int])
-    }
 
     /// Dense snapshot stack (spec counterpart).
     pub open(crate) spec fn dense_snapshots_view(&self) -> Seq<Seq<T>> {
@@ -971,33 +921,6 @@ where
 
     // ---- semi-persistence: delegate to the three inner vectors ----
 
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: SparseSetToken)
-        requires
-            old(self).wf(),
-            TRACK,
-            old(self).can_mark_spec(),
-        ensures
-            final(self).wf(),
-            final(self).dense_view() == old(self).dense_view(),
-            final(self).sparse_view() == old(self).sparse_view(),
-            final(self).indices_view() == old(self).indices_view(),
-            final(self).dense_snapshots_view()
-                == old(self).dense_snapshots_view().push(old(self).dense_view()),
-            final(self).sparse_snapshots_view()
-                == old(self).sparse_snapshots_view().push(old(self).sparse_view()),
-            final(self).indices_snapshots_view()
-                == old(self).indices_snapshots_view().push(old(self).indices_view()),
-            token.dense_frame_idx_spec() == old(self).dense_depth_spec(),
-            token.sparse_frame_idx_spec() == old(self).sparse.depth_spec(),
-            token.indices_frame_idx_spec() == old(self).indices.depth_spec(),
-            final(self).dense_depth_spec() == old(self).dense_depth_spec() + 1,
-    {
-        let dense = self.dense.mark(shrink);
-        let sparse = self.sparse.mark(shrink);
-        let indices = self.indices.mark(shrink);
-        proof { self.lemma_archive_after_push(old(self)); }
-        SparseSetToken { dense, sparse, indices }
-    }
 
     /// Archive step shared by `mark` and `push_frames`: pushing the live triple
     /// onto three lockstep stacks keeps every archived triple `snap_wf` (the
@@ -1103,148 +1026,9 @@ where
         }
     }
 
-    /// Total mark: TRACK first, then the six column headrooms as one answer.
-    pub fn try_mark(&mut self, shrink: ShrinkPolicy)
-        -> (r: Result<SparseSetToken, crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Err ==> final(self).id_set() == old(self).id_set(),
-            r matches Ok(token) ==> {
-                &&& final(self).dense_view() == old(self).dense_view()
-                &&& final(self).sparse_view() == old(self).sparse_view()
-                &&& final(self).indices_view() == old(self).indices_view()
-                &&& final(self).dense_snapshots_view()
-                    == old(self).dense_snapshots_view().push(old(self).dense_view())
-                &&& final(self).sparse_snapshots_view()
-                    == old(self).sparse_snapshots_view().push(old(self).sparse_view())
-                &&& final(self).indices_snapshots_view()
-                    == old(self).indices_snapshots_view().push(old(self).indices_view())
-                &&& token.dense_frame_idx_spec()
-                    == final(self).dense_snapshots_view().len() - 1
-                &&& token.sparse_frame_idx_spec()
-                    == final(self).sparse_snapshots_view().len() - 1
-                &&& token.indices_frame_idx_spec()
-                    == final(self).indices_snapshots_view().len() - 1
-            },
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if self.dense.can_mark() && self.sparse.can_mark() && self.indices.can_mark() {
-            Ok(self.mark(shrink))
-        } else {
-            Err(crate::error::ContainerError::DepthLimit)
-        }
-    }
 
-    /// Whether the composite token is restorable now. Every constituent must
-    /// be restorable, which is the validation half of aggregate atomicity.
-    pub fn is_valid_token(&self, token: &SparseSetToken) -> (b: bool)
-        requires self.wf(),
-        ensures b == self.is_restorable_spec(*token),
-    {
-        self.dense.is_valid_token(&token.dense)
-            && self.sparse.is_valid_token(&token.sparse)
-            && self.indices.is_valid_token(&token.indices)
-    }
 
-    /// Total restore (panic guard). Refuses a token any of whose three
-    /// components is invalid, foreign, stale, consumed or abandoned, or whose
-    /// frame indices disagree; the archive clauses of `wf` then make the
-    /// restored triple a valid sparse-set state without any O(cap) runtime
-    /// permutation check.
-    pub fn restore(&mut self, token: SparseSetToken)
-        where T: core::default::Default, Idx: core::default::Default
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            final(self).dense_view() == old(self).snap_at(token).0,
-            final(self).sparse_view() == old(self).snap_at(token).1,
-            final(self).indices_view() == old(self).snap_at(token).2,
-            final(self).dense_snapshots_view() == old(self).dense_snapshots_view()
-                .subrange(0, token.dense_frame_idx_spec() as int + 1),
-            final(self).sparse_snapshots_view() == old(self).sparse_snapshots_view()
-                .subrange(0, token.sparse_frame_idx_spec() as int + 1),
-            final(self).indices_snapshots_view() == old(self).indices_snapshots_view()
-                .subrange(0, token.indices_frame_idx_spec() as int + 1),
-    {
-        // Prevalidate all constituent tokens before restoring any of them:
-        // a partially restored sparse set
-        // (dense rolled back, sparse/indices not) violates the permutation
-        // invariant unrecoverably. Both guards are the documented traps.
-        if !self.is_valid_token(&token) {
-            crate::guard::refuse(
-                "SparseSet::restore: invalid, foreign, stale, consumed, or abandoned token component",
-            );
-        }
-        if !(token.dense.depth == token.sparse.depth
-            && token.dense.depth == token.indices.depth)
-        {
-            crate::guard::refuse("SparseSet::restore: token frame indices disagree across columns");
-        }
-        proof {
-            // depth == archived snapshot count on every column; the archive
-            // clause of `wf` at the token's frame is the restored triple.
-            self.dense.lemma_partition_counts();
-            self.sparse.lemma_partition_counts();
-            self.indices.lemma_partition_counts();
-            assert(sparse_set_snap_wf(
-                self.snap_at(token).0, self.snap_at(token).1, self.snap_at(token).2));
-        }
-        self.dense.restore(token.dense);
-        self.sparse.restore(token.sparse);
-        self.indices.restore(token.indices);
-    }
 
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the contents
-    /// are the snapshot taken at `t`, the depth is `t.depth`, and `t` and every
-    /// token minted after it die. This is the SMT-LIB `pop` to the level below
-    /// `t` and exactly the legacy restore, on one pop core: the parent stratum
-    /// is reopened once, so it costs what the legacy restore costs. `restore`
-    /// alone keeps the checkpoint's frame open instead.
-    pub fn restore_and_pop(&mut self, token: SparseSetToken)
-        where T: core::default::Default, Idx: core::default::Default
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            final(self).dense_view() == old(self).snap_at(token).0,
-            final(self).sparse_view() == old(self).snap_at(token).1,
-            final(self).indices_view() == old(self).snap_at(token).2,
-            final(self).dense_snapshots_view() == old(self).dense_snapshots_view()
-                .subrange(0, token.dense_frame_idx_spec() as int),
-            final(self).sparse_snapshots_view() == old(self).sparse_snapshots_view()
-                .subrange(0, token.sparse_frame_idx_spec() as int),
-            final(self).indices_snapshots_view() == old(self).indices_snapshots_view()
-                .subrange(0, token.indices_frame_idx_spec() as int),
-    {
-        // Prevalidate all constituent tokens before restoring any of them:
-        // a partially restored sparse set
-        // (dense rolled back, sparse/indices not) violates the permutation
-        // invariant unrecoverably. Both guards are the documented traps.
-        if !self.is_valid_token(&token) {
-            crate::guard::refuse(
-                "SparseSet::restore_and_pop: invalid, foreign, stale, consumed, or abandoned token component",
-            );
-        }
-        if !(token.dense.depth == token.sparse.depth
-            && token.dense.depth == token.indices.depth)
-        {
-            crate::guard::refuse("SparseSet::restore_and_pop: token frame indices disagree across columns");
-        }
-        proof {
-            // depth == archived snapshot count on every column; the archive
-            // clause of `wf` at the token's frame is the restored triple.
-            self.dense.lemma_partition_counts();
-            self.sparse.lemma_partition_counts();
-            self.indices.lemma_partition_counts();
-            assert(sparse_set_snap_wf(
-                self.snap_at(token).0, self.snap_at(token).1, self.snap_at(token).2));
-        }
-        self.dense.restore_and_pop(token.dense);
-        self.sparse.restore_and_pop(token.sparse);
-        self.indices.restore_and_pop(token.indices);
-    }
 
     // --------------------------------------------------------------------
     // Shared-history variants (doc 10): the same three-member fan-out driven by
@@ -1284,42 +1068,6 @@ where
         proof { self.lemma_archive_after_push(old(self)); }
     }
 
-    /// Drop the open top frame, undoing its writes (the SMT-LIB `pop`; that
-    /// frame's token dies). Refuses on an untracked set, an empty frame stack,
-    /// or columns out of step.
-    pub fn pop_scope(&mut self)
-        where T: core::default::Default, Idx: core::default::Default
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            (TRACK && old(self).dense_snapshots_view().len() >= 1) ==> ({
-                let f = old(self).dense_snapshots_view().len() - 1;
-                &&& final(self).dense_view() == old(self).dense_snapshots_view()[f]
-                &&& final(self).sparse_view() == old(self).sparse_snapshots_view()[f]
-                &&& final(self).indices_view() == old(self).indices_snapshots_view()[f]
-                &&& final(self).dense_snapshots_view() == old(self).dense_snapshots_view().subrange(0, f)
-                &&& final(self).sparse_snapshots_view() == old(self).sparse_snapshots_view().subrange(0, f)
-                &&& final(self).indices_snapshots_view() == old(self).indices_snapshots_view().subrange(0, f)
-            }),
-    {
-        if !TRACK {
-            crate::guard::refuse("pop_scope() called on untracked SparseSet");
-        }
-        let d = self.dense.depth_exec();
-        if !(d >= 1) {
-            crate::guard::refuse("SparseSet::pop_scope: no open frame");
-        }
-        if !(self.sparse.depth_exec() == d && self.indices.depth_exec() == d) {
-            crate::guard::refuse("SparseSet::pop_scope: columns out of step");
-        }
-        proof {
-            assert(sparse_set_snap_wf(
-                self.dense.snapshots_view()[d as int - 1],
-                self.sparse.snapshots_view()[d as int - 1],
-                self.indices.snapshots_view()[d as int - 1]));
-        }
-        self.restore_frames(d - 1);
-    }
 
     #[allow(dead_code)]
     pub(crate) fn restore_frames(&mut self, target: usize)
@@ -1629,18 +1377,6 @@ where
 }
 
 } // verus!
-
-// prod-parity: production derives `Debug` on `SparseSetToken`; manual here
-// (composes three `VecToken`s, now `Debug`).
-impl core::fmt::Debug for SparseSetToken {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("SparseSetToken")
-            .field("dense", &self.dense)
-            .field("sparse", &self.sparse)
-            .field("indices", &self.indices)
-            .finish()
-    }
-}
 
 // Production-surface parity (production ships Default on this variant).
 impl<T, Idx, const TRACK: bool, P> Default

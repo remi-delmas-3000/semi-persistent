@@ -96,9 +96,6 @@ impl<G: DenseId> Tagged for Justification<G> {
 pub type UnionFind<T, const TRACK: bool = true, const PROOFS: bool = false> =
     crate::containers::union_find::UnionFind<T, Justification<T>, TRACK, PROOFS>;
 
-/// Opaque token for [`UnionFind::mark`] / [`UnionFind::restore`].
-pub type UnionFindToken = crate::containers::union_find::UnionFindToken;
-
 /// Reusable scratch buffers for proof extraction (the kernel's, with this
 /// crate's justification payload).
 pub type ProofBuf<T> = crate::containers::union_find::ProofBuf<T, Justification<T>>;

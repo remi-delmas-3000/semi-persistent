@@ -5,24 +5,10 @@
 use crate::containers::AppendOnlyVec;
 use crate::containers::DenseId;
 use crate::containers::IndexLike;
-use crate::containers::MapToken;
 use crate::containers::ShrinkPolicy;
 use crate::containers::SpMap;
-use crate::containers::VecToken;
 use crate::containers::group::Member;
 use crate::id::{ENodeKind, id_at};
-
-/// Opaque token for [`SortRegistry::mark`] / [`SortRegistry::restore`].
-#[derive(Clone, Copy, Debug)]
-pub struct SortRegistryToken(MapToken);
-
-/// Opaque token for [`OpRegistry::mark`] / [`OpRegistry::restore`]. Bundles the op log's
-/// token with the completion table's, so the two are always marked and truncated together.
-#[derive(Clone, Copy, Debug)]
-pub struct OpRegistryToken {
-    map: MapToken,
-    completion: VecToken,
-}
 
 /// Flattening direction for variadic sequence operators.
 ///
@@ -267,34 +253,6 @@ impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
         self.map
             .id_of(&name.to_owned())
             .map(|id| id_at::<S>(id.as_usize()))
-    }
-
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> SortRegistryToken {
-        SortRegistryToken(
-            self.map
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        )
-    }
-
-    pub fn restore(&mut self, token: SortRegistryToken) {
-        self.map
-            .try_restore(token.0)
-            .expect("restore: token minted by this container's own mark");
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: SortRegistryToken) {
-        self.map
-            .try_restore_and_pop(token.0)
-            .expect("restore_and_pop: token minted by this container's own mark");
-    }
-
-    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.map.pop_scope();
     }
 
     // Structural frame operations: the typed-group member protocol forwarded
@@ -748,30 +706,6 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
         id_at::<O>(id.as_usize())
     }
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> OpRegistryToken {
-        OpRegistryToken {
-            map: self
-                .map
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-            completion: self
-                .completion
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        }
-    }
-
-    /// Drop the open top frame of both columns (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.map.pop_scope();
-        self.completion.pop_scope();
-        debug_assert_eq!(
-            self.completion.len().as_usize(),
-            self.map.log_len().as_usize(),
-            "pop left the completion column out of step with the map"
-        );
-    }
-
     // Structural frame operations: the typed-group member protocol forwarded
     // to the columns (`History::*_member` drives them; no tokens).
     pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
@@ -812,46 +746,11 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
     pub fn frame_depth(&self) -> usize {
         Member::depth_exec(&self.map)
     }
-
-    pub fn restore(&mut self, token: OpRegistryToken) {
-        self.map
-            .try_restore(token.map)
-            .expect("restore: token minted by this container's own mark");
-        self.completion
-            .try_restore(token.completion)
-            .expect("restore: token minted by this container's own mark");
-        debug_assert_eq!(
-            self.completion.len().as_usize(),
-            self.map.log_len().as_usize(),
-            "the completion table is truncated with the op log"
-        );
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: OpRegistryToken) {
-        self.map
-            .try_restore_and_pop(token.map)
-            .expect("restore_and_pop: token minted by this container's own mark");
-        self.completion
-            .try_restore_and_pop(token.completion)
-            .expect("restore_and_pop: token minted by this container's own mark");
-        debug_assert_eq!(
-            self.completion.len().as_usize(),
-            self.map.log_len().as_usize(),
-            "the completion table is truncated with the op log"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Rule registry
 // ---------------------------------------------------------------------------
-
-/// Opaque token for [`RuleRegistry::mark`] / [`RuleRegistry::restore`].
-#[derive(Clone, Copy, Debug)]
-pub struct RuleRegistryToken(MapToken);
 
 /// Metadata for a registered rewrite rule.
 #[derive(Clone, Debug)]
@@ -916,34 +815,6 @@ impl<const TRACK: bool> RuleRegistry<TRACK> {
             .map(|id| id_at::<crate::id::RuleId>(id.as_usize()))
     }
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> RuleRegistryToken {
-        RuleRegistryToken(
-            self.map
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        )
-    }
-
-    pub fn restore(&mut self, token: RuleRegistryToken) {
-        self.map
-            .try_restore(token.0)
-            .expect("restore: token minted by this container's own mark");
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: RuleRegistryToken) {
-        self.map
-            .try_restore_and_pop(token.0)
-            .expect("restore_and_pop: token minted by this container's own mark");
-    }
-
-    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.map.pop_scope();
-    }
-
     // Structural frame operations: the typed-group member protocol forwarded
     // to the columns (`History::*_member` drives them; no tokens).
     pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
@@ -970,10 +841,6 @@ impl<const TRACK: bool> RuleRegistry<TRACK> {
 // ---------------------------------------------------------------------------
 // Axiom registry
 // ---------------------------------------------------------------------------
-
-/// Opaque token for [`AxiomRegistry::mark`] / [`AxiomRegistry::restore`].
-#[derive(Clone, Copy, Debug)]
-pub struct AxiomRegistryToken(MapToken);
 
 /// Metadata for a registered axiom (user-asserted equality).
 #[derive(Clone, Debug)]
@@ -1031,34 +898,6 @@ impl<G: Copy + DenseId, const TRACK: bool> AxiomRegistry<G, TRACK> {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
-    }
-
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> AxiomRegistryToken {
-        AxiomRegistryToken(
-            self.map
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        )
-    }
-
-    pub fn restore(&mut self, token: AxiomRegistryToken) {
-        self.map
-            .try_restore(token.0)
-            .expect("restore: token minted by this container's own mark");
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: AxiomRegistryToken) {
-        self.map
-            .try_restore_and_pop(token.0)
-            .expect("restore_and_pop: token minted by this container's own mark");
-    }
-
-    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.map.pop_scope();
     }
 
     // Structural frame operations: the typed-group member protocol forwarded
@@ -1354,7 +1193,8 @@ mod tests {
             (Some(0), Some(1))
         );
 
-        let token = ops.mark(ShrinkPolicy::Never);
+        let token = ops.frame_depth();
+        ops.push_frame(ShrinkPolicy::Never);
         let mul = ops.register_mset("Mul", int_sort, int_sort);
         let or = ops.register_set("Or", bool_sort, bool_sort);
         // The new MSet op takes column 1, pushing every Set op up one.
@@ -1364,7 +1204,7 @@ mod tests {
         assert_eq!(ops.completion_column(or), Some(3));
         assert_eq!(ops.completion_op_count(), 4);
 
-        ops.restore(token);
+        ops.reset_frame(token);
         assert_eq!(ops.completion_ops(), vec![add, and]);
         assert_eq!(ops.completion_column(add), Some(0));
         assert_eq!(ops.completion_column(and), Some(1));

@@ -24,7 +24,6 @@ use crate::union_find::Justification;
 /// Per-class data from the verified kernel.
 pub use crate::containers::eclasses::ClassData;
 /// Opaque token for [`EClasses::mark`] / [`EClasses::restore`].
-pub use crate::containers::eclasses::EClassesToken;
 /// Returned by `merge`: survivor, absorbed, and the absorbed class's data.
 pub use crate::containers::eclasses::MergeInfo;
 

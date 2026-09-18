@@ -61,17 +61,6 @@ pub trait LitVal: Clone + Eq + Hash + fmt::Debug + fmt::Display + Send {
     fn key(&self) -> Self::Key;
 }
 
-/// Opaque token for [`LitValStore::mark`] / [`LitValStore::restore`]: the
-/// verified map's own token.
-#[derive(Clone, Copy)]
-pub struct LitValStoreToken(crate::containers::MapToken);
-
-impl fmt::Debug for LitValStoreToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("LitValStoreToken")
-    }
-}
-
 /// Append-only intern table for literals, on the verified [`SpMap`]: the log
 /// of `(canonical key, value)` pairs is the source of truth (positions are the
 /// literal ids), the map's index answers lookups, and `restore` is the map's
@@ -136,34 +125,6 @@ impl<L: LitVal, V: DenseId, const TRACK: bool> LitValStore<L, V, TRACK> {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
-    }
-
-    pub fn mark(&mut self, shrink: crate::containers::ShrinkPolicy) -> LitValStoreToken {
-        LitValStoreToken(
-            self.map
-                .try_mark(shrink)
-                .expect("literal mark: depth bounded by the saturation driver"),
-        )
-    }
-
-    pub fn restore(&mut self, token: LitValStoreToken) {
-        self.map
-            .try_restore(token.0)
-            .expect("literal restore: token minted by this container's own mark");
-    }
-
-    /// `restore(t)` then `pop_scope()`, fused (design doc 08 §1): the SMT-LIB `pop`
-    /// to the level below `t`, on one pop core per column, so it costs what the
-    /// legacy restore costs. `t` and every later token die.
-    pub fn restore_and_pop(&mut self, token: LitValStoreToken) {
-        self.map
-            .try_restore_and_pop(token.0)
-            .expect("literal restore_and_pop: token minted by this container's own mark");
-    }
-
-    /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
-    pub fn pop_scope(&mut self) {
-        self.map.pop_scope();
     }
 
     // Structural frame operations: the typed-group member protocol forwarded

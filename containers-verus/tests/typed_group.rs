@@ -9,6 +9,7 @@ use semi_persistent_containers_verus::bplus_layout::Layout64U32;
 use semi_persistent_containers_verus::bplus_search::BinarySearch;
 use semi_persistent_containers_verus::circular_list::CircularList;
 use semi_persistent_containers_verus::dense_id::{DenseId31, DenseId63};
+use semi_persistent_containers_verus::diff_compress::CompressionMode;
 use semi_persistent_containers_verus::eclasses::EClasses;
 use semi_persistent_containers_verus::group::{ForkHistory, Member, Pair};
 use semi_persistent_containers_verus::index_like::IndexLike;
@@ -153,6 +154,180 @@ fn pairing_members_out_of_step_is_refused() {
     let mut v = col(1);
     v.try_mark(ShrinkPolicy::Never).unwrap();
     let _p = Pair::new(v, Log::new());
+}
+
+/// A restored-below token is cut for good: a NEW mark at its depth mints a
+/// fresh token and never revives it; a popped frame's token is refused too.
+#[test]
+fn a_cut_token_is_not_revived_by_a_new_mark_at_its_depth() {
+    let mut g = ForkHistory::new(col(4));
+    let t0 = g.mark(ShrinkPolicy::Never).expect("mark"); // depth 0, state S0
+    g.member.set(0u32, 1); // S1
+    let t1 = g.mark(ShrinkPolicy::Never).expect("mark"); // depth 1
+    g.member.set(1u32, 2); // S2
+    assert!(g.restore(t0), "t0 is live");
+    assert_eq!(vals(&g.member), vec![0, 1, 2, 3], "back to S0");
+    assert_eq!(g.depth(), 1, "semantics B: the restored frame stays open");
+    assert!(g.restore(t0), "the checkpoint is reusable");
+    assert!(!g.restore(t1), "abandoned future: refused");
+    g.member.set(2u32, 3); // S3, in t0's reopened frame
+    let t0b = g
+        .mark(ShrinkPolicy::Never)
+        .expect("mark above the checkpoint"); // depth 1
+    g.member.set(3u32, 4); // S4
+    assert!(
+        !g.restore(t1),
+        "the abandoned token stays refused after a re-mark at its depth"
+    );
+    assert!(g.restore(t0b), "the new mark's own token restores");
+    assert_eq!(vals(&g.member), vec![0, 1, 3, 3], "to S3");
+    assert!(g.restore(t0), "the checkpoint below is still valid");
+    assert_eq!(vals(&g.member), vec![0, 1, 2, 3], "back to S0 again");
+    assert!(!g.restore(t0b), "restoring below it cut the newer token");
+    assert!(g.pop_scope(), "drop the checkpoint's frame");
+    assert_eq!(g.depth(), 0);
+    assert!(!g.restore(t0), "a popped frame's token is refused");
+    g.member.set(2u32, 3); // S3 again
+    let t0c = g.mark(ShrinkPolicy::Never).expect("mark");
+    assert!(
+        !g.restore(t0),
+        "the old token stays dead under a fresh mark at its depth"
+    );
+    assert!(g.restore(t0c), "the new mark's own token restores");
+    assert_eq!(vals(&g.member), vec![0, 1, 3, 3], "to S3");
+}
+
+// ---------------------------------------------------------------------------
+// Grouped history, randomized: three columns of different widths under one
+// `ForkHistory` (a nested `Pair`), driven by random marks, writes and
+// restores to any live token. After every restore each column equals its own
+// typed oracle snapshot taken at that mark, the group sits one above the
+// depth it had when the token was minted (semantics B), the checkpoint
+// restores again, and every token minted after it is refused forever.
+// ---------------------------------------------------------------------------
+
+type V32 = VecP<u32, u32, true>;
+type V64 = VecP<u64, u64, true>;
+type V16 = VecP<u16, u32, true>;
+type Trio = Pair<Pair<V32, V64>, V16>;
+
+const TRIO_N: usize = 64;
+
+fn trio() -> Trio {
+    let mut a = V32::new_with_mode(CompressionMode::Auto);
+    let mut b = V64::new_with_mode(CompressionMode::Auto);
+    let mut c = V16::new_with_mode(CompressionMode::Auto);
+    for _ in 0..TRIO_N {
+        a.try_push(0).unwrap();
+        b.try_push(0).unwrap();
+        c.try_push(0).unwrap();
+    }
+    Pair::new(Pair::new(a, b), c)
+}
+
+fn trio_poke(t: &mut Trio, m: usize, i: usize, v: usize) {
+    match m {
+        0 => t.a.a.set(i as u32, v as u32),
+        1 => t.a.b.set(i as u64, v as u64),
+        _ => t.b.set(i as u32, v as u16),
+    }
+}
+
+fn trio_contents(t: &Trio) -> [Vec<usize>; 3] {
+    [
+        (0..TRIO_N).map(|i| t.a.a.get(i as u32) as usize).collect(),
+        (0..TRIO_N).map(|i| t.a.b.get(i as u64) as usize).collect(),
+        (0..TRIO_N).map(|i| t.b.get(i as u32) as usize).collect(),
+    ]
+}
+
+#[test]
+fn grouped_history_random_sequences_land_in_lockstep() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+    use semi_persistent_containers_verus::history::GroupToken;
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Mark,
+        Poke(usize, usize, usize),
+        Restore(usize),
+    }
+    let strat = proptest::collection::vec(
+        prop_oneof![
+            2 => Just(Op::Mark),
+            6 => (0..3usize, 0..TRIO_N, 0..61usize).prop_map(|(m, i, v)| Op::Poke(m, i, v)),
+            2 => (0..16usize).prop_map(Op::Restore),
+        ],
+        1..96,
+    );
+    let mut runner = TestRunner::new(Config {
+        cases: 256,
+        ..Config::default()
+    });
+    runner
+        .run(&strat, |ops| {
+            let mut g = ForkHistory::new(trio());
+            let mut oracles: [Vec<usize>; 3] = [vec![0; TRIO_N], vec![0; TRIO_N], vec![0; TRIO_N]];
+            // Live tokens with the depth before the mark and the oracle
+            // snapshot at the mark; tokens the restores abandon go stale.
+            let mut live: Vec<(GroupToken, usize, [Vec<usize>; 3])> = Vec::new();
+            let mut stale: Vec<GroupToken> = Vec::new();
+            for op in ops {
+                match op {
+                    Op::Mark => {
+                        let depth = g.depth();
+                        let t = g.mark(ShrinkPolicy::Never).expect("mark headroom");
+                        prop_assert_eq!(g.depth(), depth + 1, "mark bumps the group depth");
+                        live.push((t, depth, oracles.clone()));
+                    }
+                    Op::Poke(m, i, v) => {
+                        trio_poke(&mut g.member, m, i, v);
+                        oracles[m][i] = v;
+                    }
+                    Op::Restore(k) => {
+                        if live.is_empty() {
+                            continue;
+                        }
+                        let k = k % live.len();
+                        let (t, depth, snap) = live[k].clone();
+                        prop_assert!(g.restore(t), "live token must restore");
+                        prop_assert_eq!(
+                            g.depth(),
+                            depth + 1,
+                            "restore keeps the mark's frame open (semantics B)"
+                        );
+                        prop_assert!(g.restore(t), "the checkpoint is reusable");
+                        prop_assert_eq!(
+                            g.depth(),
+                            depth + 1,
+                            "a repeated restore lands on the same depth"
+                        );
+                        oracles = snap;
+                        // The checkpoint stays live; the deeper tokens (the
+                        // abandoned future) are refused forever.
+                        for t in live.drain(k + 1..) {
+                            stale.push(t.0);
+                        }
+                    }
+                }
+                prop_assert!(g.in_lockstep(), "every column at the history depth");
+                let got = trio_contents(&g.member);
+                for m in 0..3 {
+                    prop_assert_eq!(
+                        &got[m],
+                        &oracles[m],
+                        "column {} diverged from its oracle",
+                        m
+                    );
+                }
+                for &t in &stale {
+                    prop_assert!(!g.restore(t), "stale token must be refused");
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------

@@ -130,7 +130,6 @@ mod trail_select;
 #[allow(dead_code)]
 #[path = "../proofs/top_down/model.rs"]
 pub(crate) mod persistence_model;
-pub mod sync_group;
 #[macro_use]
 pub mod id_macros;
 pub mod dyn_store;
@@ -162,14 +161,14 @@ pub mod vec;
 // ---------------------------------------------------------------------------
 
 pub use append_only_vec::AppendOnlyVec;
-pub use bplus::{BPlusCursor, BPlusToken, BPlusTreeSet};
+pub use bplus::{BPlusCursor, BPlusTreeSet};
 pub use bplus_layout::{
     Layout64U32, Layout128U32, Layout128U64, Layout256U32, Layout256U64, Layout512U64, NodeLayout,
 };
 pub use bplus_search::{BinarySearch, Branchless, SearchKind};
 #[cfg(feature = "literal-types")]
 pub use canonical_keys::{BitsF64, CanonicalF64, CanonicalRational};
-pub use circular_list::{CircularList, CircularListToken, RingIter};
+pub use circular_list::{CircularList, RingIter};
 pub use compressed_stack::CompressedStack;
 pub use compression_config::ColumnConfig;
 pub use compression_stats::{CalibrationPolicy, CalibrationStats, FrameStats};
@@ -185,13 +184,13 @@ pub use id_macros::ids::{SparseSetId, UseListId, UseNodeId};
 pub use index_like::IndexLike;
 pub use inline_store::InlineStore;
 pub use layered_span_map::LayeredSpanMap;
-pub use list::{ListArena, ListArenaToken};
+pub use list::ListArena;
 pub use map::{MapToken, SpMap};
 pub use opt::{DenseId, Opt};
 pub use parallel_store::ParallelStore;
 pub use sorted_cursor::SortedCursor;
 pub use sorted_vec_cursor::SortedVecCursor;
-pub use sparse_set::{SparseSet, SparseSetToken};
+pub use sparse_set::SparseSet;
 pub use store_policy::{HotFirst, PlainFamily, TaggedFamily, TrailFirst};
 pub use tagged::{BoolTagged, Pair, Tagged};
 pub use tier_policy::{
