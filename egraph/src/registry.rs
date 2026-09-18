@@ -9,6 +9,7 @@ use crate::containers::MapToken;
 use crate::containers::ShrinkPolicy;
 use crate::containers::SpMap;
 use crate::containers::VecToken;
+use crate::containers::group::Member;
 use crate::id::{ENodeKind, id_at};
 
 /// Opaque token for [`SortRegistry::mark`] / [`SortRegistry::restore`].
@@ -294,6 +295,28 @@ impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
     /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
     pub fn pop_scope(&mut self) {
         self.map.pop_scope();
+    }
+
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
     }
 }
 
@@ -749,6 +772,47 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
         );
     }
 
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
+        Member::push_frame(&mut self.completion, shrink);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+        Member::reset_frame(&mut self.completion, depth);
+        debug_assert_eq!(
+            self.completion.len().as_usize(),
+            self.map.log_len().as_usize(),
+            "the completion table is truncated with the op log"
+        );
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+        Member::restore_frame(&mut self.completion, depth);
+        debug_assert_eq!(
+            self.completion.len().as_usize(),
+            self.map.log_len().as_usize(),
+            "the completion table is truncated with the op log"
+        );
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+        Member::pop_frame(&mut self.completion);
+        debug_assert_eq!(
+            self.completion.len().as_usize(),
+            self.map.log_len().as_usize(),
+            "pop left the completion column out of step with the map"
+        );
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
+    }
+
     pub fn restore(&mut self, token: OpRegistryToken) {
         self.map
             .try_restore(token.map)
@@ -879,6 +943,28 @@ impl<const TRACK: bool> RuleRegistry<TRACK> {
     pub fn pop_scope(&mut self) {
         self.map.pop_scope();
     }
+
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -973,6 +1059,28 @@ impl<G: Copy + DenseId, const TRACK: bool> AxiomRegistry<G, TRACK> {
     /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
     pub fn pop_scope(&mut self) {
         self.map.pop_scope();
+    }
+
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
     }
 }
 

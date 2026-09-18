@@ -23,6 +23,7 @@ mod egraph;
 mod egraph_proof_test;
 pub mod ematch;
 pub mod extract;
+pub(crate) mod group_members;
 pub mod id;
 pub mod index;
 pub mod interpret;

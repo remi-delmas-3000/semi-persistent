@@ -199,18 +199,7 @@ impl<M: Member> ForkHistory<M> {
             },
             r is None ==> *final(self) == *old(self),
     {
-        if !self.in_lockstep() {
-            return None;
-        }
-        if !(self.history.depth() < u32::MAX) {
-            return None;
-        }
-        if !self.member.can_push_now() {
-            return None;
-        }
-        let t = self.history.mark();
-        self.member.push_frame(shrink);
-        Some(t)
+        self.history.mark_member(&mut self.member, shrink)
     }
 
     /// Restore to the version `t` names and keep its frame open (semantics B,
@@ -239,22 +228,7 @@ impl<M: Member> ForkHistory<M> {
             },
             !r ==> *final(self) == *old(self),
     {
-        if !self.in_lockstep() {
-            return false;
-        }
-        if !self.history.is_valid(t) {
-            return false;
-        }
-        if !(t.depth() < self.history.depth()) {
-            return false;
-        }
-        if !(self.history.depth() < u32::MAX) {
-            return false;
-        }
-        let d = t.depth() as usize;
-        self.member.reset_frame(d);
-        self.history.restore_to(t);
-        true
+        self.history.restore_member(&mut self.member, t)
     }
 
     /// `restore(t)` then `pop()`, fused (the SMT-LIB pop to the level below
@@ -282,19 +256,7 @@ impl<M: Member> ForkHistory<M> {
             },
             !r ==> *final(self) == *old(self),
     {
-        if !self.in_lockstep() {
-            return false;
-        }
-        if !self.history.is_valid(t) {
-            return false;
-        }
-        if !(t.depth() < self.history.depth()) {
-            return false;
-        }
-        let d = t.depth() as usize;
-        self.member.restore_frame(d);
-        self.history.restore_and_pop(t);
-        true
+        self.history.restore_and_pop_member(&mut self.member, t)
     }
 
     /// Drop the open top scope (the SMT-LIB `pop`): the member undoes and
@@ -319,15 +281,7 @@ impl<M: Member> ForkHistory<M> {
             },
             !r ==> *final(self) == *old(self),
     {
-        if !self.in_lockstep() {
-            return false;
-        }
-        if !(self.history.depth() >= 1) {
-            return false;
-        }
-        self.member.pop_frame();
-        self.history.pop();
-        true
+        self.history.pop_member(&mut self.member)
     }
 
     /// Does `t` name a live version of this group (minted here, not cut)?
@@ -343,6 +297,158 @@ impl<M: Member> ForkHistory<M> {
         ensures d as nat == self.depth_spec(),
     {
         self.history.depth()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The group operations over a borrowed member: what a consumer whose members
+// live in its own struct calls (`history.mark_member(&mut columns, shrink)`),
+// and what `ForkHistory<M>` delegates to. The lockstep theorem is stated
+// here, once, for every member type.
+// ---------------------------------------------------------------------------
+
+impl History {
+    /// Mint a token for the current version and push a frame on `m`. `None`
+    /// (nothing changes on either side) when `m` has no headroom, the depth
+    /// word is full, or `m` drifted away from this history's depth.
+    pub fn mark_member<M: Member>(&mut self, m: &mut M, shrink: ShrinkPolicy) -> (r: Option<GroupToken>)
+        requires old(self).wf(), old(m).wf(),
+        ensures
+            final(self).wf(),
+            final(m).wf(),
+            r matches Some(t) ==> {
+                &&& old(m).depth_spec() == old(self).depth_spec()
+                &&& final(m).depth_spec() == final(self).depth_spec()
+                &&& final(self).depth_spec() == old(self).depth_spec() + 1
+                &&& t.depth_spec() == old(self).depth_spec()
+                &&& final(self).valid_spec(t)
+                &&& final(m).model() == old(m).model()
+                &&& final(m).archive() == old(m).archive().push(old(m).model())
+            },
+            r is None ==> *final(self) == *old(self) && *final(m) == *old(m),
+    {
+        if !(m.depth_exec() == self.depth() as usize) {
+            return None;
+        }
+        if !(self.depth() < u32::MAX) {
+            return None;
+        }
+        if !m.can_push_now() {
+            return None;
+        }
+        let t = self.mark();
+        m.push_frame(shrink);
+        Some(t)
+    }
+
+    /// Restore `m` to the version `t` names and keep its frame open
+    /// (semantics B). `false` (nothing changes) when `t` is foreign or cut,
+    /// not below the depth, at the depth ceiling, or `m` drifted.
+    pub fn restore_member<M: Member>(&mut self, m: &mut M, t: GroupToken) -> (r: bool)
+        requires old(self).wf(), old(m).wf(),
+        ensures
+            final(self).wf(),
+            final(m).wf(),
+            r ==> {
+                &&& old(m).depth_spec() == old(self).depth_spec()
+                &&& old(self).valid_spec(t)
+                &&& t.depth_spec() < old(self).depth_spec()
+                &&& final(m).depth_spec() == final(self).depth_spec()
+                &&& final(self).depth_spec() == t.depth_spec() + 1
+                &&& final(self).valid_spec(t)
+                &&& forall|u: GroupToken| u.depth_spec() > t.depth_spec() ==> !final(self).valid_spec(u)
+                &&& forall|u: GroupToken| u.depth_spec() <= t.depth_spec()
+                    ==> final(self).valid_spec(u) == old(self).valid_spec(u)
+                &&& final(m).model() == old(m).archive()[t.depth_spec() as int]
+                &&& final(m).archive() == old(m).archive().subrange(0, t.depth_spec() as int + 1)
+            },
+            !r ==> *final(self) == *old(self) && *final(m) == *old(m),
+    {
+        if !(m.depth_exec() == self.depth() as usize) {
+            return false;
+        }
+        if !self.is_valid(t) {
+            return false;
+        }
+        if !(t.depth() < self.depth()) {
+            return false;
+        }
+        if !(self.depth() < u32::MAX) {
+            return false;
+        }
+        let d = t.depth() as usize;
+        m.reset_frame(d);
+        self.restore_to(t);
+        true
+    }
+
+    /// `restore_member` then `pop_member`, fused (the SMT-LIB pop to the
+    /// level below `t`; the legacy restore, on one pop core).
+    pub fn restore_and_pop_member<M: Member>(&mut self, m: &mut M, t: GroupToken) -> (r: bool)
+        requires old(self).wf(), old(m).wf(),
+        ensures
+            final(self).wf(),
+            final(m).wf(),
+            r ==> {
+                &&& old(m).depth_spec() == old(self).depth_spec()
+                &&& old(self).valid_spec(t)
+                &&& t.depth_spec() < old(self).depth_spec()
+                &&& final(m).depth_spec() == final(self).depth_spec()
+                &&& final(self).depth_spec() == t.depth_spec()
+                &&& !final(self).valid_spec(t)
+                &&& forall|u: GroupToken| u.depth_spec() >= t.depth_spec() ==> !final(self).valid_spec(u)
+                &&& forall|u: GroupToken| u.depth_spec() < t.depth_spec()
+                    ==> final(self).valid_spec(u) == old(self).valid_spec(u)
+                &&& final(m).model() == old(m).archive()[t.depth_spec() as int]
+                &&& final(m).archive() == old(m).archive().subrange(0, t.depth_spec() as int)
+            },
+            !r ==> *final(self) == *old(self) && *final(m) == *old(m),
+    {
+        if !(m.depth_exec() == self.depth() as usize) {
+            return false;
+        }
+        if !self.is_valid(t) {
+            return false;
+        }
+        if !(t.depth() < self.depth()) {
+            return false;
+        }
+        let d = t.depth() as usize;
+        m.restore_frame(d);
+        self.restore_and_pop(t);
+        true
+    }
+
+    /// Drop the open top scope of `m` (the SMT-LIB pop); the scope's token
+    /// dies. `false` (nothing changes) on an empty stack or a drifted `m`.
+    pub fn pop_member<M: Member>(&mut self, m: &mut M) -> (r: bool)
+        requires old(self).wf(), old(m).wf(),
+        ensures
+            final(self).wf(),
+            final(m).wf(),
+            r ==> {
+                &&& old(m).depth_spec() == old(self).depth_spec()
+                &&& old(self).depth_spec() >= 1
+                &&& final(m).depth_spec() == final(self).depth_spec()
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& forall|u: GroupToken| u.depth_spec() >= old(self).depth_spec() - 1
+                    ==> !final(self).valid_spec(u)
+                &&& forall|u: GroupToken| u.depth_spec() < old(self).depth_spec() - 1
+                    ==> final(self).valid_spec(u) == old(self).valid_spec(u)
+                &&& final(m).model() == old(m).archive()[old(self).depth_spec() - 1]
+                &&& final(m).archive() == old(m).archive().subrange(0, old(self).depth_spec() - 1)
+            },
+            !r ==> *final(self) == *old(self) && *final(m) == *old(m),
+    {
+        if !(m.depth_exec() == self.depth() as usize) {
+            return false;
+        }
+        if !(self.depth() >= 1) {
+            return false;
+        }
+        m.pop_frame();
+        self.pop();
+        true
     }
 }
 

@@ -621,6 +621,68 @@ where
         self.set.pop_scope();
         self.lit.pop_scope();
     }
+
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        self.routing.push_frame(shrink);
+        self.plain0.push_frame(shrink);
+        self.plain1.push_frame(shrink);
+        self.plain2.push_frame(shrink);
+        self.plain3.push_frame(shrink);
+        self.spair.push_frame(shrink);
+        self.plain_n.push_frame(shrink);
+        self.seq.push_frame(shrink);
+        self.mset.push_frame(shrink);
+        self.set.push_frame(shrink);
+        self.lit.push_frame(shrink);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        self.routing.reset_frame(depth);
+        self.plain0.reset_frame(depth);
+        self.plain1.reset_frame(depth);
+        self.plain2.reset_frame(depth);
+        self.plain3.reset_frame(depth);
+        self.spair.reset_frame(depth);
+        self.plain_n.reset_frame(depth);
+        self.seq.reset_frame(depth);
+        self.mset.reset_frame(depth);
+        self.set.reset_frame(depth);
+        self.lit.reset_frame(depth);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        self.routing.restore_frame(depth);
+        self.plain0.restore_frame(depth);
+        self.plain1.restore_frame(depth);
+        self.plain2.restore_frame(depth);
+        self.plain3.restore_frame(depth);
+        self.spair.restore_frame(depth);
+        self.plain_n.restore_frame(depth);
+        self.seq.restore_frame(depth);
+        self.mset.restore_frame(depth);
+        self.set.restore_frame(depth);
+        self.lit.restore_frame(depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        self.routing.pop_frame();
+        self.plain0.pop_frame();
+        self.plain1.pop_frame();
+        self.plain2.pop_frame();
+        self.plain3.pop_frame();
+        self.spair.pop_frame();
+        self.plain_n.pop_frame();
+        self.seq.pop_frame();
+        self.mset.pop_frame();
+        self.set.pop_frame();
+        self.lit.pop_frame();
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        self.routing.frame_depth()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

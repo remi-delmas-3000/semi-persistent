@@ -6,6 +6,7 @@
 //! - `VariableArityCache<G, O, C, L, TRACK>` — for PlainN, A, AC, ACI
 //! - `LitCache<G, O, V, L, TRACK>` — for literal leaves
 
+use crate::containers::group::Member;
 use std::hash::{BuildHasher, Hash, Hasher};
 
 use crate::canon::{FixedCanon, VarCanon};
@@ -684,6 +685,59 @@ impl<
         );
     }
 
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.nodes, shrink);
+        if let Some(h) = &mut self.history {
+            Member::push_frame(h, shrink);
+        }
+        self.frames.push(CacheFrame);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.nodes, depth);
+        if let Some(h) = &mut self.history {
+            Member::reset_frame(h, depth);
+        }
+        self.frames.truncate(depth + 1);
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "reset left the hashcons hint index incomplete"
+        );
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.nodes, depth);
+        if let Some(h) = &mut self.history {
+            Member::restore_frame(h, depth);
+        }
+        self.frames.truncate(depth);
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "restore left the hashcons hint index incomplete"
+        );
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.nodes);
+        if let Some(h) = &mut self.history {
+            Member::pop_frame(h);
+        }
+        self.frames.pop().expect("pop_frame: no open cache frame");
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "pop left the hint index incomplete"
+        );
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        self.frames.len()
+    }
+
     /// Completeness oracle: every live node's content is findable through the
     /// hint index (probe returns SOME node with equal content, not necessarily
     /// this one — congruent duplicates share an answer). This is the invariant
@@ -1193,6 +1247,75 @@ impl<
         );
     }
 
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.nodes, shrink);
+        Member::push_frame(&mut self.children, shrink);
+        if let Some(h) = &mut self.history_nodes {
+            Member::push_frame(h, shrink);
+        }
+        if let Some(h) = &mut self.history_children {
+            Member::push_frame(h, shrink);
+        }
+        self.frames.push(CacheFrame);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.nodes, depth);
+        Member::reset_frame(&mut self.children, depth);
+        if let Some(h) = &mut self.history_nodes {
+            Member::reset_frame(h, depth);
+        }
+        if let Some(h) = &mut self.history_children {
+            Member::reset_frame(h, depth);
+        }
+        self.frames.truncate(depth + 1);
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "reset left the hashcons hint index incomplete"
+        );
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.nodes, depth);
+        Member::restore_frame(&mut self.children, depth);
+        if let Some(h) = &mut self.history_nodes {
+            Member::restore_frame(h, depth);
+        }
+        if let Some(h) = &mut self.history_children {
+            Member::restore_frame(h, depth);
+        }
+        self.frames.truncate(depth);
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "restore left the hashcons hint index incomplete"
+        );
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.nodes);
+        Member::pop_frame(&mut self.children);
+        if let Some(h) = &mut self.history_nodes {
+            Member::pop_frame(h);
+        }
+        if let Some(h) = &mut self.history_children {
+            Member::pop_frame(h);
+        }
+        self.frames.pop().expect("pop_frame: no open cache frame");
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "pop left the hint index incomplete"
+        );
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        self.frames.len()
+    }
+
     /// See [`FixedArityCache::index_is_complete`].
     #[cfg(debug_assertions)]
     fn index_is_complete(&self) -> bool {
@@ -1450,6 +1573,47 @@ where
             self.index_is_complete(),
             "pop left the hint index incomplete"
         );
+    }
+
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.nodes, shrink);
+        self.frames.push(CacheFrame);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.nodes, depth);
+        self.frames.truncate(depth + 1);
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "reset left the literal hint index incomplete"
+        );
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.nodes, depth);
+        self.frames.truncate(depth);
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "restore left the literal hint index incomplete"
+        );
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.nodes);
+        self.frames.pop().expect("pop_frame: no open cache frame");
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.index_is_complete(),
+            "pop left the hint index incomplete"
+        );
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        self.frames.len()
     }
 
     /// See [`FixedArityCache::index_is_complete`].

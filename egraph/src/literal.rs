@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Literal value interning.
 
+use crate::containers::group::Member;
 use std::fmt;
 use std::hash::Hash;
 
@@ -163,6 +164,28 @@ impl<L: LitVal, V: DenseId, const TRACK: bool> LitValStore<L, V, TRACK> {
     /// Drop the open top frame (the SMT-LIB pop; design doc 08 §1).
     pub fn pop_scope(&mut self) {
         self.map.pop_scope();
+    }
+
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: crate::containers::ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
     }
 }
 

@@ -10,6 +10,7 @@ use crate::containers::DenseId;
 use crate::containers::IndexLike;
 use crate::containers::ShrinkPolicy;
 use crate::containers::VecToken;
+use crate::containers::group::Member;
 
 /// Bundle of local DenseId types — one per node kind.
 pub trait NodeIds {
@@ -184,6 +185,31 @@ impl<G: DenseId<Index = I::Index>, I: NodeIds, const TRACK: bool> TypedRouting<G
     pub fn pop_scope(&mut self) {
         self.entries.pop_scope();
         self.reserved = false;
+    }
+
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.entries, shrink);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.entries, depth);
+        self.reserved = false;
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.entries, depth);
+        self.reserved = false;
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.entries);
+        self.reserved = false;
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.entries)
     }
 }
 

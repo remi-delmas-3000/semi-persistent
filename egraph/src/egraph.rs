@@ -56,7 +56,7 @@ pub const PAR_NODE_MIN: usize = 1 << 14;
 static FANOUT_SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static FANOUT_WORKERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn fanout_witness() {
+pub(crate) fn fanout_witness() {
     use std::sync::atomic::Ordering;
     FANOUT_SPAWNS.fetch_add(1, Ordering::Relaxed);
     let idx = rayon::current_thread_index().unwrap_or(0).min(63);
@@ -160,19 +160,6 @@ pub struct EGraph<
     /// group token's validity and the branch cuts are recorded here once,
     /// instead of once per member vector. Sole authority for restore validity.
     history: crate::containers::history::History,
-    /// Depth-indexed member token stacks: `*_marks[d]` restores its member to
-    /// the state the group token at depth `d` names. Structural frame handles
-    /// only; validity lives on `history`. H2 thins these away once `VecToken`
-    /// loses its per-vector genealogy.
-    classes_marks: Vec<crate::classes::EClassesToken>,
-    nodes_marks: Vec<NodeStoreToken>,
-    sorts_marks: Vec<SortRegistryToken>,
-    ops_marks: Vec<OpRegistryToken>,
-    rules_marks: Vec<RuleRegistryToken>,
-    axioms_marks: Vec<AxiomRegistryToken>,
-    lits_marks: Vec<LitValStoreToken>,
-    unit_node_marks: Vec<crate::containers::MapToken>,
-    inverse_op_marks: Vec<crate::containers::MapToken>,
     worklist: Vec<(Cfg::UL, Cfg::G)>,
     collisions: Vec<(Cfg::G, Cfg::G)>,
     /// Reusable scratch for a node's child ids as bare `G` (the canonical-children buffer for
@@ -367,15 +354,6 @@ where
             classes: EClasses::new(),
             nodes: NodeStore::new(),
             history: crate::containers::history::History::new(),
-            classes_marks: Vec::new(),
-            nodes_marks: Vec::new(),
-            sorts_marks: Vec::new(),
-            ops_marks: Vec::new(),
-            rules_marks: Vec::new(),
-            axioms_marks: Vec::new(),
-            lits_marks: Vec::new(),
-            unit_node_marks: Vec::new(),
-            inverse_op_marks: Vec::new(),
             worklist: Vec::new(),
             collisions: Vec::new(),
             g_buf: Vec::new(),
@@ -3197,99 +3175,26 @@ where
     /// state; the rebuild and the tiny map marks run strictly outside it.
     pub fn mark_with(&mut self, shrink: ShrinkPolicy, par: bool) -> EGraphToken {
         self.rebuild();
-        let (classes, nodes, sorts, ops, rules, axioms, lits) = if par {
-            let mut classes = None;
-            let mut nodes = None;
-            let mut sorts = None;
-            let mut ops = None;
-            let mut rules = None;
-            let mut axioms = None;
-            let mut lits = None;
-            let (c, n, so, o, r, a, l) = (
-                &mut self.classes,
-                &mut self.nodes,
-                &mut self.sorts,
-                &mut self.ops,
-                &mut self.rules,
-                &mut self.axioms,
-                &mut self.lits,
-            );
-            rayon::scope(|s| {
-                s.spawn(|_| {
-                    fanout_witness();
-                    classes = Some(c.mark(shrink));
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    nodes = Some(n.mark(shrink));
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    sorts = Some(so.mark(shrink));
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    ops = Some(o.mark(shrink));
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    rules = Some(r.mark(shrink));
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    axioms = Some(a.mark(shrink));
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    lits = Some(l.mark(shrink));
-                });
-            });
-            (
-                classes.unwrap(),
-                nodes.unwrap(),
-                sorts.unwrap(),
-                ops.unwrap(),
-                rules.unwrap(),
-                axioms.unwrap(),
-                lits.unwrap(),
-            )
-        } else {
-            (
-                self.classes.mark(shrink),
-                self.nodes.mark(shrink),
-                self.sorts.mark(shrink),
-                self.ops.mark(shrink),
-                self.rules.mark(shrink),
-                self.axioms.mark(shrink),
-                self.lits.mark(shrink),
-            )
-        };
-        // ONE genealogy write for the whole member set; the member tokens go
-        // onto the depth-indexed stacks, so the group token alone names this
-        // version. The depth guard is History::mark's precondition.
         assert!(
             self.history.depth() < u32::MAX,
             "mark: frame depth is bounded by the saturation driver"
         );
-        let group = self.history.mark();
-        debug_assert_eq!(self.classes_marks.len(), group.depth() as usize);
-        self.classes_marks.push(classes);
-        self.nodes_marks.push(nodes);
-        self.sorts_marks.push(sorts);
-        self.ops_marks.push(ops);
-        self.rules_marks.push(rules);
-        self.axioms_marks.push(axioms);
-        self.lits_marks.push(lits);
-        self.unit_node_marks.push(
-            self.unit_node
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        );
-        self.inverse_op_marks.push(
-            self.inverse_op
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        );
+        let mut members = crate::group_members::EGraphMembers::<Cfg, L, TRACK, PROOFS> {
+            sorts: &mut self.sorts,
+            ops: &mut self.ops,
+            rules: &mut self.rules,
+            axioms: &mut self.axioms,
+            lits: &mut self.lits,
+            classes: &mut self.classes,
+            nodes: &mut self.nodes,
+            unit_node: &mut self.unit_node,
+            inverse_op: &mut self.inverse_op,
+            par,
+        };
+        let group = self
+            .history
+            .mark_member(&mut members, shrink)
+            .expect("mark: every member has headroom and the members are in step");
         EGraphToken {
             group,
             completion_outcome: self.completion_outcome,
@@ -3301,154 +3206,31 @@ where
     /// argument as [`Self::mark_with`]). The shared bookkeeping (outcome,
     /// worklists, repair watermark) runs strictly after the fan-out joins.
     pub fn restore_with(&mut self, token: EGraphToken, par: bool) {
-        // The ONE validity check for the whole member set: the group token's
-        // generation still matches the live stamp at its depth, and its frame
-        // is not already spent. History::restore_to below records the branch
-        // cut once, invalidating every deeper token.
+        // The ONE validity check for the whole member set: the group's
+        // `History` validates the token and records the cut once; the members
+        // reset structurally to the token's depth (semantics B: the
+        // checkpoint's frame stays open).
+        let t = std::time::Instant::now();
+        let mut members = crate::group_members::EGraphMembers::<Cfg, L, TRACK, PROOFS> {
+            sorts: &mut self.sorts,
+            ops: &mut self.ops,
+            rules: &mut self.rules,
+            axioms: &mut self.axioms,
+            lits: &mut self.lits,
+            classes: &mut self.classes,
+            nodes: &mut self.nodes,
+            unit_node: &mut self.unit_node,
+            inverse_op: &mut self.inverse_op,
+            par,
+        };
+        let ok = self.history.restore_member(&mut members, token.group);
         assert!(
-            self.history.is_valid(token.group),
-            "restore: token minted by this container's own mark"
-        );
-        let depth32 = token.group.depth();
-        assert!(
-            depth32 < self.history.depth(),
+            ok,
             "restore: token minted by this container's own mark, and not already spent"
         );
-        let d = depth32 as usize;
-        // Take each member's structural token at the target depth; the deeper
-        // entries belong to the abandoned future and drop with the truncate.
-        self.classes_marks.truncate(d + 1);
-        self.nodes_marks.truncate(d + 1);
-        self.sorts_marks.truncate(d + 1);
-        self.ops_marks.truncate(d + 1);
-        self.rules_marks.truncate(d + 1);
-        self.axioms_marks.truncate(d + 1);
-        self.lits_marks.truncate(d + 1);
-        self.unit_node_marks.truncate(d + 1);
-        self.inverse_op_marks.truncate(d + 1);
-        let classes = *self
-            .classes_marks
-            .last()
-            .expect("restore: member stack tracks history depth");
-        let nodes = *self
-            .nodes_marks
-            .last()
-            .expect("restore: member stack tracks history depth");
-        let sorts = *self
-            .sorts_marks
-            .last()
-            .expect("restore: member stack tracks history depth");
-        let ops = *self
-            .ops_marks
-            .last()
-            .expect("restore: member stack tracks history depth");
-        let rules = *self
-            .rules_marks
-            .last()
-            .expect("restore: member stack tracks history depth");
-        let axioms = *self
-            .axioms_marks
-            .last()
-            .expect("restore: member stack tracks history depth");
-        let lits = *self
-            .lits_marks
-            .last()
-            .expect("restore: member stack tracks history depth");
-        let unit_node = *self
-            .unit_node_marks
-            .last()
-            .expect("restore: member stack tracks history depth");
-        let inverse_op = *self
-            .inverse_op_marks
-            .last()
-            .expect("restore: member stack tracks history depth");
-        if par {
-            let (c, n, so, o, r, a, l) = (
-                &mut self.classes,
-                &mut self.nodes,
-                &mut self.sorts,
-                &mut self.ops,
-                &mut self.rules,
-                &mut self.axioms,
-                &mut self.lits,
-            );
-            rayon::scope(|s| {
-                s.spawn(|_| {
-                    fanout_witness();
-                    c.restore(classes);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    n.restore(nodes);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    so.restore(sorts);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    o.restore(ops);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    r.restore(rules);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    a.restore(axioms);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    l.restore(lits);
-                });
-            });
-        } else if *RESTORE_PROF_ON {
-            // Per-member accounting (SEMPER_RESTORE_PROF): where inside one
-            // restore the time goes, member by member.
-            let t = std::time::Instant::now();
-            self.classes.restore(classes);
-            restore_prof_record(0, t);
-            let t = std::time::Instant::now();
-            self.nodes.restore(nodes);
-            restore_prof_record(1, t);
-            let t = std::time::Instant::now();
-            self.sorts.restore(sorts);
-            restore_prof_record(2, t);
-            let t = std::time::Instant::now();
-            self.ops.restore(ops);
-            restore_prof_record(3, t);
-            let t = std::time::Instant::now();
-            self.rules.restore(rules);
-            restore_prof_record(4, t);
-            let t = std::time::Instant::now();
-            self.axioms.restore(axioms);
-            restore_prof_record(5, t);
-            let t = std::time::Instant::now();
-            self.lits.restore(lits);
-            restore_prof_record(6, t);
-        } else {
-            self.classes.restore(classes);
-            self.nodes.restore(nodes);
-            self.sorts.restore(sorts);
-            self.ops.restore(ops);
-            self.rules.restore(rules);
-            self.axioms.restore(axioms);
-            self.lits.restore(lits);
-        }
-        let t = std::time::Instant::now();
-        self.unit_node
-            .try_restore(unit_node)
-            .expect("restore: token minted by this container's own mark");
-        self.inverse_op
-            .try_restore(inverse_op)
-            .expect("restore: token minted by this container's own mark");
         if *RESTORE_PROF_ON {
-            restore_prof_record(7, t);
+            restore_prof_record(0, t);
         }
-        // One branch-cut record for the whole set. Semantics B (design doc 08
-        // §1): the checkpoint's frame stays open on every member, so its member
-        // tokens stay on the stacks; `history` cuts the tokens minted after it.
-        self.history.restore_to(token.group);
         // Roll the outcome back with the graph: the mark-time value describes exactly the
         // restored state (mark() rebuilds first), so a post-restore reader never sees an
         // outcome computed for the discarded scope.
@@ -3466,163 +3248,35 @@ where
     /// runs its own fused pop-restore (one pop core per column), the checkpoint's
     /// member tokens leave the stacks, and `history` cuts at the token's depth.
     pub fn restore_and_pop_with(&mut self, token: EGraphToken, par: bool) {
-        // The ONE validity check for the whole member set: the group token's
-        // generation still matches the live stamp at its depth, and its frame
-        // is not already spent. History::restore_to below records the branch
-        // cut once, invalidating every deeper token.
-        assert!(
-            self.history.is_valid(token.group),
-            "restore: token minted by this container's own mark"
-        );
-        let depth32 = token.group.depth();
-        assert!(
-            depth32 < self.history.depth(),
-            "restore: token minted by this container's own mark, and not already spent"
-        );
-        let d = depth32 as usize;
-        // Pop each member's structural token at the target depth (its frame goes
-        // with the pop); the deeper entries are the abandoned future.
-        self.classes_marks.truncate(d + 1);
-        self.nodes_marks.truncate(d + 1);
-        self.sorts_marks.truncate(d + 1);
-        self.ops_marks.truncate(d + 1);
-        self.rules_marks.truncate(d + 1);
-        self.axioms_marks.truncate(d + 1);
-        self.lits_marks.truncate(d + 1);
-        self.unit_node_marks.truncate(d + 1);
-        self.inverse_op_marks.truncate(d + 1);
-        let classes = self
-            .classes_marks
-            .pop()
-            .expect("restore: member stack tracks history depth");
-        let nodes = self
-            .nodes_marks
-            .pop()
-            .expect("restore: member stack tracks history depth");
-        let sorts = self
-            .sorts_marks
-            .pop()
-            .expect("restore: member stack tracks history depth");
-        let ops = self
-            .ops_marks
-            .pop()
-            .expect("restore: member stack tracks history depth");
-        let rules = self
-            .rules_marks
-            .pop()
-            .expect("restore: member stack tracks history depth");
-        let axioms = self
-            .axioms_marks
-            .pop()
-            .expect("restore: member stack tracks history depth");
-        let lits = self
-            .lits_marks
-            .pop()
-            .expect("restore: member stack tracks history depth");
-        let unit_node = self
-            .unit_node_marks
-            .pop()
-            .expect("restore: member stack tracks history depth");
-        let inverse_op = self
-            .inverse_op_marks
-            .pop()
-            .expect("restore: member stack tracks history depth");
-        if par {
-            let (c, n, so, o, r, a, l) = (
-                &mut self.classes,
-                &mut self.nodes,
-                &mut self.sorts,
-                &mut self.ops,
-                &mut self.rules,
-                &mut self.axioms,
-                &mut self.lits,
-            );
-            rayon::scope(|s| {
-                s.spawn(|_| {
-                    fanout_witness();
-                    c.restore_and_pop(classes);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    n.restore_and_pop(nodes);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    so.restore_and_pop(sorts);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    o.restore_and_pop(ops);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    r.restore_and_pop(rules);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    a.restore_and_pop(axioms);
-                });
-                s.spawn(|_| {
-                    fanout_witness();
-                    l.restore_and_pop(lits);
-                });
-            });
-        } else if *RESTORE_PROF_ON {
-            // Per-member accounting (SEMPER_RESTORE_PROF): where inside one
-            // restore the time goes, member by member.
-            let t = std::time::Instant::now();
-            self.classes.restore_and_pop(classes);
-            restore_prof_record(0, t);
-            let t = std::time::Instant::now();
-            self.nodes.restore_and_pop(nodes);
-            restore_prof_record(1, t);
-            let t = std::time::Instant::now();
-            self.sorts.restore_and_pop(sorts);
-            restore_prof_record(2, t);
-            let t = std::time::Instant::now();
-            self.ops.restore_and_pop(ops);
-            restore_prof_record(3, t);
-            let t = std::time::Instant::now();
-            self.rules.restore_and_pop(rules);
-            restore_prof_record(4, t);
-            let t = std::time::Instant::now();
-            self.axioms.restore_and_pop(axioms);
-            restore_prof_record(5, t);
-            let t = std::time::Instant::now();
-            self.lits.restore_and_pop(lits);
-            restore_prof_record(6, t);
-        } else {
-            self.classes.restore_and_pop(classes);
-            self.nodes.restore_and_pop(nodes);
-            self.sorts.restore_and_pop(sorts);
-            self.ops.restore_and_pop(ops);
-            self.rules.restore_and_pop(rules);
-            self.axioms.restore_and_pop(axioms);
-            self.lits.restore_and_pop(lits);
-        }
+        // `restore_with` then `pop_scope`, fused: the SMT-LIB pop to the level
+        // below `t`, on one pop core per column.
         let t = std::time::Instant::now();
-        self.unit_node
-            .try_restore_and_pop(unit_node)
-            .expect("restore: token minted by this container's own mark");
-        self.inverse_op
-            .try_restore_and_pop(inverse_op)
-            .expect("restore: token minted by this container's own mark");
+        let mut members = crate::group_members::EGraphMembers::<Cfg, L, TRACK, PROOFS> {
+            sorts: &mut self.sorts,
+            ops: &mut self.ops,
+            rules: &mut self.rules,
+            axioms: &mut self.axioms,
+            lits: &mut self.lits,
+            classes: &mut self.classes,
+            nodes: &mut self.nodes,
+            unit_node: &mut self.unit_node,
+            inverse_op: &mut self.inverse_op,
+            par,
+        };
+        let ok = self
+            .history
+            .restore_and_pop_member(&mut members, token.group);
+        assert!(
+            ok,
+            "restore_and_pop: token minted by this container's own mark, and not already spent"
+        );
         if *RESTORE_PROF_ON {
-            restore_prof_record(7, t);
+            restore_prof_record(0, t);
         }
-        // One branch-cut record for the whole set: the checkpoint's frame went
-        // with the pop on every member, so its member tokens leave the stacks.
-        self.history.restore_and_pop(token.group);
-        // Roll the outcome back with the graph: the mark-time value describes exactly the
-        // restored state (mark() rebuilds first), so a post-restore reader never sees an
-        // outcome computed for the discarded scope.
         self.completion_outcome = token.completion_outcome;
         self.worklist.clear();
         self.collisions.clear();
         self.touched.clear();
-        // The repair watermark is a pair of counters over the *pre-restore* graph, and
-        // restore moves both (touched cleared, classes regrown). Drop it so the next
-        // `rebuild` rescans rather than trusting a comparison against a discarded state.
         self.repair_state = None;
     }
 
@@ -3631,25 +3285,21 @@ where
     /// scope stack (the interpreter refuses a pop without push before this).
     pub fn pop_scope(&mut self) {
         assert!(self.history.depth() >= 1, "pop_scope: no open scope");
-        self.classes_marks.pop();
-        self.nodes_marks.pop();
-        self.sorts_marks.pop();
-        self.ops_marks.pop();
-        self.rules_marks.pop();
-        self.axioms_marks.pop();
-        self.lits_marks.pop();
-        self.unit_node_marks.pop();
-        self.inverse_op_marks.pop();
-        self.classes.pop_scope();
-        self.nodes.pop_scope();
-        self.sorts.pop_scope();
-        self.ops.pop_scope();
-        self.rules.pop_scope();
-        self.axioms.pop_scope();
-        self.lits.pop_scope();
-        self.unit_node.pop_scope();
-        self.inverse_op.pop_scope();
-        self.history.pop();
+        let par = self.fanout_enabled();
+        let mut members = crate::group_members::EGraphMembers::<Cfg, L, TRACK, PROOFS> {
+            sorts: &mut self.sorts,
+            ops: &mut self.ops,
+            rules: &mut self.rules,
+            axioms: &mut self.axioms,
+            lits: &mut self.lits,
+            classes: &mut self.classes,
+            nodes: &mut self.nodes,
+            unit_node: &mut self.unit_node,
+            inverse_op: &mut self.inverse_op,
+            par,
+        };
+        let ok = self.history.pop_member(&mut members);
+        assert!(ok, "pop_scope: the members are in step with the history");
         self.worklist.clear();
         self.collisions.clear();
         self.touched.clear();
