@@ -1,3 +1,5 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
 //! The e-graph's members as one typed-group member: a borrowed forwarding
 //! struct over the nine member fields, driven by the e-graph's `History`
 //! through `History::{mark_member, restore_member, restore_and_pop_member,
@@ -180,7 +182,7 @@ where
 
     fn pop_all(&mut self) {
         self.each(
-            |c| Member::pop_frame(c),
+            Member::pop_frame,
             |n| n.pop_frame(),
             |so| so.pop_frame(),
             |o| o.pop_frame(),

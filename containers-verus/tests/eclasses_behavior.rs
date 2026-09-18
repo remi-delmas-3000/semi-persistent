@@ -7,7 +7,6 @@
 
 use semi_persistent_containers_verus::dense_id::{DenseId31, DenseId63};
 use semi_persistent_containers_verus::eclasses::EClasses;
-use semi_persistent_containers_verus::error::ContainerError;
 use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::index_like::IndexLike;
 use semi_persistent_containers_verus::opt::DenseId;

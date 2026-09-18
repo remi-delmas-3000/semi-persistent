@@ -35,7 +35,7 @@ fn op_strategy() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn run_ops(ops: Vec<Op>, mut v: semi_persistent_containers_verus::VecI<u32, u32, true>) {
+fn run_ops(ops: Vec<Op>, v: semi_persistent_containers_verus::VecI<u32, u32, true>) {
     let mut v = semi_persistent_containers_verus::group::ForkHistory::new(v);
     let mut oracle: Vec<u32> = Vec::new();
     let mut snapshots: Vec<(GroupToken, Vec<u32>)> = Vec::new();

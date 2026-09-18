@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **49** (3 structs + 46 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
-| `literal-types` | **54** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **34** (3 structs + 31 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
+| `literal-types` | **39** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,10 +72,16 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current final checkpoint has 37 default-build markers:
-3 opaque structs and 34 functions (the debug-only ring walk left with the
+boundary. The current final checkpoint has 34 default-build markers:
+3 opaque structs and 31 functions (the debug-only ring walk left with the
 total public API on 2026-09-17, §4 row 15; the twelve byte reporters left the
-verified perimeter the same day, §2a). The permanent groups below remain the
+verified perimeter the same day, §2a; three more left with the predecessor dyn
+group when the external history manager became the only manager, 2026-09-18).
+They sit in fifteen modules: the ten compression-statistics reporters, the five
+`bplus_layout` node primitives, three in `container_id`, two each in
+`parallel_store`, `hasher_spec`, `guard` and `compression_config`, and one each
+in `vec`, `append_only_vec`, `map`, `list`, `sparse_set`, `diff_compress`,
+`std_sort` and `parallel`. The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -795,7 +801,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **37 default-build `external_body`
+The complete current source count is **34 default-build `external_body`
 markers plus 4 default-build axioms** (the twelve byte reporters of rows
 4–9 and 11a–11b are outside the perimeter since 2026-09-17, §2a) (plus one generated `obeys_key_model`
 axiom per `define_id*!` id type in consumer crates); execution-first three-tier Vec markers not

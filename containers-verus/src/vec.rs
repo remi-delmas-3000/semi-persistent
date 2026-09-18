@@ -7503,6 +7503,10 @@ where
     /// Append a complete bounded Cold frame. This checked construction is
     /// shared by configured and adaptive migration; sorting is the caller's job.
     #[verifier::spinoff_prover]
+    // No caller today: the adaptive path folds at eviction. Kept because it is
+    // the proven append for a pre-sorted Cold frame, which the configured
+    // sorted migration needs the moment it is turned back on.
+    #[allow(dead_code)]
     fn append_cold_sorted_checked(&mut self, entries: &[(T, I)], saved_len: I)
         requires old(self).repr_ok(), old(self).cold_payload_ok(), old(self).cold_runs_disjoint(),
             forall|a: int, b: int| 0 <= a < b < entries@.len() ==>
@@ -9687,12 +9691,15 @@ where
         }
 
         let preexisting_hot_frames = self.hot_stack.len();
-        logical = self.adaptive_trail_stage_checked(&input, &mut report, logical);
+        // Both stages return the pressure they leave behind; neither value is
+        // read here, because the Trail stage's result is superseded by the exact
+        // recomputation below and the Hot stage's is only reported.
+        self.adaptive_trail_stage_checked(&input, &mut report, logical);
 
         // Trail -> Hot is executed first. Recompute exact pressure before the
         // Hot scan so the second stage sees the actual closed representation.
         logical = self.runtime_closed_history_bytes();
-        logical = self.adaptive_hot_stage_checked(&input, &mut report, logical, preexisting_hot_frames);
+        self.adaptive_hot_stage_checked(&input, &mut report, logical, preexisting_hot_frames);
 
         report.inspected_frames = match report.inspected_trail_frames.checked_add(report.inspected_hot_frames) {
             Some(v) => v,

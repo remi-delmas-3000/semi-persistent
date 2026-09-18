@@ -1201,7 +1201,7 @@ fn bench_v1_rollover(c: &mut Criterion) {
     trail.finish();
 
     let mut small = c.benchmark_group("three_tier_v1/rollover/trail_to_hot_small_frames_per_mark");
-    small.bench_function("apply_configured_x64", |b| bench_rollover_small_frames(b));
+    small.bench_function("apply_configured_x64", bench_rollover_small_frames);
     small.finish();
 
     let mut hot = c.benchmark_group("three_tier_v1/rollover/hot_to_cold_contiguous");

@@ -1433,6 +1433,10 @@ fn hot_survivor_promotion_copies_values_without_calling_clone() {
     #[derive(Copy, Debug, Default, PartialEq, Eq)]
     struct CopyOnly(u32);
 
+    // Deliberately non-canonical: the point of the fixture is that a promotion
+    // which reaches for `Clone` on a `Copy` value is a bug, and this makes that
+    // reach fail loudly.
+    #[allow(clippy::non_canonical_clone_impl)]
     impl Clone for CopyOnly {
         fn clone(&self) -> Self {
             panic!("promotion must copy Copy values without calling Clone")

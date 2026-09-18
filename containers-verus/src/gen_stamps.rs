@@ -1,3 +1,5 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
 //! Generation stamps: the token authority's memory, one stamp per live depth.
 //!
 //! A `GenStamps` hands out stamps from a counter that only grows, so every

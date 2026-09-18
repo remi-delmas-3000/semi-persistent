@@ -1,3 +1,5 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
 //! The typed external history manager (`group::ForkHistory<M>`): a group of
 //! one column, a pair of columns driven as one, the lockstep theorem at
 //! runtime, and the refusals (drift behind the group's back, foreign and

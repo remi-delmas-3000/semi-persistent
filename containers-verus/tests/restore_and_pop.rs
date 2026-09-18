@@ -1,3 +1,5 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
 //! `restore_and_pop(t)` is `restore(t)` then `pop_scope()`, fused (design doc
 //! 08 §1): same contents, same depth, same token fate — on one pop core, so it
 //! costs what the legacy restore costs. These tests pin the equivalence on a

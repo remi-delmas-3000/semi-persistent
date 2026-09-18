@@ -16,6 +16,7 @@
 //! asserts fire.
 
 use semi_persistent_containers_verus::append_only_vec::AppendOnlyVec;
+use semi_persistent_containers_verus::error::ContainerError;
 use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::parallel_store::ParallelStore;
 use semi_persistent_containers_verus::vec::{ShrinkPolicy, Vec as SpVec};
@@ -421,7 +422,6 @@ fn sparse_set_atomic_restore_rejects_consumed_compound() {
 
 #[test]
 fn try_push_refuses_at_the_index_words_capacity() {
-    use semi_persistent_containers_verus::error::ContainerError;
     type V = SpVec<u32, u8, ParallelStore<u32, u8>, false>;
     let mut v: V = V::new();
     // can_push holds while len + 1 < 256, i.e. through len == 254.
@@ -439,7 +439,6 @@ fn try_push_refuses_at_the_index_words_capacity() {
 
 #[test]
 fn try_extend_is_all_or_nothing() {
-    use semi_persistent_containers_verus::error::ContainerError;
     type V = SpVec<u32, u8, ParallelStore<u32, u8>, false>;
     let mut v: V = V::new();
     v.try_extend(&[1, 2, 3]).unwrap();
@@ -456,7 +455,6 @@ fn try_extend_is_all_or_nothing() {
 
 #[test]
 fn try_mark_names_the_failed_precondition() {
-    use semi_persistent_containers_verus::error::ContainerError;
     // Untracked: refused as Untracked, not a panic (the partial mark panics).
     type U = SpVec<u32, u8, ParallelStore<u32, u8>, false>;
     let mut u: ForkHistory<U> = ForkHistory::new(U::new());
@@ -473,7 +471,6 @@ fn try_mark_names_the_failed_precondition() {
 
 #[test]
 fn try_restore_rejects_a_foreign_token_as_err() {
-    use semi_persistent_containers_verus::error::ContainerError;
     type T = SpVec<u32, u8, ParallelStore<u32, u8>, true>;
     let mut a: ForkHistory<T> = ForkHistory::new(T::new());
     let mut b: ForkHistory<T> = ForkHistory::new(T::new());
@@ -495,7 +492,6 @@ fn try_restore_rejects_a_foreign_token_as_err() {
 
 #[test]
 fn aov_total_shell_refuses_and_round_trips() {
-    use semi_persistent_containers_verus::error::ContainerError;
     type A = AppendOnlyVec<String, u8, true>;
     let mut a: ForkHistory<A> = ForkHistory::new(A::new());
     while a.can_push() {

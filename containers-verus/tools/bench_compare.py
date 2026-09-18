@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Compare Criterion baselines by the rule fixed in doc/tasks/final-performance-report.md.
 
 Two modes:

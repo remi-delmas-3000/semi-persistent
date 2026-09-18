@@ -43,6 +43,10 @@
     // suggestion is unavailable here. No machine-applicable fix exists, so
     // this only silences the warning; it fences nothing.
     clippy::vec_init_then_push,
+    clippy::manual_unwrap_or_default,     // `unwrap_or_default` has no vstd spec; the match is what verus reads
+    clippy::match_like_matches_macro,     // `matches!` expands to a match verus rejects in this position
+    clippy::single_match,                 // the explicit match mirrors the frame's two-case proof obligation
+    clippy::non_canonical_clone_impl,     // `Clone` for a Copy run type deliberately traps: construction must be Copy
     clippy::doc_lazy_continuation,        // doc-list wrapping in the design-heavy module comments
     clippy::doc_overindented_list_items,  // same: design-doc-style comment formatting
     // `global size_of usize == 8;` is verus syntax; clippy sees the macro expansion as braces.
