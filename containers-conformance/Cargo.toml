@@ -76,3 +76,7 @@ harness = false
 [[bench]]
 name = "three_tier_bench"
 harness = false
+
+[[bench]]
+name = "spmap_discipline_bench"
+harness = false
