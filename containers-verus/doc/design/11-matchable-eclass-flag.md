@@ -139,7 +139,7 @@ in the index-skip path, not a post-filter").
 ## Interaction with other core work
 
 - Independent of diff-stack compression and shared fork history; composes with
-  both (a shielded class in a `SyncGroup` of `COMPRESS = true` vectors is well
+  both (a shielded class in a group of `COMPRESS = true` vectors is well
   defined).
 - Depends on the e-matching engine work only to the extent that the index-build
   skip is where it plugs in; the primitive itself (bit + merge fold + API) is

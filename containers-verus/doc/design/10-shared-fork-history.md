@@ -76,9 +76,9 @@ Because `History` is a parameter, not a stored field, there is nothing to alias
 — which keeps the whole thing inside Verus's reach.
 
 - **Solo** — a thin wrapper bundling one `Vec` with one `History`, reproducing
-  today's `mark()`/`restore(token)` API exactly. Existing call sites and the
-  standalone vector semantics are preserved bit-for-bit; this is the migration
-  safety net.
+  the container-level `mark()`/`restore(token)` API exactly: the migration safety
+  net, since deleted (2026-09-18). Its successor is `ForkHistory<M>` with a group
+  of one, which is the same shape without a second API to keep in step.
 - **Synced group** — one `History`, many `Vec`s:
 
   ```
@@ -136,7 +136,7 @@ mutable aliasing for Verus to fight. Proof structure:
 
 Independent of diff-stack compression (`09-diff-stack-compression.md`):
 compression changes the *frame representation*, sharing changes *who owns the
-history*. They compose — a `SyncGroup` of `COMPRESS = true` vectors is well
+history*. They compose — a group of `COMPRESS = true` vectors is well
 defined — but ship and measure them separately so each effect is attributable.
 
 ## Size and savings estimate (which workload this is for)

@@ -58,7 +58,9 @@ abstracting the store changed no proof argument. Two facts that the concrete
 `InlineStore` had been supplying through its open `wf` had to be stated once
 for every store:
 
-- The frame-pushing `Vec` entry points (`push_frame`, `seal_frame`) require
+- The frame-pushing `Vec` entry points (`push_frame` and its options and adaptive
+  variants; `seal_frame` was deleted with the columns' token API in 2026-09-18)
+  require
   the column's length to fit its index word. `DiffStore` gained the universal
   lemma `lemma_wf_data_len` (`wf ==> data().len() < I::max_nat()`), which each
   of the four stores discharges from its own `wf`; composites call it before

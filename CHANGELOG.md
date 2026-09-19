@@ -44,6 +44,13 @@
   token per scope for the whole e-graph. Store traces land at 0.97–1.00× of
   the previous commit, `empty20k` at 0.79–0.80×, saturation at parity.
 
+- The trusted base is 12 `external_body` items, down from 34: twelve read-only
+  diagnostics moved out of the verified perimeter, and ten were proved (the B+
+  tree node-layout primitives, the container id's equality, the sparse set's
+  value comparison, the precondition guard and the compression-mode heuristic
+  with its statistics pass). The B+ tree paths pay Rust's bounds checks again;
+  they remain faster than the unverified implementation.
+
 ### Removed
 
 - Every container's own versioning surface. `Vec`, `AppendOnlyVec`, `SpMap`,

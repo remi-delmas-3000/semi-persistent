@@ -788,12 +788,23 @@ Verifying them in the sense of `containers-verus` is future work.
 
 `SearchSession` owns the space, the term pool, the results table, the action
 cache, and the statistics overlay, and exposes one `mark` and one `restore` for
-their search-relevant state. Restore is two-phase: every component token is
-validated against its container and branch genealogy BEFORE any layer is
-mutated, so a foreign or abandoned token cannot leave a partial restore. Layers
-then restore in reverse dependency order. `HybridStats` is cumulative
-diagnostic telemetry outside those arenas; restore intentionally does not
-rewind its call, proof, or duration counters.
+their search-relevant state.
+
+Since 2026-09-18 the session owns a `History` (the containers crate's external
+manager) and drives all five layers through it over one borrowed forwarding view,
+`AuMembers`, which implements `Member`. A `SearchToken` is that history's own
+stamp. Before this, a mark minted 62 container tokens — one per column, 39 of
+them across the statistics overlay alone — and bundled them in a nest of eleven
+token structs; the layers themselves now carry no tokens at all, only the
+structural frame protocol.
+
+The two-phase discipline the session used to hand-roll is now the group's
+contract: `restore_member` checks the token and the layers' lockstep before it
+moves anything and refuses without mutating, so a foreign or abandoned token
+still cannot leave a partial restore. Layers move in dependency order on the way
+up and in reverse on the way back. `HybridStats` is cumulative diagnostic
+telemetry outside those arenas; restore intentionally does not rewind its call,
+proof, or duration counters.
 
 ## 5. Rust implementation
 
@@ -811,10 +822,12 @@ memo of 9.4), `reward.rs` (2.5), `egraph_api.rs` (4.1), `pretty.rs`, `dump.rs`.
 
 Persistent arena columns use the container crate: `VecP` for mutable columns,
 `AppendOnlyVec` for immutable ones, `SpMap` for most indices, and typed spans
-for flattened pools. Some derived storage remains ordinary Rust allocation:
-`ActionCache` keeps action lists in a `Vec`, and `ExactMemo` rebuilds a standard
-`HashMap` index from an append-only log on restore. The session token covers the
-container logs and the corresponding ordinary-storage lengths; this chapter
+for flattened pools. One piece of derived storage remains ordinary Rust allocation: `ExactMemo`'s
+`HashMap` index over an append-only log, which it repairs itself (5.5). The
+action cache's action lists used to be a plain `Vec` truncated by a length the
+token carried; they are an `AppendOnlyVec` now, which fits because the cache is
+append-only and that container needs no `Copy` bound on its element. The session
+token covers the container logs and the memo's per-frame lengths; this chapter
 does not claim that the whole AU layer is Verus-verified merely because its
 primitive containers are.
 
@@ -835,15 +848,18 @@ contiguous and makes the arena's length assertions total.
 ### 5.5 Restorable hash indices
 
 The state index and the clean-solve memo are hash maps over an append-only log.
-The log is the source of truth; the index is derived. A restore validates the
-log's token first, then removes the truncated suffix's keys from the index while
-the log is still live, then rewinds the log.
+The log is the source of truth; the index is derived. A move to frame `d` drops
+the keys above it — read from the log while it is still live — and then moves the
+log. The memo keeps the log length at each open frame for exactly that purpose,
+which is what the token's saved length used to carry. Making that index an
+`SpMap` would retire the walk and the length stack together; it is the last
+hand-maintained rollback in the workspace.
 
-### 5.6 Token and restore order
+### 5.6 Frame and restore order
 
-Marks are taken in dependency order (space, terms, results, actions, statistics)
-and restores run in reverse. The whole-session validation of 4.7 happens before
-any mutation.
+Frames are pushed in dependency order (space, terms, results, actions,
+statistics) and moved back in reverse, which is the forwarding view's whole exec
+body. The group's validation (4.7) happens before any layer is touched.
 
 ### 5.7 Determinism
 

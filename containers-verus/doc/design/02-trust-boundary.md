@@ -270,14 +270,17 @@ Two markers are removed with no new trusted item, for 51 default markers and 56
 with `literal-types`. The same checkpoint adds the checked production sequence
 witness `sequence_witness_checked` (Step 3).
 
-The final checkpoint removes the last execution-first `Vec` marker,
-`try_mark_adaptive`: the public "mark, then one adaptive pass" entry point had
+The final checkpoint of that campaign removed the last execution-first `Vec`
+marker, `try_mark_adaptive` (the entry point itself is gone since 2026-09-18,
+when the columns lost their token API; its structural twin is
+`try_push_frame_adaptive`): the public "mark, then one adaptive pass" entry had
 kept a trusted semantic postcondition (view unchanged, depth + 1, snapshot
 pushed) after every function it calls became checked. Its body is unchanged —
 the three guards, the checked `mark_with_options` and the checked
 `runtime_apply_adaptive` — and the contract now follows from theirs. One
 marker removed, no new trusted item: **50 default markers and 55 with
-`literal-types`** at that checkpoint (49 and 54 since the total public API
+`literal-types`** (the ledger reached **12 and 17** on 2026-09-18; see the counts
+table at the top and §2d) at that checkpoint (49 and 54 since the total public API
 removed the debug-only ring walk). Every remaining default marker is itemized in §4 or in the
 frame-architecture ledger's diagnostics rows; none carries a semantic
 postcondition about container contents.
@@ -575,8 +578,30 @@ model (`core::panicking::panic_fmt` has no spec). This is exactly why `vstd`'s
 own `runtime_assert` is `external_body` too. The `requires cond` *is* checked at
 every call site, so the trusted part is only "the body panics when `!cond`",
 which is a one-line `if`. Nothing algorithmic hides here. (See
-[Ch. 3 §5](03-fork-history.md) for the `u32` fork-history limit these guards
-protect, and the `restores_remaining()` query that reports the headroom.)
+[Ch. 3 §5](03-fork-history.md) for the generation-counter limit these guards
+protect.)
+
+### 2d addendum: the node-layout primitives are proved (2026-09-18)
+
+The five `bplus_layout` primitives no longer carry markers. Three of them
+(`arr_get`, `arr_set`, `slice_get`) now go through vstd's specified array and
+slice accessors, which is a genuine reduction in *this* crate's trusted base —
+the `unsafe` unchecked reads are gone — but an honest reader should note the
+trust moved to the platform's specification rather than disappearing, since those
+vstd accessors are `external_body` in vstd. `sel_usize` is the branch its
+contract always described, and `arr_shift_up` is a verified loop where a trusted
+`memmove` used to be.
+
+Rust's bounds checks come back with them. Measured against the previous commit
+(`bplus_cursor_bitset_bench`, two runs, τ = 1.08): insertion, split and cursor
+cases at parity, because those index the const-generic `data` array and the
+compare folds away; `bplus/scan_only` 1.08–1.10, `from_sorted_then_scan`
+1.06–1.07 and `from_sorted_only` 1.11–1.12, because the bulk loader and leaf
+scan read a slice whose length is a runtime value. All of them remain faster than
+the unverified implementation in the same binary. One trusted hint helper
+(`requires cond`, body `core::hint::assert_unchecked(cond)`) would restore the
+margin for a thirteenth marker; it was declined. The numbers and that option are
+recorded in `doc/tasks/final-performance-report.md`.
 
 ## 3. The integer casts are proved, not trusted
 
@@ -796,49 +821,30 @@ The decision arithmetic is verified in `FrameStats::best_mode`. The marker
 covers only the `size_of` and the `HashSet` the wrapper threads through on its
 way there.
 
-### 3.6d. Parallel mark and restore (contract-carrying), 2 items
+### 3.6d–3.6f. The dyn group's trusted items: all gone (2026-09-18)
 
-*2026-09-16: both contracts now mirror the sequential `ForkHistory::mark` /
-`restore` exactly, including every member's model and archive effect. The only
-trusted step is rayon's promise to apply the per-member closure to each member
-exactly once; each member's effect is its own checked `SyncMember` contract and
-the borrows are disjoint by construction.*
+These three subsections described trusted items that belonged to the predecessor
+dyn group (`sync_group.rs`, `Vec<Box<dyn SyncMember>>`): the parallel
+`mark_parallel`/`restore_parallel` twins, the group `checksum` declared on the
+member trait, and the rayon canary. That module is deleted, and with it those
+markers — three fewer, which is where 37 became 34 before the wider audit took
+the ledger to 12.
 
-`mark_parallel` (sync_group.rs), `restore_parallel` (sync_group.rs).
+The parallel fan-out itself did not disappear, it moved and changed status. The
+e-graph's `EGraphMembers` and the anti-unification layer's `AuMembers` are
+borrowed forwarding views implementing `group::Member`; above a threshold their
+exec parts fan the structural operation out over a `rayon::scope` on disjoint
+`&mut` borrows. Both live in unverified consumer crates, so they are glue rather
+than trusted twins of verified functions: nothing assumes a postcondition about
+them, and the group's contract is discharged by the members' own `Member`
+contracts on the sequential path. What was genuinely trusted before — "rayon
+applies the closure to each member exactly once" — is now confined to code Verus
+never reads, and the differential test pinning parallel against sequential is
+still the evidence that the split is right.
 
-The campaign's real trust growth, and the only markers it adds whose
-postconditions enter downstream proofs: `wf()`, member-count preservation and
-the depth relation are assumed, not proved.
-
-What limits the exposure: both dispatch on a threshold and fall back to the
-verified sequential path below it, the fan-out is over members that own
-disjoint storage, and the per-member operation inside it is the verified one.
-
-What is genuinely trusted: that the rayon fan-out partitions the members
-disjointly, and that no worker observes another's writes. A mis-split or a data
-race would break `wf()` with no verifier complaint, and because `wf()` is
-assumed rather than checked on return, the violation would propagate silently
-into every proof downstream of the mark.
-
-Why it is not proved: Verus has no model of parallel execution, so this cannot
-be discharged by any effort on our side. The mitigation is a differential test
-pinning parallel against sequential, which is evidence and not a theorem.
-
-### 3.6e. Parallel canary (no `ensures`), 1 items
-
-`par_sum_canary` (parallel.rs).
-
-A rayon reduction over a range, confirming at runtime that the parallel backend
-is present and functioning. It asserts nothing and is on no correctness path.
-
-### 3.6f. Group checksum (`requires` only), 1 items
-
-`checksum` (sync_group.rs).
-
-Declared on the group's member trait with `requires self.wf()` and no `ensures`,
-so a differential harness can compare a production container against a verified
-one without a typed handle. It returns a `u64` the verifier knows nothing
-about, so a wrong checksum weakens a test rather than a proof.
+The canary (`parallel::par_sum_canary`) is likewise no longer a marker: it is
+plain Rust below its module's `verus!` block, confirming at runtime that the
+rayon backend links.
 
 ## 4. Summary table
 
@@ -853,26 +859,26 @@ additions are listed after the table.
 
 | # | Item | Group | Trusted because | Provable? |
 |---|---|---|---|---|
-| 1 | `struct ContainerId` | A | opaque identity by design (`uninterp id()`) | n/a: no contract |
+| 1 | ~~`struct ContainerId`~~ | A | **no longer a marker**: transparent in-crate since 2026-09-18 — the field is `pub(crate)` and `id()` reads it, so the type stays opaque to consumers while the projection is a definition | n/a |
 | 2 | `ContainerId::new` (+ `next_id_from` allocator) | A | process-global atomic side effect; no `ensures`; wrapping `u64` allocation with an optional fatal boundary | no (side effect) |
-| 3 | `ContainerId::eq` | A | bridges to an intentionally-`uninterp` `id()` | only by un-abstracting; declined |
+| 3 | ~~`ContainerId::eq`~~ | A | **no longer a marker**: proved 2026-09-18 — with `id()` transparent, `self.raw == other.raw` discharges `b == (self.id() == other.id())` | done |
 | 4–9 | byte reporters (`Vec::tracking_bytes`, `Vec::total_bytes`, `ForkHistory::heap_bytes`, `CaptureBits::heap_bytes`, `ParallelStore::heap_bytes`, `InlineStore::heap_bytes`) | — | **no longer markers**: plain Rust outside `verus!` since 2026-09-17 (§2a); read-only diagnostics | n/a (outside the perimeter) |
 | 10 | `shrink_vec_capacity` | B | `Vec::capacity`/`shrink_to` unmodeled; contract = element sequence unchanged (std-documented) | when vstd specs capacity ops |
 | 10b | `std_sort::sort_pairs_by_index` | B | std `<[T]>::sort_unstable_by_key` is unmodeled by vstd; contract = documented behaviour (permutation of the slice in non-decreasing key order, nothing else touched); consumed by Hot-to-Cold migration and `diff_compress::sort_frame_by_index` | when vstd specs slice sorting |
 | 11 | `shrink_aov_capacity` | B | same (AppendOnlyVec variant formula) | same |
 | 11a–11b | `ListArena::tracking_bytes`, `ListArena::total_bytes` | — | **no longer markers**: plain Rust outside `verus!` since 2026-09-17 (§2a) | n/a (outside the perimeter) |
 | 11c | `data_capacity_bits` | B | `Vec::capacity` unmodeled; **contract-carrying**: `n >= len` is what makes capture-word truncation unobservable (§2c) | when vstd specs capacity ops |
-| 11d | `arr_get` (bplus_layout) | B | `get_unchecked` unspecced; contract = checked indexing, `i < N` verified at every call site (§2d) | when vstd specs unchecked indexing |
-| 11e | `arr_set` (bplus_layout) | B | same, for the write (`update(i, v)` over the whole array) | same |
-| 11f | `slice_get` (bplus_layout) | B | same, with a runtime-length bound (`i < s.len()`) | same |
-| 11g | `sel_usize` (bplus_layout) | B | `select_unpredictable` unspecced (a codegen hint); contract = the `if`/`else` it replaces; **no `unsafe`** | when vstd specs the intrinsic |
-| 11h | `arr_shift_up` (bplus_layout) | B | `copy_within` unspecced; four-clause shift postcondition; **no `unsafe`** (short arm is the element loop it replaces) | when vstd specs `copy_within` |
+| 11d | ~~`arr_get`~~ (bplus_layout) | B | **no longer a marker**: 2026-09-18 it became `*vstd::array::array_index_get(a, i)`. The `unsafe` read is gone; what remains is vstd's own specified accessor, so the trust moved to the platform and Rust's bounds check returns (cost: §2d) | done, modulo vstd |
+| 11e | ~~`arr_set`~~ (bplus_layout) | B | **no longer a marker**: `a[i] = v` under vstd's array-update specification, same trade as 11d | done, modulo vstd |
+| 11f | ~~`slice_get`~~ (bplus_layout) | B | **no longer a marker**: `*vstd::slice::slice_index_get(s, i)`. This is the one whose bound is a runtime length, so its check does **not** fold away — the measured cost lives here (§2d) | done, modulo vstd |
+| 11g | ~~`sel_usize`~~ (bplus_layout) | B | **no longer a marker**: proved 2026-09-18 as the plain `if c { b } else { a }` its contract always described; the `select_unpredictable` codegen hint is dropped | done |
+| 11h | ~~`arr_shift_up`~~ (bplus_layout) | B | **no longer a marker**: proved 2026-09-18 as a verified descending loop carrying the four-clause postcondition; the trusted `copy_within` arm is gone, and a node's window is bounded by its arity so the loop is short by construction | done |
 | 11i | `guard::refuse` | C | diverges (`-> !`); body is the unmodeled panic machinery; nothing assumable (no post-state) | n/a (no contract) |
-| 12 | `guard::check_precondition` | C | body `panic!` uses unmodeled format machinery (`requires cond` is checked) | no (same reason as `vstd::runtime_assert`) |
+| 12 | ~~`guard::check_precondition`~~ | C | **no longer a marker**: proved 2026-09-18 — the violating arm diverges through `refuse` (row 11i), whose `!` return leaves no post-state obligation, so the runtime monitor survives without trusting this function | done; the panic itself is row 11i
 | 13 | `clone_key_exact` | D | projects key-model requirement (3) out of vstd's prose-stated `obeys_key_model`; no new assumption | no (vstd provides no lemma) |
-| 14 | `values_equal` | E | no ensures: unconstrained bool, nothing derivable; avoids `obeys_eq_spec` plumbing | by threading vstd eq specs; declined for production shape |
+| 14 | ~~`values_equal`~~ | E | **no longer a marker**: proved 2026-09-18 through vstd's `PartialEq` external trait specification, whose `eq` promises `obeys_eq_spec() ==> r == eq_spec(..)`; this crate never establishes `obeys_eq_spec` for a caller's `T`, so the result stays the unconstrained bool the scan wants | done
 | 15 | ~~`debug_check_different_rings`~~ | E | removed 2026-09-17: the public `splice`/`splice_absorb` now run a *verified* walk of the absorbed ring (`guard_different_rings`) in every build, and the e-graph's merge uses the crate-private walk-free cores whose precondition is a theorem | — |
-| 16 | `ListHead::white_box_head` | E | contract-free read-only test accessor (unpacks the niche for the white-box walkers; inside `verus!` so it needs the marker; its node-side counterpart `white_box_next` sits outside `verus!` and needs none) | n/a (no contract) |
+| 16 | ~~`ListHead::white_box_head`~~ | E | **no longer a marker**: plain Rust outside `verus!` since 2026-09-18, like the byte reporters (rows 4–9). Read-only test accessor (unpacks the niche for the white-box w
 | 17 | `ExIndexHasher` registration | D | contract-free opaque registration; names `IndexHasher` in specs so the hasher axiom can trigger on it | n/a (no contract) |
 | 18 | `ExFoldHasher` registration | D | same: names foldhash's `FoldHasher` (`IndexHasher`'s associated `Hasher` type) so the `BuildHasher` impl type-checks under Verus | n/a (no contract) |
 | — | `axiom_index_hasher_builds_valid_hashers` | D | `broadcast axiom fn`: mirrors vstd's shipped `axiom_random_state_builds_valid_hashers`; `builds_valid_hashers` asserts only byte-determinism, which `IndexHasher` satisfies at least as strongly as std's `RandomState` (seed stored by value, so `build_hasher` is a pure function of it; §3.5 D-hasher) | no (predicate is `uninterp`; vstd `admit()`s the identical fact for `RandomState`) |

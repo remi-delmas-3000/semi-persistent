@@ -553,7 +553,9 @@ so the index column drops to one start per run), with four lemmas mirroring
 materializes index ranges through `index_range` (the whole-slice `indices()` is
 gone). At most one column compresses at a time (index-major keeps values plain), so
 `len` reads the plain column in O(1). `index_major_compaction_tests` drives a live
-`IndexRuns` `Vec` column through 24 `mark_and_compact` frames against a plain oracle:
+`IndexRuns` column, in a group of one, through 24 marked frames against a plain
+oracle (the `mark_and_compact` entry points were deleted on 2026-09-18: they were
+dead-code aliases of `mark`, since compression folds at eviction):
 identical contents at every step and after a deep cold restore, `tracking_bytes <
 plain`. The follow-up combined mode (index-major runs AND value-dict together, for
 the scattered-but-repetitive union-find columns) drops the one-column-at-a-time

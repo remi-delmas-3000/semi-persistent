@@ -6,9 +6,15 @@ engine runs on. The unverified reference implementation is
 
 ## Semi-persistence
 
-Each container is semi-persistent: it supports `mark()` and `restore(token)`,
-where `mark` records the current state and `restore` returns the container to a
-previously marked state, discarding all states marked after it. The
+Each container is semi-persistent: a version is marked and restored through an
+externally provided history — `group::ForkHistory<M>` owns one `History` and one
+typed member, and a standalone container is a group of one
+(`ForkHistory::new(Vec::new())`). A mark records the current state and a restore
+returns the member to a previously marked state, discarding the states marked
+after it while keeping the checkpoint's own frame open, so its token can be
+restored to again (semantics B; `restore_and_pop` is the SMT-LIB `pop`). No
+container carries a token API, a token type or a genealogy of its own: doc 10 is
+the shipped shape, doc 08 the token rules. The
 externally-observable specification is a stack of deep copies: `mark` is `push`
 (deep-copy the current contents onto the stack), `restore` is `pop` to the marked
 level (discarding the entries above it). Maintaining that specification by
@@ -23,12 +29,13 @@ recorded old values in reverse, restoring each first-written cell to its
 mark-time value; untouched cells were never logged. No deep copy is ever
 materialized: a marked state is represented implicitly as the current contents
 plus O(1) frame metadata and the diffs recorded since. Runtime memory also
-includes the live value store, diff/frame capacities, container identity, and
-fork history, which grows by O(1) per restore. If `b` fork-history links are
-walked during token validation, `k` entries are replayed, `r` cells are
-regrown, `p` entries belong to the surviving parent frame, and `w`
-parallel-bitmap words are materialized, restore is O(b+k+r+p) for inline
-capture and O(b+k+r+p+w) for parallel capture.
+includes the live value store, diff/frame capacities and the history's stamp
+table, which is O(deepest depth ever reached) rather than O(restores).
+
+Token validation is O(1): one generation-stamp read, not a walk. If `k` entries
+are replayed, `r` cells are regrown, `p` entries belong to the surviving parent
+frame, and `w` parallel-bitmap words are materialized, a restore is O(k+r+p) for
+inline capture and O(k+r+p+w) for parallel capture.
 
 ## What is verified
 

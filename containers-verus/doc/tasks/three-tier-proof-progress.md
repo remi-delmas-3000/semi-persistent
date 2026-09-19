@@ -2757,6 +2757,42 @@ a cutter that finds each item's end by the next sibling item's start, which
 needs no brace matching; that pass compiled with four stale imports as the only
 fallout.
 
+## The trust surface: 34 items to 12 (2026-09-18)
+
+The `external_body` ledger was audited item by item and cut from 34 to 12,
+verification rising from 2688 to 2701 functions with 0 errors because items that
+stopped being trusted became items that are proved. Design doc 02 carries the
+full list of the twelve and the reason each is irreducible; the CI pin moved with
+it in the same commit, as that gate insists.
+
+Twelve were **stratified out of the perimeter** — neither proved nor trusted, the
+treatment the byte reporters already had: the ten compression-statistics and
+shadow-logging functions, `list::white_box_head`, and `parallel::par_sum_canary`.
+None of them has a verified caller. The statistics module keeps its verified half
+(`sat_add`, `sat_mul`, `FrameStats`, the calibration types) inside the `verus!`
+block, because byte-size code across the crate reads it.
+
+Ten were **proved**:
+
+| Item | How |
+|---|---|
+| `bplus_layout::{arr_get, slice_get, arr_set}` | vstd's specified array and slice accessors replace `get_unchecked`; the `unsafe` goes |
+| `bplus_layout::sel_usize` | an ordinary branch |
+| `bplus_layout::arr_shift_up` | a verified descending loop where a trusted `memmove` was |
+| `ContainerId` (struct) and `ContainerId::eq` | the field became `pub(crate)`, so the id is transparent in-crate and opaque to consumers, and equality is provable |
+| `sparse_set::values_equal` | vstd's external trait specification for `PartialEq`; `obeys_eq_spec` is never established here, so the result stays unconstrained — which is what the scan wants |
+| `guard::check_precondition` | diverges through `refuse` instead of panicking itself |
+| `diff_compress::choose_mode` | verified end to end; its statistics pass is two linear hash-set passes (vstd supplies the `usize` key model) under a deliberately trivial contract |
+
+Two honest caveats. The layout primitives moved trust rather than eliminating it:
+this crate stops trusting its own unchecked reads and relies on vstd's
+specification, which is itself `external_body` in vstd. And the bounds checks came
+back, at a measured price recorded in the performance report — `from_sorted_only`
+1.11–1.12 against the previous commit, the scan cases 1.06–1.10, every insertion,
+split and cursor case at parity, and all of them still ahead of the unverified
+implementation in the same binary. The one trusted hint that would have restored
+the margin was declined in favour of the smaller ledger.
+
 Known pre-existing flake, unrelated: `egraph/tests/au_exact_anytime.rs`
 (`exact_deadline_returns_anytime_incumbent`) asserts a 5 ms deadline is hit;
 in `--release` on this machine the exact solve finishes first (fails at

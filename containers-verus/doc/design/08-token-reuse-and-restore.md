@@ -7,13 +7,15 @@ verified port.
 
 ## 1. What `restore(t)` does to the frame stack
 
-Every tracked container owns a token manager, a `history::Genealogy`: a
-`ContainerId` naming the manager plus one generation stamp per live depth
-(`GenStamps`: a live length and a counter that hands out each stamp once).
-A standalone `Vec` or `AppendOnlyVec` is a group of one — it creates its
-manager in its constructor and drives it from its own `mark`, `restore` and
-`pop_scope`; a synced group (`ForkHistory`, doc 10) owns one manager for all
-its members. The token is the same type on both paths:
+The token manager is a `history::Genealogy`: a `ContainerId` naming the manager
+plus one generation stamp per live depth (`GenStamps`: a live length and a
+counter that hands out each stamp once). A `History` pairs it with the group
+depth, and it is **always provided from outside** the containers (doc 10): a
+standalone `Vec` or `AppendOnlyVec` is a group of one,
+`group::ForkHistory::new(Vec::new())`, and a synchronized member set is one
+history over one forwarding member. Containers themselves have neither a manager
+nor a token API — that changed on 2026-09-18, and this chapter's operations are
+the group's. The token type is the same on both paths:
 
 ```rust
 pub struct GroupToken { history: ContainerId, generation: u64, depth: u32 }
@@ -67,7 +69,9 @@ restore's pop core promotes the parent stratum and recomputes its capture
 tags, the reopen seals it again (clearing the tags over it), and the pop
 reopens it once more — two extra walks over the parent stratum per pop,
 which the benchmarks of 2026-09-18 showed as 1.4–2.1× on one-frame cases
-and 1.5× on the SMT store traces. `try_restore_and_pop` is the total form.
+and 1.5× on the SMT store traces. Every group operation is total, so
+`restore_and_pop` returns `false` on a dead or foreign token rather than
+trapping.
 The SAT core's backjump is the bare `restore(t)`: it stays in the
 checkpoint's scope and asserts there.
 
@@ -113,8 +117,10 @@ degenerate end of the general rule.
 
 ## 3. Which tokens a container accepts
 
-`is_valid_token(&t)` means "restorable now": provenance and generation
-(the manager's answer), then frame liveness. Under semantics B:
+`group.is_valid(t)` means "restorable now": provenance and generation (the
+manager's answer), then frame liveness. It is the group's question, not a
+container's — since 2026-09-18 no container has a token API of its own, and the
+history a group owns is the only authority. Under semantics B:
 
 - **the restored checkpoint stays valid**: `restore(t)` leaves the stamp at
   `t.depth` live, so `t` restores again and again;
@@ -131,19 +137,26 @@ degenerate end of the general rule.
   manager.
 
 ```rust
-let mut v: VecI<Id,u32,true> = VecI::new();
-v.push(10); v.push(20);
-let parent = v.mark(Never);     // depth 0
-v.set(1, 21);                   // parent-frame diff
-let child = v.mark(Never);      // depth 1
-v.set(0, 99);                   // child-frame diff
-v.restore(child);               // → [10,21], frame 1 open again, depth 2
-assert!(v.is_valid_token(&child));
-v.set(0, 7); v.restore(child);  // → [10,21] again
-v.pop_scope();                  // drop frame 1: depth 1, back in frame 0
-assert!(!v.is_valid_token(&child));
-assert!(v.is_valid_token(&parent));
+// A standalone column is a group of one: the history comes from outside.
+let mut g = ForkHistory::new(VecI::<Id, u32, true>::new());
+g.member.push(10); g.member.push(20);
+let parent = g.mark(Never).expect("headroom");  // frame 0
+g.member.set(1, 21);                            // parent-frame diff
+let child = g.mark(Never).expect("headroom");   // frame 1
+g.member.set(0, 99);                            // child-frame diff
+assert!(g.restore(child));      // → [10,21], frame 1 open again, depth 2
+assert!(g.is_valid(child));
+g.member.set(0, 7);
+assert!(g.restore(child));      // → [10,21] again
+assert!(g.pop_scope());         // drop frame 1: depth 1, back in frame 0
+assert!(!g.is_valid(child));
+assert!(g.is_valid(parent));
 ```
+
+Element operations read as before because `ForkHistory` derefs to its member;
+`g.member` is the explicit spelling. Every group operation is total: `mark`
+returns `None` and the rest return `false` rather than trapping, so a refusal is
+a value to check.
 
 **The retained unverified reference** (legacy `containers/`) validates on a
 branch model with the same inclusive rule (a token at the fork depth stays
@@ -159,7 +172,7 @@ and then popping the verified side, which is exactly the legacy operation.
 as its frame exists, which the stamp table tracks, so there is nothing an
 affine (by-move) token would add: reusing a token is the intended way to
 retry from a checkpoint, and a token whose frame was popped is refused at
-runtime (`try_restore` → `InvalidToken`, direct `restore` refuses).
+runtime — `restore` returns `false` and moves nothing.
 
 ## 5. What the real consumers do
 

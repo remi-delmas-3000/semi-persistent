@@ -266,6 +266,16 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    a `GroupToken` against a group. Verification **2688 verified, 0
    errors**, trust **34 + 5**. Nothing in the workspace mints or validates
    a token outside a `History`.
+   A further commit cut the `external_body` ledger from 34 items to 12
+   (verification 2688 → 2701, 0 errors): twelve read-only diagnostics left the
+   perimeter entirely, and ten were proved — the five B+ tree node-layout
+   primitives (vstd's specified accessors instead of `get_unchecked`, so the
+   bounds checks return), `ContainerId`'s equality (the id is transparent
+   in-crate now), `sparse_set::values_equal` (vstd's `PartialEq` specification),
+   `guard::check_precondition` (diverges through `refuse`), and
+   `diff_compress::choose_mode` with its statistics pass. Design doc 02 lists the
+   twelve that remain and why each is irreducible; the bounds-check cost is in
+   the performance report, with the trusted-hint alternative that was declined.
    **Next actions, in order:** (a) the exact memo's derived hash index
    (`egraph/src/au/exact_memo.rs`) is the last hand-maintained rollback in
    the workspace: it keeps the log length per frame and drops the keys
