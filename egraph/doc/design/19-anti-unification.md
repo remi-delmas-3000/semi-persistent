@@ -822,12 +822,14 @@ memo of 9.4), `reward.rs` (2.5), `egraph_api.rs` (4.1), `pretty.rs`, `dump.rs`.
 
 Persistent arena columns use the container crate: `VecP` for mutable columns,
 `AppendOnlyVec` for immutable ones, `SpMap` for most indices, and typed spans
-for flattened pools. One piece of derived storage remains ordinary Rust allocation: `ExactMemo`'s
-`HashMap` index over an append-only log, which it repairs itself (5.5). The
+for flattened pools. Every piece of the session's rollback now lives in a verified container. The
 action cache's action lists used to be a plain `Vec` truncated by a length the
-token carried; they are an `AppendOnlyVec` now, which fits because the cache is
-append-only and that container needs no `Copy` bound on its element. The session
-token covers the container logs and the memo's per-frame lengths; this chapter
+token carried; they are an `AppendOnlyVec`, which fits because the cache is
+append-only and that container needs no `Copy` bound on its element. The
+clean-solve memo used to be an append-only log plus a hand-kept `HashMap` index
+plus a per-frame length; it is one `SpMap` keyed by the class pair (2026-09-19),
+so a frame move rolls its entries back and unwinds its index by itself. The
+session token covers the container logs; this chapter
 does not claim that the whole AU layer is Verus-verified merely because its
 primitive containers are.
 
@@ -847,13 +849,14 @@ contiguous and makes the arena's length assertions total.
 
 ### 5.5 Restorable hash indices
 
-The state index and the clean-solve memo are hash maps over an append-only log.
-The log is the source of truth; the index is derived. A move to frame `d` drops
-the keys above it — read from the log while it is still live — and then moves the
-log. The memo keeps the log length at each open frame for exactly that purpose,
-which is what the token's saved length used to carry. Making that index an
-`SpMap` would retire the walk and the length stack together; it is the last
-hand-maintained rollback in the workspace.
+The state index and the clean-solve memo are hash maps over an append-only log:
+the log is the source of truth and the index is derived. Both are `SpMap`s, so
+neither the unwinding nor the per-frame bookkeeping is written here — the map
+drops the keys above the target frame through its own previous-occurrence column,
+which is the column that makes the unwind cost the discarded suffix rather than
+the surviving entries. The memo moved onto it on 2026-09-19, retiring the last
+hand-maintained rollback in the workspace: a walk over the log above the
+checkpoint plus a stack of per-frame lengths, 67 lines of it.
 
 ### 5.6 Frame and restore order
 

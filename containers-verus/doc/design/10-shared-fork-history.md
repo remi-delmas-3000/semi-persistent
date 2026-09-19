@@ -460,10 +460,8 @@ statistics, 14 across the space layer, 7 in the term pool, one each for the
 result table and the action cache) inside a nest of eleven token structs, and
 now mints one. Its action cache stopped backtracking a plain `Vec` by hand: the
 action lists live in an `AppendOnlyVec`, which fits because the cache is
-append-only and because that container puts no `Copy` bound on its element. The
-exact memo's derived hash index is still maintained by hand, on per-frame
-lengths rather than a token's saved length; making it an `SpMap` would remove
-that too.
+append-only and because that container puts no `Copy` bound on its element. The exact memo's derived hash index is an `SpMap` too since 2026-09-19, so
+nothing in either consumer maintains a rollback by hand any more.
 
 Forgery is tested where tokens now exist. A column has no token to forge, so
 those tests drive a group of one and forge a `GroupToken`: an out-of-range

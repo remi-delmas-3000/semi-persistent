@@ -276,12 +276,12 @@ fixes (pre-sized dedupe buffers). Trust: 50 default + 5 literal (CI
    `diff_compress::choose_mode` with its statistics pass. Design doc 02 lists the
    twelve that remain and why each is irreducible; the bounds-check cost is in
    the performance report, with the trusted-hint alternative that was declined.
-   **Next actions, in order:** (a) the exact memo's derived hash index
-   (`egraph/src/au/exact_memo.rs`) is the last hand-maintained rollback in
-   the workspace: it keeps the log length per frame and drops the keys
-   above a checkpoint by walking the log. An `SpMap` keyed by the class
-   pair would absorb both the walk and the length stack.
-   (b) the two open benchmark gaps and the dyn-store residuals (goal doc
+   Done 2026-09-19: the exact memo (`egraph/src/au/exact_memo.rs`) is one
+   `SpMap` keyed by the class pair, so the map rolls its own index back and
+   the walk, the per-frame length stack and the separate log are gone — 67
+   lines removed, the module's whole rollback surface now forwarding. No
+   rollback in the workspace is maintained by hand any more.
+   **Next actions, in order:** (a) the two open benchmark gaps and the dyn-store residuals (goal doc
    outcome 3), (c) Trail-first literal cost (outcome 4), (d) two-step
    id-mint verification (outcome 5), (e) node caches on `SpMap`, only with
    the user's go-ahead (outcome 6). Affine tokens and `reset_to(&t)`

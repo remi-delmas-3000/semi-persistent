@@ -12,52 +12,43 @@
 //! derivation, so reuse is equality. Entries are valid for one snapshot and
 //! one cycle mode, which is the session's own scope.
 //!
-//! Semi-persistence follows the interning-log pattern (design chapter 3's
-//! derived-index section): the append-only log is the source of truth, the
-//! hash index is derived, and `restore` validates the log token BEFORE
-//! removing the truncated suffix's keys from the index, reading them from
-//! the log while it is still live. Terms reference the session term pool;
-//! the session restores the pool with its own token in the same bundle, so
-//! a rolled-back entry never outlives the term it points to.
-
-use std::collections::HashMap;
+//! Semi-persistence is the verified map's, not this module's: the memo *is* an
+//! `SpMap` keyed by the class pair, so a frame move rolls the entries back and
+//! unwinds the index through the map's own previous-occurrence column. Nothing
+//! here maintains a derived index or a per-frame length any more (before
+//! 2026-09-19 it kept both, and a move walked the log above the checkpoint to
+//! drop its keys by hand). Terms reference the session term pool; the session
+//! moves the pool in the same group operation, so a rolled-back entry never
+//! outlives the term it points to.
 
 use crate::containers::error::ContainerError;
 use crate::containers::group::Member;
-use crate::containers::{AppendOnlyVec, IndexLike, ShrinkPolicy};
+use crate::containers::{IndexLike, ShrinkPolicy, SpMap};
 
 /// One memoized clean solve. Supports are sorted and deduplicated at
-/// publication (the exact solver sorts before it writes).
+/// publication (the exact solver sorts before it writes). The class pair is the
+/// map's key, so it is not repeated here.
 struct MemoEntry<T, C> {
-    key: (u64, u64),
     term: T,
     support_l: Vec<C>,
     support_r: Vec<C>,
 }
 
-/// The session memo. `T` is the term id type, `C` the class id type, `I` the
-/// session index word.
+/// The session memo: one verified map from the class pair to its clean solve.
+/// `T` is the term id type, `C` the class id type, `I` the session index word.
 pub struct ExactMemo<T: Copy, C: Copy + Ord, I: IndexLike = usize> {
-    log: AppendOnlyVec<MemoEntry<T, C>, I>,
-    /// Derived: class-pair key -> log position of its (unique) entry.
-    index: HashMap<(u64, u64), usize>,
-    /// The log length at each open frame, oldest first: what the token used to
-    /// carry. The index is not semi-persistent, so a move to frame `d` has to
-    /// know where that frame started to drop exactly the keys above it.
-    frame_lens: Vec<usize>,
+    entries: SpMap<(u64, u64), MemoEntry<T, C>, I>,
 }
 
 impl<T: Copy, C: Copy + Ord, I: IndexLike> ExactMemo<T, C, I> {
     pub fn new() -> Self {
         ExactMemo {
-            log: AppendOnlyVec::new(),
-            index: HashMap::new(),
-            frame_lens: Vec::new(),
+            entries: SpMap::new(),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.log.len().as_usize()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -67,10 +58,7 @@ impl<T: Copy, C: Copy + Ord, I: IndexLike> ExactMemo<T, C, I> {
     /// The clean entry for `(l, r)`, if one was recorded: its term and its
     /// per-side support (sorted, deduplicated).
     pub fn get(&self, l: u64, r: u64) -> Option<(T, &[C], &[C])> {
-        let &pos = self.index.get(&(l, r))?;
-        let entry = self
-            .log
-            .get(I::try_from_usize(pos).expect("index within log length"));
+        let entry = self.entries.get_by_key(&(l, r))?;
         Some((entry.term, &entry.support_l, &entry.support_r))
     }
 
@@ -84,63 +72,41 @@ impl<T: Copy, C: Copy + Ord, I: IndexLike> ExactMemo<T, C, I> {
         support_l: Vec<C>,
         support_r: Vec<C>,
     ) -> Result<(), ContainerError> {
-        if self.index.contains_key(&(l, r)) {
+        if self.entries.contains_key(&(l, r)) {
             return Ok(());
         }
-        let pos = self.log.len().as_usize();
-        self.log.try_push(MemoEntry {
-            key: (l, r),
-            term,
-            support_l,
-            support_r,
-        })?;
-        self.index.insert((l, r), pos);
+        self.entries.try_insert(
+            (l, r),
+            MemoEntry {
+                term,
+                support_l,
+                support_r,
+            },
+        )?;
         Ok(())
     }
 
     // Structural frame operations: the typed-group member protocol (design doc
-    // 10). No tokens — the session's `History` is the only token authority. The
-    // derived index is maintained here, which is what the token's saved length
-    // used to pay for.
+    // 10). No tokens, and no bookkeeping of our own — the map rolls its own
+    // index back, which is the whole point of keeping the memo in one.
     pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
-        self.frame_lens.push(self.len());
-        Member::push_frame(&mut self.log, shrink);
-    }
-
-    /// Drop the index keys of every entry above frame `depth`, reading them from
-    /// the log while it is still live, then move the log.
-    fn unindex_above(&mut self, depth: usize) {
-        let saved_len = self.frame_lens[depth];
-        for pos in saved_len..self.len() {
-            let entry = self
-                .log
-                .get(I::try_from_usize(pos).expect("position within log length"));
-            let key = entry.key;
-            self.index.remove(&key);
-        }
+        Member::push_frame(&mut self.entries, shrink);
     }
 
     pub fn reset_frame(&mut self, depth: usize) {
-        self.unindex_above(depth);
-        Member::reset_frame(&mut self.log, depth);
-        self.frame_lens.truncate(depth + 1);
+        Member::reset_frame(&mut self.entries, depth);
     }
 
     pub fn restore_frame(&mut self, depth: usize) {
-        self.unindex_above(depth);
-        Member::restore_frame(&mut self.log, depth);
-        self.frame_lens.truncate(depth);
+        Member::restore_frame(&mut self.entries, depth);
     }
 
-    /// The scope pop keeps the state and drops the checkpoint, so the index is
-    /// already correct for what stays live.
     pub fn pop_frame(&mut self) {
-        Member::pop_frame(&mut self.log);
-        self.frame_lens.pop();
+        Member::pop_frame(&mut self.entries);
     }
 
     pub fn frame_depth(&self) -> usize {
-        Member::depth_exec(&self.log)
+        Member::depth_exec(&self.entries)
     }
 }
 
