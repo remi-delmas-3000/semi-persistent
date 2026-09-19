@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **34** (3 structs + 31 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
-| `literal-types` | **39** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **12** (2 opaque type registrations + 10 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
+| `literal-types` | **17** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -72,16 +72,58 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. The current final checkpoint has 34 default-build markers:
-3 opaque structs and 31 functions (the debug-only ring walk left with the
-total public API on 2026-09-17, §4 row 15; the twelve byte reporters left the
-verified perimeter the same day, §2a; three more left with the predecessor dyn
-group when the external history manager became the only manager, 2026-09-18).
-They sit in fifteen modules: the ten compression-statistics reporters, the five
-`bplus_layout` node primitives, three in `container_id`, two each in
-`parallel_store`, `hasher_spec`, `guard` and `compression_config`, and one each
-in `vec`, `append_only_vec`, `map`, `list`, `sparse_set`, `diff_compress`,
-`std_sort` and `parallel`. The permanent groups below remain the
+boundary. The current final checkpoint has 12 default-build markers: 2 opaque
+type registrations (the two hasher types, named in specs, no semantics assumed)
+and 10 functions. They are, in full:
+
+| Item | Why it is irreducible |
+|---|---|
+| `container_id::ContainerId::new` | mints an id by atomic increment; the counter is global mutable state |
+| `hasher_spec::ExIndexHasher`, `ExFoldHasher` | external type specifications: they let the hasher types be NAMED in specs |
+| `compression_config::env_compress_default`, `env_diff_store_kind` | read the environment from inside verified constructors; no spec content (every branch carries the same contract) |
+| `vec::log_shrink_capacity`, `append_only_vec::shrink_aov_capacity`, `parallel_store::shrink_vec_capacity` | capacity-only shrink; vstd models neither `Vec::capacity` nor `shrink_to`, and the contract is "the view is unchanged" |
+| `parallel_store::data_capacity_bits` | reads `Vec::capacity`, same gap, read-only |
+| `std_sort::sort_pairs_by_index` | std's `sort_unstable_by_key` under its documented contract; vstd ships no sort specification |
+| `guard::refuse` | the divergence every total refusal ends in; the panic machinery is unmodeled |
+| `map::clone_key_exact` | vstd's hash-table key model requires the clone to be identical, which is not provable for a generic `K: Clone` |
+
+Twenty-two items left this list on 2026-09-18, in two different ways, and the
+distinction matters when reading the ledger.
+
+**Twelve were stratified out of the perimeter** and are now neither proved nor
+trusted, exactly as the byte reporters were (§2a): the ten
+compression-statistics and shadow-logging functions, `list::white_box_head` and
+`parallel::par_sum_canary`. Nothing verified calls them; they observe frames and
+emit measurements.
+
+**Ten were proved.** The five B+ tree node-layout primitives dropped their
+`unsafe` bodies: `arr_get`, `slice_get` and `arr_set` now go through vstd's
+specified array and slice accessors, `sel_usize` is an ordinary branch, and
+`arr_shift_up` is a verified descending loop where a trusted `memmove` used to
+be. Note honestly what moved where: the vstd accessors are themselves
+`external_body` *in vstd*, so this crate stops trusting its own unchecked reads
+and relies on the platform specification instead, and the bounds checks come
+back. The measured price (2026-09-18, paired against the previous commit):
+`bplus/from_sorted_only` 1.11–1.12, `bplus/scan_only` 1.08–1.10,
+`bplus/from_sorted_then_scan` 1.06–1.07, every insertion, split and cursor case
+at parity — the const-generic array checks fold away, the runtime-length slice
+check in the bulk loader does not. All of those cases remain faster than the
+unverified implementation in the same binary, so the parity rule is unaffected,
+and the margin given back was ours.
+
+`ContainerId` became transparent inside the crate (its field is `pub(crate)`, so
+it stays opaque to consumers), which let its equality be proved and retired the
+struct's own marker. `sparse_set::values_equal` now calls vstd's external trait
+specification for `PartialEq`, whose `eq` promises `obeys_eq_spec() ==> r ==
+eq_spec(..)`; this crate never establishes `obeys_eq_spec` for a caller's `T`,
+so the result stays an unconstrained bool — which is what the scan wanted, now
+without trust. `guard::check_precondition` diverges through `refuse` instead of
+panicking itself. And `diff_compress::choose_mode` is verified end to end: its
+statistics pass is two linear hash-set passes (vstd supplies the key model for
+`usize`) with a deliberately trivial contract, since only sizes depend on the
+counts.
+
+The permanent groups below remain the
 intended boundary; temporary three-tier Vec scaffolds are additionally owned by
 `doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
 milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
@@ -801,7 +843,7 @@ about, so a wrong checksum weakens a test rather than a proof.
 ## 4. Summary table
 
 The table below catalogs the permanent and historically grouped trust items.
-The complete current source count is **34 default-build `external_body`
+The complete current source count is **12 default-build `external_body`
 markers plus 4 default-build axioms** (the twelve byte reporters of rows
 4–9 and 11a–11b are outside the perimeter since 2026-09-17, §2a) (plus one generated `obeys_key_model`
 axiom per `define_id*!` id type in consumer crates); execution-first three-tier Vec markers not

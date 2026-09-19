@@ -1290,16 +1290,16 @@ pub(crate) proof fn lemma_transposition_injective<Idx: IndexLike>(
     }
 }
 
-/// Value equality via `PartialEq`, usable from verified code without
-/// threading vstd's `obeys_eq_spec` plumbing: `external_body` with NO ensures
-/// — the result is an unconstrained bool as far as proofs are concerned, so
-/// nothing unsound can be derived from it; `remove_value`'s contract
-/// consequently promises which STRUCTURAL change happened (an element left),
-/// not which value matched. The scan behavior is pinned by the ported
-/// production proptests. Trust ledger: group E.
-#[verifier::external_body]
+/// Value equality via `PartialEq`, verified through vstd's external trait
+/// specification. Nothing is trusted here: that specification's `eq` promises
+/// `obeys_eq_spec() ==> r == eq_spec(..)`, and this crate never establishes
+/// `obeys_eq_spec` for a caller's `T`, so the result is an unconstrained bool as
+/// far as proofs are concerned — which is exactly what the scan needs.
+/// `remove_value`'s contract consequently promises which STRUCTURAL change
+/// happened (an element left), not which value matched, and the scan behaviour
+/// is pinned by the ported production proptests.
 fn values_equal<T: PartialEq>(a: &T, b: &T) -> bool {
-    a == b
+    PartialEq::eq(a, b)
 }
 
 // ---------------------------------------------------------------------------

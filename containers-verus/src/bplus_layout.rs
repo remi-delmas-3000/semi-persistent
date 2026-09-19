@@ -135,17 +135,11 @@ pub proof fn lemma_u64_usize_roundtrip(x: u64)
 /// `a[i]`), and `N` here is the array's own const-generic length, so no
 /// arithmetic relates the bound to the index — there is nothing to get wrong
 /// beyond the precondition Verus checks at every call site.
-#[verifier::external_body]
 pub(crate) fn arr_get<T: Copy, const N: usize>(a: &[T; N], i: usize) -> (r: T)
     requires i < N,
     ensures r == a[i as int],
 {
-    // SAFETY: `i < N` is a verified precondition at every call site. The
-    // debug_assert is a runtime monitor on that assumption for unverified
-    // crate-internal callers (get_unchecked skips the bounds check even in
-    // debug builds): a violation panics cleanly instead of reading OOB.
-    debug_assert!(i < N);
-    unsafe { *a.get_unchecked(i) }
+    *vstd::array::array_index_get(a, i)
 }
 
 /// `s[i]` with the bounds check elided. The slice analogue of [`arr_get`], for
@@ -158,15 +152,11 @@ pub(crate) fn arr_get<T: Copy, const N: usize>(a: &[T; N], i: usize) -> (r: T)
 /// production's zero (it bulk-copies a pre-materialized word vector). Same trust
 /// as [`arr_get`]: `external_body`, contract is `get_unchecked`'s own documented
 /// one, and the precondition is checked by Verus at every call site.
-#[verifier::external_body]
 pub(crate) fn slice_get<T: Copy>(s: &[T], i: usize) -> (r: T)
     requires i < s@.len(),
     ensures r == s@[i as int],
 {
-    // SAFETY: `i < s.len()` is a verified precondition at every call site.
-    // debug_assert: runtime monitor (see `arr_get`).
-    debug_assert!(i < s.len());
-    unsafe { *s.get_unchecked(i) }
+    *vstd::slice::slice_index_get(s, i)
 }
 
 /// `if c { b } else { a }`, lowered to `cmov` instead of a branch.
@@ -191,50 +181,34 @@ pub(crate) fn slice_get<T: Copy>(s: &[T], i: usize) -> (r: T)
 /// body is a total, `unsafe`-free expression whose contract is the postcondition
 /// stated here, and `select_unpredictable`'s own documented semantics are exactly
 /// `if c { b } else { a }` — it is a codegen hint, not a semantic one.
-#[verifier::external_body]
 pub(crate) fn sel_usize(c: bool, a: usize, b: usize) -> (r: usize)
-    requires true,
     ensures r == if c { b } else { a },
 {
-    core::hint::select_unpredictable(c, b, a)
+    if c { b } else { a }
 }
 
 /// `a[i] = v` with the bounds check elided. See [`arr_get`] for why the check
 /// is provably dead and what is trusted here.
-#[verifier::external_body]
 pub(crate) fn arr_set<T: Copy, const N: usize>(a: &mut [T; N], i: usize, v: T)
     requires i < N,
     ensures final(a)@ =~= old(a)@.update(i as int, v),
 {
-    // SAFETY: `i < N` is a verified precondition at every call site.
-    // debug_assert: runtime monitor (see `arr_get`).
-    debug_assert!(i < N);
-    unsafe {
-        *a.get_unchecked_mut(i) = v;
-    }
+    a[i] = v;
 }
 
-/// Open a hole at `pos` by moving `a[pos..cnt]` up one slot, i.e.
-/// `a.copy_within(pos..cnt, pos + 1)`.
+/// Open a hole at `pos` by moving `a[pos..cnt]` up one slot, i.e. what
+/// `a.copy_within(pos..cnt, pos + 1)` does.
 ///
-/// Verus can carry the element-wise postcondition through the scalar arm, while
-/// `copy_within` supplies one `memmove` for longer tails. Short and long shifts
-/// have different machine costs, so the implementation uses a tuned crossover.
-/// The value 18 is a historical tuning choice, not a portable performance
-/// theorem; changes require the Criterion B+tree insertion distribution as well
-/// as the agreement tests around the boundary.
+/// Verified: the descending loop writes each slot from its predecessor, and the
+/// invariant carries three facts — the slots below `pos` are untouched, the
+/// window above the cursor already holds the shifted values, and the slots above
+/// `cnt` are untouched. The `memmove` arm this replaces was trusted for exactly
+/// that postcondition; the loop proves it instead. A node's window is bounded by
+/// its arity, so the copy is short by construction.
 ///
-/// Trusted (`external_body`) for the same reason as [`arr_get`]: the postcondition
-/// below is the whole contract, `copy_within`'s own documented behavior supplies
-/// it for the long arm, and the short arm is the loop it replaces. `pos <= cnt <
-/// N` is a verified precondition at every call site (`cnt` is strictly below `N`
-/// because the moved window's top element lands at `cnt`). `unsafe`-free.
-/// `#[inline(always)]` is load-bearing, not cosmetic: an `external_body` function
-/// is a real call boundary, and left out-of-line this cost more than the scalar
-/// loop it replaced — the length dispatch only pays off if the constant-length
-/// call sites can fold it away and `memmove` can be reached without a `callq`.
+/// `#[inline(always)]` is load-bearing, not cosmetic: the call sites have
+/// constant lengths, and leaving this out-of-line costs more than the shift.
 #[inline(always)]
-#[verifier::external_body]
 pub(crate) fn arr_shift_up<T: Copy, const N: usize>(a: &mut [T; N], pos: usize, cnt: usize)
     requires pos <= cnt, cnt < N,
     ensures
@@ -243,18 +217,21 @@ pub(crate) fn arr_shift_up<T: Copy, const N: usize>(a: &mut [T; N], pos: usize, 
         forall|k: int| pos < k <= cnt ==> final(a)@[k] == old(a)@[k - 1],
         forall|k: int| cnt < k < N ==> final(a)@[k] == old(a)@[k],
 {
-    // Runtime monitor on the verified precondition: a violated bound here
-    // corrupts the node silently rather than faulting.
-    debug_assert!(pos <= cnt && cnt < N);
-    // Historical crossover for this layout. Criterion owns any retuning.
-    if cnt - pos < 18 {
-        let mut j = cnt;
-        while j > pos {
-            a[j] = a[j - 1];
-            j -= 1;
-        }
-    } else {
-        a.copy_within(pos..cnt, pos + 1);
+    let ghost original = a@;
+    let mut j: usize = cnt;
+    while j > pos
+        invariant
+            pos <= j <= cnt,
+            cnt < N,
+            a@.len() == original.len(),
+            forall|k: int| 0 <= k <= j ==> a@[k] == original[k],
+            forall|k: int| j < k <= cnt ==> a@[k] == original[k - 1],
+            forall|k: int| cnt < k < N ==> a@[k] == original[k],
+        decreases j - pos,
+    {
+        let prev = arr_get(a, j - 1);
+        arr_set(a, j, prev);
+        j = j - 1;
     }
 }
 

@@ -1698,3 +1698,41 @@ Step-3 reruns (checkpoint):
 | `three_tier_v2/adaptive/high_duplicates_W512_U32_R1/budget_4096/dyn_parallel` | 13.4 ns | 15.7 ns | 1.167 [1.005, 1.357] | **inconclusive** |
 | `three_tier_v2/adaptive/singleton_W512_U512_R512/budget_4096/dyn_trail` | 1.335 µs | 1.770 µs | 1.326 [1.320, 1.331] | **regression** |
 | `three_tier_v2/large/W64_U16_R1_frames256/budget_unbounded/dyn_trail` | 150.9 ns | 157.8 ns | 1.045 [1.033, 1.058] | pass |
+
+## Trust-surface reduction: what the bounds checks cost (2026-09-18)
+
+The B+ tree node-layout primitives gave up their `unsafe` unchecked reads for
+vstd's specified accessors, which brings Rust's bounds checks back on those
+paths. Paired against the previous commit, `bplus_cursor_bitset_bench`, two runs
+each, τ = 1.08:
+
+| Case (verified side) | Run A | Run B | Verdict |
+|---|---|---|---|
+| `bplus/insert_shuffled` | 1.002 | 1.009 | pass |
+| `bplus/insert_shuffled_branchless` | 1.006 | 1.010 | pass |
+| `bplus/cursor_seek` | 1.020 | 1.028 | pass |
+| `bplus/cursor_seek_branchless` | 1.012 | 0.988 | pass |
+| `bplus/from_sorted_then_scan` | 1.073 | 1.062 | inconclusive |
+| `bplus/scan_only` | 1.098 | 1.077 | inconclusive |
+| `bplus/from_sorted_only` | 1.121 | 1.105 | **regression** |
+
+The split is explained by where the bound comes from. Insertion, split and
+cursor descent index the node's const-generic `data` array, and the compare
+folds away because the caller already bounded the index by that same constant.
+The bulk loader's sortedness scan and the leaf scan read a *slice* whose length
+is a runtime value, and that check survives.
+
+Read against the oracle rather than against ourselves, every one of these cases
+is still at or ahead of the unverified implementation in the same binary:
+`from_sorted_only` 12.5 µs against 13.5 µs (0.93×), `scan_only` 15.9 µs against
+57.4 µs (0.28×), `from_sorted_then_scan` 28.1 µs against 76.4 µs (0.37×),
+`cursor_seek` 0.98×. The parity rule is therefore unaffected; what was given
+back is margin we had over legacy, in exchange for five trusted items leaving
+the ledger.
+
+Decision (user's call, 2026-09-18): keep the checks. The alternative was one
+trusted hint helper (`requires cond`, body `core::hint::assert_unchecked(cond)`)
+called from the otherwise-verified accessors, which would restore the margin at
+the price of a thirteenth `external_body` item. It was declined in favour of the
+smaller trust surface; the option stands recorded here if the bulk-load path
+ever becomes load-bearing.

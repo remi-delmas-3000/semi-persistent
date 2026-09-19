@@ -2134,15 +2134,15 @@ pub enum CompressionMode {
 }
 
 /// Exact-size cost selector: pick the cheapest scheme for this specific frame.
-/// `external_body` — a heuristic with no spec content: whichever mode it returns,
-/// `compress_frame`'s bijection still holds, so correctness does not depend on the
-/// choice, only the size does. `R` (run count) is the scatter signal; `D`
-/// (distinct values) is the value-repetition signal.
-#[verifier::external_body]
+/// A heuristic with no spec content — whichever mode it returns,
+/// `compress_frame`'s bijection still holds, so correctness does not depend on
+/// the choice, only the size does. `R` (run count) is the scatter signal; `D`
+/// (distinct values) is the value-repetition signal. Verified: both halves are
+/// now verified exec (the statistics pass and `FrameStats::best_mode`), and
+/// `size_of` comes from vstd's specification.
 pub fn choose_mode<T: IndexLike, I: IndexLike>(diffs: &Vec<(T, I)>) -> CompressionMode {
-    // One O(N) stats pass (R runs, D distinct; no sort), then the exact-size
-    // decision. `external_body` only for the `size_of`/hashset it threads
-    // through; the arithmetic lives in the verified `FrameStats::best_mode`.
+    // Two linear stats passes (R runs, D distinct; no sort), then the exact-size
+    // decision, whose arithmetic lives in the verified `FrameStats::best_mode`.
     let stats = crate::compression_stats::frame_stats(diffs);
     // best_mode costs each scheme at the shipped encoders' achievable widths
     // (sorted run count, narrow code width computed from D internally).

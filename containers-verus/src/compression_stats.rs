@@ -88,26 +88,6 @@ impl FrameStats {
     }
 }
 
-/// Compute a frame's stats in one pass: `R` counts indices whose predecessor is
-/// absent (contiguous-run starts), `D` counts distinct values. `external_body`:
-/// it uses hash sets (unmodeled) and its output feeds a size heuristic, never
-/// correctness. Both counts are exact for the byte formulas above.
-#[verifier::external_body]
-pub fn frame_stats<T: IndexLike, I: IndexLike>(diffs: &Vec<(T, I)>) -> FrameStats {
-    use std::collections::HashSet;
-    let n = diffs.len();
-    let idx_set: HashSet<usize> = diffs.iter().map(|d| d.1.as_usize()).collect();
-    let mut runs: usize = 0;
-    for &ix in idx_set.iter() {
-        // A run starts at an index whose predecessor is not itself present.
-        if ix == 0 || !idx_set.contains(&(ix - 1)) {
-            runs += 1;
-        }
-    }
-    let val_set: HashSet<usize> = diffs.iter().map(|d| d.0.as_usize()).collect();
-    FrameStats { n, runs, distinct: val_set.len() }
-}
-
 /// Running per-scheme byte totals over a window of frames. Feeds two decisions:
 /// which static default to promote for a column (`recommend`), and whether an
 /// active default is still optimal (compare `recommend` to it after a
@@ -123,16 +103,6 @@ pub struct CalibrationStats {
 impl CalibrationStats {
     pub fn new() -> CalibrationStats {
         CalibrationStats { frames: 0, plain_total: 0, runs_total: 0, dict_total: 0 }
-    }
-
-    /// Fold one frame's would-be sizes into the totals, at the shipped encoders'
-    /// achievable widths (sorted run count, narrow code width).
-    #[verifier::external_body]
-    pub fn observe(&mut self, stats: FrameStats, t: usize, i: usize) {
-        self.frames = self.frames.saturating_add(1);
-        self.plain_total = self.plain_total.saturating_add(stats.plain_bytes(t, i));
-        self.runs_total = self.runs_total.saturating_add(stats.runs_bytes(t));
-        self.dict_total = self.dict_total.saturating_add(stats.dict_bytes(t, i));
     }
 
     /// The scheme with the smallest total over the observed frames — the default
@@ -194,12 +164,115 @@ impl CalibrationPolicy {
         }
     }
 
+}
+
+
+// ===========================================================================
+// F4: the shadow-encode harness. When SEMPER_SHADOW=1, every seal ALSO encodes
+// the frame in every mode its value type supports and emits one machine-readable
+// line per (column-instance, frame): entry count, run counts, distinct count
+// where computable, and the REAL encoded byte size of every candidate (actual
+// encoders, never projections), plus the mode the live selector chose. Off by
+// default and gated by one cached boolean, so the seal path pays a single
+// branch when disabled. Diagnostic only, and outside the verified perimeter
+// (below the `verus!` block): no spec content to carry.
+// ===========================================================================
+
+/// Saturating byte arithmetic for the diagnostic counters. Verified (vstd
+/// models `checked_mul`/`checked_add`), so a byte count can never trap and
+/// Frame statistics: entry count, the contiguous-run count over the frame's
+/// index SET, and the distinct-value count. Two linear passes with hash sets,
+/// whose key model vstd supplies for `usize`.
+///
+/// Verified, with a deliberately trivial contract: only sizes depend on these
+/// counts, never correctness — whichever mode they lead `best_mode` to pick,
+/// `compress_frame`'s bijection still holds. So the proof carries termination
+/// and overflow-freedom; the counts' exactness is pinned by the ported
+/// production proptests, as it was when this function was trusted.
+pub fn frame_stats<T: IndexLike, I: IndexLike>(diffs: &Vec<(T, I)>) -> FrameStats {
+    broadcast use vstd::std_specs::hash::group_hash_axioms;
+
+    let n = diffs.len();
+    let mut idx_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut val_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut k: usize = 0;
+    while k < n
+        invariant
+            k <= n,
+            n == diffs@.len(),
+        decreases n - k,
+    {
+        let d = diffs[k];
+        idx_set.insert(d.1.as_usize());
+        val_set.insert(d.0.as_usize());
+        k = k + 1;
+    }
+
+    // A run starts at an index whose predecessor is absent from the set; each
+    // distinct index is counted once, which is what `counted` enforces.
+    let mut counted: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut runs: usize = 0;
+    let mut j: usize = 0;
+    while j < n
+        invariant
+            j <= n,
+            n == diffs@.len(),
+            runs <= j,
+        decreases n - j,
+    {
+        let ix = diffs[j].1.as_usize();
+        // A run starts at a not-yet-counted index whose predecessor is absent.
+        if counted.insert(ix) && (ix == 0 || !idx_set.contains(&(ix - 1))) {
+            runs = runs + 1;
+        }
+        j = j + 1;
+    }
+
+    FrameStats { n, runs, distinct: val_set.len() }
+}
+
+/// never needs a trust marker. Introduced 2026-09 when the counters were
+/// discharged from the trust ledger.
+pub fn sat_mul(a: usize, b: usize) -> usize {
+    match a.checked_mul(b) {
+        Some(v) => v,
+        None => usize::MAX,
+    }
+}
+
+pub fn sat_add(a: usize, b: usize) -> usize {
+    match a.checked_add(b) {
+        Some(v) => v,
+        None => usize::MAX,
+    }
+}
+
+} // verus!
+
+// ---------------------------------------------------------------------------
+// Read-only diagnostics — OUTSIDE the verified perimeter (stratified, as the
+// byte reporters are; see `diagnostics.rs`). Nothing verified calls these: they
+// observe frames and emit measurements, so they are neither proved nor trusted
+// rather than `external_body` items the trust ledger has to carry.
+// ---------------------------------------------------------------------------
+
+impl CalibrationStats {
+    /// Fold one frame's would-be sizes into the totals, at the shipped encoders'
+    /// achievable widths (sorted run count, narrow code width).
+    pub fn observe(&mut self, stats: FrameStats, t: usize, i: usize) {
+        self.frames = self.frames.saturating_add(1);
+        self.plain_total = self.plain_total.saturating_add(stats.plain_bytes(t, i));
+        self.runs_total = self.runs_total.saturating_add(stats.runs_bytes(t));
+        self.dict_total = self.dict_total.saturating_add(stats.dict_bytes(t, i));
+    }
+}
+
+impl CalibrationPolicy {
     /// Advance the state machine by one observed frame. During calibration, fold
     /// the frame's would-be sizes in and, at the end of the window, promote the
     /// winner and switch to the default. During the default phase, count down to
-    /// the next re-calibration. `external_body`: heuristic bookkeeping (counters
-    /// and size folds), no correctness surface.
-    #[verifier::external_body]
+    /// the next re-calibration. Outside the perimeter: heuristic bookkeeping
+    /// (counters and size folds), no correctness surface.
     pub fn observe_frame(&mut self, stats: FrameStats, t: usize, i: usize) {
         if self.calibrating {
             self.stats.observe(stats, t, i);
@@ -221,41 +294,30 @@ impl CalibrationPolicy {
     }
 }
 
-
-// ===========================================================================
-// F4: the shadow-encode harness. When SEMPER_SHADOW=1, every seal ALSO encodes
-// the frame in every mode its value type supports and emits one machine-readable
-// line per (column-instance, frame): entry count, run counts, distinct count
-// where computable, and the REAL encoded byte size of every candidate (actual
-// encoders, never projections), plus the mode the live selector chose. Off by
-// default and gated by one cached boolean, so the seal path pays a single
-// branch when disabled. Diagnostic only: external_body, no spec content.
-// ===========================================================================
-
-#[verifier::external_body]
 pub fn shadow_enabled() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var("SEMPER_SHADOW").map(|v| !v.is_empty()).unwrap_or(false))
+    *FLAG.get_or_init(|| {
+        std::env::var("SEMPER_SHADOW")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    })
 }
 
 /// Emit one shadow line. `SEMPER_SHADOW=1` writes stderr; any other non-empty
 /// value is a file path appended to (survives harnesses that swallow a child's
 /// stderr, and merges lines from many solver subprocesses).
-#[verifier::external_body]
 fn shadow_emit(line: String) {
     use std::io::Write;
     static SINK: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
         std::sync::OnceLock::new();
-    let sink = SINK.get_or_init(|| {
-        match std::env::var("SEMPER_SHADOW") {
-            Ok(v) if v != "1" && !v.is_empty() => std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(v)
-                .ok()
-                .map(std::sync::Mutex::new),
-            _ => None,
-        }
+    let sink = SINK.get_or_init(|| match std::env::var("SEMPER_SHADOW") {
+        Ok(v) if v != "1" && !v.is_empty() => std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(v)
+            .ok()
+            .map(std::sync::Mutex::new),
+        _ => None,
     });
     match sink {
         Some(f) => {
@@ -269,7 +331,6 @@ fn shadow_emit(line: String) {
 /// Shadow-encode with the value-opaque candidates (any `T: Copy` column):
 /// plain, write-order runs, sorted runs. `instance` is an opaque column-instance
 /// key (the diff log's address), `frame` the sealed frame's ordinal.
-#[verifier::external_body]
 pub fn shadow_log_copy<T: Copy, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
     pairs: &Vec<(T, I)>,
     instance: usize,
@@ -287,8 +348,14 @@ pub fn shadow_log_copy<T: Copy, I: IndexLike, VC: crate::value_compressor::Value
     // sorted-runs and plain index layers, real encoders.
     let (vso, vpl) = if VC::enabled() {
         (
-            format!("{}", crate::layered::LayeredFrame::<T, I, VC>::compress_runs_sorted(pairs).byte_len()),
-            format!("{}", crate::layered::LayeredFrame::<T, I, VC>::compress_plain(pairs).byte_len()),
+            format!(
+                "{}",
+                crate::layered::LayeredFrame::<T, I, VC>::compress_runs_sorted(pairs).byte_len()
+            ),
+            format!(
+                "{}",
+                crate::layered::LayeredFrame::<T, I, VC>::compress_plain(pairs).byte_len()
+            ),
         )
     } else {
         ("-".to_string(), "-".to_string())
@@ -313,8 +380,11 @@ pub fn shadow_log_copy<T: Copy, I: IndexLike, VC: crate::value_compressor::Value
 
 /// Shadow-encode with the full candidate set (`T: IndexLike` columns): the
 /// value-opaque set plus dictionary and delta, and the distinct-value count.
-#[verifier::external_body]
-pub fn shadow_log_full<T: IndexLike, I: IndexLike, VC: crate::value_compressor::ValueCompressor<T>>(
+pub fn shadow_log_full<
+    T: IndexLike,
+    I: IndexLike,
+    VC: crate::value_compressor::ValueCompressor<T>,
+>(
     pairs: &Vec<(T, I)>,
     instance: usize,
     frame: usize,
@@ -334,12 +404,17 @@ pub fn shadow_log_full<T: IndexLike, I: IndexLike, VC: crate::value_compressor::
             + d.idxs.len() * core::mem::size_of::<I>()
     };
     let delta = crate::diff_compress::DeltaFrame::compress(pairs).byte_len();
-    let distinct: std::collections::HashSet<usize> =
-        pairs.iter().map(|p| p.0.as_usize()).collect();
+    let distinct: std::collections::HashSet<usize> = pairs.iter().map(|p| p.0.as_usize()).collect();
     let (vso, vpl) = if VC::enabled() {
         (
-            format!("{}", crate::layered::LayeredFrame::<T, I, VC>::compress_runs_sorted(pairs).byte_len()),
-            format!("{}", crate::layered::LayeredFrame::<T, I, VC>::compress_plain(pairs).byte_len()),
+            format!(
+                "{}",
+                crate::layered::LayeredFrame::<T, I, VC>::compress_runs_sorted(pairs).byte_len()
+            ),
+            format!(
+                "{}",
+                crate::layered::LayeredFrame::<T, I, VC>::compress_plain(pairs).byte_len()
+            ),
         )
     } else {
         ("-".to_string(), "-".to_string())
@@ -365,7 +440,6 @@ pub fn shadow_log_full<T: IndexLike, I: IndexLike, VC: crate::value_compressor::
     ));
 }
 
-#[verifier::external_body]
 fn run_count_writeorder<T: Copy, I: IndexLike>(pairs: &Vec<(T, I)>) -> usize {
     let mut runs = 0usize;
     let mut prev: Option<usize> = None;
@@ -380,7 +454,6 @@ fn run_count_writeorder<T: Copy, I: IndexLike>(pairs: &Vec<(T, I)>) -> usize {
     runs
 }
 
-#[verifier::external_body]
 fn run_count_sorted<T: Copy, I: IndexLike>(pairs: &Vec<(T, I)>) -> usize {
     let mut idx: Vec<usize> = pairs.iter().map(|p| p.1.as_usize()).collect();
     idx.sort_unstable();
@@ -396,9 +469,7 @@ fn run_count_sorted<T: Copy, I: IndexLike>(pairs: &Vec<(T, I)>) -> usize {
     runs
 }
 
-
 /// Mode name for the shadow log's `chosen` column.
-#[verifier::external_body]
 pub fn mode_name(mode: crate::diff_compress::CompressionMode) -> &'static str {
     match mode {
         crate::diff_compress::CompressionMode::None => "None",
@@ -408,23 +479,3 @@ pub fn mode_name(mode: crate::diff_compress::CompressionMode) -> &'static str {
         crate::diff_compress::CompressionMode::Auto => "Auto",
     }
 }
-
-/// Saturating byte arithmetic for the diagnostic counters. Verified (vstd
-/// models `checked_mul`/`checked_add`), so a byte count can never trap and
-/// never needs a trust marker. Introduced 2026-09 when the counters were
-/// discharged from the trust ledger.
-pub fn sat_mul(a: usize, b: usize) -> usize {
-    match a.checked_mul(b) {
-        Some(v) => v,
-        None => usize::MAX,
-    }
-}
-
-pub fn sat_add(a: usize, b: usize) -> usize {
-    match a.checked_add(b) {
-        Some(v) => v,
-        None => usize::MAX,
-    }
-}
-
-} // verus!

@@ -22,12 +22,16 @@ verus! {
 /// `parallel_restore_bench` before the parallel path is defaulted on.
 pub const PAR_THRESHOLD: usize = 4096;
 
-/// Canary: confirms rayon coexists with `cargo verus verify` (external_body body is
-/// opaque to verus; the crate must still compile and verify with rayon linked).
-#[verifier::external_body]
+} // verus!
+
+// ---------------------------------------------------------------------------
+// Build canary — OUTSIDE the verified perimeter: it only confirms rayon links
+// and runs under the Verus toolchain. Nothing verified calls it, so it is
+// neither proved nor trusted.
+// ---------------------------------------------------------------------------
+/// Canary: confirms rayon coexists with `cargo verus verify` — the crate must
+/// still compile and verify with rayon linked.
 pub fn par_sum_canary(n: usize) -> usize {
     use rayon::prelude::*;
     (0..n).into_par_iter().sum()
 }
-
-} // verus!

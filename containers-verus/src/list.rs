@@ -422,13 +422,6 @@ impl<N: DenseId + Tagged + core::default::Default> ListHead<N> {
         proof { assert(id.id_nat() == t as nat); }
     }
 
-    /// Read-only unpacked head for white-box tests.
-    #[doc(hidden)]
-    #[verifier::external_body]
-    pub fn white_box_head(&self) -> Option<usize> {
-        let o = crate::opt::Opt::<N>::from_raw(self.head_repr);
-        if o.is_none() { None } else { Some(o.get().as_usize()) }
-    }
 }
 
 impl<N: DenseId + Tagged + core::default::Default> core::default::Default for ListHead<N> {
@@ -2910,6 +2903,24 @@ pub(crate) proof fn splice_cache_node<T, L, N, const TRACK: bool, P>(
 }
 
 } // verus!
+
+// ---------------------------------------------------------------------------
+// Read-only white-box accessor — OUTSIDE the verified perimeter: it unpacks a
+// head for tests and nothing verified calls it, so it is neither proved nor
+// trusted (see `diagnostics.rs` for the same stratification).
+// ---------------------------------------------------------------------------
+impl<N: DenseId + Tagged + core::default::Default> ListHead<N> {
+    /// Read-only unpacked head for white-box tests.
+    #[doc(hidden)]
+    pub fn white_box_head(&self) -> Option<usize> {
+        let o = crate::opt::Opt::<N>::from_raw(self.head_repr);
+        if o.is_none() {
+            None
+        } else {
+            Some(o.get().as_usize())
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // White-box oracle access (plain Rust; see bplus.rs's matching comment).
