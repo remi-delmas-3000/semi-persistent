@@ -97,13 +97,11 @@ impl<L: LitVal, V: DenseId, const TRACK: bool> LitValStore<L, V, TRACK> {
     }
 
     pub fn intern(&mut self, value: L) -> V {
+        // One hash of the canonical key on both paths (see `SpMap::try_intern`).
         let key = value.key();
-        if let Some(id) = self.map.id_of(&key) {
-            return crate::id::id_at_index::<V>(id);
-        }
-        let id = self
+        let (id, _fresh) = self
             .map
-            .try_insert(key, value)
+            .try_intern(key, value)
             .expect("literal interner exhausted the id index word");
         crate::id::id_at_index::<V>(id)
     }

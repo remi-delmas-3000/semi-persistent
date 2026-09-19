@@ -213,14 +213,11 @@ impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
     }
 
     pub fn intern(&mut self, name: &str) -> S {
-        if let Some(id) = self.map.id_of(&name.to_owned()) {
-            // A position already in the log came from `sort_id` below, so it is in
-            // range; re-checking costs nothing on this path and keeps one spelling.
-            return id_at::<S>(id.as_usize());
-        }
-        let id = self
+        // One hash of the name, whether it is already registered or not: the
+        // entry decides membership and inserts through the same probe.
+        let (id, _fresh) = self
             .map
-            .try_insert(name.to_owned(), ())
+            .try_intern(name.to_owned(), ())
             .expect("registry id space exhausted for its index word");
         id_at::<S>(id.as_usize())
     }

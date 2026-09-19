@@ -106,10 +106,18 @@ where
     }
 
     pub fn intern(&mut self, sorted_items: &[T]) -> A::Context {
-        if let Some(log_idx) = self.index.id_of(&sorted_items.to_vec()) {
-            return *self.index.get_val(log_idx);
-        }
+        // One hash of the item vector, not two: the map decides membership and
+        // claims the id in the same probe (`SpMap::try_intern`), and the span
+        // columns are only extended when the id is fresh. The key is a heap
+        // vector, so the hash saved here is the dominant cost of an intern.
         let id: A::Context = crate::id::id_at_index(self.spans.len());
+        let (found, fresh) = self
+            .index
+            .try_intern(sorted_items.to_vec(), id)
+            .expect("AU arena sized by its index word");
+        if !fresh {
+            return *self.index.get_val(found);
+        }
         let start = self.items.len().as_usize();
         for &item in sorted_items {
             self.items
@@ -118,9 +126,6 @@ where
         }
         self.spans
             .try_push(Span::new(start, sorted_items.len()))
-            .expect("AU arena sized by its index word");
-        self.index
-            .try_insert(sorted_items.to_vec(), id)
             .expect("AU arena sized by its index word");
         id
     }

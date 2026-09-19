@@ -72,10 +72,9 @@ impl<T: Copy, C: Copy + Ord, I: IndexLike> ExactMemo<T, C, I> {
         support_l: Vec<C>,
         support_r: Vec<C>,
     ) -> Result<(), ContainerError> {
-        if self.entries.contains_key(&(l, r)) {
-            return Ok(());
-        }
-        self.entries.try_insert(
+        // One hash of the pair on both paths; first writer wins because a
+        // present key leaves the map untouched (`SpMap::try_intern`).
+        self.entries.try_intern(
             (l, r),
             MemoEntry {
                 term,

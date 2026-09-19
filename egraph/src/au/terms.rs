@@ -94,12 +94,20 @@ impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> Ter
 
     /// Intern a term. Returns the existing id if structurally equal term exists.
     pub fn intern(&mut self, op: TermOp<O, V>, children: &[A::Term]) -> A::Term {
+        // One hash of the structural key (an operator plus a child vector, so a
+        // heap key) whether the term is new or not: the map decides membership
+        // and claims the id in the same probe, and the columns below are only
+        // extended when the id is fresh.
         let key = (op.clone(), children.to_vec());
-        if let Some(log_idx) = self.by_structure.id_of(&key) {
-            return *self.by_structure.get_val(log_idx);
+        let id: A::Term = crate::id::id_at_index(self.ops.len());
+        let (found, fresh) = self
+            .by_structure
+            .try_intern(key, id)
+            .expect("AU arena sized by its index word");
+        if !fresh {
+            return *self.by_structure.get_val(found);
         }
 
-        let id: A::Term = crate::id::id_at_index(self.ops.len());
         let start = self.child_pool.len().as_usize();
         for &c in children {
             self.child_pool
@@ -152,9 +160,6 @@ impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> Ter
             .expect("AU arena sized by its index word");
         self.vmasses
             .try_push(vmass)
-            .expect("AU arena sized by its index word");
-        self.by_structure
-            .try_insert(key, id)
             .expect("AU arena sized by its index word");
         id
     }
@@ -305,13 +310,16 @@ impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> Ter
     /// Record the minimal term extracted for a snapshot class. Callers check
     /// the cache first, so a key is never overwritten (no shadow log entries).
     fn cache_best_term(&mut self, class: A::Class, term: A::Term) {
+        // One hash, and the write-once discipline is now enforced rather than
+        // asserted: a present key leaves the entry as it was.
+        let (_, fresh) = self
+            .best_terms
+            .try_intern(class, term)
+            .expect("AU arena sized by its index word");
         debug_assert!(
-            self.best_terms.id_of(&class).is_none(),
+            fresh,
             "best-term cache entries are written at most once per class"
         );
-        self.best_terms
-            .try_insert(class, term)
-            .expect("AU arena sized by its index word");
     }
 
     // Structural frame operations: the typed-group member protocol (design doc

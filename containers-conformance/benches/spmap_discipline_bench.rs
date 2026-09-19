@@ -123,7 +123,7 @@ fn vecs(n: usize) -> Vec<Vec<u32>> {
 /// Fill both sides through the interning path: lookup, then insert on a miss.
 fn bench_intern<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, keys: Vec<K>) {
     let mut g = c.benchmark_group(format!("spmap/intern/{shape}"));
-    g.bench_function("spmap", |b| {
+    g.bench_function("spmap_precheck", |b| {
         b.iter_batched(
             || keys.clone(),
             |ks| {
@@ -132,6 +132,20 @@ fn bench_intern<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, 
                     if !m.contains_key(&k) {
                         m.try_insert(k, i as u32).expect("fits the index word");
                     }
+                }
+                m.len()
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    // The interning entry point: one hash, membership decided by the same probe.
+    g.bench_function("spmap_intern", |b| {
+        b.iter_batched(
+            || keys.clone(),
+            |ks| {
+                let mut m: SpMap<K, u32> = SpMap::new();
+                for (i, k) in ks.into_iter().enumerate() {
+                    m.try_intern(k, i as u32).expect("fits the index word");
                 }
                 m.len()
             },

@@ -52,6 +52,7 @@
 //! (mirrors vstd's shipped `RandomState` axiom).
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::hash::Hash;
 use vstd::prelude::*;
 
@@ -469,6 +470,82 @@ where
             Ok(self.insert(key, val))
         } else {
             Err(crate::error::ContainerError::CapacityExhausted)
+        }
+    }
+
+    /// Interning insert in ONE hash of the key: the id of the existing entry, or
+    /// a fresh one appended at the end. The `bool` says which happened.
+    ///
+    /// This is what every interning caller in this workspace wants. Written with
+    /// a membership check followed by `try_insert`, a caller hashes the key
+    /// twice; the entry API decides membership and inserts through the same
+    /// probe, so this hashes it once. On a `String` or a `Vec` key that is the
+    /// dominant cost of an insert.
+    ///
+    /// The vacant case is also what makes the previous-occurrence link provable
+    /// without a lookup: the entry's contract says the key was absent from the
+    /// index, and `index_agrees` turns that into "absent from the log", which is
+    /// exactly the `None` link.
+    pub fn try_intern(&mut self, key: K, val: V) -> (r: Result<(I, bool), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r matches Ok((id, fresh)) ==> !fresh ==> (
+                final(self).log_view() == old(self).log_view()
+                && final(self).index_view() == old(self).index_view()
+                && old(self).index_view().contains_key(key)
+                && old(self).index_view()[key] == id),
+            r matches Ok((id, fresh)) ==> fresh ==> (
+                id.as_nat() == old(self).log_view().len()
+                && final(self).log_view() == old(self).log_view().push((key, val))
+                && final(self).index_view() == old(self).index_view().insert(key, id)),
+            r is Err ==> final(self).log_view() == old(self).log_view()
+                && final(self).index_view() == old(self).index_view(),
+            r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted,
+    {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+        broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
+        if !self.can_insert() {
+            // No room to append, but a hit still has an answer: one lookup.
+            return match self.id_of(&key) {
+                Some(id) => Ok((id, false)),
+                None => Err(crate::error::ContainerError::CapacityExhausted),
+            };
+        }
+        let ghost old_log = self.log_view();
+        let ghost old_index = self.index@;
+        let ghost old_prev = self.prev@;
+        let key_for_index = clone_key_exact(&key);
+        match self.index.entry(key_for_index) {
+            Entry::Occupied(e) => {
+                let id = *e.get();
+                Ok((id, false))
+            }
+            Entry::Vacant(e) => {
+                proof {
+                    // The key is absent from the index, so it is absent from the
+                    // log: an occurrence would have a last occurrence, which
+                    // `index_agrees` would have put in the index.
+                    assert forall|j: int| 0 <= j < old_log.len()
+                        implies (#[trigger] old_log[j]).0 != key by {
+                        if old_log[j].0 == key {
+                            lemma_last_occurrence_exists::<K, V>(old_log, j);
+                        }
+                    }
+                }
+                let id = self.log.push((key, val));
+                self.prev.push(None);
+                e.insert(id);
+                proof {
+                    let log = self.log_view();
+                    assert(log == old_log.push((key, val)));
+                    assert(self.prev@ =~= old_prev.push(None::<I>));
+                    lemma_insert_prev_link(old_log, old_prev, old_index, log, self.prev@, None);
+                    lemma_append_fresh_preserves_index::<K, V, I>(old_log, old_index, key, val, id);
+                    assert(self.index@ =~= old_index.insert(key, id));
+                }
+                Ok((id, true))
+            }
         }
     }
 
@@ -957,6 +1034,70 @@ proof fn lemma_prev_agrees_after_truncate<K, V, I: IndexLike>(log: Seq<(K, V)>, 
 
 /// `insert`'s chain maintenance: appending `(key, val)` and recording the
 /// index's former answer for `key` as the new entry's link keeps the whole
+/// Appending an entry whose key does not occur in the log preserves index
+/// agreement. The fresh-key specialization of what `insert` proves inline: no
+/// position loses its last-occurrence status, because the new tail's key is
+/// absent from the prefix, and the new tail is that key's last occurrence.
+pub proof fn lemma_append_fresh_preserves_index<K, V, I: IndexLike>(
+    old_log: Seq<(K, V)>,
+    old_index: Map<K, I>,
+    key: K,
+    val: V,
+    id: I,
+)
+    requires
+        index_agrees_seq(old_log, old_index),
+        forall|j: int| 0 <= j < old_log.len() ==> (#[trigger] old_log[j]).0 != key,
+        id.as_nat() == old_log.len(),
+    ensures
+        index_agrees_seq(old_log.push((key, val)), old_index.insert(key, id)),
+{
+    let log = old_log.push((key, val));
+    let m = old_index.insert(key, id);
+    let idn = id.as_nat() as int;
+    assert(log[idn] == (key, val));
+    assert(is_last_occurrence(log, idn));
+    assert forall|i: int| #[trigger] is_last_occurrence(log, i)
+        implies m.contains_key(log[i].0) && m[log[i].0].as_nat() == i by {
+        if i == idn {
+            assert(m[key] == id);
+        } else {
+            assert(log[i] == old_log[i]);
+            assert(log[i].0 != key);
+            assert(is_last_occurrence(old_log, i)) by {
+                assert forall|j: int| i < j < old_log.len()
+                    implies (#[trigger] old_log[j]).0 != old_log[i].0 by {
+                    assert(old_log[j] == log[j]);
+                }
+            }
+            assert(old_index.contains_key(log[i].0));
+            assert(old_index[log[i].0].as_nat() == i);
+            assert(m[log[i].0] == old_index[log[i].0]);
+        }
+    }
+    assert forall|k: K| #[trigger] m.contains_key(k)
+        implies m[k].as_nat() < log.len() && log[m[k].as_nat() as int].0 == k
+            && is_last_occurrence(log, m[k].as_nat() as int) by {
+        if k == key {
+            assert(m[k] == id);
+        } else {
+            assert(m[k] == old_index[k]);
+            assert(old_index.contains_key(k));
+            let p = old_index[k].as_nat() as int;
+            assert(is_last_occurrence(old_log, p));
+            assert(log[p] == old_log[p]);
+            assert forall|j: int| p < j < log.len() implies (#[trigger] log[j]).0 != log[p].0 by {
+                if j < old_log.len() {
+                    assert(log[j] == old_log[j]);
+                } else {
+                    assert(log[j] == (key, val));
+                    assert(log[p].0 == k);
+                }
+            }
+        }
+    }
+}
+
 /// column agreeing. The former answer is `key`'s last occurrence in the old log
 /// (index agreement), or `None` exactly when the old log never mentions `key`.
 proof fn lemma_insert_prev_link<K, V, I: IndexLike>(
