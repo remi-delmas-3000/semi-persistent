@@ -39,6 +39,12 @@
   wide as the id: 32 bits for a 31-bit family, 64 for a 63-bit one. It was a
   hardcoded `u32` with a `1 << 31` tag that a 63-bit id would have overflowed
   into the spill index silently in release builds.
+- `AppendOnlyVec::try_push` reads the length once for the capacity test, the
+  returned index and the append, and the whole append path (`try_push`,
+  `push`, `len`, `can_push`, `as_slice`, the group's `Deref`) is inlined
+  unconditionally: the append loop a caller runs is a compare, a branch to
+  the cold growth call and a store, the same instructions as a bare
+  `Vec::push` loop.
 - `retained_containers_bench` has `aov/push`, `aov/push_presized`,
   `aov/scan` and `aov/mark_restore` beside the alignment-bound `aov/log`
   composite, and `bench_compare.py` prints a speedup column (reference ÷

@@ -1743,12 +1743,14 @@ where
 // the member carries no versioning surface of its own).
 impl<M: Member> core::ops::Deref for ForkHistory<M> {
     type Target = M;
+    #[inline(always)]
     fn deref(&self) -> &M {
         &self.member
     }
 }
 
 impl<M: Member> core::ops::DerefMut for ForkHistory<M> {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut M {
         &mut self.member
     }

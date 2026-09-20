@@ -1789,6 +1789,16 @@ nothing in `AppendOnlyVec` to change. The retained bench now carries the four
 phase rows (`aov/push`, `aov/push_presized`, `aov/scan`, `aov/mark_restore`)
 beside `aov/log`, and those are the rows to read for the container.
 
+One source-side change did move the composite, after the flag experiments:
+`try_push` now reads the length once and uses it for the capacity test, the
+returned index and the append (it used to call `can_push` and then re-read
+the length inside `push`), and every function on the append path is
+`#[inline(always)]`, so the caller's loop is exactly the legacy loop's three
+instructions with nothing left for the optimiser to guess. `aov/log` then
+measured 0.94× and 0.97× in two runs and passed the protocol in both (it was
+0.92–0.93× and inconclusive), and the composite experiment read 0.97× in
+either order. The residual is placement.
+
 ### The dyn-store family: per-primitive dispatch, and a harness call boundary
 
 Root cause, first half: `VecD` was `Vec<T, I, DynStore<T, I>>`, one generic

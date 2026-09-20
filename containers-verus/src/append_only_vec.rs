@@ -107,6 +107,7 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     /// this cannot fail for a well-formed vec — the same protocol as
     /// `InlineStore::len` (`inline_store.rs`), and the reason `push` guards the
     /// *new* length rather than the returned index.
+    #[inline(always)]
     pub fn len(&self) -> (n: I)
         requires self.wf(),
         ensures n.as_nat() == self.view().len(),
@@ -133,6 +134,7 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     /// Contiguous read access to all elements (production parity; also the
     /// safe replacement for egraph's `from_raw_parts` contiguity assumption).
     /// The backing store IS a `std::vec::Vec`, so the slice is the view.
+    #[inline(always)]
     pub fn as_slice(&self) -> (r: &[T])
         ensures r@ == self.view(),
     {
@@ -146,6 +148,7 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     /// returned index: `wf` has to hold on exit, and it is what makes `len` and
     /// `mark` infallible. Requiring only `view().len() < I::max_nat()` would admit
     /// a final push whose successor length falls outside `I`.
+    #[inline(always)]
     pub(crate) fn push(&mut self, val: T) -> (idx: I)
         requires
             old(self).wf(),
@@ -278,6 +281,7 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     // ------------------------------------------------------------------
 
     /// Exec counterpart of `push`'s capacity precondition.
+    #[inline(always)]
     pub fn can_push(&self) -> (b: bool)
         requires self.wf(),
         ensures b == (self.view().len() + 1 < I::max_nat()),
@@ -295,6 +299,13 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
 
     /// Total push: refuses at the index word's capacity, returns the new
     /// element's index on success.
+    ///
+    /// One read of the length serves the capacity test, the returned index and
+    /// the append, and the whole path is inlined into the caller: the append
+    /// loop a node store or a log writer runs is then a compare, a branch to the
+    /// cold growth call, and a store — the same instructions as a bare
+    /// `Vec::push` loop — with nothing for the optimiser to hoist or guess.
+    #[inline(always)]
     pub fn try_push(&mut self, val: T) -> (r: Result<I, crate::error::ContainerError>)
         requires old(self).wf(),
         ensures
@@ -305,8 +316,36 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             final(self).snapshots_view() == old(self).snapshots_view(),
             r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted,
     {
-        if self.can_push() {
-            Ok(self.push(val))
+        let n = self.data.len();
+        let cap = <I as crate::index_like::IndexLike>::max().as_usize();
+        proof {
+            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
+            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
+            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
+            assert(cap as nat == I::max_nat() - 1);
+        }
+        if n < cap {
+            // `n < cap` puts `n` inside `I`, so the conversion cannot fail.
+            let idx = match I::try_from_usize(n) {
+                Some(i) => i,
+                None => crate::guard::refuse("append-only vec: length inside the index word"),
+            };
+            let ghost old_data = self.data@;
+            self.data.push(val);
+            proof {
+                let data = self.data@;
+                assert(data == old_data.push(val));
+                assert forall|k: int| 0 <= k < self.frames@.len() implies
+                    #[trigger] self.snapshots@[k] == data.subrange(0, self.frames@[k].as_nat() as int)
+                by {
+                    assert(old(self).snapshots@[k]
+                        == old_data.subrange(0, self.frames@[k].as_nat() as int));
+                    assert(self.frames@[k].as_nat() <= old_data.len());
+                    assert(data.subrange(0, self.frames@[k].as_nat() as int)
+                        =~= old_data.subrange(0, self.frames@[k].as_nat() as int));
+                }
+            }
+            Ok(idx)
         } else {
             Err(crate::error::ContainerError::CapacityExhausted)
         }
