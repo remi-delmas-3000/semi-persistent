@@ -618,12 +618,18 @@ where
     }
 
     fn can_push_now(&self) -> (b: bool) {
-        proof { self.col.lemma_snapshots_len(); }
+        proof {
+            self.col.lemma_snapshots_len();
+            self.col.lemma_member_specs();
+        }
         <crate::VecD<T, I, TRACK> as crate::group::Member>::can_push_now(&self.col)
     }
 
     fn depth_exec(&self) -> (d: usize) {
-        proof { self.col.lemma_snapshots_len(); }
+        proof {
+            self.col.lemma_snapshots_len();
+            self.col.lemma_member_specs();
+        }
         <crate::VecD<T, I, TRACK> as crate::group::Member>::depth_exec(&self.col)
     }
 
@@ -632,7 +638,9 @@ where
             crate::guard::refuse("Member::push_frame: the hinted arena cannot open another frame");
         }
         let ghost pre = *self;
+        proof { self.col.lemma_member_specs(); }
         <crate::VecD<T, I, TRACK> as crate::group::Member>::push_frame(&mut self.col, shrink);
+        proof { self.col.lemma_member_specs(); }
         proof {
             assert(self.index == pre.index && self.spill == pre.spill);
             assert forall|f2: u32, j2: nat| pre.hinted(f2, j2)
@@ -664,7 +672,9 @@ where
             crate::guard::refuse("Member::restore_frame: depth is not below the hinted arena's");
         }
         let ghost pre = *self;
+        proof { self.col.lemma_member_specs(); }
         <crate::VecD<T, I, TRACK> as crate::group::Member>::restore_frame(&mut self.col, depth);
+        proof { self.col.lemma_member_specs(); }
         proof { self.lemma_complete_after_cut(pre, depth as int, depth as int); }
     }
 
@@ -676,7 +686,9 @@ where
             crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
         }
         let ghost pre = *self;
+        proof { self.col.lemma_member_specs(); }
         <crate::VecD<T, I, TRACK> as crate::group::Member>::reset_frame(&mut self.col, depth);
+        proof { self.col.lemma_member_specs(); }
         proof { self.lemma_complete_after_cut(pre, depth as int, depth as int + 1); }
     }
 
@@ -686,7 +698,9 @@ where
             crate::guard::refuse("Member::pop_frame: no open frame");
         }
         let ghost pre = *self;
+        proof { self.col.lemma_member_specs(); }
         <crate::VecD<T, I, TRACK> as crate::group::Member>::pop_frame(&mut self.col);
+        proof { self.col.lemma_member_specs(); }
         proof { self.lemma_complete_after_cut(pre, d as int - 1, d as int - 1); }
     }
 }

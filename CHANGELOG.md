@@ -26,6 +26,14 @@
   (`Default`, and provably valid in vstd's model on an already-shipped axiom).
   `IndexHasher` stays the default; `std::hash::RandomState` is implemented for
   keys from an untrusted source. No new trusted item.
+- `VecD`, the runtime-selected three-tier column, is an enum over the three
+  static columns (`vec_dyn`), dispatched once per operation, instead of a
+  `Vec` over the per-primitive `DynStore`. Same constructors and methods;
+  it is no longer the same type as `Vec<T, I, DynStore<T, I>, TRACK>`,
+  which still exists. On the three-tier write rows the runtime-selected
+  columns were 1.26–2.2× the static ones running the same loops; they are
+  now within 1.02–1.19 on writes (one match per operation) and level on
+  restores.
 
 ### Changed
 

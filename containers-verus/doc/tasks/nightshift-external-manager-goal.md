@@ -98,7 +98,14 @@ foreign tokens are refused).
    partition, tier representations and capture tags all touched), so budget
    it as a milestone, not a fix.
 
-3. **Close the append-only log gap** (`aov/log/verified` 0.92× of legacy,
+3. **CLOSED 2026-09-20** — see the performance report's section "The two
+   open benchmark gaps": `aov/log` has a root cause (allocation placement;
+   every phase at parity or better, no code change), and the dyn-store family
+   is fixed (`VecD` as an enum of the static columns, plus a harness call
+   boundary the bench wrapper was adding), within 1.02–1.19 of static on
+   writes and level on restores. Original text follows.
+
+   **Close the append-only log gap** (`aov/log/verified` 0.92× of legacy,
    200 µs vs 183 µs for 100 000 pushes, 0.16 ns per push, pre-existing since
    before `aa01a08`). Bounded experiments, in this order, each measured at the
    protocol settings with both orders: (a) after outcome 1 the push path is

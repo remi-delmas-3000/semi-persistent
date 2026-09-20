@@ -1736,3 +1736,91 @@ called from the otherwise-verified accessors, which would restore the margin at
 the price of a thirteenth `external_body` item. It was declined in favour of the
 smaller trust surface; the option stands recorded here if the bulk-load path
 ever becomes load-bearing.
+
+## The two open benchmark gaps (2026-09-20)
+
+Goal-doc outcome 3 asked for parity or a written root cause on `aov/log`
+(0.92× of legacy since before `aa01a08`) and on the dyn-store family
+(`three_tier_v1/*/dyn_*` at 1.09–1.25 in the 2026-09-18 pair, and 1.26–2.2× the
+static columns on the write rows when re-measured on 2026-09-20). Both are
+closed here: the first with a root cause, the second with a fix and a residual.
+
+### `aov/log`: no work difference; allocation placement
+
+`aov_phases_bench` (new, kept) takes the row apart. Each phase alone, legacy
+versus verified, on performance cores (`retained_containers_bench` binary
+canary in range):
+
+| phase | legacy | verified | ratio |
+|---|---|---|---|
+| 100 000 pushes from empty | 131.9 µs | 135.2 µs | 1.025 |
+| 100 000 pushes into a presized vec | 109.5 µs | 106.2 µs | 0.970 |
+| slice scan | 7.28 µs | 7.35 µs | 1.009 |
+| mark, 50 000 pushes, restore | 64.3 µs | 58.5 µs | 0.910 |
+
+The composite body (the row itself) in `#[inline(never)]` functions registered
+in both orders measured 1.05–1.08 in one run and 1.00–1.03 in the next, in
+either order, so it is not placement of one body against the other. The two
+push loops are the same instructions in the disassembly (compare, branch,
+`grow_one`), and the verified side's only extra code is the token validation
+on `restore_and_pop`, once per iteration. A legacy body given one 32-byte
+allocation live from the mark to the end — the shape the verified side's
+history has — moved by +4 per cent on its own. Verdict: the row's few per cent
+is where the 800 KB data buffer lands relative to a small allocation made
+mid-iteration, not the container's work; the per-phase rows are at parity or
+better. Nothing to change in `AppendOnlyVec`.
+
+### The dyn-store family: per-primitive dispatch, and a harness call boundary
+
+Root cause, first half: `VecD` was `Vec<T, I, DynStore<T, I>>`, one generic
+vector whose store is an enum, so every store primitive a write touches — the
+capture and the raw set — matched on the store's tag, with the tag reloaded in
+between because the primitive writes through the same `&mut`. The e-graph does
+not use it (its columns are selected at the type level through `StorePolicy`);
+the hinted arena and the benches do. `VecD` is now an enum over the three
+static vectors (`vec_dyn.rs`), dispatched once per operation, every method a
+three-arm forward with the arm's contract restated over the enum's spec
+functions. The `Member` impl's spec bodies are `closed`: as open bodies they
+became crate-wide axioms mentioning every static column's `wf`/`view`, which
+alone pushed `vec.rs::lemma_hot_frame_encoded_new_covered_bwd` over Z3's
+resource limit, reproducibly; closing them fixed it with no limit raised.
+
+Root cause, second half, found while the enum still measured 2× on the Trail
+write row: the bench's column wrapper is `#[inline]`, and a column type used by
+every group in `three_tier_bench` has enough call sites that LLVM declines the
+hint. The wrapper then compiles as a standalone function whose prologue spills
+for the largest arm of the enum on every call. The same wrapper generated under
+a second name with one call site ran the dyn Trail write row at 861 ns against
+1575 ns; a consumer writes to a column from one place and never pays this. The
+wrapper's `set` and `push` are `#[inline(always)]` now; the static rows speed
+up as well (`static_veci` low-duplicates 1382 → 1003 ns), which is the same
+harness cost they were paying.
+
+Same binary, final build, performance cores:
+
+| row | dyn before (`Vec<DynStore>`) | static | dyn now (enum) | now / static |
+|---|---|---|---|---|
+| write/low_duplicates inline | 1768 ns | 1003 ns | 1061 ns | 1.06 |
+| write/low_duplicates parallel | 1859 ns | 1268 ns | 1289 ns | 1.02 |
+| write/low_duplicates trail | 1593 ns | 734 ns | 870 ns | 1.19 |
+| write/high_duplicates inline | 1167 ns | 513 ns | 560 ns | 1.09 |
+| write/high_duplicates parallel | 1188 ns | 535 ns | 639 ns | 1.19 |
+| write/high_duplicates trail | 1688 ns | 726 ns | 865 ns | 1.19 |
+| restore/shallow inline | — | 22.8 ns | 24.8 ns | 1.09 |
+| restore/shallow trail | — | 221.6 ns | 224.4 ns | 1.01 |
+| restore/deep_64_frames trail | 1440 ns | 1663 ns | 1669 ns | 1.00 |
+
+("before" is the 2026-09-20 re-measurement of the old shape; "static" is from
+the final build.) The residual on the write rows, 0.1–0.3 ns per write, is the
+one match per operation. The deep 64-frame Trail restore is the one row where
+the enum is slower than the old shape: the old `Vec<DynStore>` monomorph
+happened to compile that restore path 10 per cent faster than the static Trail
+column does, and the enum runs the static column's code by construction;
+forcing `restore_entry` inline in the three stores did not move it.
+
+Paired against the previous commit on the `dyn_*` rows (τ = 1.08, two runs):
+48 pass, 8 inconclusive (nanosecond rows with ±30 per cent intervals, and two
+at 1.05–1.08 that pass at the protocol rerun), 1 regression — the deep Trail
+restore above, 1.10 at the rerun, explained. The traces gain 12–38 per cent
+(`smt_backtracking_128/dyn_inline` 0.62, `eclasses_mark_merge_restore_32/
+dyn_inline` 0.65) and the promotion rows 18–33 per cent.

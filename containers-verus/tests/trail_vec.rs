@@ -201,12 +201,9 @@ proptest! {
 #[test]
 fn vecd_kinds_match_oracle() {
     use semi_persistent_containers_verus::{StoreKind, VecD};
-    let _: semi_persistent_containers_verus::Vec<
-        u32,
-        u32,
-        semi_persistent_containers_verus::dyn_store::DynStore<u32, u32>,
-        true,
-    > = VecD::new_kind(StoreKind::Inline);
+    // `VecD` is an enum over the three static columns (one dispatch per
+    // operation); the per-primitive `Vec<_, _, DynStore<_, _>>` still exists
+    // as its own type and is exercised in `three_tier_runtime`.
     let kinds = [StoreKind::Inline, StoreKind::Parallel, StoreKind::Trail];
     let mut cols: Vec<ForkHistory<VecD<u32, u32, true>>> = kinds
         .iter()

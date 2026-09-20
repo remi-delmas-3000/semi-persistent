@@ -742,6 +742,13 @@ trait MeasuredMatrixColumn: MatrixColumn {
     fn total_bytes(&self) -> usize;
 }
 
+// The write and push wrappers are `#[inline(always)]`, not `#[inline]`: a
+// column type used by every group in this file has enough call sites that
+// LLVM declines the hint, and the wrapper then becomes a standalone function
+// whose prologue spills for the largest arm of the runtime-selected column on
+// every call — a harness cost no consumer pays (a consumer writes to a column
+// from one place). Measured: the same wrapper generated under a second name
+// with one call site ran the dyn Trail write row at 861 ns against 1575 ns.
 macro_rules! verified_matrix_column {
     ($wrapper:ident, $inner:ty, $constructor:expr) => {
         struct $wrapper($inner);
@@ -754,14 +761,14 @@ macro_rules! verified_matrix_column {
                 Self(($constructor)(policy))
             }
 
-            #[inline]
+            #[inline(always)]
             fn push(&mut self, value: u64) {
                 self.0
                     .try_push(value)
                     .expect("matrix fixture fits u32 index");
             }
 
-            #[inline]
+            #[inline(always)]
             fn set(&mut self, index: u32, value: u64) {
                 self.0.set_index(index, value);
             }
@@ -865,12 +872,12 @@ macro_rules! production_matrix_column {
                 Self(<$inner>::new())
             }
 
-            #[inline]
+            #[inline(always)]
             fn push(&mut self, value: u64) {
                 self.0.push(value);
             }
 
-            #[inline]
+            #[inline(always)]
             fn set(&mut self, index: u32, value: u64) {
                 self.0.set(index, value);
             }

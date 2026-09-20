@@ -158,6 +158,7 @@ pub mod two_stack_log;
 pub mod union_find;
 pub mod value_compressor;
 pub mod vec;
+pub mod vec_dyn;
 
 // ---------------------------------------------------------------------------
 // Root re-exports: production-style flat surface
@@ -231,7 +232,7 @@ pub type VecT<T, I, const TRACK: bool = true> =
 /// Runtime-selectable column: the store kind is chosen at construction while
 /// capture semantics follow that store. This preserves the legacy concrete
 /// type, including equality with the defaulted five-parameter `Vec` spelling.
-pub type VecD<T, I, const TRACK: bool = true> = Vec<T, I, crate::dyn_store::DynStore<T, I>, TRACK>;
+pub use vec_dyn::VecD;
 
 pub use compression_config::env_diff_store_kind;
 pub use dyn_store::StoreKind;

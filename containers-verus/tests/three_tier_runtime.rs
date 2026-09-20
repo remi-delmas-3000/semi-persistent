@@ -18,11 +18,35 @@ fn policy(trail: TierLimit, hot: TierLimit) -> TierPolicy {
     }
 }
 
-fn values<S>(v: &SpVec<u32, u32, S, true>) -> std::vec::Vec<u32>
+/// The stored values in index order, for a static column, the runtime-selected
+/// enum column, or a group around either.
+trait Values {
+    fn values(&self) -> std::vec::Vec<u32>;
+}
+
+impl<S> Values for SpVec<u32, u32, S, true>
 where
     S: DiffStore<u32, u32, true>,
 {
-    (0..v.len()).map(|i| v.get(i)).collect()
+    fn values(&self) -> std::vec::Vec<u32> {
+        (0..self.len()).map(|i| self.get(i)).collect()
+    }
+}
+
+impl Values for VecD<u32, u32, true> {
+    fn values(&self) -> std::vec::Vec<u32> {
+        (0..self.len()).map(|i| self.get(i)).collect()
+    }
+}
+
+impl<M: Values + semi_persistent_containers_verus::group::Member> Values for ForkHistory<M> {
+    fn values(&self) -> std::vec::Vec<u32> {
+        self.member.values()
+    }
+}
+
+fn values<C: Values>(v: &C) -> std::vec::Vec<u32> {
+    v.values()
 }
 
 #[test]
