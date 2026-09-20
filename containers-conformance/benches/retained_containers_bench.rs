@@ -727,6 +727,13 @@ fn bench_sparse_set_churn(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 // aov/log: AppendOnlyVec as the append log it is (node store pattern) —
 // bulk push, slice scan, mark/restore.
+//
+// Read this row with its phase rows below. The composite is alignment-bound:
+// on unchanged source its verified/legacy speedup moved between 0.92× and
+// 1.02× with `-C llvm-args=-align-loops` / `-align-all-blocks` alone
+// (2026-09-20), the two push loops are the same instructions, and every phase
+// on its own is at parity or better. `aov/push`, `aov/push_presized`,
+// `aov/scan` and `aov/mark_restore` are the rows that measure the container.
 // ---------------------------------------------------------------------------
 
 fn bench_aov_log(c: &mut Criterion) {
@@ -774,6 +781,140 @@ fn bench_aov_log(c: &mut Criterion) {
         })
     });
 
+    g.finish();
+}
+
+fn aov_filled_legacy(n: usize) -> prod::AppendOnlyVec<u64, usize, true> {
+    let mut v = prod::AppendOnlyVec::new();
+    for i in 0..n {
+        v.push(i as u64);
+    }
+    v
+}
+
+fn aov_filled_verified(n: usize) -> ForkHistory<verus::AppendOnlyVec<u64, usize, true>> {
+    let mut v = ForkHistory::new(verus::AppendOnlyVec::new());
+    for i in 0..n {
+        v.try_push(i as u64).expect("push: within index word");
+    }
+    v
+}
+
+/// `aov/log` taken apart: the pushes from empty (growth included), the pushes
+/// into a presized vec, the slice scan, and mark/push/restore, each on both
+/// sides. These are the container's own costs; the composite above adds the
+/// allocator's and the compiler's placement.
+fn bench_aov_phases(c: &mut Criterion) {
+    const N: usize = 100_000;
+
+    let mut g = c.benchmark_group("aov/push");
+    g.bench_function("legacy", |b| {
+        b.iter(|| {
+            let mut v: prod::AppendOnlyVec<u64, usize, true> = prod::AppendOnlyVec::new();
+            for i in 0..N {
+                v.push(i as u64);
+            }
+            black_box(v.len())
+        })
+    });
+    g.bench_function("verified", |b| {
+        b.iter(|| {
+            let mut v: ForkHistory<verus::AppendOnlyVec<u64, usize, true>> =
+                ForkHistory::new(verus::AppendOnlyVec::new());
+            for i in 0..N {
+                v.try_push(i as u64).expect("push: within index word");
+            }
+            black_box(v.len())
+        })
+    });
+    g.finish();
+
+    let mut g = c.benchmark_group("aov/push_presized");
+    g.bench_function("legacy", |b| {
+        b.iter_batched_ref(
+            || {
+                let mut v = aov_filled_legacy(N);
+                let tok = v.mark(prod::ShrinkPolicy::Never);
+                v.restore(tok);
+                v
+            },
+            |v| {
+                for i in 0..N {
+                    v.push(i as u64);
+                }
+                black_box(v.len())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    g.bench_function("verified", |b| {
+        b.iter_batched_ref(
+            || aov_filled_verified(N),
+            |v| {
+                for i in 0..N {
+                    v.try_push(i as u64).expect("push: within index word");
+                }
+                black_box(v.len())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    g.finish();
+
+    let mut g = c.benchmark_group("aov/scan");
+    let l = aov_filled_legacy(N);
+    let v = aov_filled_verified(N);
+    g.bench_function("legacy", |b| {
+        b.iter(|| {
+            let mut acc = 0u64;
+            for x in l.as_slice() {
+                acc = acc.wrapping_add(*x);
+            }
+            black_box(acc)
+        })
+    });
+    g.bench_function("verified", |b| {
+        b.iter(|| {
+            let mut acc = 0u64;
+            for x in v.as_slice() {
+                acc = acc.wrapping_add(*x);
+            }
+            black_box(acc)
+        })
+    });
+    g.finish();
+
+    let mut g = c.benchmark_group("aov/mark_restore");
+    g.bench_function("legacy", |b| {
+        b.iter_batched_ref(
+            || aov_filled_legacy(N / 2),
+            |v| {
+                let tok = v.mark(prod::ShrinkPolicy::Never);
+                for i in 0..N / 2 {
+                    v.push(i as u64);
+                }
+                v.restore(tok);
+                black_box(v.len())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    g.bench_function("verified", |b| {
+        b.iter_batched_ref(
+            || aov_filled_verified(N / 2),
+            |v| {
+                let tok = v
+                    .mark(verus::ShrinkPolicy::Never)
+                    .expect("mark: depth bounded by this harness");
+                for i in 0..N / 2 {
+                    v.try_push(i as u64).expect("push: within index word");
+                }
+                assert!(v.restore_and_pop(tok), "restore: own token");
+                black_box(v.len())
+            },
+            BatchSize::LargeInput,
+        )
+    });
     g.finish();
 }
 
@@ -1005,5 +1146,6 @@ criterion_group!(
     bench_map_restore_small_suffix,
     bench_sparse_set_churn,
     bench_aov_log,
+    bench_aov_phases,
 );
 criterion_main!(benches);

@@ -186,16 +186,33 @@ def checkpoint(args, cases):
     return rows
 
 
+def fmt_speedup(legacy_mean, verified_mean):
+    """Reference time over new time: above 1 the new side is faster."""
+    return f"{legacy_mean / verified_mean:.2f}×"
+
+
 def print_table(rows, runs, reference_label):
-    head = f"| Case | {reference_label} mean ({'/'.join(runs)}) | Final mean ({'/'.join(runs)}) | Ratio " + " | Ratio ".join(runs) + " | Status |"
+    # The convention for every number reported from this tool: the new side
+    # against the reference, as a SPEEDUP (reference time ÷ new time, above 1 is
+    # faster). The `Ratio` columns (new ÷ reference, with the interval the
+    # verdict is taken from) stay because the pass/regression rule is stated on
+    # them; read `Speedup` for direction and size.
+    head = (
+        f"| Case | {reference_label} mean ({'/'.join(runs)}) | Final mean ({'/'.join(runs)}) | Speedup "
+        + " | Speedup ".join(runs)
+        + " | Ratio "
+        + " | Ratio ".join(runs)
+        + " | Status |"
+    )
     print(head)
-    print("|" + "---|" * (4 + len(runs)))
+    print("|" + "---|" * (4 + 2 * len(runs)))
     for r in rows:
         cells = [
             f"`{r['case']}`",
             " / ".join(fmt_time(m) for m in r["legacy_means"]),
             " / ".join(fmt_time(m) for m in r["verified_means"]),
         ]
+        cells += [fmt_speedup(l, v) for l, v in zip(r["legacy_means"], r["verified_means"])]
         cells += [fmt_ratio(x) for x in r["ratios"]]
         cells.append(f"**{r['status']}**" if r["status"] != "pass" else "pass")
         print("| " + " | ".join(cells) + " |")

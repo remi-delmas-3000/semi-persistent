@@ -34,6 +34,15 @@
   columns were 1.26–2.2× the static ones running the same loops; they are
   now within 1.02–1.19 on writes (one match per operation) and level on
   restores.
+- The e-graph node caches' hint slot is the id family's own repr word with
+  the family's reserved bit as the spill marker (`HintSlot<L>`), so it is as
+  wide as the id: 32 bits for a 31-bit family, 64 for a 63-bit one. It was a
+  hardcoded `u32` with a `1 << 31` tag that a 63-bit id would have overflowed
+  into the spill index silently in release builds.
+- `retained_containers_bench` has `aov/push`, `aov/push_presized`,
+  `aov/scan` and `aov/mark_restore` beside the alignment-bound `aov/log`
+  composite, and `bench_compare.py` prints a speedup column (reference ÷
+  new) next to its ratio.
 
 ### Changed
 

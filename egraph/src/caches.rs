@@ -97,34 +97,49 @@ impl Hash for FpKey {
 /// recanonize and collision totals); the small SMT tables never left L2, so
 /// the corpus sweep did not see it.
 ///
-/// MSB clear: the value IS the single local id hinted at this fingerprint
-/// (the common all-distinct case; ids are 31-bit by the `define_id31`
-/// doctrine, so the MSB is free). MSB set: the low 31 bits index the cache's
-/// `spill` table, whose entry lists every id hinted at this fingerprint
+/// Tag clear: the value IS the single local id hinted at this fingerprint
+/// (the common all-distinct case). Tag set: the value is the index of the
+/// cache's `spill` table entry listing every id hinted at this fingerprint
 /// (congruent clusters and re-key histories).
-#[derive(Clone, Copy, Debug)]
-struct HintSlot(u32);
+///
+/// The word is the id family's own repr (`L::Repr`: `u32` for a 31-bit
+/// family, `u64` for a 63-bit one), and the marker is the bit that family
+/// reserves (`Tagged`), so the slot is exactly as wide as the id and never
+/// hardcodes a width. A spill index is stored as an id of the same family; it
+/// is bounded by the number of spilled fingerprints, which the family's id
+/// space covers.
+#[derive(Clone, Copy)]
+struct HintSlot<L: Tagged>(L::Repr);
 
-const HINT_SPILL_TAG: u32 = 1 << 31;
-
-impl HintSlot {
+impl<L: DenseId> HintSlot<L> {
     #[inline]
-    fn single(id: usize) -> Self {
-        debug_assert!(id < HINT_SPILL_TAG as usize);
-        HintSlot(id as u32)
+    fn single(id: L) -> Self {
+        HintSlot(id.into_repr())
     }
     #[inline]
     fn spilled(ix: usize) -> Self {
-        debug_assert!(ix < HINT_SPILL_TAG as usize);
-        HintSlot(ix as u32 | HINT_SPILL_TAG)
+        let mut r = L::from_usize(ix).into_repr();
+        L::set_tag(&mut r);
+        HintSlot(r)
     }
+    /// The single hinted id, as a position, when the tag is clear.
     #[inline]
     fn as_single(self) -> Option<usize> {
-        (self.0 & HINT_SPILL_TAG == 0).then_some(self.0 as usize)
+        (!L::tag(&self.0)).then(|| L::from_repr(&self.0).as_usize())
     }
+    /// The spill-table index (the tag is set).
     #[inline]
     fn spill_index(self) -> usize {
-        (self.0 & !HINT_SPILL_TAG) as usize
+        L::from_repr(&self.0).as_usize()
+    }
+}
+
+impl<L: DenseId> core::fmt::Debug for HintSlot<L> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.as_single() {
+            Some(id) => write!(f, "HintSlot::single({id})"),
+            None => write!(f, "HintSlot::spilled({})", self.spill_index()),
+        }
     }
 }
 
@@ -217,7 +232,7 @@ pub struct FixedArityCache<
     /// fingerprints across 11678 live nodes on QF_UF_cyclic_scheduler.3) from
     /// degrading the table: a cluster is one bucket pushed to in O(1), not a
     /// same-hash probe chain the map walks quadratically.
-    index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
+    index: hashbrown::HashMap<FpKey, HintSlot<L>, PassthroughBuildHasher>,
     /// Spilled hint buckets; `HintSlot` values with the spill tag index here.
     spill: Vec<HintBucket<L>>,
     /// Recanonicalization history, indexed at `usize`: its population is the number of
@@ -408,7 +423,7 @@ impl<
     fn push_hint(&mut self, fp: Fingerprint, id: L) {
         let key = FpKey(fp);
         let Some(&slot) = self.index.get(&key) else {
-            self.index.insert(key, HintSlot::single(id.as_usize()));
+            self.index.insert(key, HintSlot::single(id));
             return;
         };
         if let Some(raw) = slot.as_single() {
@@ -421,7 +436,7 @@ impl<
             // which pushes a fresh hint), and promoting it would manufacture
             // a heap spill bucket for a fingerprint with one live hint.
             if raw >= self.nodes.len().as_usize() {
-                self.index.insert(key, HintSlot::single(id.as_usize()));
+                self.index.insert(key, HintSlot::single(id));
                 return;
             }
             let ix = self.spill.len();
@@ -674,7 +689,7 @@ pub struct VariableArityCache<
     children:
         crate::containers::vec::Vec<C, usize, <P as TaggedFamily<C, usize, TRACK>>::Store, TRACK>,
     /// Hint index over (op, span contents); see [`FixedArityCache::index`].
-    index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
+    index: hashbrown::HashMap<FpKey, HintSlot<L>, PassthroughBuildHasher>,
     /// Spilled hint buckets; `HintSlot` values with the spill tag index here.
     spill: Vec<HintBucket<L>>,
     /// Recanonicalization history. `usize` for a different reason than `children`: the
@@ -791,7 +806,7 @@ impl<
     fn push_hint(&mut self, fp: Fingerprint, id: L) {
         let key = FpKey(fp);
         let Some(&slot) = self.index.get(&key) else {
-            self.index.insert(key, HintSlot::single(id.as_usize()));
+            self.index.insert(key, HintSlot::single(id));
             return;
         };
         if let Some(raw) = slot.as_single() {
@@ -804,7 +819,7 @@ impl<
             // which pushes a fresh hint), and promoting it would manufacture
             // a heap spill bucket for a fingerprint with one live hint.
             if raw >= self.nodes.len().as_usize() {
-                self.index.insert(key, HintSlot::single(id.as_usize()));
+                self.index.insert(key, HintSlot::single(id));
                 return;
             }
             let ix = self.spill.len();
@@ -1131,7 +1146,7 @@ pub struct LitCache<
     >,
     /// Hint index; see [`FixedArityCache::index`]. Literal content never
     /// changes, so the only staleness here is truncated ids after a restore.
-    index: hashbrown::HashMap<FpKey, HintSlot, PassthroughBuildHasher>,
+    index: hashbrown::HashMap<FpKey, HintSlot<L>, PassthroughBuildHasher>,
     /// Spilled hint buckets; `HintSlot` values with the spill tag index here.
     spill: Vec<HintBucket<L>>,
     frames: Vec<CacheFrame>,
@@ -1206,7 +1221,7 @@ where
         let key = FpKey(fp);
         match self.index.get(&key).copied() {
             None => {
-                self.index.insert(key, HintSlot::single(lid.as_usize()));
+                self.index.insert(key, HintSlot::single(lid));
             }
             Some(slot) => {
                 if let Some(raw) = slot.as_single() {
@@ -1215,7 +1230,7 @@ where
                         // dead single from a restore (lid is the newest live
                         // id), replaced in place as in the node caches.
                         if raw > lid.as_usize() {
-                            self.index.insert(key, HintSlot::single(lid.as_usize()));
+                            self.index.insert(key, HintSlot::single(lid));
                         }
                     } else {
                         let ix = self.spill.len();
@@ -1324,6 +1339,27 @@ mod tests {
     use crate::nodes::{
         LitNodeId, LitValId, MSetNodeId, Plain0Id, Plain2Id, PlainNId, SPairNodeId, SetNodeId,
     };
+
+    /// The hint slot is the id family's own word with the family's reserved
+    /// bit as the spill marker, so it is exactly as wide as the id: a 63-bit
+    /// family stores ids and spill indices above `u32::MAX` intact. This is
+    /// the regression test for the `u32` slot that preceded it.
+    #[test]
+    fn hint_slot_is_as_wide_as_the_id_family() {
+        use crate::nodes::ENodeId64;
+        let big = ENodeId64::new(1u64 << 40);
+        let s = HintSlot::<ENodeId64>::single(big);
+        assert_eq!(s.as_single(), Some(1usize << 40));
+        let sp = HintSlot::<ENodeId64>::spilled((1usize << 40) + 7);
+        assert_eq!(sp.as_single(), None);
+        assert_eq!(sp.spill_index(), (1usize << 40) + 7);
+        // And the 31-bit family still packs into 32 bits.
+        assert_eq!(core::mem::size_of::<HintSlot<ENodeId>>(), 4);
+        assert_eq!(core::mem::size_of::<HintSlot<ENodeId64>>(), 8);
+        let s31 = HintSlot::<ENodeId>::spilled((1usize << 31) - 1);
+        assert_eq!(s31.spill_index(), (1usize << 31) - 1);
+        assert_eq!(s31.as_single(), None);
+    }
 
     #[test]
     fn fixed_arity_probe_insert() {

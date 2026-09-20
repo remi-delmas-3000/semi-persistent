@@ -1765,10 +1765,29 @@ push loops are the same instructions in the disassembly (compare, branch,
 `grow_one`), and the verified side's only extra code is the token validation
 on `restore_and_pop`, once per iteration. A legacy body given one 32-byte
 allocation live from the mark to the end — the shape the verified side's
-history has — moved by +4 per cent on its own. Verdict: the row's few per cent
-is where the 800 KB data buffer lands relative to a small allocation made
-mid-iteration, not the container's work; the per-phase rows are at parity or
-better. Nothing to change in `AppendOnlyVec`.
+history has — moved by +4 per cent on its own, but reserving the verified
+side's frame stack and stamp table at construction (so it makes no allocation
+mid-iteration) did not move the row at all, which retired that theory.
+
+What did move it was code alignment, on unchanged source (speedup = legacy ÷
+verified, same binary):
+
+| LLVM flag | legacy | verified | speedup |
+|---|---|---|---|
+| default | 112.5 µs | 120.4 µs | 0.93× |
+| `-align-loops=32` | 115.5 µs | 118.1 µs | 0.98× |
+| `-align-loops=64` | 108.6 µs | 117.7 µs | 0.92× |
+| `-align-all-blocks=5` | 118.1 µs | 115.6 µs | 1.02× |
+| `-align-all-blocks=6` | 93.0 µs | 93.1 µs | 1.00× |
+
+Verdict: the composite row measures where the compiler places two loops
+whose instructions are the same, and the sign is whichever body drew the
+better alignment; both sides run 20 per cent faster when every block is
+64-byte aligned, which says the loops are alignment-sensitive and nothing
+else. No flag is shipped (one setting made the row worse), and there is
+nothing in `AppendOnlyVec` to change. The retained bench now carries the four
+phase rows (`aov/push`, `aov/push_presized`, `aov/scan`, `aov/mark_restore`)
+beside `aov/log`, and those are the rows to read for the container.
 
 ### The dyn-store family: per-primitive dispatch, and a harness call boundary
 
