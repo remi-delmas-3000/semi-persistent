@@ -345,4 +345,36 @@ pub broadcast axiom fn axiom_index_hasher_builds_valid_hashers()
         #[trigger] builds_valid_hashers::<IndexHasher>(),
 ;
 
+/// A `BuildHasher` an `SpMap` index may use. `Default`, because `SpMap::new`
+/// builds its index through `HashMap::default`, the one constructor vstd
+/// specifies; and provably valid in vstd's hash-table model, which is the one
+/// fact every index operation's contract needs. One impl per hasher, each
+/// resting on an axiom that already ships — nothing new is trusted by choosing
+/// a hasher:
+///
+/// * [`IndexHasher`] (the default): foldhash `fast` with a controllable seed,
+///   on this crate's [`axiom_index_hasher_builds_valid_hashers`].
+/// * [`std::hash::RandomState`]: std's SipHash-1-3 with per-process random
+///   keys, on vstd's `axiom_random_state_builds_valid_hashers`. Slower, and
+///   what a caller picks when its keys come from an untrusted source and the
+///   map must not be flooded into one bucket (the registries' names, say).
+pub trait ValidHasher: BuildHasher + Default {
+    proof fn lemma_builds_valid_hashers()
+        ensures
+            builds_valid_hashers::<Self>(),
+    ;
+}
+
+impl ValidHasher for IndexHasher {
+    proof fn lemma_builds_valid_hashers() {
+        broadcast use axiom_index_hasher_builds_valid_hashers;
+    }
+}
+
+impl ValidHasher for std::hash::RandomState {
+    proof fn lemma_builds_valid_hashers() {
+        broadcast use vstd::std_specs::hash::axiom_random_state_builds_valid_hashers;
+    }
+}
+
 } // verus!

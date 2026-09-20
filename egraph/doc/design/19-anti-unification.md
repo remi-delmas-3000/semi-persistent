@@ -858,7 +858,10 @@ costs the discarded suffix rather than the surviving entries. Every AU index is
 an interning table (a key is looked up and inserted only on a miss), which is
 what the discipline states: no key occurs twice in the log, so the map keeps no
 previous-occurrence column and an insert is one hash of the key (`try_intern`)
-and one log push. The memo moved onto the map on 2026-09-19, retiring the last
+and one log push. Where the value is expensive to build — the action cache's
+list for a class pair, the or-statistics node — the entry is built inside
+`try_intern_with`, so the probe that decides membership is the only hash the
+visit pays; the action cache used to hash a pair three times per visit. The memo moved onto the map on 2026-09-19, retiring the last
 hand-maintained rollback in the workspace: a walk over the log above the
 checkpoint plus a stack of per-frame lengths, 67 lines of it; the unique
 discipline followed the same day.

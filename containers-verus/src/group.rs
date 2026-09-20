@@ -1382,7 +1382,8 @@ where
     }
 }
 
-impl<K, V, I, const TRACK: bool, const UNIQUE: bool> Member for crate::map::SpMap<K, V, I, TRACK, UNIQUE>
+impl<K, V, I, const TRACK: bool, const UNIQUE: bool, S: crate::hasher_spec::ValidHasher> Member
+    for crate::map::SpMap<K, V, I, TRACK, UNIQUE, S>
 where
     K: Clone + core::hash::Hash + Eq,
     I: crate::index_like::IndexLike,

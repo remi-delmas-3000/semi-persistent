@@ -23,6 +23,16 @@
 //! action cache), a `String` (the four registries), and a `Vec<u32>` (the
 //! context store, where hashing and cloning a key touch the heap).
 //!
+//! Reading the numbers: on an Apple Silicon machine a benchmark process may land
+//! on efficiency cores, where every row is about twice as slow and, worse, the
+//! ORDER of two close variants can differ from the performance-core order (a
+//! column push and a hash cost different fractions of an insert on each). The
+//! `spmap/intern/u64pair/spmap_unique_intern` row is the canary: about 82 µs on
+//! the performance cores of an M4 Pro, about 160 µs on its efficiency cores.
+//! Discard a run whose canary is off, and never trust a single-run difference
+//! under ten per cent from this file; the paired protocol in `bench_pair.sh` is
+//! for those.
+//!
 //! Both sides use the crate's `IndexHasher`. That is not a detail: with std's
 //! default `RandomState` on the reference side the comparison measures the
 //! hasher and nothing else — the map came out between 1.4x and 5.7x faster on
@@ -31,7 +41,7 @@
 //! isolates the previous-occurrence column and the double hash.
 
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::hash::{Hash, RandomState};
 
 use semi_persistent_containers_verus::hasher_spec::IndexHasher;
 
@@ -125,6 +135,9 @@ fn vecs(n: usize) -> Vec<Vec<u32>> {
 /// Fill both sides through the interning path: lookup, then insert on a miss.
 fn bench_intern<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, keys: Vec<K>) {
     let mut g = c.benchmark_group(format!("spmap/intern/{shape}"));
+    if keys.len() > N {
+        g.sample_size(30);
+    }
     g.bench_function("spmap_precheck", |b| {
         b.iter_batched(
             || keys.clone(),
@@ -160,6 +173,21 @@ fn bench_intern<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, 
             || keys.clone(),
             |ks| {
                 let mut m: SpUniqueMap<K, u32> = SpUniqueMap::new();
+                for (i, k) in ks.into_iter().enumerate() {
+                    m.try_intern(k, i as u32).expect("fits the index word");
+                }
+                m.len()
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    // The same map on std's SipHash `RandomState`: what DoS resistance costs
+    // when the keys come from an untrusted source.
+    g.bench_function("spmap_unique_intern_randomstate", |b| {
+        b.iter_batched(
+            || keys.clone(),
+            |ks| {
+                let mut m: SpUniqueMap<K, u32, usize, true, RandomState> = SpUniqueMap::new();
                 for (i, k) in ks.into_iter().enumerate() {
                     m.try_intern(k, i as u32).expect("fits the index word");
                 }
@@ -304,6 +332,12 @@ fn benches(c: &mut Criterion) {
     bench_intern(c, "u64pair", pairs(N));
     bench_intern(c, "string", strings(N));
     bench_intern(c, "vec32", vecs(N));
+    // Sixteen times larger, so the column's growth (16 bytes per entry,
+    // reallocated as the table grows) is a 1 MB allocation rather than 64 KB.
+    // On performance cores the unique map is 2–3 per cent ahead of the general
+    // map's `try_intern` here and level with the hand-rolled table.
+    bench_intern(c, "string_64k", strings(16 * N));
+    bench_intern(c, "vec32_64k", vecs(16 * N));
 
     bench_lookup(c, "u64pair", pairs(N));
     bench_lookup(c, "string", strings(N));

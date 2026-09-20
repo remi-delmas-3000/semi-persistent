@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use semi_persistent_containers_verus::dense_id::DenseId31;
 use semi_persistent_containers_verus::error::ContainerError;
-use semi_persistent_containers_verus::map::{SpMap, SpUniqueMap};
+use semi_persistent_containers_verus::map::{Produce, SpMap, SpUniqueMap};
 use semi_persistent_containers_verus::parallel_store::ParallelStore;
 use semi_persistent_containers_verus::sparse_set::SparseSet;
 use semi_persistent_containers_verus::vec::ShrinkPolicy;
@@ -235,6 +235,69 @@ fn unique_map_mark_restore() {
             assert_eq!(m.contains_key(&absent), oracle.contains_key(&absent));
         }
         println!("unique_map_mark_restore seed={seed}: OK");
+    }
+}
+
+/// A closure as a producer, as an unverified caller writes it.
+struct Lazy<F>(F);
+impl<V, F: FnOnce() -> V> Produce<V> for Lazy<F> {
+    fn produce(self) -> V {
+        (self.0)()
+    }
+}
+
+/// The hasher parameter: the same map on std's `RandomState`, and the
+/// insert-on-miss `try_intern_with`, whose closure must run exactly once per
+/// fresh key and never for a present one.
+#[test]
+fn unique_map_on_random_state_and_intern_with() {
+    type RMap = SpUniqueMap<String, u64, usize, true, std::hash::RandomState>;
+    for seed in 0..8u64 {
+        let mut m = ForkHistory::new(RMap::new());
+        let mut oracle: HashMap<String, u64> = HashMap::new();
+        let mut rng = Lcg::new(seed ^ 0x2D2D);
+        let mut frames: Vec<(_, HashMap<String, u64>)> = Vec::new();
+        let mut computed = 0usize;
+        let mut fresh_count = 0usize;
+        for _ in 0..300 {
+            match rng.below(8) {
+                0 => {
+                    let token = m.mark(ShrinkPolicy::Never).expect("mark");
+                    frames.push((token, oracle.clone()));
+                }
+                1 if !frames.is_empty() => {
+                    let (tok, snap) = frames.pop().unwrap();
+                    assert!(m.restore(tok));
+                    oracle = snap;
+                }
+                _ => {
+                    let key = format!("k{}", rng.below(40));
+                    let val = rng.next();
+                    let (id, fresh) = m
+                        .try_intern_with(
+                            key.clone(),
+                            Lazy(|| {
+                                computed += 1;
+                                val
+                            }),
+                        )
+                        .expect("within index word");
+                    assert_eq!(fresh, !oracle.contains_key(&key), "seed={seed}: {key}");
+                    if fresh {
+                        fresh_count += 1;
+                        assert_eq!(m.get(id).1, val);
+                    }
+                    oracle.entry(key).or_insert(val);
+                }
+            }
+            // The closure ran exactly once per fresh key and never for a hit.
+            assert_eq!(computed, fresh_count, "seed={seed}");
+            assert_eq!(m.len(), oracle.len());
+            for (k, &v) in oracle.iter() {
+                assert_eq!(m.get_by_key(k).copied(), Some(v), "seed={seed}: {k}");
+            }
+        }
+        println!("random_state seed={seed}: OK");
     }
 }
 

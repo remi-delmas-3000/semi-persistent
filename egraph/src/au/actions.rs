@@ -135,6 +135,35 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
         })
     }
 
+    /// The action list for `(l, r)`, computing and caching it on a miss: one
+    /// hash of the pair, and `f` runs only when the pair is new.
+    pub fn get_or_insert_with(
+        &mut self,
+        l: A::Class,
+        r: A::Class,
+        f: impl FnOnce() -> Vec<Action<O, A, M>>,
+    ) -> &[Action<O, A, M>] {
+        let values = &mut self.values;
+        let (log_idx, _fresh) = self
+            .index
+            .try_intern_with(
+                (l, r),
+                super::Lazy(|| {
+                    // See `insert` for why the column refuses rather than masks.
+                    let idx = crate::id::id_at::<A::Action>(values.len().as_usize());
+                    values
+                        .try_push(f())
+                        .expect("AU arena sized by its index word");
+                    idx
+                }),
+            )
+            .expect("AU arena sized by its index word");
+        let &idx = self.index.get_val(log_idx);
+        self.values
+            .get(A::Index::try_from_usize(idx.to_usize()).expect("id within the index word"))
+            .as_slice()
+    }
+
     pub fn insert(&mut self, l: A::Class, r: A::Class, actions: Vec<Action<O, A, M>>) {
         // The column refuses at its index word rather than masking: masking would
         // hand the new list the id of an older one, and `get` would then serve the
@@ -189,24 +218,43 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> Default for ActionCache<O, A, M>
 
 /// Generate all actions for a class pair `(l, r)` by scanning their common operators.
 /// Actions are NOT cycle-filtered here; that is done at the OR-node level.
-pub fn generate_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
+pub fn generate_actions<'c, Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
     snap: &AuSnapshot<Cfg, L, T, P>,
-    cache: &mut ActionCache<Cfg::O, Cfg::Au, Cfg::M>,
+    cache: &'c mut ActionCache<Cfg::O, Cfg::Au, Cfg::M>,
     l: ClassOf<Cfg>,
     r: ClassOf<Cfg>,
-) where
+) -> &'c [Action<Cfg::O, Cfg::Au, Cfg::M>]
+where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
     Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
-    if cache.get(l, r).is_some() {
-        return;
-    }
+    // One hash of the class pair: the cache decides membership, computes the
+    // list only on a miss, and hands back the slice either way. Written as a
+    // membership check, an insert and a read-back this hashed the pair three
+    // times per visit.
+    let a_max = cache.a_max();
+    let include_ac = cache.include_ac();
+    cache.get_or_insert_with(l, r, || {
+        dedup(compute_actions(snap, a_max, include_ac, l, r))
+    })
+}
 
+/// The action list for `(l, r)` before deduplication: scan the members' common
+/// operators and pair them up per operator class.
+fn compute_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
+    snap: &AuSnapshot<Cfg, L, T, P>,
+    a_max: usize,
+    include_ac: bool,
+    l: ClassOf<Cfg>,
+    r: ClassOf<Cfg>,
+) -> Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>
+where
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
+{
     let eg = snap.egraph();
     let members_l = snap.members(l);
     let members_r = snap.members(r);
-    let a_max = cache.a_max();
-    let include_ac = cache.include_ac();
 
     let mut actions: Vec<Action<Cfg::O, Cfg::Au, Cfg::M>> = Vec::new();
 
@@ -307,8 +355,7 @@ pub fn generate_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
     if !include_ac {
         // The exact solver handles all AC/ACI pairs (including identity
         // expansion) through the transport path; skip materialization.
-        dedup_and_insert(cache, l, r, actions);
-        return;
+        return actions;
     }
     for &(op_id, _) in members_l.iter() {
         let kind = eg.ops().info(op_id).canon_class();
@@ -440,20 +487,17 @@ pub fn generate_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
         }
     }
 
-    dedup_and_insert(cache, l, r, actions);
+    actions
 }
 
 /// Deduplicate actions by operator plus canonical (left, right, count)
-/// signature and insert into the cache. Rewrite-derived equivalent members can produce identical
+/// signature. Rewrite-derived equivalent members can produce identical
 /// actions from different (l_node, r_node) pairs; duplicates would surface as
 /// separate statistics edges and bias MCGS selection toward the duplicated
 /// action.
-fn dedup_and_insert<O: DenseId, A: AuIds, M: MultiplicityLike>(
-    cache: &mut ActionCache<O, A, M>,
-    l: A::Class,
-    r: A::Class,
+fn dedup<O: DenseId, A: AuIds, M: MultiplicityLike>(
     mut actions: Vec<Action<O, A, M>>,
-) {
+) -> Vec<Action<O, A, M>> {
     // The signature holds the pair's own types. Widening the two class ids to `usize` to
     // key a hash set bought nothing — dense ids are already `Hash + Ord` — and cost real
     // bytes in a set that is rebuilt for every class pair the search visits: at the 31-bit
@@ -473,7 +517,7 @@ fn dedup_and_insert<O: DenseId, A: AuIds, M: MultiplicityLike>(
         sig.sort_unstable();
         seen.insert((action.op, sig))
     });
-    cache.insert(l, r, actions);
+    actions
 }
 
 /// Ordered operators (fixed arity): positional zip of same-arity member pairs (§3.4.1).

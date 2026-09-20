@@ -42,8 +42,12 @@
 //! `Key::clone` produces a result identical to its input (see
 //! `clone_key_exact`).
 //!
-//! The index's `BuildHasher` is [`crate::hasher_spec::IndexHasher`], which uses
-//! the same hash ALGORITHM production gets from hashbrown 0.17's default. Its
+//! The index's `BuildHasher` is the `S` parameter, any [`ValidHasher`]: a
+//! hasher that is `Default` and provably valid in vstd's model, each on one
+//! already-shipped axiom. The default, [`crate::hasher_spec::IndexHasher`], uses
+//! the same hash ALGORITHM production gets from hashbrown 0.17's default;
+//! `std::hash::RandomState` (SipHash, per-process random keys) is the choice
+//! for keys from an untrusted source. The rest of this note is about the default. Its
 //! seed is DETERMINISTIC by default (a fixed constant, so runs are reproducible)
 //! and CONTROLLABLE three ways — `SP_HASHER_SEED`,
 //! `hasher_spec::set_default_seed`, or `IndexHasher::with_seed` per instance.
@@ -60,10 +64,11 @@
 //! sequences reproducible too. See `hasher_spec` for the full policy.
 //!
 //! vstd models `std::HashMap<K, V, S>` generically over any `S: BuildHasher`,
-//! so this is the same verified container with a faster hash function; the one
-//! `builds_valid_hashers::<S>()` fact it needs is
-//! `hasher_spec::axiom_index_hasher_builds_valid_hashers`
-//! (mirrors vstd's shipped `RandomState` axiom).
+//! so every hasher gives the same verified container; the one
+//! `builds_valid_hashers::<S>()` fact each operation needs comes from the
+//! hasher's `ValidHasher::lemma_builds_valid_hashers` — this crate's
+//! `axiom_index_hasher_builds_valid_hashers` for the default, vstd's shipped
+//! `RandomState` axiom for std's.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -76,7 +81,7 @@ use crate::vec::{ShrinkPolicy, VecToken};
 
 // The index hasher (and the determinism policy behind it) lives in one place:
 // `hasher_spec`. Re-exported here because it appears in `SpMap`'s field type.
-pub use crate::hasher_spec::IndexHasher;
+pub use crate::hasher_spec::{IndexHasher, ValidHasher};
 
 verus! {
 
@@ -101,6 +106,22 @@ pub open(crate) spec fn keys_unique<K, V>(log: Seq<(K, V)>) -> bool {
     forall|i: int, j: int| 0 <= i < j < log.len() ==> (#[trigger] log[i]).0 != (#[trigger] log[j]).0
 }
 
+/// A value computed on demand, for [`SpMap::try_intern_with`]: the map calls
+/// `produce` only after its probe has found the key absent. `produce` has no
+/// precondition, which is what keeps the map's operation total; what it
+/// promises about the value is `post`, and the map carries that promise into
+/// its own postcondition. An unverified caller implements it for a closure
+/// wrapper in one line.
+pub trait Produce<V> {
+    /// What `produce` guarantees about its value.
+    spec fn post(&self, v: V) -> bool;
+
+    fn produce(self) -> (v: V)
+        ensures
+            self.post(v),
+    ;
+}
+
 /// Semi-persistent map. (`SpMap` rather than `Map` to avoid colliding with
 /// `vstd::map::Map`, which is `HashMap`'s view type.)
 ///
@@ -113,12 +134,19 @@ pub open(crate) spec fn keys_unique<K, V>(log: Seq<(K, V)>) -> bool {
 /// `UNIQUE` selects the key discipline (see the module docs): `false` is
 /// last-write-wins, `true` refuses duplicate keys and drops the
 /// previous-occurrence column.
-pub struct SpMap<K, V, I: IndexLike = usize, const TRACK: bool = true, const UNIQUE: bool = false>
-where
+#[verifier::reject_recursive_types(S)]
+pub struct SpMap<
+    K,
+    V,
+    I: IndexLike = usize,
+    const TRACK: bool = true,
+    const UNIQUE: bool = false,
+    S: ValidHasher = IndexHasher,
+> where
     K: Clone + Hash + Eq,
 {
     pub(crate) log: AppendOnlyVec<(K, V), I, TRACK>,
-    pub(crate) index: HashMap<K, I, IndexHasher>,
+    pub(crate) index: HashMap<K, I, S>,
     /// Previous-occurrence chain, parallel to the log: `prev[p]` is the position
     /// of the last entry holding `log[p].0` BEFORE `p`, or `None` when `p` is the
     /// key's first occurrence. It is the value `HashMap::insert` returns when the
@@ -133,9 +161,10 @@ where
 /// The unique-keys map: [`SpMap`] with `UNIQUE = true`. An insert of a present
 /// key is refused (`try_insert`) or answered with the existing entry
 /// (`try_intern`); no previous-occurrence column is kept.
-pub type SpUniqueMap<K, V, I = usize, const TRACK: bool = true> = SpMap<K, V, I, TRACK, true>;
+pub type SpUniqueMap<K, V, I = usize, const TRACK: bool = true, S = IndexHasher> =
+    SpMap<K, V, I, TRACK, true, S>;
 
-impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool> SpMap<K, V, I, TRACK, UNIQUE>
+impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool, S: ValidHasher> SpMap<K, V, I, TRACK, UNIQUE, S>
 where
     K: Clone + Hash + Eq,
 {
@@ -174,7 +203,7 @@ where
     /// agreement is exactly as strong as before, just stated on the projection.
     pub open(crate) spec fn index_agrees(&self) -> bool {
         &&& obeys_key_model::<K>()
-        &&& builds_valid_hashers::<IndexHasher>()
+        &&& builds_valid_hashers::<S>()
         &&& index_agrees_seq(self.log_view(), self.index@)
     }
 
@@ -276,7 +305,7 @@ where
             m.index_view() == Map::<K, I>::empty(),
     {
         broadcast use vstd::std_specs::hash::group_hash_axioms;
-        broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
+        proof { S::lemma_builds_valid_hashers(); }
         let log = AppendOnlyVec::new();
         // `default()` (not `new()`): `new()` hardcodes std's `RandomState`;
         // `default()` builds the map with our chosen `S = IndexHasher`
@@ -285,7 +314,7 @@ where
         // `IndexHasher::default()` rather than a `with_hasher` constructor: vstd
         // does not spec `with_hasher`, so this route keeps seed control free of
         // added trust. See hasher_spec.
-        let index: HashMap<K, I, IndexHasher> = HashMap::default();
+        let index: HashMap<K, I, S> = HashMap::default();
         let prev: std::vec::Vec<Option<I>> = std::vec::Vec::new();
         let m = SpMap { log, index, prev };
         proof {
@@ -444,7 +473,7 @@ where
             final(self).index_view() == old(self).index_view().insert(key, id),
     {
         broadcast use vstd::std_specs::hash::group_hash_axioms;
-        broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
+        proof { S::lemma_builds_valid_hashers(); }
         let ghost old_log = self.log_view();
         let ghost old_prev = self.prev@;
         let key_for_index = clone_key_exact(&key);
@@ -627,6 +656,87 @@ where
         Ok(self.intern_entry(key, val))
     }
 
+    /// `try_intern` whose value is computed only on a miss: the id of the
+    /// existing entry, or a fresh one holding `f()`. One hash of the key either
+    /// way, and `f` runs at most once, after the probe has decided the key is
+    /// absent.
+    ///
+    /// This is the shape for a caller whose value is expensive to build — an
+    /// action list, a statistics node — and who would otherwise look the key up,
+    /// compute, and insert: two hashes, or three with a read-back. The producer
+    /// may borrow anything but this map.
+    ///
+    /// The producer is a [`Produce`] rather than a bare closure so that this
+    /// stays a total operation: a closure carries its own precondition, which
+    /// this map could only pass through as a `requires` of its own, while
+    /// `Produce::produce` has none.
+    pub fn try_intern_with<P: Produce<V>>(&mut self, key: K, f: P)
+        -> (r: Result<(I, bool), crate::error::ContainerError>)
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            r matches Ok((id, fresh)) ==> !fresh ==> (
+                final(self).log_view() == old(self).log_view()
+                && final(self).index_view() == old(self).index_view()
+                && old(self).index_view().contains_key(key)
+                && old(self).index_view()[key] == id),
+            r matches Ok((id, fresh)) ==> fresh ==> (
+                id.as_nat() == old(self).log_view().len()
+                && final(self).log_view().len() == old(self).log_view().len() + 1
+                && final(self).log_view()[id.as_nat() as int].0 == key
+                && f.post(final(self).log_view()[id.as_nat() as int].1)
+                && final(self).log_view()
+                    == old(self).log_view().push(final(self).log_view()[id.as_nat() as int])
+                && final(self).index_view() == old(self).index_view().insert(key, id)),
+            r is Err ==> final(self).log_view() == old(self).log_view()
+                && final(self).index_view() == old(self).index_view(),
+            r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted,
+    {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+        proof { S::lemma_builds_valid_hashers(); }
+        if !self.can_insert() {
+            return match self.id_of(&key) {
+                Some(id) => Ok((id, false)),
+                None => Err(crate::error::ContainerError::CapacityExhausted),
+            };
+        }
+        let ghost old_log = self.log_view();
+        let ghost old_index = self.index@;
+        let ghost old_prev = self.prev@;
+        let key_for_index = clone_key_exact(&key);
+        match self.index.entry(key_for_index) {
+            Entry::Occupied(e) => {
+                let id = *e.get();
+                Ok((id, false))
+            }
+            Entry::Vacant(e) => {
+                proof {
+                    lemma_absent_from_index_absent_from_log(old_log, old_index, key);
+                }
+                let val = f.produce();
+                let id = self.log.push((key, val));
+                if !UNIQUE {
+                    self.prev.push(None);
+                }
+                e.insert(id);
+                proof {
+                    let log = self.log_view();
+                    assert(log == old_log.push((key, val)));
+                    if UNIQUE {
+                        lemma_append_fresh_keys_unique(old_log, key, val);
+                    } else {
+                        assert(self.prev@ =~= old_prev.push(None::<I>));
+                        lemma_insert_prev_link(old_log, old_prev, old_index, log, self.prev@, None);
+                    }
+                    lemma_append_fresh_preserves_index::<K, V, I>(old_log, old_index, key, val, id);
+                    assert(self.index@ =~= old_index.insert(key, id));
+                }
+                Ok((id, true))
+            }
+        }
+    }
+
     /// The interning core behind `try_intern` and unique-mode `try_insert`:
     /// one probe through the entry API, appending only when the key is vacant.
     ///
@@ -635,6 +745,14 @@ where
     /// and `index_agrees` turns that into "absent from the log", which is
     /// exactly the `None` link (last-write-wins) or the fresh key that keeps
     /// the log's keys distinct (unique keys).
+    ///
+    /// Inlined unconditionally: the two disciplines are separate
+    /// monomorphizations of this body, and left to the inliner the unique one
+    /// came out 4–5 per cent slower than the general one on heap keys despite
+    /// doing strictly less work — a code-layout artefact, reproducible per
+    /// binary. Forcing the inline puts both in the same context, and the
+    /// expected order holds: unique keys is the faster path on every key shape.
+    #[inline(always)]
     fn intern_entry(&mut self, key: K, val: V) -> (r: (I, bool))
         requires
             old(self).wf(),
@@ -652,7 +770,7 @@ where
                 && final(self).index_view() == old(self).index_view().insert(key, r.0)),
     {
         broadcast use vstd::std_specs::hash::group_hash_axioms;
-        broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
+        proof { S::lemma_builds_valid_hashers(); }
         let ghost old_log = self.log_view();
         let ghost old_index = self.index@;
         let ghost old_prev = self.prev@;
@@ -850,7 +968,7 @@ where
             final(self).index_agrees_prefix(saved_len as int),
     {
         broadcast use vstd::std_specs::hash::group_hash_axioms;
-        broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
+        proof { S::lemma_builds_valid_hashers(); }
         let ghost log = self.log_view();
         // The chain links the walk consults: the stored column, or the all-`None`
         // column the unique discipline never materializes.
@@ -882,7 +1000,7 @@ where
                 log.len() < I::max_nat(),
                 saved_len <= bound <= n,
                 obeys_key_model::<K>(),
-                builds_valid_hashers::<IndexHasher>(),
+                builds_valid_hashers::<S>(),
                 !UNIQUE ==> links == self.prev@,
                 UNIQUE ==> (forall|i: int| 0 <= i < links.len() ==> #[trigger] links[i] is None),
                 prev_agrees_seq(log, links),
@@ -928,7 +1046,7 @@ where
             final(self).prev == old(self).prev,
     {
         broadcast use vstd::std_specs::hash::group_hash_axioms;
-        broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
+        proof { S::lemma_builds_valid_hashers(); }
         let ghost log = self.log_view();
         self.index.clear();
         // The scan counter stays `usize` — it is a loop variable, never stored —
@@ -949,7 +1067,7 @@ where
                 log.len() < I::max_nat(),
                 0 <= i <= n,
                 obeys_key_model::<K>(),
-                builds_valid_hashers::<IndexHasher>(),
+                builds_valid_hashers::<S>(),
                 forall|p: int| 0 <= p < i && is_last_occurrence_prefix(log, p, i as int)
                     ==> #[trigger] self.index@.contains_key(log[p].0)
                         && self.index@[log[p].0].as_nat() == p,
@@ -1457,8 +1575,8 @@ fn clone_key_exact<K: Clone>(key: &K) -> (r: K)
 // `verus!{}` is unsupported. Prints the live entries via the public `iter`
 // (the log is the source of truth); shadowed/overwritten log entries are not
 // shown, matching the map's logical contents.
-impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool> core::fmt::Debug
-    for SpMap<K, V, I, TRACK, UNIQUE>
+impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool, S: ValidHasher> core::fmt::Debug
+    for SpMap<K, V, I, TRACK, UNIQUE, S>
 where
     K: Clone + core::hash::Hash + Eq + core::fmt::Debug,
     V: core::fmt::Debug,
@@ -1473,8 +1591,8 @@ where
     }
 }
 
-impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool> Default
-    for SpMap<K, V, I, TRACK, UNIQUE>
+impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool, S: ValidHasher> Default
+    for SpMap<K, V, I, TRACK, UNIQUE, S>
 where
     K: Clone + core::hash::Hash + Eq,
 {
@@ -1489,7 +1607,8 @@ where
 // semantics). Delegates to the verified AppendOnlyVec::as_slice.
 // ---------------------------------------------------------------------------
 
-impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool> SpMap<K, V, I, TRACK, UNIQUE>
+impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool, S: ValidHasher>
+    SpMap<K, V, I, TRACK, UNIQUE, S>
 where
     K: Clone + std::hash::Hash + Eq,
 {

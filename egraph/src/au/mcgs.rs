@@ -1418,19 +1418,6 @@ impl<A: AuIds, O: DenseId> McgsState<A, O> {
         self.or_stats.or_id(id)
     }
 
-    fn push_or_stat(
-        &mut self,
-        or_id: A::Or,
-        data: OrStatsData<A::AndStats>,
-        descriptors: Vec<TransportActionDesc<O, A::Class>>,
-    ) -> A::OrStats {
-        let id = self.or_stats.push(or_id, data, descriptors);
-        self.or_stats_map
-            .try_insert(or_id, id)
-            .expect("AU arena sized by its index word");
-        id
-    }
-
     /// Push one AND-statistics node. With `track_closed` (the `closed_bit`
     /// flag), also register the reverse edge from every child position back to
     /// this node and discount the children that are already closed, so the
@@ -2207,7 +2194,12 @@ fn solve_hybrid<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
     space: &SearchSpace<Cfg::Au>,
     pool: &mut TermPool<Cfg::O, Cfg::V, Cfg::Au>,
     results: &mut BestResults<Cfg::Au>,
-    state: &mut McgsState<Cfg::Au, Cfg::O>,
+    exact_memo: &mut super::exact_memo::ExactMemo<
+        <Cfg::Au as AuIds>::Term,
+        <Cfg::Au as AuIds>::Class,
+        <Cfg::Au as AuIds>::Index,
+    >,
+    hybrid: &mut HybridStats,
     or_id: <Cfg::Au as AuIds>::Or,
     l: ClassOf<Cfg>,
     r: ClassOf<Cfg>,
@@ -2240,16 +2232,16 @@ fn solve_hybrid<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
         // leave the optimum unchanged (au_differential.rs).
         true,
         true,
-        config.session_exact_memo.then_some(&mut state.exact_memo),
+        config.session_exact_memo.then_some(exact_memo),
         config.hybrid_node_budget,
         None,
     );
-    state.hybrid.calls += 1;
-    state.hybrid.time += start.elapsed();
+    hybrid.calls += 1;
+    hybrid.time += start.elapsed();
 
     results.offer(or_id, run.term, pool.quality(run.term));
     if run.complete {
-        state.hybrid.proved += 1;
+        hybrid.proved += 1;
         results.mark_exact(or_id);
     }
 }
@@ -2285,133 +2277,151 @@ where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
     Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
-    if let Some(log_idx) = state.or_stats_map.id_of(&or_id) {
-        return *state.or_stats_map.get_val(log_idx);
-    }
-
-    let dominance = config.dominance_pruning;
-    let l = *space.or_arena.left.get(or_id.to_index());
-    let r = *space.or_arena.right.get(or_id.to_index());
-    let l_best = *space.or_arena.left_best_size.get(or_id.to_index()) as f64;
-    let r_best = *space.or_arena.right_best_size.get(or_id.to_index()) as f64;
-
+    // One hash of the or-id: the map decides membership, and the node is
+    // built only on a miss, inside the closure. The state is split into the
+    // map and the fields the construction needs, so the closure can borrow
+    // the latter while the map holds the probe.
+    let McgsState {
+        or_stats,
+        or_stats_map,
+        exact_memo,
+        hybrid,
+        ..
+    } = state;
     let live_prune = config.live_incumbent_pruning;
-    let mut edge_bounds: Vec<u32> = Vec::new();
-    let (num_actions, descs) = if l == r {
-        (0, Vec::new())
-    } else {
-        let gen_size = static_generalize_quality(snap, l, r).0;
-        generate_actions(snap, action_cache, l, r);
-        let actions = action_cache.get(l, r).unwrap();
-        let mut count = 0;
-        for action in actions {
-            let blocked = action
-                .pairs
-                .iter()
-                .any(|p| space.is_cycle_blocked(or_id, p.left, p.right));
-            if blocked {
-                continue;
-            }
-            if dominance || live_prune {
-                let bound = structural_action_bound(snap, action);
-                if dominance && bound > u64::from(gen_size) {
-                    continue;
-                }
-                count += 1;
-                if live_prune {
-                    edge_bounds.push(u32::try_from(bound).unwrap_or(u32::MAX));
-                }
-            } else {
-                count += 1;
-            }
-        }
-        // One edge per feasible AC/ACI transport action (flow-verified).
-        // Descriptors are computed once here and cached on the stats entry;
-        // expansion reads the cache instead of re-solving feasibility.
-        let mut descs = transport_actions(snap, space, or_id, l, r);
-        if dominance {
-            // Same dominance screen for transport actions, on the shared
-            // lb-cost flow bound. `None` (infeasible) cannot occur here —
-            // every descriptor passed the zero-cost feasibility gate on the
-            // same mask and supplies — but dropping it would be sound too.
-            descs.retain(|desc| {
-                let n_cols = desc.right.len();
-                match transport_pair_lb(snap, &desc.left, &desc.right, |i, j| {
-                    desc.legal_cells[i * n_cols + j]
-                }) {
-                    None => false,
-                    Some(bound) => bound <= u128::from(gen_size),
-                }
-            });
-        }
-        if live_prune {
-            // The flow bound per surviving descriptor, on the same mask the
-            // real solve uses; `None` cannot occur (every descriptor passed
-            // the zero-cost feasibility gate), and a saturated bound clamps
-            // to `u32::MAX`, which only ever excludes.
-            for desc in &descs {
-                let n_cols = desc.right.len();
-                let bound = transport_pair_lb(snap, &desc.left, &desc.right, |i, j| {
-                    desc.legal_cells[i * n_cols + j]
-                })
-                .unwrap_or(u128::MAX);
-                edge_bounds.push(u32::try_from(bound).unwrap_or(u32::MAX));
-            }
-        }
-        count += descs.len();
-        (count, descs)
-    };
-    if !live_prune {
-        edge_bounds = vec![0; num_actions];
-    }
-    debug_assert_eq!(edge_bounds.len(), num_actions);
-
-    // Hybrid exact (hybrid exact solving): a subproblem small enough to prove outright
-    // is proved here rather than enumerated by playouts. Running before the
-    // terminal test is what makes the proof land: `results.is_exact` is
-    // already a terminal condition, so a proved node needs no separate flag.
-    if config.hybrid_exact && l != r && num_actions > 0 && !results.is_exact(or_id) {
-        solve_hybrid(
-            snap,
-            space,
-            pool,
-            results,
-            state,
+    let mut fresh_terminal: Option<bool> = None;
+    let (log_idx, _fresh) = or_stats_map
+        .try_intern_with(
             or_id,
-            l,
-            r,
-            num_actions,
-            config,
-        );
-    }
+            super::Lazy(|| {
+                let dominance = config.dominance_pruning;
+                let l = *space.or_arena.left.get(or_id.to_index());
+                let r = *space.or_arena.right.get(or_id.to_index());
+                let l_best = *space.or_arena.left_best_size.get(or_id.to_index()) as f64;
+                let r_best = *space.or_arena.right_best_size.get(or_id.to_index()) as f64;
 
-    let terminal = l == r || num_actions == 0 || results.is_exact(or_id);
-    // Terminal nodes take their stored best result as their permanent value.
-    let value = if terminal {
-        results.best_size(or_id) as f64
-    } else {
-        f64::INFINITY
-    };
+                let mut edge_bounds: Vec<u32> = Vec::new();
+                let (num_actions, descs) = if l == r {
+                    (0, Vec::new())
+                } else {
+                    let gen_size = static_generalize_quality(snap, l, r).0;
+                    let actions = generate_actions(snap, action_cache, l, r);
+                    let mut count = 0;
+                    for action in actions {
+                        let blocked = action
+                            .pairs
+                            .iter()
+                            .any(|p| space.is_cycle_blocked(or_id, p.left, p.right));
+                        if blocked {
+                            continue;
+                        }
+                        if dominance || live_prune {
+                            let bound = structural_action_bound(snap, action);
+                            if dominance && bound > u64::from(gen_size) {
+                                continue;
+                            }
+                            count += 1;
+                            if live_prune {
+                                edge_bounds.push(u32::try_from(bound).unwrap_or(u32::MAX));
+                            }
+                        } else {
+                            count += 1;
+                        }
+                    }
+                    // One edge per feasible AC/ACI transport action (flow-verified).
+                    // Descriptors are computed once here and cached on the stats entry;
+                    // expansion reads the cache instead of re-solving feasibility.
+                    let mut descs = transport_actions(snap, space, or_id, l, r);
+                    if dominance {
+                        // Same dominance screen for transport actions, on the shared
+                        // lb-cost flow bound. `None` (infeasible) cannot occur here —
+                        // every descriptor passed the zero-cost feasibility gate on the
+                        // same mask and supplies — but dropping it would be sound too.
+                        descs.retain(|desc| {
+                            let n_cols = desc.right.len();
+                            match transport_pair_lb(snap, &desc.left, &desc.right, |i, j| {
+                                desc.legal_cells[i * n_cols + j]
+                            }) {
+                                None => false,
+                                Some(bound) => bound <= u128::from(gen_size),
+                            }
+                        });
+                    }
+                    if live_prune {
+                        // The flow bound per surviving descriptor, on the same mask the
+                        // real solve uses; `None` cannot occur (every descriptor passed
+                        // the zero-cost feasibility gate), and a saturated bound clamps
+                        // to `u32::MAX`, which only ever excludes.
+                        for desc in &descs {
+                            let n_cols = desc.right.len();
+                            let bound = transport_pair_lb(snap, &desc.left, &desc.right, |i, j| {
+                                desc.legal_cells[i * n_cols + j]
+                            })
+                            .unwrap_or(u128::MAX);
+                            edge_bounds.push(u32::try_from(bound).unwrap_or(u32::MAX));
+                        }
+                    }
+                    count += descs.len();
+                    (count, descs)
+                };
+                if !live_prune {
+                    edge_bounds = vec![0; num_actions];
+                }
+                debug_assert_eq!(edge_bounds.len(), num_actions);
 
-    let idx = state.push_or_stat(
-        or_id,
-        OrStatsData {
-            initial_value: value,
-            value,
-            min_size: l_best.min(r_best),
-            max_size: l_best.max(r_best),
-            terminal,
-            edge_visits: vec![0; num_actions],
-            edge_and: vec![None; num_actions],
-            edge_bounds,
-        },
-        descs,
-    );
+                // Hybrid exact (hybrid exact solving): a subproblem small enough to prove outright
+                // is proved here rather than enumerated by playouts. Running before the
+                // terminal test is what makes the proof land: `results.is_exact` is
+                // already a terminal condition, so a proved node needs no separate flag.
+                if config.hybrid_exact && l != r && num_actions > 0 && !results.is_exact(or_id) {
+                    solve_hybrid(
+                        snap,
+                        space,
+                        pool,
+                        results,
+                        exact_memo,
+                        hybrid,
+                        or_id,
+                        l,
+                        r,
+                        num_actions,
+                        config,
+                    );
+                }
+
+                let terminal = l == r || num_actions == 0 || results.is_exact(or_id);
+                // Terminal nodes take their stored best result as their permanent value.
+                let value = if terminal {
+                    results.best_size(or_id) as f64
+                } else {
+                    f64::INFINITY
+                };
+
+                fresh_terminal = Some(terminal);
+                or_stats.push(
+                    or_id,
+                    OrStatsData {
+                        initial_value: value,
+                        value,
+                        min_size: l_best.min(r_best),
+                        max_size: l_best.max(r_best),
+                        terminal,
+                        edge_visits: vec![0; num_actions],
+                        edge_and: vec![None; num_actions],
+                        edge_bounds,
+                    },
+                    descs,
+                )
+            }),
+        )
+        .expect("AU arena sized by its index word");
+    let idx = *or_stats_map.get_val(log_idx);
     // Creation-time sweep: arms the live incumbent already beats are
     // excluded before the first playout touches the node; a node whose every
     // arm dies here closes at its stored best result, which is then exact by
-    // the same argument as the all-dominated case.
-    if live_prune && !terminal {
+    // the same argument as the all-dominated case. Only a node built just now
+    // is swept: a hit returns the existing node as it stands.
+    if fresh_terminal == Some(false) && live_prune {
         sweep_arms(results, state, idx, config.interval_bounds);
         if state.or_stats.open_edges(idx) == 0 {
             let sz = results.best_size(or_id) as f64;
@@ -3038,7 +3048,7 @@ where
     let l = *space.or_arena.left.get(or_id.to_index());
     let r = *space.or_arena.right.get(or_id.to_index());
 
-    generate_actions(snap, action_cache, l, r);
+    let actions = generate_actions(snap, action_cache, l, r);
 
     // Count non-AC surviving actions and clone only the descriptor this
     // expansion realizes; the cached vector itself is read in place. The
@@ -3046,7 +3056,6 @@ where
     // surviving subsequence and the transport range starts after it.
     let gen_size = static_generalize_quality(snap, l, r).0;
     let (non_ac_count, selected) = {
-        let actions = action_cache.get(l, r).unwrap();
         let mut count = 0usize;
         let mut selected = None;
         for action in actions {
@@ -3276,7 +3285,7 @@ where
             done = results.best_term(current);
         }
         if done.is_none() && l != r {
-            generate_actions(snap, action_cache, l, r);
+            let actions = generate_actions(snap, action_cache, l, r);
             // Rollout hybridization with two-part admission: the trigger fires
             // after enumeration so the node's own action count is known. The
             // rectangle and entry action count are complementary workload
@@ -3286,9 +3295,7 @@ where
             // marked exact, so when expansion later reaches this node it is
             // terminal at creation (and, under `closed_bit`, born closed).
             if config.rollout_hybrid && reachable_pairs(snap, l, r) <= config.hybrid_threshold {
-                let non_ac = action_cache
-                    .get(l, r)
-                    .unwrap()
+                let non_ac = actions
                     .iter()
                     .filter(|action| {
                         !action
@@ -3375,11 +3382,10 @@ where
             }
         }
         if done.is_none() && l != r {
-            generate_actions(snap, action_cache, l, r);
             // Borrowed in place: nothing below this point in the iteration
             // touches the cache, and the borrow ends before the next node's
             // `generate_actions`.
-            let actions = action_cache.get(l, r).unwrap();
+            let actions = generate_actions(snap, action_cache, l, r);
             let transport = transport_actions(snap, space, current, l, r);
 
             // Eager generalization is an explicit action and wins ties, so the
@@ -3719,7 +3725,16 @@ mod tests {
     }
     fn push_or(state: &mut McgsState, data: OrStatsData<AndStatsId>) -> OrStatsId {
         let or_id = OrId::from_usize(state.or_stats.len().as_usize());
-        state.push_or_stat(or_id, data, Vec::new())
+        let or_stats = &mut state.or_stats;
+        let (log_idx, fresh) = state
+            .or_stats_map
+            .try_intern_with(
+                or_id,
+                crate::au::Lazy(|| or_stats.push(or_id, data, Vec::new())),
+            )
+            .expect("test arena within its index word");
+        assert!(fresh, "test or-ids are minted fresh");
+        *state.or_stats_map.get_val(log_idx)
     }
     fn push_and(
         state: &mut McgsState,

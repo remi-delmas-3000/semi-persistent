@@ -18,6 +18,14 @@
   or axiom name, or a second unit node or inverse for an operator, is now
   refused by the map rather than shadowed.
 - `SpMap::try_intern`: interning insert in one hash of the key.
+- `SpMap::try_intern_with(key, f)`: interning insert whose value is computed
+  only on a miss, still in one hash. The anti-unification action cache and
+  or-statistics map build their entries inside it; the action cache used to
+  hash a class pair three times per visit (check, insert, read-back).
+- `SpMap<…, S>`: the index's hasher is a parameter, any `hasher_spec::ValidHasher`
+  (`Default`, and provably valid in vstd's model on an already-shipped axiom).
+  `IndexHasher` stays the default; `std::hash::RandomState` is implemented for
+  keys from an untrusted source. No new trusted item.
 
 ### Changed
 
