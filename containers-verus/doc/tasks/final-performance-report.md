@@ -1799,6 +1799,20 @@ measured 0.94× and 0.97× in two runs and passed the protocol in both (it was
 0.92–0.93× and inconclusive), and the composite experiment read 0.97× in
 either order. The residual is placement.
 
+The block-alignment flag was then tried as a build setting, paired across the
+retained containers target (aligned build ÷ unaligned build of the same
+source, two runs, speedup = unaligned time ÷ aligned time). It does what it
+did for the one row — `aov/log/verified` 1.38×, `aov/push` 2.6× — and it
+costs everything branchy: `class_ring/walk` 0.41×, `class_ring/merge_restore`
+0.37–0.40×, `list/append_iter` 0.44–0.54×, `vec/restore_replay` 0.31×,
+`sparse_set/churn` 0.55×, `map/intern` 0.83–0.89×, `vec/mark_set_restore`
+0.50–0.60×. Padding every basic block to 64 bytes starves the fetch of code
+made of many small blocks. Rejected; the pairing was stopped after the first
+target because the verdict was already clear. Function-entry alignment
+(`-align-all-functions=6`, no padding inside functions) was then measured the
+same way on the same target: 0.98–1.04× on every row, `aov/log` at 0.99×,
+neither harm nor help. No alignment flag is set in the build.
+
 ### The dyn-store family: per-primitive dispatch, and a harness call boundary
 
 Root cause, first half: `VecD` was `Vec<T, I, DynStore<T, I>>`, one generic
