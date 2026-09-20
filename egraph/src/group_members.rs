@@ -43,9 +43,9 @@ pub(crate) struct EGraphMembers<
     pub nodes:
         &'a mut NodeStore<Cfg::G, Cfg::O, Cfg::V, Cfg::C, Cfg::Ids, TRACK, PROOFS, Cfg::Policy>,
     pub unit_node:
-        &'a mut crate::containers::SpMap<Cfg::O, Cfg::G, <Cfg::O as DenseId>::Index, TRACK>,
+        &'a mut crate::containers::SpUniqueMap<Cfg::O, Cfg::G, <Cfg::O as DenseId>::Index, TRACK>,
     pub inverse_op:
-        &'a mut crate::containers::SpMap<Cfg::O, Cfg::O, <Cfg::O as DenseId>::Index, TRACK>,
+        &'a mut crate::containers::SpUniqueMap<Cfg::O, Cfg::O, <Cfg::O as DenseId>::Index, TRACK>,
     pub par: bool,
 }
 

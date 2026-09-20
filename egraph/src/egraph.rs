@@ -8,6 +8,7 @@ use crate::config::EGraphConfig;
 use crate::containers::DenseId;
 use crate::containers::IndexLike;
 use crate::containers::ShrinkPolicy;
+use crate::containers::error::ContainerError;
 use crate::literal::{LitVal, LitValStore};
 use crate::multiplicity::MultiplicityLike;
 use crate::node_store::{Added, NodeStore};
@@ -213,13 +214,13 @@ pub struct EGraph<
     /// here rather than on `OpKind<S>` because a node id is `Cfg::G`, which `OpKind<S>` cannot
     /// carry. Semi-persistent (its own token), so it rolls back with the op declarations that
     /// created the units. Absent key = the op has no declared identity.
-    unit_node: crate::containers::SpMap<Cfg::O, Cfg::G, <Cfg::O as DenseId>::Index, TRACK>,
+    unit_node: crate::containers::SpUniqueMap<Cfg::O, Cfg::G, <Cfg::O as DenseId>::Index, TRACK>,
     /// Per-op group inverse operator, for AC ops declared with `:inverse neg`
     /// (`x ∘ neg(x) = e`). Resolved to a real op id at registration (sortcheck validates
     /// the unary signature). Same persistence story as `unit_node`. Absent key = no
     /// declared inverse. NOTE: gate-level group support — inverse-PAIR cancellation only,
     /// not Kapur §5.4's full Abelian-group completion (no Gaussian elimination).
-    inverse_op: crate::containers::SpMap<Cfg::O, Cfg::O, <Cfg::O as DenseId>::Index, TRACK>,
+    inverse_op: crate::containers::SpUniqueMap<Cfg::O, Cfg::O, <Cfg::O as DenseId>::Index, TRACK>,
     /// Outcome of the most recent `rebuild` when `cc` is enabled. Lets callers distinguish
     /// convergence from a growth-budget abort. `None` if completion hasn't run yet.
     completion_outcome: Option<CompletionOutcome>,
@@ -365,8 +366,8 @@ where
             cmp_buf_a: Vec::new(),
             cmp_buf_b: Vec::new(),
             flatten_buf: Vec::new(),
-            unit_node: crate::containers::SpMap::new(),
-            inverse_op: crate::containers::SpMap::new(),
+            unit_node: crate::containers::SpUniqueMap::new(),
+            inverse_op: crate::containers::SpUniqueMap::new(),
             completion_outcome: None,
             completion_node_budget: DEFAULT_COMPLETION_NODE_BUDGET,
             repair_state: None,
@@ -589,18 +590,24 @@ where
     /// Record `op`'s identity (unit) element node (`x ∘ e = x`; the unit drops from monomials).
     /// Called by the resolver in `sortcheck` after it builds the `:identity` term to a node.
     pub fn set_unit_node(&mut self, op: Cfg::O, unit: Cfg::G) {
-        self.unit_node
-            .try_insert(op, unit)
-            .expect("unit/inverse-op map exhausted its index word");
+        // Unique-keyed: an operator declares its identity once, in its own
+        // declaration, so a second unit for the same op is a caller error.
+        match self.unit_node.try_insert(op, unit) {
+            Ok(_) => {}
+            Err(ContainerError::DuplicateKey) => panic!("operator already has a unit node"),
+            Err(_) => panic!("unit/inverse-op map exhausted its index word"),
+        }
     }
     /// The identity (unit) element node of `op`, or `None` if `op` has no declared identity.
     pub fn unit_node(&self, op: Cfg::O) -> Option<Cfg::G> {
         self.unit_node.get_by_key(&op).copied()
     }
     pub fn set_inverse_op(&mut self, op: Cfg::O, inv: Cfg::O) {
-        self.inverse_op
-            .try_insert(op, inv)
-            .expect("unit/inverse-op map exhausted its index word");
+        match self.inverse_op.try_insert(op, inv) {
+            Ok(_) => {}
+            Err(ContainerError::DuplicateKey) => panic!("operator already has an inverse op"),
+            Err(_) => panic!("unit/inverse-op map exhausted its index word"),
+        }
     }
     /// The group inverse operator of `op` (`:inverse neg`), or `None` if none declared.
     pub fn inverse_op(&self, op: Cfg::O) -> Option<Cfg::O> {

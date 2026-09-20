@@ -171,21 +171,21 @@ mod min_pool_shaped {
 }
 
 /// EGraph's unit_node / inverse_op maps (egraph.rs:102-108) at the Copy-key
-/// surface available today: SpMap<Copy, Copy>.
+/// surface available today: SpUniqueMap<Copy, Copy>.
 mod copy_key_maps {
     use super::cv;
 
     // Index word `u32`, as at the egraph sites: both maps are keyed by an operator id
     // whose `Index` is the config word, so a log position shares that word.
     struct EGraphMapsShaped {
-        unit_node: cv::map::SpMap<u32, u32, u32, true>,
-        inverse_op: cv::map::SpMap<u32, u32, u32, true>,
+        unit_node: cv::map::SpUniqueMap<u32, u32, u32, true>,
+        inverse_op: cv::map::SpUniqueMap<u32, u32, u32, true>,
     }
 
     pub fn smoke() {
         let mut m = EGraphMapsShaped {
-            unit_node: cv::map::SpMap::new(),
-            inverse_op: cv::map::SpMap::new(),
+            unit_node: cv::map::SpUniqueMap::new(),
+            inverse_op: cv::map::SpUniqueMap::new(),
         };
         m.unit_node
             .try_insert(1, 100)
@@ -310,20 +310,20 @@ mod clone_key_maps {
     // Index word `u32` at every site, as in the egraph: each of these maps mints its
     // ids from its own log positions, and those ids' `Index` is the config word.
     struct RegistriesShaped {
-        sorts: cv::map::SpMap<String, (), u32, true>,
-        ops: cv::map::SpMap<String, OpInfoShaped, u32, true>,
+        sorts: cv::map::SpUniqueMap<String, (), u32, true>,
+        ops: cv::map::SpUniqueMap<String, OpInfoShaped, u32, true>,
         // au/terms.rs:43 — Vec inside the key tuple.
-        by_structure: cv::map::SpMap<(u32, Vec<u32>), u32, u32, true>,
+        by_structure: cv::map::SpUniqueMap<(u32, Vec<u32>), u32, u32, true>,
         // au/space.rs:63 — Vec as the whole key.
-        ctx_index: cv::map::SpMap<Vec<u32>, u32, u32, true>,
+        ctx_index: cv::map::SpUniqueMap<Vec<u32>, u32, u32, true>,
     }
 
     pub fn smoke() {
         let mut r = RegistriesShaped {
-            sorts: cv::map::SpMap::new(),
-            ops: cv::map::SpMap::new(),
-            by_structure: cv::map::SpMap::new(),
-            ctx_index: cv::map::SpMap::new(),
+            sorts: cv::map::SpUniqueMap::new(),
+            ops: cv::map::SpUniqueMap::new(),
+            by_structure: cv::map::SpUniqueMap::new(),
+            ctx_index: cv::map::SpUniqueMap::new(),
         };
         r.sorts
             .try_insert("Int".to_string(), ())
@@ -340,15 +340,31 @@ mod clone_key_maps {
                 },
             )
             .expect("canary: capacity");
-        // Append-only entries have no mutable accessor: constructor-ness is
-        // decided at registration; a late change is read-clone-modify-insert.
+        // Unique-keyed: a second registration under the same name is refused,
+        // which is the registry's duplicate check; the first entry stands.
         let mut updated = r.ops.get_val(idx).clone();
         updated.is_constructor = true;
-        r.ops
-            .try_insert("+".to_string(), updated)
+        assert_eq!(
+            r.ops.try_insert("+".to_string(), updated),
+            Err(cv::error::ContainerError::DuplicateKey),
+            "unique map refuses a present key"
+        );
+        assert!(!r.ops.get_by_key(&"+".to_string()).unwrap().is_constructor);
+        assert_eq!(r.ops.len(), 1, "one live key, no shadow");
+        // Interning answers with the existing entry, in one hash.
+        let (hit, fresh) = r
+            .ops
+            .try_intern(
+                "+".to_string(),
+                OpInfoShaped {
+                    name: "+".to_string(),
+                    args: vec![0, 0],
+                    unit: None,
+                    is_constructor: true,
+                },
+            )
             .expect("canary: capacity");
-        assert!(r.ops.get_by_key(&"+".to_string()).unwrap().is_constructor);
-        assert_eq!(r.ops.len(), 1, "shadow overwrite keeps one live key");
+        assert!(!fresh && hit == idx, "intern of a present key is a hit");
 
         r.by_structure
             .try_insert((3, vec![1, 2]), 9)

@@ -800,8 +800,9 @@ mod tests {
         let model = NiraModel;
         let l = parse_pattern(lhs);
         let r = parse_rhs(rhs);
+        // The registry is unique-keyed, so each test rule gets its own name.
         compile_rewrite(
-            "test",
+            &format!("test_{}", rules.len()),
             lhs,
             rhs,
             &l,
@@ -831,8 +832,9 @@ mod tests {
         let l = parse_pattern(lhs);
         let whens: Vec<_> = when.iter().map(|s| parse_pattern(s)).collect();
         let r = parse_rhs(rhs);
+        // The registry is unique-keyed, so each test rule gets its own name.
         compile_rewrite(
-            "test",
+            &format!("test_{}", rules.len()),
             lhs,
             rhs,
             &l,

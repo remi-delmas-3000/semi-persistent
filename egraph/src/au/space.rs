@@ -12,7 +12,7 @@
 
 use crate::config::AuIds;
 use crate::containers::group::Member;
-use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpMap};
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpUniqueMap};
 
 use super::{AuIds31, Span};
 
@@ -82,7 +82,7 @@ where
     /// Pool of items (all interned contexts concatenated).
     items: AppendOnlyVec<T, A::Index>,
     /// Deduplication map: sorted item vector -> context id.
-    index: SpMap<Vec<T>, A::Context, A::Index>,
+    index: SpUniqueMap<Vec<T>, A::Context, A::Index>,
 }
 
 impl<A: AuIds, T> ContextStore<A, T>
@@ -93,7 +93,7 @@ where
         let mut store = ContextStore {
             spans: AppendOnlyVec::new(),
             items: AppendOnlyVec::new(),
-            index: SpMap::new(),
+            index: SpUniqueMap::new(),
         };
         store.intern(&[]);
         store
@@ -223,7 +223,7 @@ pub struct OrArena<A: AuIds = AuIds31> {
     pub terminal: AppendOnlyVec<bool, A::Index>,
     pub left_best_size: AppendOnlyVec<u32, A::Index>,
     pub right_best_size: AppendOnlyVec<u32, A::Index>,
-    pub by_key: SpMap<(A::Class, A::Class, A::Context, A::Context), A::Or, A::Index>,
+    pub by_key: SpUniqueMap<(A::Class, A::Class, A::Context, A::Context), A::Or, A::Index>,
 }
 
 impl<A: AuIds> OrArena<A> {
@@ -236,7 +236,7 @@ impl<A: AuIds> OrArena<A> {
             terminal: AppendOnlyVec::new(),
             left_best_size: AppendOnlyVec::new(),
             right_best_size: AppendOnlyVec::new(),
-            by_key: SpMap::new(),
+            by_key: SpUniqueMap::new(),
         }
     }
 

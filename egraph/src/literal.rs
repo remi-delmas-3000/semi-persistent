@@ -72,7 +72,7 @@ pub trait LitVal: Clone + Eq + Hash + fmt::Debug + fmt::Display + Send {
 /// [`SpMap`]: crate::containers::SpMap
 pub struct LitValStore<L: LitVal, V: DenseId, const TRACK: bool> {
     /// Positions in this log ARE literal-value ids, so the log's index word is `V`'s.
-    map: crate::containers::SpMap<L::Key, L, V::Index, TRACK>,
+    map: crate::containers::SpUniqueMap<L::Key, L, V::Index, TRACK>,
 }
 
 impl<L: LitVal, V: DenseId, const TRACK: bool> Default for LitValStore<L, V, TRACK> {
@@ -92,7 +92,7 @@ impl<L: LitVal, V: DenseId, const TRACK: bool> fmt::Debug for LitValStore<L, V, 
 impl<L: LitVal, V: DenseId, const TRACK: bool> LitValStore<L, V, TRACK> {
     pub fn new() -> Self {
         Self {
-            map: crate::containers::SpMap::new(),
+            map: crate::containers::SpUniqueMap::new(),
         }
     }
 

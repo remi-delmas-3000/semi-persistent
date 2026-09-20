@@ -34,6 +34,9 @@ pub enum ContainerError {
     /// The key type lacks a property the container requires statically
     /// (e.g. a non-bit-stealing id family on the B+tree).
     UnsupportedKey,
+    /// The key is already present in a unique-keys map (`SpUniqueMap`), which
+    /// never overwrites.
+    DuplicateKey,
 }
 
 } // verus!
@@ -50,6 +53,7 @@ impl core::fmt::Display for ContainerError {
             ContainerError::IndexOutOfBounds => "index beyond current length",
             ContainerError::NotSorted => "input keys not strictly ascending",
             ContainerError::UnsupportedKey => "key type lacks a required static property",
+            ContainerError::DuplicateKey => "key already present in a unique-keys map",
         };
         f.write_str(s)
     }

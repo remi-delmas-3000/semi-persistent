@@ -5,19 +5,33 @@
 //! The append-only log `(K, V)` is the source of truth; semi-persistence
 //! (mark/restore) lives entirely in that already-verified log. A `HashMap`
 //! accelerates key lookup, mapping each key to the dense log index of its MOST
-//! RECENT entry (last-write-wins; older entries linger in the log as shadows).
-//! Each log position also records the PREVIOUS occurrence of its key (`prev`,
-//! a parallel column filled from the value `HashMap::insert` hands back). On
-//! `restore` the index is unwound over the entries about to be discarded,
-//! newest first: each key is pointed back at its previous occurrence or
-//! dropped, so the work is proportional to the truncated suffix, not to the
-//! survivors, and no surviving key is cloned. When the suffix outnumbers the
-//! survivors the full rebuild (`rebuild_index`) is cheaper and is used instead.
+//! RECENT entry. On `restore` the index is unwound over the entries about to
+//! be discarded, newest first, so the work is proportional to the truncated
+//! suffix, not to the survivors, and no surviving key is cloned. When the
+//! suffix outnumbers the survivors the full rebuild (`rebuild_index`) is
+//! cheaper and is used instead.
+//!
+//! The map has two key disciplines, chosen by the `UNIQUE` parameter:
+//!
+//! * **Last-write-wins** (`UNIQUE = false`, the default and the published
+//!   semantics): an insert of a present key appends a new entry and the older
+//!   one lingers in the log as a shadow. Each log position then also records
+//!   the PREVIOUS occurrence of its key (`prev`, a parallel column filled from
+//!   the value `HashMap::insert` hands back), which is what lets the unwind
+//!   point a key back at its earlier occurrence instead of dropping it.
+//! * **Unique keys** (`UNIQUE = true`, [`SpUniqueMap`]): no key occurs twice in
+//!   the log. `try_insert` refuses a present key with `DuplicateKey`, and
+//!   `try_intern` returns the existing entry. The previous-occurrence column
+//!   is not kept — every link would be `None` — so an insert is one log push
+//!   and one hash, and the unwind is a bare removal per discarded entry. Every
+//!   interning table in the e-graph is one of these.
 //!
 //! Verified invariant (`wf`): the exec index agrees with `is_last_occurrence`,
 //! the declarative "this position is the latest one holding its key", over the
-//! current log, and `prev` agrees with `is_last_occurrence_prefix` (the same
-//! statement cut at the entry's own position). From that, `get_by_key`/
+//! current log; and the discipline's own column invariant holds — `prev`
+//! agrees with `is_last_occurrence_prefix` (the same statement cut at the
+//! entry's own position) under last-write-wins, or the log's keys are pairwise
+//! distinct (`keys_unique`) under unique keys. From that, `get_by_key`/
 //! `contains_key` provably read the latest value, and `restore` provably
 //! returns the map to its marked logical contents (the log headline theorem
 //! composes through). `unwind_index` and `rebuild_index` each re-establish
@@ -82,6 +96,11 @@ pub open(crate) spec fn is_last_occurrence<K, V>(log: Seq<(K, V)>, i: int) -> bo
     &&& (forall|j: int| i < j < log.len() ==> (#[trigger] log[j]).0 != log[i].0)
 }
 
+/// No key occurs twice in the log: the unique-keys discipline's invariant.
+pub open(crate) spec fn keys_unique<K, V>(log: Seq<(K, V)>) -> bool {
+    forall|i: int, j: int| 0 <= i < j < log.len() ==> (#[trigger] log[i]).0 != (#[trigger] log[j]).0
+}
+
 /// Semi-persistent map. (`SpMap` rather than `Map` to avoid colliding with
 /// `vstd::map::Map`, which is `HashMap`'s view type.)
 ///
@@ -90,7 +109,11 @@ pub open(crate) spec fn is_last_occurrence<K, V>(log: Seq<(K, V)>, i: int) -> bo
 /// over a 31-bit id space at `I = u32` stores 4-byte positions instead of 8-byte
 /// ones, and `wf` (via the log's) still pins every position inside `I`, so nothing
 /// wraps. See [`AppendOnlyVec`] for why the default is `usize`.
-pub struct SpMap<K, V, I: IndexLike = usize, const TRACK: bool = true>
+///
+/// `UNIQUE` selects the key discipline (see the module docs): `false` is
+/// last-write-wins, `true` refuses duplicate keys and drops the
+/// previous-occurrence column.
+pub struct SpMap<K, V, I: IndexLike = usize, const TRACK: bool = true, const UNIQUE: bool = false>
 where
     K: Clone + Hash + Eq,
 {
@@ -101,10 +124,18 @@ where
     /// key's first occurrence. It is the value `HashMap::insert` returns when the
     /// entry is indexed, so it costs no extra lookup, and it is what lets
     /// `restore` unwind the index over the truncated suffix alone.
+    ///
+    /// Under `UNIQUE` the column stays empty (never allocated): every link would
+    /// be `None`, and the unwind knows it.
     pub(crate) prev: std::vec::Vec<Option<I>>,
 }
 
-impl<K, V, I: IndexLike, const TRACK: bool> SpMap<K, V, I, TRACK>
+/// The unique-keys map: [`SpMap`] with `UNIQUE = true`. An insert of a present
+/// key is refused (`try_insert`) or answered with the existing entry
+/// (`try_intern`); no previous-occurrence column is kept.
+pub type SpUniqueMap<K, V, I = usize, const TRACK: bool = true> = SpMap<K, V, I, TRACK, true>;
+
+impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool> SpMap<K, V, I, TRACK, UNIQUE>
 where
     K: Clone + Hash + Eq,
 {
@@ -159,10 +190,74 @@ where
         prev_agrees_seq(self.log_view(), self.prev@)
     }
 
+    /// The discipline's column invariant, as a relation on the parts:
+    /// last-write-wins keeps the previous-occurrence column agreeing with the
+    /// log; unique keys keeps no column and has the log's keys distinct.
+    pub open(crate) spec fn column_agrees_seq(log: Seq<(K, V)>, prev: Seq<Option<I>>) -> bool {
+        if UNIQUE {
+            &&& keys_unique(log)
+            &&& prev.len() == 0
+        } else {
+            prev_agrees_seq(log, prev)
+        }
+    }
+
+    /// [`Self::column_agrees_seq`] on the map's own parts.
+    pub open(crate) spec fn column_agrees(&self) -> bool {
+        Self::column_agrees_seq(self.log_view(), self.prev@)
+    }
+
     pub open(crate) spec fn wf(&self) -> bool {
         &&& self.log.wf()
         &&& self.index_agrees()
-        &&& self.prev_agrees()
+        &&& self.column_agrees()
+    }
+
+    /// The column invariant of a truncated log: the previous-occurrence column
+    /// is cut with the log (last-write-wins) or was never kept (unique keys).
+    proof fn lemma_column_after_truncate(log: Seq<(K, V)>, prev: Seq<Option<I>>, bound: int)
+        requires
+            Self::column_agrees_seq(log, prev),
+            0 <= bound <= log.len(),
+        ensures
+            Self::column_agrees_seq(
+                log.subrange(0, bound),
+                if UNIQUE { prev } else { prev.subrange(0, bound) },
+            ),
+    {
+        if UNIQUE {
+            let log2 = log.subrange(0, bound);
+            assert forall|i: int, j: int| 0 <= i < j < log2.len()
+                implies (#[trigger] log2[i]).0 != (#[trigger] log2[j]).0 by {
+                assert(log2[i] == log[i]);
+                assert(log2[j] == log[j]);
+            }
+        } else {
+            lemma_prev_agrees_after_truncate(log, prev, bound);
+        }
+    }
+
+    /// Column maintenance for a log already truncated to `saved_len`: cut the
+    /// previous-occurrence column with it, or leave the (empty) column alone.
+    fn truncate_column(&mut self, Ghost(old_log): Ghost<Seq<(K, V)>>, saved_len: usize)
+        requires
+            Self::column_agrees_seq(old_log, old(self).prev@),
+            saved_len <= old_log.len(),
+            old(self).log_view() == old_log.subrange(0, saved_len as int),
+        ensures
+            final(self).log == old(self).log,
+            final(self).index == old(self).index,
+            final(self).column_agrees(),
+    {
+        if !UNIQUE {
+            self.prev.truncate(saved_len);
+        }
+        proof {
+            Self::lemma_column_after_truncate(old_log, old(self).prev@, saved_len as int);
+            if !UNIQUE {
+                assert(self.prev@ == old(self).prev@.subrange(0, saved_len as int));
+            }
+        }
     }
 
 
@@ -333,12 +428,15 @@ where
 
     /// Insert or overwrite. Appends `(key, val)` to the log (the new last
     /// occurrence of `key`) and points the index at it. Returns the dense
-    /// log index of the new entry.
+    /// log index of the new entry. Under `UNIQUE` the key must be absent: this
+    /// is the one-hash insert for a caller that has already established that
+    /// (`try_insert` establishes it itself through the entry API).
     pub(crate) fn insert(&mut self, key: K, val: V) -> (id: I)
         requires
             old(self).wf(),
             // Room for one more position in the index word; see `AppendOnlyVec::push`.
             old(self).log_view().len() + 1 < I::max_nat(),
+            UNIQUE ==> !old(self).index_view().contains_key(key),
         ensures
             final(self).wf(),
             id.as_nat() == old(self).log_view().len(),
@@ -352,15 +450,23 @@ where
         let key_for_index = clone_key_exact(&key);
         let id = self.log.push((key, val));
         // The index's former answer for `key` is exactly the new entry's
-        // previous occurrence (or `None` for a fresh key): record it.
+        // previous occurrence (or `None` for a fresh key): record it — unless
+        // the discipline says it is always `None`.
         let shadowed = self.index.insert(key_for_index, id);
-        self.prev.push(shadowed);
+        if !UNIQUE {
+            self.prev.push(shadowed);
+        }
         proof {
             let log = self.log_view();
             let m = self.index@;
             let idn = id.as_nat() as int;
-            assert(self.prev@ =~= old_prev.push(shadowed));
-            lemma_insert_prev_link(old_log, old_prev, old(self).index@, log, self.prev@, shadowed);
+            if UNIQUE {
+                lemma_absent_from_index_absent_from_log(old_log, old(self).index@, key);
+                lemma_append_fresh_keys_unique(old_log, key, val);
+            } else {
+                assert(self.prev@ =~= old_prev.push(shadowed));
+                lemma_insert_prev_link(old_log, old_prev, old(self).index@, log, self.prev@, shadowed);
+            }
             assert(log == old_log.push((key, val)));
             assert(log[idn] == (key, val));
             // The appended entry is the unique new last-occurrence of `key`;
@@ -453,7 +559,9 @@ where
         self.log.can_push()
     }
 
-    /// Total insert: refuses at the log's index-word capacity.
+    /// Total insert: refuses at the log's index-word capacity, and under
+    /// `UNIQUE` refuses a present key (`DuplicateKey`, one hash: the entry API
+    /// decides membership and inserts through the same probe).
     pub fn try_insert(&mut self, key: K, val: V)
         -> (r: Result<I, crate::error::ContainerError>)
         requires old(self).wf(),
@@ -464,12 +572,23 @@ where
                 && final(self).index_view() == old(self).index_view().insert(key, id),
             r is Err ==> final(self).log_view() == old(self).log_view()
                 && final(self).index_view() == old(self).index_view(),
-            r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted,
+            r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted
+                || (UNIQUE && e == crate::error::ContainerError::DuplicateKey
+                    && old(self).index_view().contains_key(key)),
+            !UNIQUE ==> (r is Err <==> !(old(self).log_view().len() + 1 < I::max_nat())),
     {
-        if self.can_insert() {
-            Ok(self.insert(key, val))
+        if !self.can_insert() {
+            return Err(crate::error::ContainerError::CapacityExhausted);
+        }
+        if UNIQUE {
+            let (id, fresh) = self.intern_entry(key, val);
+            if fresh {
+                Ok(id)
+            } else {
+                Err(crate::error::ContainerError::DuplicateKey)
+            }
         } else {
-            Err(crate::error::ContainerError::CapacityExhausted)
+            Ok(self.insert(key, val))
         }
     }
 
@@ -481,11 +600,6 @@ where
     /// twice; the entry API decides membership and inserts through the same
     /// probe, so this hashes it once. On a `String` or a `Vec` key that is the
     /// dominant cost of an insert.
-    ///
-    /// The vacant case is also what makes the previous-occurrence link provable
-    /// without a lookup: the entry's contract says the key was absent from the
-    /// index, and `index_agrees` turns that into "absent from the log", which is
-    /// exactly the `None` link.
     pub fn try_intern(&mut self, key: K, val: V) -> (r: Result<(I, bool), crate::error::ContainerError>)
         requires old(self).wf(),
         ensures
@@ -503,8 +617,6 @@ where
                 && final(self).index_view() == old(self).index_view(),
             r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted,
     {
-        broadcast use vstd::std_specs::hash::group_hash_axioms;
-        broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
         if !self.can_insert() {
             // No room to append, but a hit still has an answer: one lookup.
             return match self.id_of(&key) {
@@ -512,6 +624,35 @@ where
                 None => Err(crate::error::ContainerError::CapacityExhausted),
             };
         }
+        Ok(self.intern_entry(key, val))
+    }
+
+    /// The interning core behind `try_intern` and unique-mode `try_insert`:
+    /// one probe through the entry API, appending only when the key is vacant.
+    ///
+    /// The vacant case is what makes the discipline invariant provable without
+    /// a lookup: the entry's contract says the key was absent from the index,
+    /// and `index_agrees` turns that into "absent from the log", which is
+    /// exactly the `None` link (last-write-wins) or the fresh key that keeps
+    /// the log's keys distinct (unique keys).
+    fn intern_entry(&mut self, key: K, val: V) -> (r: (I, bool))
+        requires
+            old(self).wf(),
+            old(self).log_view().len() + 1 < I::max_nat(),
+        ensures
+            final(self).wf(),
+            !r.1 ==> (
+                final(self).log_view() == old(self).log_view()
+                && final(self).index_view() == old(self).index_view()
+                && old(self).index_view().contains_key(key)
+                && old(self).index_view()[key] == r.0),
+            r.1 ==> (
+                r.0.as_nat() == old(self).log_view().len()
+                && final(self).log_view() == old(self).log_view().push((key, val))
+                && final(self).index_view() == old(self).index_view().insert(key, r.0)),
+    {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+        broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
         let ghost old_log = self.log_view();
         let ghost old_index = self.index@;
         let ghost old_prev = self.prev@;
@@ -519,32 +660,30 @@ where
         match self.index.entry(key_for_index) {
             Entry::Occupied(e) => {
                 let id = *e.get();
-                Ok((id, false))
+                (id, false)
             }
             Entry::Vacant(e) => {
                 proof {
-                    // The key is absent from the index, so it is absent from the
-                    // log: an occurrence would have a last occurrence, which
-                    // `index_agrees` would have put in the index.
-                    assert forall|j: int| 0 <= j < old_log.len()
-                        implies (#[trigger] old_log[j]).0 != key by {
-                        if old_log[j].0 == key {
-                            lemma_last_occurrence_exists::<K, V>(old_log, j);
-                        }
-                    }
+                    lemma_absent_from_index_absent_from_log(old_log, old_index, key);
                 }
                 let id = self.log.push((key, val));
-                self.prev.push(None);
+                if !UNIQUE {
+                    self.prev.push(None);
+                }
                 e.insert(id);
                 proof {
                     let log = self.log_view();
                     assert(log == old_log.push((key, val)));
-                    assert(self.prev@ =~= old_prev.push(None::<I>));
-                    lemma_insert_prev_link(old_log, old_prev, old_index, log, self.prev@, None);
+                    if UNIQUE {
+                        lemma_append_fresh_keys_unique(old_log, key, val);
+                    } else {
+                        assert(self.prev@ =~= old_prev.push(None::<I>));
+                        lemma_insert_prev_link(old_log, old_prev, old_index, log, self.prev@, None);
+                    }
                     lemma_append_fresh_preserves_index::<K, V, I>(old_log, old_index, key, val, id);
                     assert(self.index@ =~= old_index.insert(key, id));
                 }
-                Ok((id, true))
+                (id, true)
             }
         }
     }
@@ -573,7 +712,6 @@ where
                 == old(self).log_snapshots_view().subrange(0, target as int + 1),
     {
         let ghost old_log = self.log_view();
-        let ghost old_prev = self.prev@;
         // The target frame's saved length: what the log restore truncates to.
         let saved_len = self.log.frames[target].as_usize();
         let n = self.log.len().as_usize();
@@ -587,21 +725,17 @@ where
         if n - saved_len <= saved_len {
             self.unwind_index(saved_len);
             self.log.reset_frame(target);
-            self.prev.truncate(saved_len);
             proof {
                 assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
                 lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
             }
+            self.truncate_column(Ghost(old_log), saved_len);
         } else {
             self.log.reset_frame(target);
-            self.prev.truncate(saved_len);
             proof {
                 assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
             }
+            self.truncate_column(Ghost(old_log), saved_len);
             self.rebuild_index();
         }
     }
@@ -622,7 +756,6 @@ where
                 == old(self).log_snapshots_view().subrange(0, old(self).depth_spec() - 1),
     {
         let ghost old_log = self.log_view();
-        let ghost old_prev = self.prev@;
         // The target frame's saved length: what the log restore truncates to.
         let target = self.log.frames.len() - 1;
         let saved_len = self.log.frames[target].as_usize();
@@ -637,21 +770,17 @@ where
         if n - saved_len <= saved_len {
             self.unwind_index(saved_len);
             self.log.pop_frame();
-            self.prev.truncate(saved_len);
             proof {
                 assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
                 lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
             }
+            self.truncate_column(Ghost(old_log), saved_len);
         } else {
             self.log.pop_frame();
-            self.prev.truncate(saved_len);
             proof {
                 assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
             }
+            self.truncate_column(Ghost(old_log), saved_len);
             self.rebuild_index();
         }
     }
@@ -673,7 +802,6 @@ where
                 == old(self).log_snapshots_view().subrange(0, target as int),
     {
         let ghost old_log = self.log_view();
-        let ghost old_prev = self.prev@;
         // The target frame's saved length: what the log restore truncates to.
         let saved_len = self.log.frames[target].as_usize();
         let n = self.log.len().as_usize();
@@ -687,21 +815,17 @@ where
         if n - saved_len <= saved_len {
             self.unwind_index(saved_len);
             self.log.restore_frame(target);
-            self.prev.truncate(saved_len);
             proof {
                 assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
                 lemma_index_agrees_after_truncate(old_log, self.index@, saved_len as int);
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
             }
+            self.truncate_column(Ghost(old_log), saved_len);
         } else {
             self.log.restore_frame(target);
-            self.prev.truncate(saved_len);
             proof {
                 assert(self.log_view() == old_log.subrange(0, saved_len as int));
-                assert(self.prev@ == old_prev.subrange(0, saved_len as int));
-                lemma_prev_agrees_after_truncate(old_log, old_prev, saved_len as int);
             }
+            self.truncate_column(Ghost(old_log), saved_len);
             self.rebuild_index();
         }
     }
@@ -713,6 +837,9 @@ where
     /// operations, and a key clone only for the entries whose key survives at
     /// an earlier position. Leaves the index agreeing with the log's
     /// `[0, saved_len)` prefix, which is what the truncated log will be.
+    ///
+    /// Under `UNIQUE` every link is `None` without being stored: a discarded
+    /// entry's key leaves the map, and no key is ever cloned.
     fn unwind_index(&mut self, saved_len: usize)
         requires
             old(self).wf(),
@@ -725,10 +852,24 @@ where
         broadcast use vstd::std_specs::hash::group_hash_axioms;
         broadcast use crate::hasher_spec::axiom_index_hasher_builds_valid_hashers;
         let ghost log = self.log_view();
+        // The chain links the walk consults: the stored column, or the all-`None`
+        // column the unique discipline never materializes.
+        let ghost links: Seq<Option<I>> = if UNIQUE {
+            Seq::new(log.len(), |i: int| None::<I>)
+        } else {
+            self.prev@
+        };
         let n = self.log.len().as_usize();
         let mut bound: usize = n;
         proof {
             lemma_index_agrees_prefix_full(log, self.index@);
+            if UNIQUE {
+                assert forall|p: int| 0 <= p < log.len() implies #[trigger] prev_link_ok(log, links, p) by {
+                    assert(links[p] is None);
+                    assert forall|j: int| 0 <= j < p implies (#[trigger] log[j]).0 != log[p].0 by {}
+                }
+            }
+            assert(prev_agrees_seq(log, links));
         }
         // Invariant: the index agrees with last-occurrence RESTRICTED to the
         // prefix `[0, bound)`; each step retires the entry at `bound - 1`.
@@ -742,15 +883,20 @@ where
                 saved_len <= bound <= n,
                 obeys_key_model::<K>(),
                 builds_valid_hashers::<IndexHasher>(),
-                self.prev_agrees(),
+                !UNIQUE ==> links == self.prev@,
+                UNIQUE ==> (forall|i: int| 0 <= i < links.len() ==> #[trigger] links[i] is None),
+                prev_agrees_seq(log, links),
                 self.index_agrees_prefix(bound as int),
             decreases bound,
         {
             let p = bound - 1;
             let pos = I::try_from_usize(p).expect("log position exceeds the map's index word");
             let entry = self.log.get(pos);
-            let link = self.prev[p];
+            let link: Option<I> = if UNIQUE { None } else { self.prev[p] };
             let ghost before = self.index@;
+            proof {
+                assert(link == links[p as int]);
+            }
             match link {
                 Some(q) => {
                     // The key survives at `q`: point the index there. This is
@@ -764,7 +910,7 @@ where
                 }
             }
             proof {
-                lemma_unwind_step(log, self.prev@, before, self.index@, bound as int);
+                lemma_unwind_step(log, links, before, self.index@, bound as int);
             }
             bound = p;
         }
@@ -774,7 +920,7 @@ where
     /// key to the position seen so far. After the full scan each key maps to
     /// its last occurrence.
     fn rebuild_index(&mut self)
-        requires old(self).log.wf(), obeys_key_model::<K>(), old(self).prev_agrees(),
+        requires old(self).log.wf(), obeys_key_model::<K>(), old(self).column_agrees(),
         ensures
             final(self).wf(),
             final(self).log_view() == old(self).log_view(),
@@ -929,6 +1075,48 @@ pub proof fn lemma_last_occurrence_exists<K, V>(log: Seq<(K, V)>, i: int)
         lemma_last_occurrence_exists(log, j);
         let q = choose|q: int| #[trigger] is_last_occurrence(log, q) && log[q].0 == log[j].0;
         assert(is_last_occurrence(log, q) && log[q].0 == log[i].0);
+    }
+}
+
+/// A key absent from an agreeing index is absent from the log: an occurrence
+/// would have a last occurrence, which `index_agrees` would have indexed.
+pub proof fn lemma_absent_from_index_absent_from_log<K, V, I: IndexLike>(
+    log: Seq<(K, V)>,
+    m: Map<K, I>,
+    key: K,
+)
+    requires
+        index_agrees_seq(log, m),
+        !m.contains_key(key),
+    ensures
+        forall|j: int| 0 <= j < log.len() ==> (#[trigger] log[j]).0 != key,
+{
+    assert forall|j: int| 0 <= j < log.len() implies (#[trigger] log[j]).0 != key by {
+        if log[j].0 == key {
+            lemma_last_occurrence_exists::<K, V>(log, j);
+            let q = choose|q: int| #[trigger] is_last_occurrence(log, q) && log[q].0 == log[j].0;
+            assert(m.contains_key(log[q].0));
+        }
+    }
+}
+
+/// Appending a key absent from a key-distinct log keeps its keys distinct.
+proof fn lemma_append_fresh_keys_unique<K, V>(old_log: Seq<(K, V)>, key: K, val: V)
+    requires
+        keys_unique(old_log),
+        forall|j: int| 0 <= j < old_log.len() ==> (#[trigger] old_log[j]).0 != key,
+    ensures
+        keys_unique(old_log.push((key, val))),
+{
+    let log = old_log.push((key, val));
+    assert forall|i: int, j: int| 0 <= i < j < log.len()
+        implies (#[trigger] log[i]).0 != (#[trigger] log[j]).0 by {
+        assert(log[i] == old_log[i]);
+        if j < old_log.len() {
+            assert(log[j] == old_log[j]);
+        } else {
+            assert(log[j] == (key, val));
+        }
     }
 }
 
@@ -1269,7 +1457,8 @@ fn clone_key_exact<K: Clone>(key: &K) -> (r: K)
 // `verus!{}` is unsupported. Prints the live entries via the public `iter`
 // (the log is the source of truth); shadowed/overwritten log entries are not
 // shown, matching the map's logical contents.
-impl<K, V, I: IndexLike, const TRACK: bool> core::fmt::Debug for SpMap<K, V, I, TRACK>
+impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool> core::fmt::Debug
+    for SpMap<K, V, I, TRACK, UNIQUE>
 where
     K: Clone + core::hash::Hash + Eq + core::fmt::Debug,
     V: core::fmt::Debug,
@@ -1284,7 +1473,8 @@ where
     }
 }
 
-impl<K, V, I: IndexLike, const TRACK: bool> Default for SpMap<K, V, I, TRACK>
+impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool> Default
+    for SpMap<K, V, I, TRACK, UNIQUE>
 where
     K: Clone + core::hash::Hash + Eq,
 {
@@ -1299,7 +1489,7 @@ where
 // semantics). Delegates to the verified AppendOnlyVec::as_slice.
 // ---------------------------------------------------------------------------
 
-impl<K, V, I: IndexLike, const TRACK: bool> SpMap<K, V, I, TRACK>
+impl<K, V, I: IndexLike, const TRACK: bool, const UNIQUE: bool> SpMap<K, V, I, TRACK, UNIQUE>
 where
     K: Clone + std::hash::Hash + Eq,
 {

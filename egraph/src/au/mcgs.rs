@@ -106,7 +106,7 @@
 use crate::canon::{MSetCanon, VarCanon};
 use crate::config::EGraphConfig;
 use crate::containers::group::Member;
-use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpMap, VecP};
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpUniqueMap, VecP};
 use crate::literal::LitVal;
 use crate::multiplicity::MultiplicityLike;
 
@@ -1336,7 +1336,7 @@ pub(crate) struct McgsState<A: AuIds = AuIds31, O: DenseId = crate::id::OpId> {
     exact_memo: super::exact_memo::ExactMemo<A::Term, A::Class, A::Index>,
     /// `A::Or` -> its statistics node. Keyed by an id whose `Index` is `A::Index`, so
     /// the hash index stores positions in that word rather than 8-byte `usize`.
-    or_stats_map: SpMap<A::Or, A::OrStats, A::Index>,
+    or_stats_map: SpUniqueMap<A::Or, A::OrStats, A::Index>,
     /// What the hybrid trigger did (`McgsConfig::hybrid_exact`). Diagnostics,
     /// not search state: nothing reads them back, so they sit outside the
     /// semi-persistent arenas and `mark`/`restore` do not touch them.
@@ -1348,7 +1348,7 @@ impl<A: AuIds, O: DenseId> McgsState<A, O> {
         Self {
             or_stats: OrStatsArena::new(),
             and_stats: AndStatsArena::new(),
-            or_stats_map: SpMap::new(),
+            or_stats_map: SpUniqueMap::new(),
             exact_memo: super::exact_memo::ExactMemo::new(),
             hybrid: HybridStats::default(),
         }

@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- `SpMap` has a key discipline parameter: `SpMap<K, V, I, TRACK, UNIQUE>`,
+  with `SpUniqueMap<K, V, I, TRACK>` as the `UNIQUE = true` alias. Under it
+  no key occurs twice in the log — `try_insert` refuses a present key with
+  the new `ContainerError::DuplicateKey`, `try_intern` answers with the
+  existing entry — and the previous-occurrence column is not kept, so an
+  insert is one hash and one log push and a restore's index unwind is a
+  bare removal per discarded entry. The default `UNIQUE = false` is the
+  published last-write-wins map, unchanged. Every interning table in the
+  e-graph (four registries, the literal store, the unit-node and
+  inverse-op maps, the seven anti-unification indices) and the hinted
+  arena's fingerprint index are `SpUniqueMap`s; a repeated operator, rule
+  or axiom name, or a second unit node or inverse for an operator, is now
+  refused by the map rather than shadowed.
+- `SpMap::try_intern`: interning insert in one hash of the key.
+
 ### Changed
 
 - Version tokens now carry their minting manager, a generation and a depth

@@ -45,16 +45,19 @@ operations (+, -, *, <, etc.) with their evaluation functions.
 
 ```rust
 pub struct LitValStore<L, V, const TRACK: bool> {
-    map: SpMap<L::Key, L, V::Index, TRACK>,
+    map: SpUniqueMap<L::Key, L, V::Index, TRACK>,
 }
 ```
 
-The store is a verified semi-persistent map (`SpMap`, from the container
-crate's `literal-types` feature): its append-only value log is the source of
-truth and the log positions are the literal ids; its index is the map's own,
-maintained through the verified insert/restore transitions (restore unwinds
-the discarded suffix, no hand-rolled rebuild heuristic). Mark and restore go
-through the map's token.
+The store is a verified semi-persistent map in its unique-keys discipline
+(`SpUniqueMap`; the key types come from the container crate's `literal-types`
+feature): its append-only value log is the source of truth and the log
+positions are the literal ids; its index is the map's own, maintained through
+the verified insert/restore transitions (restore unwinds the discarded suffix,
+no hand-rolled rebuild heuristic). Interning is `try_intern`: one hash of the
+canonical key decides membership and appends on a miss, and the discipline
+guarantees the log never holds a shadowed literal. Mark and restore go through
+the session's history.
 
 Keys are **canonical**, not bit-compared values. `LitVal` carries an
 associated `Key` type and `key()`, produced from each payload type by the

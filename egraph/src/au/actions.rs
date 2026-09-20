@@ -12,7 +12,7 @@
 use crate::canon::{MSetCanon, VarCanon};
 use crate::config::EGraphConfig;
 use crate::containers::group::Member;
-use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpMap};
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpUniqueMap};
 use crate::egraph::EGraph;
 use crate::id::ENodeKind;
 use crate::literal::LitVal;
@@ -89,7 +89,7 @@ pub struct ActionCache<O: DenseId, A: AuIds = AuIds31, M: MultiplicityLike = Mul
     ///
     /// Index word `A::Index`: the map's log positions are what the `A::Action`s are
     /// minted from, and `A::Action::Index` is that word.
-    index: SpMap<(A::Class, A::Class), A::Action, A::Index>,
+    index: SpUniqueMap<(A::Class, A::Class), A::Action, A::Index>,
     /// Action lists, indexed by the map's stored value. An append-only column:
     /// ids are positions, an entry is never overwritten, and a rollback is
     /// exactly "drop the suffix", which is what `AppendOnlyVec` proves. Its
@@ -103,7 +103,7 @@ pub struct ActionCache<O: DenseId, A: AuIds = AuIds31, M: MultiplicityLike = Mul
 impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
     pub fn new(a_max: usize) -> Self {
         ActionCache {
-            index: SpMap::new(),
+            index: SpUniqueMap::new(),
             values: AppendOnlyVec::new(),
             a_max,
             include_ac: true,
@@ -114,7 +114,7 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
     /// Used by the exact solver, which handles those operators by transport.
     pub fn without_ac_actions(a_max: usize) -> Self {
         ActionCache {
-            index: SpMap::new(),
+            index: SpUniqueMap::new(),
             values: AppendOnlyVec::new(),
             a_max,
             include_ac: false,

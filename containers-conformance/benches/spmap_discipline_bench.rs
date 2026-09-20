@@ -3,19 +3,21 @@
 //! What the map's last-write-wins encoding costs a unique-key caller.
 //!
 //! Every `SpMap` in this workspace is an interning table: it looks a key up and
-//! inserts only on a miss, so no key is ever overwritten. The map is built for
-//! the general case, and that costs a unique-key caller two things on the insert
-//! path — a push to the previous-occurrence column (the column exists so a
-//! restore can point the index back at a key's earlier occurrence, which never
-//! happens here) and a second hash of the key, because the caller's membership
-//! check and the map's insert each hash it once.
+//! inserts only on a miss, so no key is ever overwritten. The general
+//! (last-write-wins) map costs such a caller two things on the insert path — a
+//! push to the previous-occurrence column (the column exists so a restore can
+//! point the index back at a key's earlier occurrence, which never happens
+//! here) and, written as a membership check followed by an insert, a second
+//! hash of the key. `try_intern` removes the second hash; the unique-keys
+//! discipline (`SpUniqueMap`) removes the column. Both are measured here against
+//! the general map and against the hand-rolled reference.
 //!
 //! The reference side is a hand-rolled interning table with exactly the shape
 //! the anti-unification memo used before it moved onto `SpMap`: an append-only
 //! log of `(key, value)`, a plain index to log positions, one saved length per
 //! frame, and a restore that walks the discarded suffix removing keys. It is the
-//! lower bound a unique-key discipline inside `SpMap` should approach, not a
-//! proposal to go back to hand-rolling.
+//! lower bound the unique-key discipline should approach, not a proposal to go
+//! back to hand-rolling.
 //!
 //! Key shapes are the ones that actually occur: a pair of `u64` (the memo, the
 //! action cache), a `String` (the four registries), and a `Vec<u32>` (the
@@ -36,7 +38,7 @@ use semi_persistent_containers_verus::hasher_spec::IndexHasher;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use semi_persistent_containers_verus::append_only_vec::AppendOnlyVec;
 use semi_persistent_containers_verus::group::Member;
-use semi_persistent_containers_verus::{ShrinkPolicy, SpMap};
+use semi_persistent_containers_verus::{ShrinkPolicy, SpMap, SpUniqueMap};
 
 const N: usize = 4096;
 
@@ -152,6 +154,20 @@ fn bench_intern<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, 
             BatchSize::SmallInput,
         )
     });
+    // The unique-keys discipline: one hash, and no column push.
+    g.bench_function("spmap_unique_intern", |b| {
+        b.iter_batched(
+            || keys.clone(),
+            |ks| {
+                let mut m: SpUniqueMap<K, u32> = SpUniqueMap::new();
+                for (i, k) in ks.into_iter().enumerate() {
+                    m.try_intern(k, i as u32).expect("fits the index word");
+                }
+                m.len()
+            },
+            BatchSize::SmallInput,
+        )
+    });
     g.bench_function("handrolled", |b| {
         b.iter_batched(
             || keys.clone(),
@@ -171,9 +187,11 @@ fn bench_intern<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, 
 /// Hit every key once on a filled table.
 fn bench_lookup<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, keys: Vec<K>) {
     let mut m: SpMap<K, u32> = SpMap::new();
+    let mut u: SpUniqueMap<K, u32> = SpUniqueMap::new();
     let mut t: Intern<K, u32> = Intern::new();
     for (i, k) in keys.iter().enumerate() {
         m.try_insert(k.clone(), i as u32).expect("fits");
+        u.try_insert(k.clone(), i as u32).expect("fits");
         t.intern(k.clone(), i as u32);
     }
     let mut g = c.benchmark_group(format!("spmap/lookup_hit/{shape}"));
@@ -182,6 +200,15 @@ fn bench_lookup<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, 
             let mut acc: u64 = 0;
             for k in &keys {
                 acc += *m.get_by_key(k).expect("present") as u64;
+            }
+            acc
+        })
+    });
+    g.bench_function("spmap_unique", |b| {
+        b.iter(|| {
+            let mut acc: u64 = 0;
+            for k in &keys {
+                acc += *u.get_by_key(k).expect("present") as u64;
             }
             acc
         })
@@ -214,6 +241,26 @@ fn bench_restore<K: Clone + Eq + Hash + 'static>(
         b.iter_batched(
             || {
                 let mut m: SpMap<K, u32> = SpMap::new();
+                for (i, k) in keys[..split].iter().enumerate() {
+                    m.try_insert(k.clone(), i as u32).expect("fits");
+                }
+                Member::push_frame(&mut m, ShrinkPolicy::Never);
+                for (i, k) in keys[split..].iter().enumerate() {
+                    m.try_insert(k.clone(), i as u32).expect("fits");
+                }
+                m
+            },
+            |mut m| {
+                Member::reset_frame(&mut m, 0);
+                m.len()
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.bench_function("spmap_unique", |b| {
+        b.iter_batched(
+            || {
+                let mut m: SpUniqueMap<K, u32> = SpUniqueMap::new();
                 for (i, k) in keys[..split].iter().enumerate() {
                     m.try_insert(k.clone(), i as u32).expect("fits");
                 }

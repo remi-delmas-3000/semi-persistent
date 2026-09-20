@@ -6,7 +6,8 @@ use crate::containers::AppendOnlyVec;
 use crate::containers::DenseId;
 use crate::containers::IndexLike;
 use crate::containers::ShrinkPolicy;
-use crate::containers::SpMap;
+use crate::containers::SpUniqueMap;
+use crate::containers::error::ContainerError;
 use crate::containers::group::Member;
 use crate::id::{ENodeKind, id_at};
 
@@ -176,7 +177,7 @@ impl<S: DenseId> OpInfo<S> {
 #[derive(Debug)]
 pub struct SortRegistry<S: DenseId, const TRACK: bool> {
     /// Positions in this log ARE sort ids, so the log's index word is the id's.
-    map: SpMap<String, (), S::Index, TRACK>,
+    map: SpUniqueMap<String, (), S::Index, TRACK>,
     builtin_count: usize,
     concrete_count: usize,
     _phantom: core::marker::PhantomData<S>,
@@ -191,7 +192,7 @@ impl<S: DenseId, const TRACK: bool> Default for SortRegistry<S, TRACK> {
 impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
     pub fn new() -> Self {
         Self {
-            map: SpMap::new(),
+            map: SpUniqueMap::new(),
             builtin_count: 0,
             concrete_count: 0,
             _phantom: core::marker::PhantomData,
@@ -204,8 +205,9 @@ impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
             "register_builtins must be called on empty registry"
         );
         for name in sort_names {
+            // Interning, so a builtin list that repeats a name registers it once.
             self.map
-                .try_insert(name.to_string(), ())
+                .try_intern(name.to_string(), ())
                 .expect("registry id space exhausted for its index word");
         }
         self.builtin_count = self.map.len();
@@ -314,7 +316,7 @@ thread_local! {
 #[derive(Debug)]
 pub struct OpRegistry<O: DenseId, S: DenseId, const TRACK: bool> {
     /// Positions in this log ARE op ids, so the log's index word is the id's.
-    map: SpMap<String, OpInfo<S>, O::Index, TRACK>,
+    map: SpUniqueMap<String, OpInfo<S>, O::Index, TRACK>,
     /// Completion bookkeeping per op, one entry per op id ([`CompletionSlot`]).
     ///
     /// `insert` pushes exactly one entry per op, so entry `i` describes op `i`, and the
@@ -338,7 +340,7 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> Default for OpRegistry<O,
 impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
     pub fn new() -> Self {
         Self {
-            map: SpMap::new(),
+            map: SpUniqueMap::new(),
             completion: AppendOnlyVec::new(),
             builtin_count: 0,
             concrete_sort_count: 0,
@@ -643,10 +645,6 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
     }
 
     fn insert(&mut self, name: &str, return_sort: S, kind: OpKind<S>, meta: OpMeta) -> O {
-        assert!(
-            !self.map.contains_key(&name.to_owned()),
-            "operator '{name}' already registered"
-        );
         match &kind {
             OpKind::Commutative { arg_sorts } => assert!(
                 arg_sorts[0] == arg_sorts[1],
@@ -671,20 +669,24 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
             OpKind::Set { .. } => CompletionKind::Set,
             _ => CompletionKind::NotCompletion,
         };
-        let id = self
-            .map
-            .try_insert(
-                name.to_owned(),
-                OpInfo {
-                    name: name.to_owned(),
-                    return_sort,
-                    kind,
-                    is_constructor: meta.is_constructor,
-                    cost: meta.cost,
-                    unextractable: meta.unextractable,
-                },
-            )
-            .expect("registry id space exhausted for its index word");
+        // One hash of the name: the unique-keyed map decides membership and
+        // inserts through the same probe, and refuses a repeated name, which
+        // is the duplicate-registration check.
+        let id = match self.map.try_insert(
+            name.to_owned(),
+            OpInfo {
+                name: name.to_owned(),
+                return_sort,
+                kind,
+                is_constructor: meta.is_constructor,
+                cost: meta.cost,
+                unextractable: meta.unextractable,
+            },
+        ) {
+            Ok(id) => id,
+            Err(ContainerError::DuplicateKey) => panic!("operator '{name}' already registered"),
+            Err(_) => panic!("registry id space exhausted for its index word"),
+        };
         let (msets, sets) = self.completion_counts();
         let slot = CompletionSlot {
             kind: completion_kind,
@@ -761,7 +763,7 @@ pub struct RuleInfo {
 pub struct RuleRegistry<const TRACK: bool> {
     /// Positions in this log ARE rule ids, so the log's index word is `RuleId`'s — a
     /// `u16`, since `RuleId` is 15-bit.
-    map: SpMap<String, RuleInfo, <crate::id::RuleId as DenseId>::Index, TRACK>,
+    map: SpUniqueMap<String, RuleInfo, <crate::id::RuleId as DenseId>::Index, TRACK>,
 }
 
 impl<const TRACK: bool> Default for RuleRegistry<TRACK> {
@@ -772,21 +774,26 @@ impl<const TRACK: bool> Default for RuleRegistry<TRACK> {
 
 impl<const TRACK: bool> RuleRegistry<TRACK> {
     pub fn new() -> Self {
-        Self { map: SpMap::new() }
+        Self {
+            map: SpUniqueMap::new(),
+        }
     }
 
     pub fn register(&mut self, name: &str, lhs: &str, rhs: &str) -> crate::id::RuleId {
-        let id = self
-            .map
-            .try_insert(
-                name.to_owned(),
-                RuleInfo {
-                    name: name.to_owned(),
-                    lhs: lhs.to_owned(),
-                    rhs: rhs.to_owned(),
-                },
-            )
-            .expect("registry id space exhausted for its index word");
+        // The registry is unique-keyed: a second rule under the same name is a
+        // caller error, and the map refuses it rather than shadowing the first.
+        let id = match self.map.try_insert(
+            name.to_owned(),
+            RuleInfo {
+                name: name.to_owned(),
+                lhs: lhs.to_owned(),
+                rhs: rhs.to_owned(),
+            },
+        ) {
+            Ok(id) => id,
+            Err(ContainerError::DuplicateKey) => panic!("rule '{name}' already registered"),
+            Err(_) => panic!("registry id space exhausted for its index word"),
+        };
         id_at::<crate::id::RuleId>(id.as_usize())
     }
 
@@ -852,7 +859,7 @@ pub struct AxiomRegistry<G: Copy + DenseId, const TRACK: bool> {
     /// Positions in this log ARE axiom ids, so the log's index word is `AxiomId`'s — a
     /// `u16`, since `AxiomId` is 15-bit. Note this is NOT `G::Index`: `G` is the id type
     /// of the *terms* an axiom relates, not of the axiom.
-    map: SpMap<String, AxiomInfo<G>, <crate::id::AxiomId as DenseId>::Index, TRACK>,
+    map: SpUniqueMap<String, AxiomInfo<G>, <crate::id::AxiomId as DenseId>::Index, TRACK>,
 }
 
 impl<G: Copy + DenseId, const TRACK: bool> Default for AxiomRegistry<G, TRACK> {
@@ -863,21 +870,25 @@ impl<G: Copy + DenseId, const TRACK: bool> Default for AxiomRegistry<G, TRACK> {
 
 impl<G: Copy + DenseId, const TRACK: bool> AxiomRegistry<G, TRACK> {
     pub fn new() -> Self {
-        Self { map: SpMap::new() }
+        Self {
+            map: SpUniqueMap::new(),
+        }
     }
 
     pub fn register(&mut self, name: &str, lhs: G, rhs: G) -> crate::id::AxiomId {
-        let id = self
-            .map
-            .try_insert(
-                name.to_owned(),
-                AxiomInfo {
-                    name: name.to_owned(),
-                    lhs,
-                    rhs,
-                },
-            )
-            .expect("registry id space exhausted for its index word");
+        // Unique-keyed, as the rule registry: a repeated axiom name is refused.
+        let id = match self.map.try_insert(
+            name.to_owned(),
+            AxiomInfo {
+                name: name.to_owned(),
+                lhs,
+                rhs,
+            },
+        ) {
+            Ok(id) => id,
+            Err(ContainerError::DuplicateKey) => panic!("axiom '{name}' already registered"),
+            Err(_) => panic!("registry id space exhausted for its index word"),
+        };
         id_at::<crate::id::AxiomId>(id.as_usize())
     }
 

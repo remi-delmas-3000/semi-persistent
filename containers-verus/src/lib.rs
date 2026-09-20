@@ -189,7 +189,7 @@ pub use index_like::IndexLike;
 pub use inline_store::InlineStore;
 pub use layered_span_map::LayeredSpanMap;
 pub use list::ListArena;
-pub use map::SpMap;
+pub use map::{SpMap, SpUniqueMap};
 pub use opt::{DenseId, Opt};
 pub use parallel_store::ParallelStore;
 pub use sorted_cursor::SortedCursor;

@@ -77,7 +77,9 @@ where
     pub(crate) col: crate::VecD<T, I, TRACK>,
     /// Fingerprint -> spill bucket index. UNTRACKED on purpose: restore must
     /// not roll the hint index back - that is the zero-maintenance theorem.
-    pub(crate) index: crate::SpMap<u32, usize, usize, false>,
+    /// Unique-keyed: a fingerprint is inserted once, so the map's own
+    /// discipline carries the key-distinctness `wf_struct` states.
+    pub(crate) index: crate::SpUniqueMap<u32, usize, usize, false>,
     /// Hint buckets; entries are cell ids that at some point held content
     /// with the bucket's fingerprint. Push-only.
     pub(crate) spill: Vec<Vec<I>>,

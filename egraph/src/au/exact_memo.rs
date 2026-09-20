@@ -23,7 +23,7 @@
 
 use crate::containers::error::ContainerError;
 use crate::containers::group::Member;
-use crate::containers::{IndexLike, ShrinkPolicy, SpMap};
+use crate::containers::{IndexLike, ShrinkPolicy, SpUniqueMap};
 
 /// One memoized clean solve. Supports are sorted and deduplicated at
 /// publication (the exact solver sorts before it writes). The class pair is the
@@ -37,13 +37,13 @@ struct MemoEntry<T, C> {
 /// The session memo: one verified map from the class pair to its clean solve.
 /// `T` is the term id type, `C` the class id type, `I` the session index word.
 pub struct ExactMemo<T: Copy, C: Copy + Ord, I: IndexLike = usize> {
-    entries: SpMap<(u64, u64), MemoEntry<T, C>, I>,
+    entries: SpUniqueMap<(u64, u64), MemoEntry<T, C>, I>,
 }
 
 impl<T: Copy, C: Copy + Ord, I: IndexLike> ExactMemo<T, C, I> {
     pub fn new() -> Self {
         ExactMemo {
-            entries: SpMap::new(),
+            entries: SpUniqueMap::new(),
         }
     }
 

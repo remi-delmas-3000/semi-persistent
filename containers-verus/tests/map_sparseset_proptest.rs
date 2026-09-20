@@ -12,7 +12,8 @@ use semi_persistent_containers_verus::group::ForkHistory;
 use std::collections::HashMap;
 
 use semi_persistent_containers_verus::dense_id::DenseId31;
-use semi_persistent_containers_verus::map::SpMap;
+use semi_persistent_containers_verus::error::ContainerError;
+use semi_persistent_containers_verus::map::{SpMap, SpUniqueMap};
 use semi_persistent_containers_verus::parallel_store::ParallelStore;
 use semi_persistent_containers_verus::sparse_set::SparseSet;
 use semi_persistent_containers_verus::vec::ShrinkPolicy;
@@ -124,6 +125,116 @@ fn map_mark_restore() {
             assert_eq!(m.contains_key(&absent), oracle.contains_key(&absent));
         }
         println!("map_mark_restore seed={seed}: OK");
+    }
+}
+
+// --------------------------------------------------------------------------
+// SpUniqueMap: the unique-keys discipline. `try_insert` refuses a present key,
+// `try_intern` answers with the existing entry, the log never holds a shadow,
+// and mark/restore agree with a HashMap oracle exactly as the default map does.
+// --------------------------------------------------------------------------
+
+type UMap = SpUniqueMap<u32, u64, usize, false>;
+type UMapT = SpUniqueMap<u32, u64, usize, true>;
+
+#[test]
+fn unique_map_refuses_duplicates_and_interns() {
+    for seed in 0..16u64 {
+        let mut m = UMap::new();
+        let mut oracle: HashMap<u32, (usize, u64)> = HashMap::new();
+        let mut rng = Lcg::new(seed ^ 0x5151);
+        for _ in 0..1500 {
+            let key = (rng.below(64)) as u32;
+            let val = rng.next();
+            if rng.below(2) == 0 {
+                match m.try_insert(key, val) {
+                    Ok(id) => {
+                        assert!(
+                            oracle.insert(key, (id, val)).is_none(),
+                            "seed={seed}: insert accepted a present key {key}"
+                        );
+                        assert_eq!(id, m.log_len() - 1);
+                    }
+                    Err(e) => {
+                        assert_eq!(e, ContainerError::DuplicateKey, "seed={seed}");
+                        assert!(
+                            oracle.contains_key(&key),
+                            "seed={seed}: refused a fresh key"
+                        );
+                    }
+                }
+            } else {
+                let (id, fresh) = m.try_intern(key, val).expect("within index word");
+                match oracle.get(&key) {
+                    Some(&(known, _)) => {
+                        assert!(
+                            !fresh && id == known,
+                            "seed={seed}: intern of present key {key}"
+                        );
+                    }
+                    None => {
+                        assert!(fresh, "seed={seed}: intern of fresh key {key} not fresh");
+                        oracle.insert(key, (id, val));
+                    }
+                }
+            }
+            // No shadows: the log and the live-key count coincide.
+            assert_eq!(m.log_len(), m.len());
+            assert_eq!(m.len(), oracle.len());
+            let probe = (rng.below(80)) as u32;
+            assert_eq!(m.id_of(&probe), oracle.get(&probe).map(|&(id, _)| id));
+            assert_eq!(
+                m.get_by_key(&probe).copied(),
+                oracle.get(&probe).map(|&(_, v)| v)
+            );
+        }
+        println!("unique_map seed={seed}: OK ({} keys)", oracle.len());
+    }
+}
+
+#[test]
+fn unique_map_mark_restore() {
+    for seed in 0..10u64 {
+        let mut m = ForkHistory::new(UMapT::new());
+        let mut oracle: HashMap<u32, u64> = HashMap::new();
+        let mut rng = Lcg::new(seed ^ 0x7E7E);
+        let mut frames: Vec<(_, HashMap<u32, u64>)> = Vec::new();
+
+        for _ in 0..400 {
+            match rng.below(8) {
+                0 => {
+                    let token = m
+                        .mark(ShrinkPolicy::Never)
+                        .expect("mark: depth bounded by this harness");
+                    frames.push((token, oracle.clone()));
+                }
+                1 if !frames.is_empty() => {
+                    let (tok, snap) = frames.pop().unwrap();
+                    assert!(m.restore(tok), "restore: own token");
+                    oracle = snap;
+                }
+                _ => {
+                    // Interning: a present key is a hit, a fresh one appends. A
+                    // key discarded by a restore is fresh again, which is exactly
+                    // what the index unwind has to get right without a column.
+                    let key = (rng.below(48)) as u32;
+                    let val = rng.next();
+                    let (_, fresh) = m.try_intern(key, val).expect("within index word");
+                    assert_eq!(fresh, !oracle.contains_key(&key), "seed={seed}: key {key}");
+                    oracle.entry(key).or_insert(val);
+                }
+            }
+            for (&k, &v) in oracle.iter() {
+                assert!(m.contains_key(&k), "seed={seed}: lost key {k} after op");
+                let i = m.id_of(&k).expect("present key has an id");
+                assert_eq!(m.get(i).1, v, "seed={seed}: key {k} value mismatch");
+            }
+            assert_eq!(m.len(), oracle.len(), "seed={seed}: live-key count");
+            assert_eq!(m.log_len(), oracle.len(), "seed={seed}: no shadows");
+            let absent = 200u32 + (rng.below(50) as u32);
+            assert_eq!(m.contains_key(&absent), oracle.contains_key(&absent));
+        }
+        println!("unique_map_mark_restore seed={seed}: OK");
     }
 }
 

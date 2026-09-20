@@ -9,7 +9,7 @@
 use crate::canon::{MSetCanon, VarCanon};
 use crate::config::{AuIds, EGraphConfig};
 use crate::containers::group::Member;
-use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpMap};
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpUniqueMap};
 use crate::literal::LitVal;
 use crate::multiplicity::MultiplicityLike;
 
@@ -48,7 +48,7 @@ pub struct TermPool<O: DenseId, V: DenseId, A: AuIds = AuIds31> {
     child_pool: AppendOnlyVec<A::Term, A::Index>,
     sizes: AppendOnlyVec<u32, A::Index>,
     vmasses: AppendOnlyVec<u32, A::Index>,
-    by_structure: SpMap<(TermOp<O, V>, Vec<A::Term>), A::Term, A::Index>,
+    by_structure: SpUniqueMap<(TermOp<O, V>, Vec<A::Term>), A::Term, A::Index>,
     /// Memoized [`build_best_term`] result per snapshot class.
     ///
     /// A class's minimal member is fixed by the snapshot, so its extracted term
@@ -64,7 +64,7 @@ pub struct TermPool<O: DenseId, V: DenseId, A: AuIds = AuIds31> {
     /// `build_best_term` call on this pool uses the same snapshot. That holds
     /// by construction: every pool is created next to one snapshot
     /// (`session.rs`, `exact.rs`, `mcgs.rs`) and never outlives it.
-    best_terms: SpMap<A::Class, A::Term, A::Index>,
+    best_terms: SpUniqueMap<A::Class, A::Term, A::Index>,
 }
 
 impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> TermPool<O, V, A> {
@@ -75,8 +75,8 @@ impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> Ter
             child_pool: AppendOnlyVec::new(),
             sizes: AppendOnlyVec::new(),
             vmasses: AppendOnlyVec::new(),
-            by_structure: SpMap::new(),
-            best_terms: SpMap::new(),
+            by_structure: SpUniqueMap::new(),
+            best_terms: SpUniqueMap::new(),
         }
     }
 

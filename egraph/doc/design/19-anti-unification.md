@@ -821,7 +821,7 @@ memo of 9.4), `reward.rs` (2.5), `egraph_api.rs` (4.1), `pretty.rs`, `dump.rs`.
 ### 5.2 Container primitives
 
 Persistent arena columns use the container crate: `VecP` for mutable columns,
-`AppendOnlyVec` for immutable ones, `SpMap` for most indices, and typed spans
+`AppendOnlyVec` for immutable ones, `SpUniqueMap` for the indices, and typed spans
 for flattened pools. Every piece of the session's rollback now lives in a verified container. The
 action cache's action lists used to be a plain `Vec` truncated by a length the
 token carried; they are an `AppendOnlyVec`, which fits because the cache is
@@ -850,13 +850,18 @@ contiguous and makes the arena's length assertions total.
 ### 5.5 Restorable hash indices
 
 The state index and the clean-solve memo are hash maps over an append-only log:
-the log is the source of truth and the index is derived. Both are `SpMap`s, so
-neither the unwinding nor the per-frame bookkeeping is written here — the map
-drops the keys above the target frame through its own previous-occurrence column,
-which is the column that makes the unwind cost the discarded suffix rather than
-the surviving entries. The memo moved onto it on 2026-09-19, retiring the last
+the log is the source of truth and the index is derived. Both are `SpUniqueMap`s
+(the container's unique-keys discipline), so neither the unwinding nor the
+per-frame bookkeeping is written here — on a frame move the map drops the keys
+above the target frame, one index removal per discarded entry, and the unwind
+costs the discarded suffix rather than the surviving entries. Every AU index is
+an interning table (a key is looked up and inserted only on a miss), which is
+what the discipline states: no key occurs twice in the log, so the map keeps no
+previous-occurrence column and an insert is one hash of the key (`try_intern`)
+and one log push. The memo moved onto the map on 2026-09-19, retiring the last
 hand-maintained rollback in the workspace: a walk over the log above the
-checkpoint plus a stack of per-frame lengths, 67 lines of it.
+checkpoint plus a stack of per-frame lengths, 67 lines of it; the unique
+discipline followed the same day.
 
 ### 5.6 Frame and restore order
 
