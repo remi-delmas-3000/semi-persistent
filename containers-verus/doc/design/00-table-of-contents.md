@@ -96,6 +96,11 @@ listing's order.
     policy type parameter every composite takes, the two column families it is
     consulted through, `HotFirst` (the default) versus `TrailFirst`, and the
     two facts the abstract store made explicit in the proofs.
+19. **[Verified Node Caches](19-verified-node-caches.md)**: design sketch. The
+    hint index as a lower bound: the completeness invariant, the hash-consing
+    theorem in the presence of collisions, restore with no index work, the
+    two droppability rules, and the public contracts of the three e-graph
+    caches derived by bi-abduction. Not yet implemented beyond `hinted_arena`.
 
 ## The class layer
 
