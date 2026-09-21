@@ -324,6 +324,126 @@ rewrites. The public surface then has no operation that can break clause 1.
 The fixed-arity contracts with content `(op, lit)` and no recanonization
 (literal content never changes), so no history column and no `set`.
 
+## 6a. The store: the two-step id protocol and the routing bijection
+
+The caches do not work alone. A node's *global* id `G` is what the rest of
+the e-graph holds (classes, use-lists, proofs); its *local* id `L` is a
+position in one of the ten kind-specific caches. The node store owns the
+mapping and the minting of global ids, and every cache's correctness theorem
+is only useful through it. This section states the protocol and the
+invariant that makes the caches one structure, again by abduction.
+
+### The routing table
+
+`TypedRouting` is an `AppendOnlyVec<NodeRef, Index, TRACK>` (verified) plus
+one flag. A global id *is* a position in that column: `routing[g]` is the
+kind-tagged local id `Kind(l)` of the node minted as `g`. Ids are never reused
+while a node lives, and a restore rolls the column back by length, so the
+column carries the mark/restore proofs already.
+
+### The two-step protocol
+
+Minting a node is a probe-then-commit in which the global id is chosen
+*before* the cache is consulted, because the cache stores the global id in
+the cell it appends:
+
+```
+reserve() -> g            requires ¬reserved
+                          ensures  g == |entries| ∧ reserved ∧ entries unchanged
+probe_or_insert(g, content)   (the cache; §6)
+finalize(g, Kind(l))      requires reserved ∧ g == |entries|
+                          ensures  entries == old.entries.push(Kind(l)) ∧ ¬reserved
+unreserve()               requires reserved
+                          ensures  ¬reserved ∧ entries unchanged
+```
+
+`add(op, children)` is: reserve `g`; dispatch on the operator's kind to one
+cache; on `Inserted { l }` finalize `g ↦ Kind(l)` and answer `Fresh(g)`; on
+`Hit { g' }` unreserve and answer `Existing(g')`. The flag is the executable
+form of a linear token: exactly one reservation is open at a time, and every
+frame operation clears it.
+
+### The store invariant
+
+Let `C_kind` be the cache of each kind. The store's `wf` is the caches' and
+the routing's `wf` together with three clauses that tie them:
+
+```
+route_ok:    ∀ g < |routing|. routing[g] == Kind(l) ⟹ l < |C_kind.view| ∧ C_kind.view[l].global_id == g
+cell_ok:     ∀ kind, l < |C_kind.view|.  let g = C_kind.view[l].global_id in  g < |routing| ∧ routing[g] == Kind(l)
+lockstep:    depth(routing) == depth(C_kind) == depth(pool) for every kind   (one History drives them all)
+```
+
+`route_ok` and `cell_ok` together say routing is a bijection between minted
+global ids and live cells across all caches. With it the store-level theorem
+is:
+
+```
+unique_content:  ∀ kind, l₁ ≠ l₂ < |C_kind.view|. ¬eq_spec(content(C_kind.view[l₁]), content(C_kind.view[l₂]))
+```
+
+which is each cache's hash-consing theorem, made global by the fact that an
+operator's kind is a function of the operator (the registry fixes it at
+registration and never changes it), so two nodes of the same content are in
+the same cache.
+
+### Abductions
+
+- **`Fresh(g)` must satisfy `route_ok` and `cell_ok`.** The cell appended by
+  `probe_or_insert` carries `g` (the cache's `Inserted` contract), and
+  `finalize` writes `Kind(l)` at position `g`. For the two to line up,
+  `finalize` needs `g == |entries|` *at commit time*, which is the abduced
+  anti-frame of the whole protocol: **no other `finalize` and no frame
+  operation may happen between `reserve` and `finalize`.** The flag enforces
+  the first executably; clearing the flag on every frame operation enforces
+  the second, since a stale reservation across a restore would commit at a
+  position that no longer equals `g`. In the verified store the reservation
+  is a ghost-tracked obligation carried from `reserve` to `finalize` or
+  `unreserve`, and the frame operations require it to be closed.
+- **`Existing(g')` must leave the store unchanged.** `Hit` leaves the cache
+  unchanged (§6); `unreserve` leaves the routing unchanged. Nothing else was
+  touched: that is the frame.
+- **Restore must preserve the bijection without repair.** A restore truncates
+  the routing and every cache to the same mark (`lockstep`). A cell and its
+  routing entry were appended between the same two marks, because the
+  protocol forbids a frame operation between them, so they are cut together
+  or kept together. This is why `lockstep` is a clause of `wf` and not an
+  external assumption, and it is the abduced precondition of the restore
+  postcondition `route_ok ∧ cell_ok`.
+- **Id reuse after a restore is safe.** `reserve` returns `|entries|`, so
+  after a restore the first truncated global id is minted again, and the
+  cache's first truncated local id likewise. The old cell's content hint
+  `(fp_old, l)` may still be in a bucket; it now names a live cell with
+  different content, is skipped by the equality test, and the new content has
+  its own hint. The lower bound is untouched. (Droppability rule 1 could have
+  removed the stale hint only while `l` was past the live length; once `l` is
+  reused the hint is junk, not a hole.)
+- **`recanonize` dispatches through the routing.** The union-find hands the
+  store a global id; `routing[g]` says which cache and which cell; `route_ok`
+  is exactly the precondition `recanonize_node` needs (`l < |view|` and the
+  cell is the node `g`). The collision pairs it reports are global ids read
+  from cells, which `cell_ok` guarantees route back to those cells.
+
+### Contracts for the store
+
+```
+add(op, children) -> Added<G>
+    ensures Existing(g) ⟹ store unchanged ∧ g < |routing| ∧ content(cell_of(g)) == (op, children)
+            Fresh(g)    ⟹ g == old|routing| ∧ routing == old.routing.push(Kind(l)) ∧ C_kind.view == old.C_kind.view.push(node(g, op, children))
+                          ∧ every other cache and the pools unchanged
+            store.wf ∧ unique_content
+recanonize(g, find, collisions, touched)
+    ensures the dispatched cache's recanonize_node contract on cell_of(g); store.wf ∧ unique_content-modulo-collisions
+            (the pairs in `collisions` are the only equal-content pairs, and the closure merges them)
+Member: the group protocol over routing, caches and pools, ensures store.wf, lockstep, and the bijection after every frame move.
+```
+
+`unique_content-modulo-collisions` names the one moment the store is allowed
+to hold two equal cells: between a recanonize that created a collision and
+the closure's merge, which is how congruence closure works. Its contract is
+that the pair is reported; the store's invariant is restored when the
+closure merges the classes and the duplicate is retired.
+
 ## 7. Trust
 
 Nothing new. The arena's only external fact is the hasher's validity, already
@@ -344,7 +464,13 @@ every theorem would still hold and every probe would scan one bucket.
    content type over spans with its routing lemma, `pool_set` made private.
    Two to three days.
 3. **Literal cache.** One day.
-4. **Wiring.** `NodeStore` on the three verified caches; the store and
-   saturation traces paired against the previous commit at the usual
-   protocol; the `HintSlot` width test and the completeness debug check
-   retired in favour of the contracts. One to two weeks, the uncertain part.
+4. **The store.** The routing table is already a verified column; what is
+   left is the reservation as a ghost obligation (`reserve` opens it,
+   `finalize`/`unreserve` close it, frame operations require it closed), the
+   three tying clauses as `wf`, and the store-level theorems `unique_content`
+   and the bijection after every frame move. Two to three days.
+5. **Wiring.** `NodeStore` on the three verified caches and the verified
+   routing; the store and saturation traces paired against the previous
+   commit at the usual protocol; the `HintSlot` width test and the
+   completeness debug check retired in favour of the contracts. One to two
+   weeks, the uncertain part.
