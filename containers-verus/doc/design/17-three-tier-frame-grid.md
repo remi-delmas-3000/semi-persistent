@@ -54,6 +54,21 @@ Empty frames retain a delimiter and `saved_len` even when they contain no
 physical entries. The delimiter is logical token identity and must survive
 conversion.
 
+### Physical authority
+
+The proofs read the frame grid from the tier pools and nothing else: the
+`hot_value_pool`, the `trail_value_pool` and the Cold runs are the physical
+authority for what a frame captured, and every capture extent, every
+reconstruction and every restore is justified from them. The compatibility
+`diff_log` that production's shape carries is inert: no lemma may cite it to
+justify a capture, an extent or a reconstructed value. Each Trail, Hot and
+Cold frame owns its own `saved_len`; nothing relates a frame's saved length to
+its neighbours' (§2), and a Hot frame's payload count is bounded by that
+saved length while an undeduplicated Trail frame's is not, because duplicate
+writes stack vertically (§8). Persistent Hot frames are unique but unordered;
+sorting happens only as a transient local step inside the Hot-to-Cold
+translation (§4).
+
 ## 2. Saved lengths zigzag
 
 Each frame records the exact live length at its mark:

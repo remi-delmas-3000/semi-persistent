@@ -59,6 +59,24 @@ restates a slice copy whose effect its postcondition pins element-by-element.*
 
 [Design Table of Contents](00-table-of-contents.md)
 
+## Rules of the perimeter
+
+These held for the whole proof drive and hold for every change inside
+`verus!`:
+
+- No `admit`, `assume` or `assume_specification` anywhere in the verified
+  crates (a CI gate greps for them), and no contract-bearing `external_body`
+  added to hide an obligation. The trusted count below is pinned in CI; a
+  change that moves it updates this chapter and the pin in the same commit.
+- Public contracts are never weakened to make a proof go through, and the
+  public API stays total (the partial-API gate: no public function with a
+  precondition beyond `wf`).
+- `containers/`, the unverified implementation, is the differential and
+  performance oracle and is not modified; every runtime property test and
+  every paired benchmark compares against it as it was.
+- Solver limits are not raised to admit a proof; a proof that exceeds them is
+  restructured.
+
 ## 0. What `external_body` means
 
 `#[verifier::external_body]` tells Verus: *do not look inside this function; take
