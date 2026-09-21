@@ -715,7 +715,12 @@ the requirement-level fuzzing is what tests the assumed facts.
 **D-hasher: `axiom_index_hasher_builds_valid_hashers`
 (src/hasher_spec.rs, default build; 1 axiom + the `ExIndexHasher` and
 `ExFoldHasher` registrations).** `SpMap`'s transient key index is
-`std::collections::HashMap<K, usize, IndexHasher>`, where `IndexHasher` is an
+`std::collections::HashMap<K, I, S>` for a hasher parameter `S: ValidHasher`
+(2026-09-20): a trait asking for `Default` and a proof of
+`builds_valid_hashers::<S>()`, with two impls, each on an axiom that already
+ships — `IndexHasher`, the default, on this one, and `std::hash::RandomState`
+on vstd's own. Choosing a hasher adds no trusted item. The rest of this entry
+describes the default. `IndexHasher` is an
 8-byte crate-local `BuildHasher` carrying an explicit seed and delegating to
 foldhash's `fast` family, the same hash ALGORITHM production's `Map` uses
 (hashbrown 0.17's `DefaultHashBuilder` is a newtype wrapping
