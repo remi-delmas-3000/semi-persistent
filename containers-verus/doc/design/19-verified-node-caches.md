@@ -444,6 +444,85 @@ the closure's merge, which is how congruence closure works. Its contract is
 that the pair is reported; the store's invariant is restored when the
 closure merges the classes and the duplicate is retired.
 
+## 6b. Batching and parallel insertion: two designs for the id space
+
+The protocol of §6a is strictly sequential: one open reservation, one cache
+touched at a time. Two designs lift that, at different costs.
+
+### Design A: probe first, mint only misses
+
+Probing needs no id; the id exists before the probe in §6a only because the
+cache stores it in the cell it might append. So:
+
+```
+probe_many(contents) -> [Hit(g) | Miss]      read-only, the probe contract elementwise on one state
+insert_many(misses)  -> ids                  sequential appends, ids len, len+1, …; in-batch equal misses deduplicated
+```
+
+Failures consume nothing, so there is nothing to return and no gap. The
+probe phase is reads only and fans out over the batch and over the ten caches
+with no synchronisation; the insert phase is a short sequential tail. The
+routing stays append-only and every proof of §6a stands. This is the cheap
+design; it parallelises probes, not inserts.
+
+### Design B: a pool-first allocator over a captured routing column
+
+To insert in parallel too, ids must be handed out before the caches are
+consulted and returned when the cache says `Hit`. The id space becomes a bump
+allocator with a pool of freed lower ids and the theorem:
+
+```
+alloc_wf ≜  free ⊆ [0, max)
+          ∧ ∀ g < max.  g ∈ free  ⟺  routing[g] is empty
+          ∧ ∀ g ≥ max.  routing[g] is empty
+alloc():     free ≠ ∅ ⟹ r ∈ free ∧ free' == free \ {r} ∧ max' == max
+             free == ∅ ⟹ r == max ∧ max' == max + 1
+release(g):  requires g < max ∧ routing[g] empty;  ensures free' == free ∪ {g}
+```
+
+Pool-first: nothing is minted beyond `max` while a lower id is free, so gaps
+are temporary and the id space consumed is the live count plus the pool. The
+model changes in two places, both to columns the crate already verifies:
+
+- **Routing becomes a captured-write column** (`VecI` with the empty entry as
+  the niche): a hole filled later is a write below the length, which an
+  append-only column cannot roll back. Its `set` captures the old value and a
+  restore replays it, so holes reopen exactly as they were at the mark.
+- **The pool is a semi-persistent set** (`SparseSet`): after a restore, ids
+  allocated since the mark are free again and ids freed since are not. Both
+  columns sit under the one history, so `alloc_wf` is restored by lockstep,
+  not by repair; that lockstep is a clause of the store's `wf`, as in §6a.
+
+The store invariant of §6a changes only in its domain: the bijection is
+between *allocated* ids (`g < max ∧ g ∉ free`) and live cells.
+
+### The parallel shape under design B
+
+```
+prologue  (sequential):  for each cache k, hand worker k a slice of `free` and a bump range of `max`
+parallel  (rayon):       worker k runs probe_or_insert on cache k alone, taking ids from its slice, recording (g, l) for successes and unused ids
+epilogue  (sequential):  write routing[g] = Kind(l) for every success; release every unused id; advance max
+```
+
+Nothing in the parallel phase is shared: each worker owns one cache by
+`&mut` (the shape the restore fan-out already uses) and its own id slice.
+The verified contracts are therefore single-threaded per cache and the proofs
+never see an interleaving; the store-level `alloc_wf` and bijection are
+established by the epilogue from the workers' records. The two constraints of
+design A carry over: equal misses in one batch land in one cache and are
+caught by that cache's sequential loop, and a node whose child is in the same
+batch needs the child's id first, so batches are layers.
+
+### Cost and choice
+
+Design A costs nothing per node beyond today. Design B costs, per inserted
+node, a captured set plus a pool pop instead of a push (a few nanoseconds
+against a probe that costs tens), and a pool push per pre-reserved id that
+turned out to be a hit; it gains parallel inserts across caches. Which is
+worth it depends on how much of a saturation round is insertion into distinct
+caches, a number not yet measured. The single-node `add` of §6a is the
+degenerate batch of either design.
+
 ## 7. Trust
 
 Nothing new. The arena's only external fact is the hasher's validity, already
