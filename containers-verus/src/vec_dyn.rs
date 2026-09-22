@@ -232,6 +232,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn can_push(&self) -> (b: bool)
         requires self.wf(),
         ensures b == (self.view().len() + 1 < I::max_nat()),
@@ -243,6 +244,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn try_push(&mut self, value: T) -> (r: Result<(), crate::error::ContainerError>)
         requires old(self).wf(),
         ensures
@@ -260,6 +262,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn try_extend(&mut self, values: &[T]) -> (r: Result<(), crate::error::ContainerError>)
         requires old(self).wf(),
         ensures
@@ -276,6 +279,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn pop(&mut self) -> (r: Option<T>)
         requires old(self).wf(),
         ensures
@@ -295,6 +299,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn push_untracked(&mut self, value: T)
         requires old(self).wf(),
         ensures
@@ -312,6 +317,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn pop_untracked(&mut self) -> (r: Option<T>)
         requires old(self).wf(),
         ensures
@@ -333,6 +339,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn set_untracked(&mut self, i: I, value: T)
         requires old(self).wf(),
         ensures
@@ -375,6 +382,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn as_slice(&self) -> (r: Option<&[T]>)
         ensures r matches Some(s) ==> s@ == self.view(),
     {

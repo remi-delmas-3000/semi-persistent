@@ -1142,7 +1142,7 @@ where
         proof { self.lemma_len_bounded(l as int); }
         let ghost old_nodes = self.nodes_view();
         let ghost old_model = self.model@;
-        let h0 = self.heads.get_index(self.head_ix(l));
+        let h0 = self.heads.get_at(self.head_ix(l));
         let old_head = h0.head();
         let was_empty = old_head.is_null_exec();
 
@@ -1176,7 +1176,7 @@ where
         }
         h.len = Self::len_incr(h.len);
         let li = self.head_ix(l);
-        self.heads.set_index(li, h);
+        self.heads.set_at(li, h);
 
         proof {
             let model = self.model@;
@@ -1350,7 +1350,7 @@ where
         proof { self.lemma_len_bounded(l as int); }
         let ghost old_nodes = self.nodes_view();
         let ghost old_model = self.model@;
-        let h0 = self.heads.get_index(self.head_ix(l));
+        let h0 = self.heads.get_at(self.head_ix(l));
         let was_empty = h0.head().is_null_exec();
 
         let slot = self.nodes_len();
@@ -1363,10 +1363,10 @@ where
         if !was_empty {
             // relink old tail node forward to slot.
             let old_tail = h0.tail();
-            let mut tnode = self.nodes.get_index(self.node_ix(old_tail));
+            let mut tnode = self.nodes.get_at(self.node_ix(old_tail));
             tnode.set_next(NodeRef::to(slot));
             let ti = self.node_ix(old_tail);
-            self.nodes.set_index(ti, tnode);
+            self.nodes.set_at(ti, tnode);
         }
 
         // model[l] := model[l] ++ [slot]
@@ -1387,7 +1387,7 @@ where
         }
         h.len = Self::len_incr(h.len);
         let li = self.head_ix(l);
-        self.heads.set_index(li, h);
+        self.heads.set_at(li, h);
 
         proof {
             let model = self.model@;
@@ -1962,10 +1962,10 @@ where
             final(self).nodes_snapshots_view() == old(self).nodes_snapshots_view(),
             final(self).model_snapshots_view() == old(self).model_snapshots_view(),
     {
+        let n = self.nodes.store.raw_len();
         if !(l.to_usize() < self.heads.store.raw_len()) {
             return Err(crate::error::ContainerError::IndexOutOfBounds);
         }
-        let n = self.nodes.store.raw_len();
         if n < usize::MAX - 1
             && N::try_new(n).is_some()
             && (N::bit_stealing() || N::try_new(n + 1).is_some())
@@ -2302,15 +2302,9 @@ where
     {
         // Runtime guard: node-id headroom before allocating (N::try_new on
         // the fresh node row; reject-before-mutate).
-        crate::guard::check_precondition(
-            // The fresh slot's id must be representable
-            // (`try_new(n).is_some() <==> n < id_bound`); the full-range
-            // family alone also needs the successor representable
-            // (`lemma_node_push_fits` derives the word bound).
-            N::try_new(self.nodes_len()).is_some()
-                && (N::bit_stealing() || N::try_new(self.nodes_len() + 1).is_some()),
-            "ListArena::prepend: node-id range exhausted",
-        );
+        // The id-range facts are this function's `requires`; every caller proves
+        // them (the total `try_prepend` checks them once), so nothing is re-read or
+        // re-checked here.
         let lu = l.as_usize();
         proof {
             l.lemma_as_nat_is_id_nat();  // as_usize ensures as_nat; bridge to id_nat. prod-parity
@@ -2353,11 +2347,9 @@ where
             final(self).nodes_view()[old(self).nodes_view().len() as int].payload == payload,
     {
         // Runtime guard: node-id headroom before allocating; see `prepend`.
-        crate::guard::check_precondition(
-            N::try_new(self.nodes_len()).is_some()
-                && (N::bit_stealing() || N::try_new(self.nodes_len() + 1).is_some()),
-            "ListArena::append: node-id range exhausted",
-        );
+        // The id-range facts are this function's `requires`; every caller proves
+        // them (the total `try_append` checks them once), so nothing is re-read or
+        // re-checked here.
         proof { l.lemma_as_nat_is_id_nat(); }  // as_usize -> id_nat bridge. prod-parity
         self.append_raw(l.as_usize(), payload)
     }

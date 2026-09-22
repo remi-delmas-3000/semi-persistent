@@ -346,6 +346,69 @@ peel heuristic sees nothing to specialise. Why the earlier passes leave them
 in memory on the branch and not on mainline is the open question; no `opt`
 matching rustc's LLVM 22 is installed here to print MemorySSA's view.
 
+## Second pass: source review of the hot paths (2026-09-22)
+
+A mechanical scan of the executable residue of every container (proofs
+stripped) for two rules, *branch on the const generics before any runtime
+work* and *never re-evaluate a value that cannot have changed*, followed by a
+manual reading of the flagged per-element paths. The frame operations (mark,
+restore, pop) and the runtime store enum, which dispatches by design, are
+excluded from the list; they are per-frame, not per-element.
+
+The systematic pattern is one: the public total wrapper checks a bound, then
+every internal layer re-derives the same fact from a fresh read of the same
+field, each with its own conversion and refuse path. The rule that fixes it
+everywhere: **check once at the public boundary, pass the proven facts down
+as `requires` on internal cores that never re-check, read each field once per
+operation.**
+
+| container | finding | direction |
+|---|---|---|
+| Vec | `get_index`/`set_index` are total; internal callers holding the bound re-paid the check | `get_at`/`set_at` with the bound as `requires` (applied) |
+| Vec | `hot_defer_scope_exec` read the frame stacks before the `TRACK` test | short-circuit with `TRACK` first (applied) |
+| Vec | two write implementations behind a per-element dispatch | one executable write path with separate proof cases; no cached tier flag (its correctness across migrations would be a new obligation) |
+| Vec iterator | `next` reads the length three times per element | read once |
+| ListArena | append reads the node count four times through four accessors and the heads length twice; `append`/`prepend` re-check a precondition every caller proves | `append`/`prepend` call the raw cores; raw cores on the checked accessors (applied) |
+| SparseSet | `try_get` calls `contains` then `get`, which calls `contains` again; `get`/`set`/`remove` reload the sparse position after validation | one internal lookup returning the validated dense position, reused |
+| UnionFind | `union_core` reads the length twice, then `find` re-checks; `explain` can run five `find_const` traversals | cache roots; validated internal extraction |
+| UnionFind | `try_make_set` tests the two proof columns without an outer `if PROOFS` | const-generic test first (confirm the option tests fold) |
+| EClasses | `prefer_a_by_uses` finds both roots, then the directed union finds them again; accessors do `contains` then a second lookup | carry resolved roots into an internal union; SparseSet helper |
+| EClasses | `set_min_monomial` initialises a known-width row by repeated `try_push` | validate headroom once, batch-initialise |
+| B+ tree | cursor `seek` always descends from the root (the legacy current-leaf fast path was omitted); `seek` reloads the leaf `seek_leaf` already loaded | restore the sequential fast path; return the loaded leaf |
+| CircularList | public `splice` walks the absorbed ring to prove disjointness before an O(1) splice; `add_singleton` reads the length three times | keep the public guard; callers with proven disjointness use the core (the e-graph already does) |
+| SpMap | `intern_entry` clones the key even on a hit | defer clone and capacity work to the vacant path; measure against the extra hash |
+| HintedArena | `probe` re-indexes the spill slot and re-selects the store inside the bucket loop | bind the bucket once; select the store once around the scan |
+| LayeredSpanMap | `flatten` binary-searches the invalidation list per key | cursor walk, linear |
+| Layered decode | `decode_exec` random-accesses every element; delta decode replays all predecessors | sequential decoder carrying run position and previous value |
+| TwoStackLog | `flush_cold(0)` still copies the hot log | zero-work exit; retain allocations |
+| ColdStack, builders | known-size copies start empty and push | reserve once |
+
+Order: Vec write unification, SparseSet lookup reuse, list cleanup (in
+progress), the repeated traversals; the compression and log items tracked
+separately. Every step is benchmarked with the paired protocol regardless of
+what the codegen audit shows: the audit is diagnostic, the timing decides.
+Validation to add beyond the current microbenchmarks: tracked and untracked,
+static and runtime stores, `PROOFS` on and off, repeated capture, pop then
+re-push, nested restores, migrated histories, sequential B+ seeks, expensive
+map keys, long compression runs, zero-frame flushes.
+
+## The list regression: what the pass trace shows
+
+Forced one-iteration peeling recovers the time fully (103 µs against
+mainline's 103; unpeeled 128), and the legacy arm gains the same 25 per cent
+under forced peeling, so mainline's 1.25x over legacy was that peel obtained
+by heuristic. The pass trace on the benchmark closure shows both trees
+identical through inlining and the early loop passes; they part in the
+closure's late simplification, where mainline's GVN and jump threading fold
+the repeated heads bounds check into a boolean phi that is constant after the
+first iteration (the peel trigger) and ours does not, and where our loop nest
+is additionally unswitched once. Tested and ruled out as the trigger, one at
+a time: the write dispatch, the constructor's visibility, the type's size,
+drop glue, address escape, inline attributes, the pinned frame-stack loads,
+the leaf id code. The check-once rule above removes the repeated reads that
+the late passes had to reason about; whether that restores the peel is a
+measurement, not a prediction.
+
 ## Fix list
 
 | # | change | status |

@@ -3171,10 +3171,16 @@ where
         requires self.wf(),
         ensures r == self.hot_defer_scope(),
     {
-        let unique = self.store.unique_capture();
-        let cold_empty = self.cold_stack.len() == 0;
-        let trail_empty = self.trail_stack.len() == 0;
-        let r = TRACK && unique && cold_empty && trail_empty;
+        // The constant is tested first, so an untracked column never reads
+        // the frame stacks: their `len()` reads carry compiler assumptions
+        // that would keep the dead loads alive inside every hot loop.
+        let r = TRACK
+            && self.store.unique_capture()
+            && self.cold_stack.len() == 0
+            && self.trail_stack.len() == 0;
+        let ghost unique = self.store.unique_capture_spec();
+        let ghost cold_empty = self.cold_stack@.len() == 0;
+        let ghost trail_empty = self.trail_stack@.len() == 0;
         proof {
             reveal(Vec::hot_defer_scope);
             if r {
@@ -3470,6 +3476,7 @@ where
     /// the view — AND the vector stays untracked with no diff log. These are
     /// thin wrappers asserting the equivalence explicitly; the heavy lifting is
     /// in push/set/pop's own contracts, which hold for ALL states.
+    #[inline(always)]
     pub fn push_untracked(&mut self, value: T)
         requires
             old(self).wf(),
@@ -3497,6 +3504,7 @@ where
         proof { self.lemma_untracked_diff_log_empty(); }
     }
 
+    #[inline(always)]
     pub fn pop_untracked(&mut self) -> (r: Option<T>)
         requires old(self).wf(),
         ensures
@@ -3519,6 +3527,7 @@ where
         r
     }
 
+    #[inline(always)]
     pub fn set_untracked(&mut self, i: I, value: T)
         requires
             old(self).wf(),
@@ -3570,6 +3579,21 @@ where
         if !(i.as_usize() < self.store.raw_len()) {
             crate::guard::refuse("Vec::get_index: index out of bounds");
         }
+        self.get_at(i)
+    }
+
+    /// Checked-by-proof read: the bound is a precondition, not a branch. The
+    /// public `get_index` establishes it once at the total boundary; internal
+    /// callers that already hold the fact must use this so a length is read
+    /// once per operation (never re-derived behind a check the caller made).
+    #[inline(always)]
+    pub(crate) fn get_at(&self, i: I) -> (v: T)
+        requires
+            self.wf(),
+            i.as_nat() < self.view().len(),
+        ensures
+            v == self.view()[i.as_nat() as int],
+    {
         self.store.get(i)
     }
 
@@ -13491,6 +13515,7 @@ where
     /// Contiguous read access to the raw values when the backend stores them
     /// contiguously: `Some` for `ParallelStore`, `None` for `InlineStore`
     /// (production parity — the backend-specific fast path).
+    #[inline(always)]
     pub fn as_slice(&self) -> (r: Option<&[T]>)
         ensures r matches Some(s) ==> s@ == self.view(),
     {
@@ -13527,6 +13552,7 @@ where
     // ------------------------------------------------------------------
 
     /// Exec counterpart of `push`'s capacity precondition.
+    #[inline(always)]
     pub fn can_push(&self) -> (b: bool)
         requires self.wf(),
         ensures b == (self.view().len() + 1 < I::max_nat()),
@@ -13545,6 +13571,7 @@ where
 
     /// Total push: refuses at the index word's capacity instead of the
     /// partial core's deferred trap-at-next-`len()` protocol.
+    #[inline(always)]
     pub fn try_push(&mut self, value: T) -> (r: Result<(), crate::error::ContainerError>)
         requires old(self).wf(),
         ensures
@@ -13568,6 +13595,7 @@ where
     /// form of `try_push` for hot loops (one branch per batch, none per
     /// element).
     #[verifier::spinoff_prover]
+    #[inline(always)]
     pub fn try_extend(&mut self, values: &[T]) -> (r: Result<(), crate::error::ContainerError>)
         requires old(self).wf(),
         ensures
@@ -15522,6 +15550,20 @@ where
         if !(i.as_usize() < self.store.raw_len()) {
             crate::guard::refuse("Vec::set_index: index out of bounds");
         }
+        self.set_at(i, value);
+    }
+
+    /// Checked-by-proof write: the bound is a precondition (see `get_at`).
+    #[inline(always)]
+    pub(crate) fn set_at(&mut self, i: I, value: T)
+        requires
+            old(self).wf(),
+            i.as_nat() < old(self).view().len(),
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).view().update(i.as_nat() as int, value),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+    {
         self.runtime_set(i, value);
     }
 
