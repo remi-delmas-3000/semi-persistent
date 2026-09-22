@@ -306,17 +306,17 @@ where
 
     #[inline(always)]
     fn is_empty(&self) -> bool {
-        self.data.len() == 0
+        self.data.as_slice().len() == 0
     }
 
     #[inline(always)]
     fn raw_len(&self) -> (n: usize) {
-        self.data.len()
+        self.data.as_slice().len()
     }
 
     #[inline(always)]
     fn len(&self) -> I {
-        I::try_from_usize(self.data.len()).expect("len overflow")
+        I::try_from_usize(self.data.as_slice().len()).expect("len overflow")
     }
 
     #[inline(always)]

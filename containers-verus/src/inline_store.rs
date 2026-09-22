@@ -530,19 +530,19 @@ where
 
     #[inline(always)]
     fn is_empty(&self) -> bool {
-        self.data.len() == 0
+        self.data.as_slice().len() == 0
     }
 
     #[inline(always)]
     fn raw_len(&self) -> (n: usize) {
-        self.data.len()
+        self.data.as_slice().len()
     }
 
     #[inline(always)]
     fn len(&self) -> I {
         // Production's line verbatim (containers/src/diff_store.rs:246); vstd's
         // `Option::expect` spec requires `is Some`, discharged by wf.
-        I::try_from_usize(self.data.len()).expect("len overflow")
+        I::try_from_usize(self.data.as_slice().len()).expect("len overflow")
     }
 
     #[inline(always)]
