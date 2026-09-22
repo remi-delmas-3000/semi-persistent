@@ -292,22 +292,36 @@ where
         self.dense.is_empty()
     }
 
+    /// The one liveness lookup (design chapter 20, H4): reads the sparse
+    /// length, the sparse slot, the dense length and the indices slot once
+    /// each and returns the validated dense position. Every public operation
+    /// that needs liveness consumes this result instead of testing again and
+    /// re-deriving the position behind the test.
+    pub(crate) fn lookup(&self, id: Idx) -> (r: Option<Idx>)
+        requires self.wf(),
+        ensures
+            r is Some <==> self.contains_spec(id),
+            r matches Some(pos) ==> pos == self.sparse_view()[id.as_nat() as int],
+    {
+        let cap = self.sparse.len();
+        if id.as_usize() >= cap.as_usize() {
+            return None;
+        }
+        let pos = self.sparse.get_at(id);
+        let nlen = self.dense.len();
+        if pos.as_usize() >= nlen.as_usize() {
+            return None;
+        }
+        let idx_at = self.indices.get_at(pos);
+        if idx_at.as_usize() == id.as_usize() { Some(pos) } else { None }
+    }
+
     /// Liveness test. Returns exactly `contains_spec(id)`.
     pub fn contains(&self, id: Idx) -> (b: bool)
         requires self.wf(),
         ensures b == self.contains_spec(id),
     {
-        let cap = self.sparse.len();
-        if id.as_usize() >= cap.as_usize() {
-            return false;
-        }
-        let pos = self.sparse.get_index(id);
-        let nlen = self.dense.len();
-        if pos.as_usize() >= nlen.as_usize() {
-            return false;
-        }
-        let idx_at = self.indices.get_index(pos);
-        idx_at.as_usize() == id.as_usize()
+        self.lookup(id).is_some()
     }
 
     /// Value of a live id (through the stable indirection).
@@ -319,16 +333,16 @@ where
         // Total-with-documented-panic: liveness is an explicit branch. A dead
         // id previously read a stale dense slot silently (production asserts;
         // the verified core relied on the erased requires).
-        if !self.contains(id) {
-            crate::guard::refuse("SparseSet::get: id not present");
+        match self.lookup(id) {
+            Some(pos) => self.dense.get_at(pos),
+            None => crate::guard::refuse("SparseSet::get: id not present"),
         }
-        let pos = self.sparse.get_index(id);
-        self.dense.get_index(pos)
     }
 
     /// Value of a live id whose liveness the caller has already established
     /// (pub(crate): the aggregate checks once, or holds it as a proof fact,
     /// and reads without the public form's re-check).
+    #[inline(always)]
     pub(crate) fn get_live(&self, id: Idx) -> (v: T)
         requires
             self.wf(),
@@ -336,12 +350,13 @@ where
         ensures
             v == self.dense_view()[self.sparse_view()[id.as_nat() as int].as_nat() as int],
     {
-        let pos = self.sparse.get_index(id);
-        self.dense.get_index(pos)
+        let pos = self.sparse.get_at(id);
+        self.dense.get_at(pos)
     }
 
     /// Overwrite a live id's value, liveness already established (the
     /// pub(crate) counterpart of `set`, same effects without the re-check).
+    #[inline(always)]
     pub(crate) fn set_live(&mut self, id: Idx, value: T)
         requires
             old(self).wf(),
@@ -360,8 +375,8 @@ where
             final(self).sparse_snapshots_view() == old(self).sparse_snapshots_view(),
             final(self).indices_snapshots_view() == old(self).indices_snapshots_view(),
     {
-        let pos = self.sparse.get_index(id);
-        self.dense.set_index(pos, value);
+        let pos = self.sparse.get_at(id);
+        self.dense.set_at(pos, value);
         proof {
             assert(self.sparse.view() == old(self).sparse.view());
             assert(self.indices.view() == old(self).indices.view());
@@ -391,11 +406,11 @@ where
             final(self).indices_snapshots_view() == old(self).indices_snapshots_view(),
     {
         // Total-with-documented-panic: see `get`.
-        if !self.contains(id) {
-            crate::guard::refuse("SparseSet::set: id not present");
-        }
-        let pos = self.sparse.get_index(id);
-        self.dense.set_index(pos, value);
+        let pos = match self.lookup(id) {
+            Some(pos) => pos,
+            None => crate::guard::refuse("SparseSet::set: id not present"),
+        };
+        self.dense.set_at(pos, value);
         proof {
             // dense.set changes only dense's values, not lengths; sparse and
             // indices are untouched, so the permutation + inverse carry.
@@ -462,8 +477,8 @@ where
         let cap = self.sparse.len();
         if pos.as_usize() < cap.as_usize() {
             // Recycle: indices[pos] is the first free id (pos == old_n).
-            let recycled_id = self.indices.get_index(pos);
-            self.sparse.set_index(recycled_id, pos);
+            let recycled_id = self.indices.get_at(pos);
+            self.sparse.set_at(recycled_id, pos);
             proof {
                 let sparse = self.sparse.view();
                 let indices = self.indices.view();
@@ -661,7 +676,7 @@ where
         let ghost old_cap = self.sparse.view().len();
         let ghost old_sparse = self.sparse.view();
         let ghost old_indices = self.indices.view();
-        let pos = self.sparse.get_index(id);
+        let pos = self.sparse.get_at(id);
         let nlen = self.dense.len();
         // last_pos = n - 1 (n >= 1 since id is live ⇒ pos < n).
         proof { nlen.lemma_as_nat_bounded(); }
@@ -671,8 +686,8 @@ where
         };
 
         if pos.as_usize() != last_pos.as_usize() {
-            let last_id = self.indices.get_index(last_pos);
-            let last_val = self.dense.get_index(last_pos);
+            let last_id = self.indices.get_at(last_pos);
+            let last_val = self.dense.get_at(last_pos);
             proof {
                 // From inverse-on-live: indices[pos]==id and sparse[last_id]==last_pos.
                 assert(pos.as_nat() < old_n);          // id live
@@ -682,10 +697,10 @@ where
                     == (old_n - 1));  // inverse at last_pos
                 assert(last_id.as_nat() == old_indices[(old_n - 1) as int].as_nat());
             }
-            self.dense.set_index(pos, last_val);
-            self.indices.set_index(pos, last_id);
-            self.indices.set_index(last_pos, id);
-            self.sparse.set_index(last_id, pos);
+            self.dense.set_at(pos, last_val);
+            self.indices.set_at(pos, last_id);
+            self.indices.set_at(last_pos, id);
+            self.sparse.set_at(last_id, pos);
             self.dense.pop();
             proof {
                 let sparse = self.sparse.view();
@@ -891,9 +906,9 @@ where
                     return false;
                 }
             };
-            let cur = self.dense.get_index(pos);
+            let cur = self.dense.get_at(pos);
             if values_equal(&cur, val) {
-                let id = self.indices.get_index(pos);
+                let id = self.indices.get_at(pos);
                 proof {
                     // indices[pos] for pos < n is live: inverse-on-live gives
                     // sparse[indices[pos]] == pos < n, and the round-trip
@@ -1019,10 +1034,9 @@ where
             r matches Ok(v) ==> v
                 == self.dense_view()[self.sparse_view()[id.as_nat() as int].as_nat() as int],
     {
-        if self.contains(id) {
-            Ok(self.get(id))
-        } else {
-            Err(crate::error::ContainerError::IndexOutOfBounds)
+        match self.lookup(id) {
+            Some(pos) => Ok(self.dense.get_at(pos)),
+            None => Err(crate::error::ContainerError::IndexOutOfBounds),
         }
     }
 

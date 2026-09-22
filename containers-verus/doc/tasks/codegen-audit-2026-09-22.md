@@ -410,3 +410,39 @@ touches no executable statement (the untracked static probe rows are
 identical in the audit), so its swing is placement. The `map/intern` deficit
 of two to four per cent sits inside tau with overlapping intervals and is
 carried as a watch item for the SparseSet/SpMap work (item 2).
+
+## Item 2 result: SparseSet lookup reuse (2026-09-22)
+
+`SparseSet::lookup` reads the sparse length, the sparse slot, the dense
+length and the indices slot once and returns the validated dense position;
+`contains`, `get`, `set`, `remove` and `try_get` consume it, and every
+internal read and write inside `add`, `remove` and `remove_value` uses the
+checked accessors. Verified 30/0 unchanged in contract.
+
+Audit vs the item 1 commit (`350e1e1`): no loop-shape change. The tracked
+`set` probe stays at 75 inner instructions; `contains_get` gains six
+instructions outside the loop. LLVM was already merging the repeated loads,
+since no store separates a `contains` from the position read that follows
+it. The measured effect is parity, reported as such:
+
+| row | round A | round B |
+|---|---|---|
+| `sparse_set/churn/verified` | 1.01× [1.01] | 1.01× [0.99] |
+| `eclasses/merge_cascade/verified` | 1.03× [1.00] | 0.99× [0.99] |
+| `eclasses/mark_merge_restore/verified` | 0.99× | 1.00× |
+| `compress_columns/sequential/*` (15 rows) | 0.99–1.01× | 0.98–1.03× |
+
+One lesson worth the record. The first form of this change regressed
+`eclasses/merge_cascade/verified` to 0.88–0.91× in every round while the
+retained canary held at 1.00×, and a control run with the file restored to
+HEAD was at parity, so the source was responsible. Bisection: the inline
+attributes on `lookup`/`contains` were not it; `remove` on the bool test was
+not it; reverting `get_live`/`set_live` to the public checked accessors
+recovered the row. The two bodies had become smaller (no bound branch), and
+that changed LLVM's inlining decisions inside the e-class merge functions
+that call them, a heuristic cascade of exactly the kind the governing
+principle warns about. Marking `get_live`/`set_live` `#[inline(always)]`
+(they are per-element paths, so the H1 rule applies) restores parity with
+the checked accessors kept. Rule confirmed from the other side: shrinking a
+per-element callee without pinning its inlining is a change to the caller's
+codegen, and it must be measured.
