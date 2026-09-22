@@ -350,12 +350,63 @@ matching rustc's LLVM 22 is installed here to print MemorySSA's view.
 
 | # | change | status |
 |---|---|---|
-| F1 | `#[inline(always)]` on `VecD` forwarders and `Vec` per-element entry points | applied, awaiting gate |
+| F1 | `#[inline(always)]` on `VecD` forwarders and `Vec` per-element entry points | applied (design ch.20 H1); `try_extend` excluded, see below |
 | F2 | reorder `try_append`: read the node count before the heads bounds check | applied earlier, removed the carried slot, no time change; kept for the codegen it buys |
-| F3 | tracked writes: test the watermark before the tier dispatch so a no-capture write does one load and one compare | proposed; needs a Verus proof for the new fast path |
+| F3 | tracked writes: one executable write path (design ch.20 H6), checked accessors `get_at`/`set_at` (H4) | applied and measured, see below |
 | F4 | `#[inline]` on the composite hot methods LLVM declined (`EClasses::{add_use, find, try_add_singleton}`, `SparseSet::{try_add, remove}`, `ListArena::try_append`, `CircularList::{splice_core, guard_different_rings}`) | proposed; measure, since call overhead may be minor relative to the bodies |
 | F5 | list append regression: make the early peel fire (or make it unnecessary) | open; mechanism known, source trigger not yet found |
 
 Every fix is validated first by the audit (the loop shape must change) and
 then by the paired benchmark protocol (`tools/bench_compare.py`, tau 1.08,
 two interleaved rounds, mainline as the reference), before the gate.
+
+## F3 result: one tracked write path (2026-09-22)
+
+The Hot projection arms (`hot_defer_push_checked`, `hot_defer_set_checked`,
+`hot_defer_pop_checked` and their two capture helpers, 757 lines) are deleted;
+`runtime_push`/`runtime_set`/`runtime_pop` call the general path
+unconditionally, whose lemmas needed only `wf` plus the effect predicates.
+`get_index`/`set_index` stay total and delegate to `get_at`/`set_at`, whose
+bound is a precondition. `hot_defer_scope_exec` tests `TRACK` before any read.
+
+Audit, reference = the tree before the change (`0cd65bc`), same probes:
+
+| probe (tracked, no frame open) | instr | inner loop | dup loads |
+|---|---|---|---|
+| `vec_*::probe_vec_set_index` | 268 → 218 | 83 → 59 | 10 → 5 |
+| `vec_*::probe_vec_get_set` | 235 → 189 | 87 → 59 | 10 → 5 |
+| `svec_parallel::probe_svec_set_index` | 151 → 117 | 85 → 51 | 5 → 3 |
+| `svec_parallel::probe_svec_pop` | 146 → 107 | 94 → 53 | 6 → 3 |
+| `svec_inline::probe_svec_set_index` | 123 → 106 | 56 → 39 | 2 → 1 |
+
+Rows whose instruction count *rose* (`VecD` push/pop/set_untracked/try_extend,
+`svec_parallel::probe_svec_push` 99 → 138) are the F1 inline attributes taking
+effect: the reference loop was a call per element and the new loop is the same
+work inlined with no call (verified on the parallel push disassembly: eight
+instructions around a `bl try_push` became an eighteen-instruction body with
+the length check, the capacity check, the store and the watermark compare).
+The exception is `try_extend`, whose `VecD` probe went from 107 to 622
+instructions with 24 out-of-line calls once inlined; it is a batch operation,
+not a per-element path, so the attribute is not applied there.
+
+Paired benchmark, reference = `0cd65bc`, two interleaved rounds, speedup =
+reference ÷ new (legacy arm in brackets as the placement canary):
+
+| row | round A | round B |
+|---|---|---|
+| `sparse_set/churn/verified` | 1.10× [1.00] | 1.11× [1.01] |
+| `class_ring/merge_restore/verified` | 1.07× [1.00] | 1.07× [1.00] |
+| `vec/mark_set_restore/verified` | 1.07× [1.05] | 1.05× [1.05] |
+| `active_frame_write/*` (six rows) | 0.98–1.02× | 1.00–1.05× |
+| `tracked_veci/mark_churn/verus/{1000,100000}` | 1.02–1.03× | 1.02–1.03× |
+| `list/append_iter/verified` | 1.01× [1.00] | 0.99× [0.99] |
+| `map/intern/verified` | 0.96–0.98× [1.01–1.02] | 0.96–0.98× [1.02–1.05] |
+| `vec/try_extend/verified` | 0.89–0.99× [1.03–1.10] | 0.88–0.95× [0.94–1.03] |
+
+The two bottom rows were re-run twice; the legacy canary moved by up to ten
+per cent between rounds each time, so those rounds are discarded under the
+protocol. `vec/try_extend/verified` runs with tracking off, where the change
+touches no executable statement (the untracked static probe rows are
+identical in the audit), so its swing is placement. The `map/intern` deficit
+of two to four per cent sits inside tau with overlapping intervals and is
+carried as a watch item for the SparseSet/SpMap work (item 2).
