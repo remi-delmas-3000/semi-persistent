@@ -441,8 +441,41 @@ not it; reverting `get_live`/`set_live` to the public checked accessors
 recovered the row. The two bodies had become smaller (no bound branch), and
 that changed LLVM's inlining decisions inside the e-class merge functions
 that call them, a heuristic cascade of exactly the kind the governing
-principle warns about. Marking `get_live`/`set_live` `#[inline(always)]`
+principle warns about. Demonstrated on the e-class bench binaries: the
+regressed build carries an out-of-line `SparseSet::set_live` (420 bytes,
+called once per merge with the class record passed by value) and its
+`EClasses` merge body is 2864 bytes; the reference and the fixed build have
+no out-of-line sparse-set symbol at all and merge bodies of 3148 and 3324
+bytes. The symbol tables, not the probes, show the change, which is why the
+isolated audit missed it: the probe loops are small enough that the accessor
+inlines there regardless. Marking `get_live`/`set_live` `#[inline(always)]`
 (they are per-element paths, so the H1 rule applies) restores parity with
 the checked accessors kept. Rule confirmed from the other side: shrinking a
 per-element callee without pinning its inlining is a change to the caller's
 codegen, and it must be measured.
+
+## Item 3 result: list check-once (2026-09-22)
+
+`ListArena::append`/`prepend` (crate-internal) no longer call
+`check_precondition` on the id-range facts their `requires` already carry;
+`append_raw`/`prepend_raw` read and write heads and nodes through the checked
+accessors; `try_append` reads the node count before the heads bounds check.
+Verified 77/0; partial-API gate unchanged (the public `try_append`/
+`try_prepend` keep their explicit checks).
+
+Measured effect on the peel: none. The closure keeps its two unpeeled inner
+loops (52 and 67 instructions against mainline's 43 and 53), and the paired
+rows read (speedup = reference ÷ new, two rounds):
+
+| reference | `list/append_iter/verified` | `list/splice/verified` |
+|---|---|---|
+| previous commit `72eb850` | 1.02× / 1.00× | 1.03× / 1.01× |
+| upstream main `8f60f49` (post-merge) | 1.00× / 1.00× | 1.04× / 1.04× |
+| pre-merge mainline `85e9de3` | **0.80× / 0.80×** (160 µs vs 200 µs) | 1.07× / 1.07× |
+
+So H7's open question is answered in the negative: removing the re-check and
+the extra length reads from the list layer does not hand LLVM the peel. The
+trigger sits below the list layer, in the vector code the merge changed, and
+stays open (F5). Note that `sp-ref-main` is upstream main *after* the merge
+and measures identical to this branch; the 0.79× row exists only against the
+pre-merge tree.
