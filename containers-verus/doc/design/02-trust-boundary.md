@@ -215,9 +215,10 @@ The groups differ in kind, and the distinction is the point of this chapter:
   meaningless (no spec) or would expose an abstraction we deliberately keep
   closed. These are permanent.
 - **Group B is trusted by *unmodeled std behavior*.** `Vec::capacity` /
-  `shrink_to` / `size_of` have no vstd specs, and neither do `get_unchecked`,
-  `select_unpredictable`, or `copy_within` (verified against vstd
-  0.0.0-2026-08-02-0125). The byte reporters are spec-free diagnostics; the
+  `shrink_to` / `size_of` have no vstd specs, and neither do `get_unchecked`
+  or `select_unpredictable` (verified against vstd 0.0.0-2026-09-20-0158;
+  that release added a `copy_within` spec, which no verified exec path here
+  calls). The byte reporters are spec-free diagnostics; the
   shrink helpers, `data_capacity_bits`, and the five `bplus_layout` primitives
   carry contracts that restate the documented std behavior. Partly provable
   when vstd grows the specs; the

@@ -8,7 +8,7 @@ cd semi-persistent
 cargo build --release
 ```
 
-The workspace requires Rust 1.97.1, pinned in `rust-toolchain.toml`. `rustup`
+The workspace requires Rust 1.98.1, pinned in `rust-toolchain.toml`. `rustup`
 selects this compiler when Cargo runs in the checkout. A normal build does not
 require Verus; the proof annotations compile away under `rustc`.
 

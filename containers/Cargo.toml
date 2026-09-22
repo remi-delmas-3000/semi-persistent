@@ -2,7 +2,7 @@
 name = "semi-persistent-containers"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.97.1"
+rust-version = "1.98.1"
 license = "Apache-2.0"
 description = "Semi-persistent core data structures with sparse snapshots and diff-proportional restore"
 repository = "https://github.com/yaspar-org/semi-persistent"

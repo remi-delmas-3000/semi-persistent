@@ -2,7 +2,7 @@
 name = "semi-persistent-traversals-derive"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.97.1"
+rust-version = "1.98.1"
 license = "Apache-2.0"
 description = "Derive macros for semi-persistent-traversals"
 repository = "https://github.com/yaspar-org/semi-persistent"

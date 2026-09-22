@@ -18,8 +18,8 @@ The draft composition verifies with the project's pinned Verus:
 verus --crate-type lib containers-verus/proofs/top_down/composition.rs
 ```
 
-Result on 2026-09-15: **80 verified, 0 errors**, Verus
-`0.2026.08.02.b677dd5`, Rust 1.97.1. The target needs only the bundled vstd and
+Result on 2026-09-22: **80 verified, 0 errors**, Verus
+`0.2026.09.20.aef82ed`, Rust 1.98.1. The target needs only the bundled vstd and
 has no runtime history fields. Production now verifies the shared mathematical
 model as well as its concrete adapters; those counts are reported separately.
 

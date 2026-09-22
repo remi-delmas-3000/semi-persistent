@@ -182,7 +182,7 @@ evidence. Their numbers remain valid for the source snapshots and binaries they
 name. No retained cross-engine campaign currently measures the branch tip.
 
 The project-local no-admit gate does not remove dependency axioms from the
-trusted base. With pinned `vstd` `0.0.0-2026-08-02-0125`, global
+trusted base. With pinned `vstd` `0.0.0-2026-09-20-0158`, global
 `--no-cheating` stops in `vstd` before checking these crates because that
 dependency contains admitted specifications. The supported statement is
 therefore ordinary Verus verification plus a project-source scan, subject to

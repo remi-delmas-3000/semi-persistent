@@ -1723,12 +1723,10 @@ impl<T: Copy, I: IndexLike> ColdStack<T, I> {
             }
         }
         proof {
-            // Cursor prefix equality across the pool truncations (cursors
-            // read only frames, which are already popped).
-            self.lemma_cursors_prefix_all(pre, n1);
-            // Pointwise pool-prefix facts for the survivors lemma: every
-            // truncate keeps its prefix verbatim, and untouched pools are
-            // equal outright.
+            // Pointwise pool-prefix facts: every truncate keeps its prefix
+            // verbatim, and untouched pools are equal outright. The wf
+            // reassembly itself lives in `lemma_pop_frame_wf`, so this
+            // function's query carries only the truncation effects.
             assert forall|m: int| 0 <= m < self.pairs@.len()
                 implies #[trigger] self.pairs@[m] == pre.pairs@[m] by {}
             assert forall|m: int| 0 <= m < self.values@.len()
@@ -1739,13 +1737,56 @@ impl<T: Copy, I: IndexLike> ColdStack<T, I> {
                 implies #[trigger] self.dicts@[m] == pre.dicts@[m] by {}
             assert forall|m: int| 0 <= m < self.codes.view().len()
                 implies #[trigger] self.codes.view()[m] == pre.codes.view()[m] by {}
-            assert(self.starts@.len() > 0 ==> self.offs@.len() == self.starts@.len() + 1);
-            self.lemma_pop_survivors_hdr_wf(pre, n1);
             assert forall|m: int| 0 <= m < self.offs@.len()
                 implies #[trigger] self.offs@[m] == pre.offs@[m] by {}
-            self.lemma_pop_offs_wf(pre, n1);
-            self.lemma_pop_tiling(pre, n1);
+            assert(self.starts@.len() > 0 ==> self.offs@.len() == self.starts@.len() + 1);
+            self.lemma_pop_frame_wf(pre, n1);
         }
+    }
+
+    /// Reassemble `wf` after a pop from the truncation effects alone: the
+    /// surviving headers, the survivors' pool prefixes and the offs column.
+    /// Split out of `pop_frame` so that the executable function's query
+    /// carries only the truncations and this one only the reassembly.
+    #[verifier::spinoff_prover]
+    pub proof fn lemma_pop_frame_wf(&self, pre: Self, n1: int)
+        requires
+            pre.wf(),
+            0 <= n1 < pre.frames@.len(),
+            self.frames@.len() == n1,
+            forall|g: int| 0 <= g < n1 ==> #[trigger] self.frames@[g] == pre.frames@[g],
+            self.pairs@.len() == pre.pairs_used(n1),
+            self.values@.len() == pre.values_used(n1),
+            self.starts@.len() == pre.runs_used(n1),
+            self.druns@.len() == pre.druns_used(n1),
+            self.dicts@.len() == pre.dicts_used(n1),
+            self.codes.view().len() == pre.codes_used(n1),
+            forall|m: int| 0 <= m < self.pairs@.len()
+                ==> #[trigger] self.pairs@[m] == pre.pairs@[m],
+            forall|m: int| 0 <= m < self.values@.len()
+                ==> #[trigger] self.values@[m] == pre.values@[m],
+            forall|m: int| 0 <= m < self.druns@.len()
+                ==> #[trigger] self.druns@[m] == pre.druns@[m],
+            forall|m: int| 0 <= m < self.dicts@.len()
+                ==> #[trigger] self.dicts@[m] == pre.dicts@[m],
+            forall|m: int| 0 <= m < self.codes.view().len()
+                ==> #[trigger] self.codes.view()[m] == pre.codes.view()[m],
+            forall|m: int| 0 <= m < self.offs@.len()
+                ==> #[trigger] self.offs@[m] == pre.offs@[m],
+            self.offs@.len() <= pre.offs@.len(),
+            self.starts@.len() == 0 ==> self.offs@.len() == 0,
+            self.starts@.len() > 0 ==> self.offs@.len() == self.starts@.len() + 1,
+            !(self.codes is Packed),
+            self.codes.wf(),
+        ensures
+            self.wf(),
+    {
+        // Cursor prefix equality across the pool truncations (cursors read
+        // only frames, which are already popped).
+        self.lemma_cursors_prefix_all(pre, n1);
+        self.lemma_pop_survivors_hdr_wf(pre, n1);
+        self.lemma_pop_offs_wf(pre, n1);
+        self.lemma_pop_tiling(pre, n1);
     }
 }
 

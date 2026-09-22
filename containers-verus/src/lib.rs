@@ -56,14 +56,15 @@
     // lint fires on generated code the source does not contain.
     non_shorthand_field_patterns,
     // `($leaf_cap + 1) / 2` is verified exec arithmetic that must match `split_mid_spec()`'s
-    // same expression; pinned vstd (2026-08-02) has no `div_ceil` spec, so a `.div_ceil(2)` rewrite
+    // same expression; pinned vstd (2026-09-20) has no `div_ceil` spec, so a `.div_ceil(2)` rewrite
     // would jeopardise the `split_mid` ensures for a pure style change.
     clippy::manual_div_ceil,
     // Same reasoning as `manual_div_ceil` above, for `keep_bits % 64 == 0` in
     // `CaptureBits::truncate_words_for`: that expression appears verbatim in the
     // `by (nonlinear_arith)` block that proves the retained words still cover
-    // every kept bit. `is_multiple_of` has no spec in pinned vstd (2026-08-02), so the
-    // rewrite would break the proof for a pure style change.
+    // every kept bit. The `%` form appears verbatim in that proof block (vstd
+    // 2026-09-20 does specify `is_multiple_of`), so the rewrite would be a pure
+    // style change that costs a proof edit.
     clippy::manual_is_multiple_of,
     // insert_rec / insert_rec_leaf take 8 args including GHOST proof parameters (is_root, the
     // split sub-models); bundling them into a struct would obscure the proof and break

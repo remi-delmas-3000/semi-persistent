@@ -4,7 +4,7 @@
 
 The complete conditional operation family, legal public-operation traces, and
 arbitrary legal rollover traces verify in `composition.rs`: **79 verified,
-0 errors** with pinned Verus `0.2026.08.02.b677dd5`. There are no imported leaf
+0 errors** with pinned Verus `0.2026.09.20.aef82ed`. There are no imported leaf
 implementations or trusted proof stubs. The mathematical witness implements all
 provisional method contracts; additional encoded examples exercise duplicates,
 sorting, gapped runs, preserved pool prefixes, and empty frames.

@@ -14,7 +14,7 @@ cd semi-persistent
 cargo build --release
 ```
 
-The toolchain is pinned in `rust-toolchain.toml` (currently 1.97.1), so
+The toolchain is pinned in `rust-toolchain.toml` (currently 1.98.1), so
 `rustup` selects the right compiler on its own. The Verus proof annotations in
 `containers-verus`, `abstract-domains` and `au-verus` erase under plain
 `rustc`, so a normal `cargo build` needs no verifier.

@@ -6423,7 +6423,6 @@ where
     {
         hide(Vec::wf);
         hide(frame_inv_range);
-        hide(stratum_unique);
         hide(Vec::wf_for_snap);
         hide(Vec::hot_repr_ok);
         hide(Vec::trail_repr_ok);
@@ -9113,7 +9112,12 @@ where
         lemma_frame_inv_range_same_saved_map::<T, I>(pre.layer_above_at(cc + g), pre.hot_value_pool@,
             pre.phys_hot_start(g), pre.phys_hot_end(g), self.hot_value_pool@,
             self.phys_hot_start(i), self.phys_hot_end(i), pre.snapshots@[cc + g], pre.snapshots@[cc + g].len());
-        reveal(Vec::phys_frame_inv_range_holds);
+        // Two conclusions, two queries: the reveal is scoped to the one that
+        // needs the definition, so neither query carries the other's context.
+        assert(self.phys_frame_inv_range_holds(i)) by {
+            reveal(Vec::phys_frame_inv_range_holds);
+        }
+        assert(stratum_unique::<T, I>(self.hot_value_pool@, self.phys_hot_start(i), self.phys_hot_end(i)));
     }
 
     /// Hot representation after retiring the encoded prefix.
