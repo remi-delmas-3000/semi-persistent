@@ -354,7 +354,7 @@ matching rustc's LLVM 22 is installed here to print MemorySSA's view.
 | F2 | reorder `try_append`: read the node count before the heads bounds check | applied earlier, removed the carried slot, no time change; kept for the codegen it buys |
 | F3 | tracked writes: one executable write path (design ch.20 H6), checked accessors `get_at`/`set_at` (H4) | applied and measured, see below |
 | F4 | `#[inline]` on the composite hot methods LLVM declined (`EClasses::{add_use, find, try_add_singleton}`, `SparseSet::{try_add, remove}`, `ListArena::try_append`, `CircularList::{splice_core, guard_different_rings}`) | proposed; measure, since call overhead may be minor relative to the bodies |
-| F5 | list append regression: make the early peel fire (or make it unnecessary) | open; mechanism known, source trigger not yet found |
+| F5 | list append regression: make the early peel fire | done: store length reads return the slice length (no `Vec::len` assume); see below |
 
 Every fix is validated first by the audit (the loop shape must change) and
 then by the paired benchmark protocol (`tools/bench_compare.py`, tau 1.08,
@@ -479,3 +479,59 @@ trigger sits below the list layer, in the vector code the merge changed, and
 stays open (F5). Note that `sp-ref-main` is upstream main *after* the merge
 and measures identical to this branch; the 0.79× row exists only against the
 pre-merge tree.
+
+## F5 result: the list-append peel (2026-09-22)
+
+**Bisection.** Oracle: the append benchmark's verified-to-legacy time ratio
+in one process (immune to core placement; 0.79 on the pre-merge mainline,
+0.99 on the branch). First bad commit over the 126 merged commits: 7ece790,
+"GenStamps fork-history reclamation". It touched no executable statement of
+the list layer.
+
+**Mechanism, from the per-pass IR of the benchmark closure on both sides of
+that commit** (traces and the parsing scripts are kept in the session
+scratchpad; the chapter 20 H7 section carries the reasoning):
+
+1. The peel is LLVM's early full-unroll pass acting on a loop-header phi that
+   becomes invariant after the first iteration. Mainline's append loop header
+   carries `phi i1 [l < heads.len, entry], [true, latch]`.
+2. That phi is InstCombine's fold of a compare of a phi into a phi of
+   compares, which requires the phi to have one use. The branch's phi of the
+   heads length had two: the compare, and the `llvm.assume(len <= isize::MAX
+   / size_of::<T>())` that std's `Vec::len` attaches to its result.
+3. The assume folds only when the phi's range is known. Mainline entered the
+   loop with the constant 2000: the benchmark closure was optimized as its
+   own function first, and its GVN seeded the length from the constructor's
+   visible `len = 0` store. 7ece790 grew `Vec::with_store` (a `GenStamps::new`
+   loop) past the early inliner's budget, `ListArena::new` became an opaque
+   call, the seed became a load of unknown range, the assume survived, no
+   fold, no peel. On the current tree the closure is merged into the criterion
+   driver before any GVN runs, so restoring the constructor's visibility alone
+   does not help (measured, no change).
+4. Fix in the library's hands: read lengths as the slice length. Same value,
+   no assume, one use, the fold fires whatever the entry value's range is.
+
+**Measured** (speedup = reference ÷ new; two interleaved rounds):
+
+| measurement | before | after |
+|---|---|---|
+| peel oracle, verified ÷ legacy | 0.99 | 0.84 (mainline 0.79) |
+| `list/append_iter/verified` vs pre-merge 85e9de3 | 0.80× | 0.92× (200 µs → 170 µs; legacy arm 200 µs both times) |
+| `list/splice/verified` vs 85e9de3 | 1.07× | 1.05× / 1.08× |
+| closure inner loop | 52 instr, unpeeled | 38 instr, peeled (mainline 37) |
+| `probe_svec_get_index` (all stores) | 116–121 instr | 40–41 instr |
+| broad set vs previous commit (73 rows) | | 63 pass, 10 inconclusive by reference drift, 0 regressions |
+
+**Ruled out by one measurement each:** inlining the whole constructor chain
+(`ListArena::new`, `with_store*`, `GenStamps::new`, `env_compress_default`;
+ratio 0.986), writing the head record before the node push (1.095, worse),
+raising GVN's memdep scan limits to 2000/5000 (1.007), a config-read barrier
+(no atomic load in the loop). Forced peeling (`-unroll-force-peel-count=1`)
+takes the legacy arm to the same 160 µs as the verified arm, so the entire
+mainline-versus-legacy advantage was the peel.
+
+**Remaining 8 per cent.** The steady-state loops now differ by one
+instruction pair: our loop keeps the std bounds check on the old tail's node
+read (`nodes.get_at` → `data[i]`), which mainline's explicit `get_index`
+pre-check let LLVM fold. Removing it needs an unchecked read, which the trust
+policy excludes; it stays as measured.

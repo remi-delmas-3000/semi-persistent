@@ -138,28 +138,58 @@ saved slot, and `pop` must capture the last element before removing it.
 
 ### H7. Loop peeling and unrolling
 
-**Confirmed as the mechanism, not as a tool.** Peeling is decisive for the
-list append (above). The library cannot unroll or peel the caller's loop, and
-compiler flags are not a fix. What the library can do is make the peel
-trigger reliable: LLVM peels one iteration when a loop-header value becomes
-constant after the first iteration, and on mainline that value is the heads
-bounds check, forwarded across the back-edge into a boolean that is `true` on
-every later iteration. Our loop reaches the same pass with the raw length
-carried instead and the check recomputed, plus a second exit from the
-id-capacity guard rewritten as an induction-variable test. The pass trace on
-the benchmark closure places the divergence in the closure's late GVN and
-jump-threading passes (both trees are identical through inlining and the
-early loop passes). Whether H4's check-once rewrite restores the peel is a
-measurement, still to be made; it is the first candidate because it removes
-exactly the reads those passes had to reason about.
+**Resolved.** Peeling is decisive for the list append, and the trigger is
+now known to the instruction.
 
-Ruled out as the trigger, each by one experiment on an isolated worktree: the
-write dispatch (reverted, no change), the constructor's visibility (inlined,
-no change), the type's size (mainline padded to 320 bytes still peels), the
-drop glue (a forgotten arena, no change), address escape (every callee is
-`captures(none)`, no address stored), the pinned frame-stack loads
-(short-circuited, no change), the inline attributes (identical on both
-trees), the loop-size threshold (doubled, no change).
+The mechanism, read from the per-pass IR of the benchmark closure on the
+pre-merge mainline (85e9de3) and on the first commit that lost the peel
+(7ece790, found by bisection with the append benchmark's verified-to-legacy
+ratio as the oracle):
+
+1. LLVM's early full-unroll pass peels one iteration when a loop-header phi
+   becomes invariant after the first iteration. On mainline the append loop's
+   header carries `phi i1 [l < heads.len, entry], [true, latch]`: the heads
+   bound check as a boolean, `true` on the back edge because the same check
+   is re-done after the node push and dominates the latch.
+2. That boolean phi is InstCombine folding a compare of a phi into a phi of
+   compares. The fold requires the phi to have a single use. Our header phi of
+   the raw heads length has two: the compare, and an `llvm.assume` that
+   std's `Vec::len` attaches to every length it returns (`len <= isize::MAX /
+   size_of::<T>()`).
+3. The assume folds away only when the phi's range is already known: on
+   mainline the loop entered with the heads length as the constant 2000,
+   because the benchmark closure was optimized as its own function first and
+   its GVN seeded the length from the constructor's visible `len = 0` store.
+   7ece790 grew the constructor (`GenStamps::new` with a loop) past the early
+   inliner's budget, the seed became an opaque call, the entry value became a
+   load of unknown range, the assume survived, the fold did not fire, the
+   peel did not fire. Later commits changed the closure's inlining order, so
+   restoring the constructor's visibility alone no longer helps (measured:
+   no change).
+4. The library cannot control what the caller's optimization order makes
+   visible. It can control the assume. Reading the length as the slice
+   length (`data.as_slice().len()`) returns the same value with no range
+   assumption attached, the phi has one use, the fold fires regardless of
+   what the entry value is, and the peel follows. Measured on the append
+   benchmark: verified 200 µs to 170 µs with the legacy arm flat, ratio 0.99
+   to 0.84 (mainline 0.79); the closure's inner loop goes from 52 to 38
+   instructions, mainline's shape.
+
+Ruled out along the way, each by one measurement: the constructor's
+visibility (inlined the whole chain, no change), moving the head write before
+the node push (worse, 1.10×), raising GVN's memory-dependence scan limits (no
+change), a config-read barrier (no atomic load in the loop). Forced peeling
+(`-unroll-force-peel-count=1`) takes the legacy arm to the same 160 µs, which
+is the proof that the whole gap is the peel and nothing else.
+
+**Rule.** *A length read on a per-element path returns the slice length, not
+`Vec::len`.* std's `Vec::len` is not a plain load: it carries an assumption
+that keeps the loaded value alive as a separate use and can block the
+phi-of-compare fold that loop peeling depends on. The store accessors
+`raw_len`, `len` and `is_empty` follow the rule; `wf` proves the same bound
+the assumption stated, so nothing is lost. More generally: an executable
+statement that only *tells the compiler something* is still an executable
+statement with consequences, and the proofs already carry the fact.
 
 ### H8. Pooled storage for hint lists
 
@@ -212,7 +242,7 @@ zero-frame flushes.
 
 1. Vec: one executable write path (H6), on the checked accessors (H4).
 2. SparseSet lookup reuse.
-3. List append on the check-once rule (H4), measured for the peel (H7).
+3. List append on the check-once rule (H4), measured for the peel (H7): done, peel restored by the H7 rule.
 4. The repeated traversals (union-find, e-classes, B+ cursor).
 5. Compression and log items, tracked separately.
 
