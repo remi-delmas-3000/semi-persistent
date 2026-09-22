@@ -1,0 +1,361 @@
+# Codegen audit of the verified containers (2026-09-22)
+
+Scope: every executable method of the core `Vec` container in each store
+(Inline, Parallel, Trail, and the `VecD` enum) and tracking mode, then every
+composite (`ListArena`, `SparseSet`, `AppendOnlyVec`, `SpMap`/`SpUniqueMap`,
+`UnionFind`, `EClasses`, `BPlusTreeSet`, `CircularList`), each beside its
+legacy counterpart where one exists. The question is not "is it fast" but
+"did the optimizer do what the source allows": inlining, keeping loop
+variables in registers, hoisting invariant loads, folding dead paths.
+
+## Method
+
+Two probe binaries, `containers-conformance/examples/codegen_probe.rs` (Vec)
+and `codegen_probe_composites.rs` (composites), hold one `#[inline(never)]`
+function per (container, store, mode, method), each running the method in a
+tight loop. `containers-verus/tools/codegen_audit.py <binary>` disassembles
+every probe and reports:
+
+- **instr**: instructions in the probe function (setup included);
+- **inner loop**: instructions in the innermost loop, the per-operation cost
+  shape; compare against the legacy row of the same method;
+- **verus calls**: out-of-line calls into the verified crate from the probe
+  (hot-path inlining failures; growth and construction calls are cold and
+  listed separately by the tool);
+- **panic paths**: refuse/expect call sites reachable from the probe;
+- **carried**: stack slots stored and reloaded inside an innermost loop, a
+  loop variable the optimizer kept in memory;
+- **dup loads**: stack slots loaded more than once per iteration with no store
+  between, a reload the optimizer could not prove unnecessary.
+
+Build: `cargo build --release -p containers-conformance --example codegen_probe
+--example codegen_probe_composites`. Rows prefixed `vec_` are the `VecD` enum
+with a runtime store kind, so each such probe compiles all three kinds and
+its numbers are the union; the `svec_` rows are per static store and are the
+ones to compare per kind. `lvec_` rows are the legacy container.
+
+## Findings on `Vec`
+
+1. **Reads are at parity.** `get_index`, `get`, `as_slice` iteration: 8 to 9
+   instruction loops, same as legacy, in every store and mode.
+2. **Untracked writes are at parity.** `set_index` 8 to 10 versus legacy 8
+   to 10; `push` 12 versus 11 to 13; untracked `pop` on the verified side is
+   folded to a closed form (no loop left), better than legacy's 11.
+3. **Tracked writes with no frame open are the outlier.** `set_index`: 56
+   (inline) and 85 (parallel) instructions per element against legacy's 8 and
+   21; tracked `pop` on the parallel store 94 against 20. The loop re-reads,
+   every element, the two frame-stack lengths, the saved-length watermark and
+   the store's data pointer, re-checks bounds twice (the public guard, then
+   Rust's index check inside the store), and carries the capture path twice
+   (duplicated around the unwind edges). None of it is extra work in the
+   source: the watermark is zero with no frame open and every branch skips.
+4. **A no-drop twin halves it.** Wrapping the container in `ManuallyDrop`
+   (no drop glue, so no landing pads in the loop) takes the tracked
+   `set_index` loop from 56 to 26 (inline) and 85 to 32 (parallel) with the
+   untracked loop unchanged at 10. The unwind structure that drops the
+   container is one confirmed cause; the remaining 26 versus 8 is the
+   invariant reloads.
+5. **Hot forwarders were not inlined.** `VecD::try_push`, `try_extend`,
+   `pop`, `push_untracked`, `set_untracked` and the same entry points on
+   `Vec` carried no inline attribute and were called out of line per element
+   (only the get/set family was marked); the static parallel-store `try_push`
+   likewise. Fixed in this branch with `#[inline(always)]`, the same fix that
+   closed the earlier interning regression.
+
+### Vec audit table (branch, after the inline attributes)
+
+| function | instr | inner loop | verus calls | panic paths | carried | dup loads |
+|---|---:|---:|---:|---:|---:|---:|
+| `lvec_inline_tracked::probe_lvec_get` | 54 | 9 | 0 | 1 | 0 | 0 |
+| `lvec_inline_tracked::probe_lvec_get_set` | 64 | 15 | 0 | 1 | 0 | 0 |
+| `lvec_inline_tracked::probe_lvec_mark_set_restore` | 422 | 8 | 4 | 5 | 3 | 3 |
+| `lvec_inline_tracked::probe_lvec_pop` | 96 | 17 | 1 | 1 | 0 | 0 |
+| `lvec_inline_tracked::probe_lvec_push` | 96 | 22 | 1 | 1 | 0 | 0 |
+| `lvec_inline_tracked::probe_lvec_set` | 61 | 8 | 0 | 1 | 0 | 0 |
+| `lvec_inline_untracked::probe_lvec_get` | 99 | 9 | 1 | 1 | 0 | 0 |
+| `lvec_inline_untracked::probe_lvec_get_set` | 110 | 11 | 1 | 2 | 0 | 0 |
+| `lvec_inline_untracked::probe_lvec_pop` | 104 | 11 | 1 | 1 | 0 | 0 |
+| `lvec_inline_untracked::probe_lvec_push` | 84 | 13 | 1 | 1 | 0 | 0 |
+| `lvec_inline_untracked::probe_lvec_set` | 113 | 10 | 1 | 2 | 0 | 0 |
+| `lvec_parallel_tracked::probe_lvec_get` | 97 | 8 | 0 | 1 | 0 | 0 |
+| `lvec_parallel_tracked::probe_lvec_get_set` | 136 | 23 | 0 | 2 | 0 | 1 |
+| `lvec_parallel_tracked::probe_lvec_mark_set_restore` | 597 | 8 | 4 | 5 | 3 | 3 |
+| `lvec_parallel_tracked::probe_lvec_pop` | 117 | 20 | 0 | 1 | 1 | 0 |
+| `lvec_parallel_tracked::probe_lvec_push` | 74 | None | 0 | 1 | 0 | 0 |
+| `lvec_parallel_tracked::probe_lvec_set` | 137 | 21 | 0 | 3 | 0 | 0 |
+| `lvec_parallel_untracked::probe_lvec_get` | 104 | 8 | 1 | 1 | 0 | 0 |
+| `lvec_parallel_untracked::probe_lvec_get_set` | 114 | 8 | 1 | 2 | 0 | 0 |
+| `lvec_parallel_untracked::probe_lvec_pop` | 109 | 8 | 1 | 1 | 0 | 0 |
+| `lvec_parallel_untracked::probe_lvec_push` | 88 | 11 | 1 | 1 | 0 | 0 |
+| `lvec_parallel_untracked::probe_lvec_set` | 180 | 8 | 1 | 2 | 0 | 0 |
+| `svec_inline_tracked::probe_svec_get_index` | 121 | 9 | 0 | 1 | 0 | 0 |
+| `svec_inline_tracked::probe_svec_mark_set_restore` | 255 | 11 | 5 | 6 | 1 | 3 |
+| `svec_inline_tracked::probe_svec_pop` | 103 | 17 | 2 | 1 | 0 | 4 |
+| `svec_inline_tracked::probe_svec_push` | 116 | 29 | 3 | 2 | 0 | 1 |
+| `svec_inline_tracked::probe_svec_set_index` | 120 | 56 | 2 | 3 | 1 | 2 |
+| `svec_inline_tracked::probe_svec_set_index_nodrop` | 91 | 26 | 1 | 4 | 1 | 1 |
+| `svec_inline_untracked::probe_svec_get_index` | 121 | 9 | 0 | 1 | 0 | 0 |
+| `svec_inline_untracked::probe_svec_pop` | 32 | None | 0 | 0 | 0 | 0 |
+| `svec_inline_untracked::probe_svec_push` | 90 | 12 | 2 | 1 | 0 | 0 |
+| `svec_inline_untracked::probe_svec_set_index` | 50 | 10 | 0 | 2 | 0 | 0 |
+| `svec_inline_untracked::probe_svec_set_index_nodrop` | 38 | 10 | 0 | 2 | 0 | 0 |
+| `svec_parallel_tracked::probe_svec_get_index` | 116 | 8 | 0 | 1 | 0 | 0 |
+| `svec_parallel_tracked::probe_svec_mark_set_restore` | 291 | 15 | 7 | 6 | 1 | 6 |
+| `svec_parallel_tracked::probe_svec_pop` | 146 | 94 | 4 | 1 | 2 | 6 |
+| `svec_parallel_tracked::probe_svec_push` | 160 | 22 | 5 | 3 | 1 | 3 |
+| `svec_parallel_tracked::probe_svec_set_index` | 150 | 85 | 4 | 3 | 1 | 5 |
+| `svec_parallel_tracked::probe_svec_set_index_nodrop` | 103 | 32 | 2 | 4 | 1 | 3 |
+| `svec_parallel_untracked::probe_svec_get_index` | 116 | 8 | 0 | 1 | 0 | 0 |
+| `svec_parallel_untracked::probe_svec_pop` | 31 | None | 0 | 0 | 0 | 0 |
+| `svec_parallel_untracked::probe_svec_push` | 114 | 12 | 2 | 2 | 0 | 0 |
+| `svec_parallel_untracked::probe_svec_set_index` | 48 | 8 | 0 | 2 | 0 | 0 |
+| `svec_parallel_untracked::probe_svec_set_index_nodrop` | 36 | 8 | 0 | 2 | 0 | 0 |
+| `vec_inline_tracked::probe_vec_as_slice_sum` | 120 | 8 | 0 | 0 | 0 | 0 |
+| `vec_inline_tracked::probe_vec_get_index` | 72 | 8 | 0 | 1 | 0 | 0 |
+| `vec_inline_tracked::probe_vec_get_set` | 262 | 80 | 7 | 2 | 3 | 9 |
+| `vec_inline_tracked::probe_vec_mark_pop_scope` | 337 | 48 | 9 | 5 | 1 | 4 |
+| `vec_inline_tracked::probe_vec_mark_push_restore_and_pop` | 286 | 30 | 9 | 5 | 2 | 4 |
+| `vec_inline_tracked::probe_vec_mark_set_restore` | 367 | 15 | 10 | 5 | 2 | 10 |
+| `vec_inline_tracked::probe_vec_nested_marks` | 497 | 27 | 13 | 6 | 4 | 9 |
+| `vec_inline_tracked::probe_vec_pop` | 239 | 63 | 7 | 1 | 5 | 10 |
+| `vec_inline_tracked::probe_vec_push` | 205 | 29 | 7 | 3 | 2 | 4 |
+| `vec_inline_tracked::probe_vec_push_untracked` | 219 | 32 | 7 | 3 | 2 | 7 |
+| `vec_inline_tracked::probe_vec_set_index` | 272 | 26 | 7 | 3 | 3 | 9 |
+| `vec_inline_tracked::probe_vec_set_untracked` | 285 | 29 | 7 | 3 | 3 | 13 |
+| `vec_inline_tracked::probe_vec_try_extend` | 551 | 23 | 28 | 3 | 1 | 3 |
+| `vec_inline_untracked::probe_vec_as_slice_sum` | 120 | 8 | 0 | 0 | 0 | 0 |
+| `vec_inline_untracked::probe_vec_get_index` | 72 | 8 | 0 | 1 | 0 | 0 |
+| `vec_inline_untracked::probe_vec_get_set` | 76 | 9 | 0 | 1 | 0 | 0 |
+| `vec_inline_untracked::probe_vec_pop` | 72 | None | 0 | 0 | 0 | 0 |
+| `vec_inline_untracked::probe_vec_push` | 147 | 20 | 3 | 2 | 2 | 2 |
+| `vec_inline_untracked::probe_vec_push_untracked` | 170 | 26 | 3 | 2 | 2 | 5 |
+| `vec_inline_untracked::probe_vec_set_index` | 96 | 8 | 0 | 2 | 0 | 0 |
+| `vec_inline_untracked::probe_vec_set_untracked` | 129 | 8 | 0 | 2 | 0 | 0 |
+| `vec_inline_untracked::probe_vec_try_extend` | 382 | 88 | 24 | 2 | 2 | 2 |
+| `vec_parallel_tracked::probe_vec_as_slice_sum` | 120 | 8 | 0 | 0 | 0 | 0 |
+| `vec_parallel_tracked::probe_vec_get_index` | 72 | 8 | 0 | 1 | 0 | 0 |
+| `vec_parallel_tracked::probe_vec_get_set` | 262 | 80 | 7 | 2 | 3 | 9 |
+| `vec_parallel_tracked::probe_vec_mark_pop_scope` | 337 | 48 | 9 | 5 | 1 | 4 |
+| `vec_parallel_tracked::probe_vec_mark_push_restore_and_pop` | 286 | 30 | 9 | 5 | 2 | 4 |
+| `vec_parallel_tracked::probe_vec_mark_set_restore` | 367 | 15 | 10 | 5 | 2 | 10 |
+| `vec_parallel_tracked::probe_vec_nested_marks` | 497 | 27 | 13 | 6 | 4 | 9 |
+| `vec_parallel_tracked::probe_vec_pop` | 239 | 63 | 7 | 1 | 5 | 10 |
+| `vec_parallel_tracked::probe_vec_push` | 206 | 19 | 7 | 3 | 2 | 4 |
+| `vec_parallel_tracked::probe_vec_push_untracked` | 220 | 20 | 7 | 3 | 2 | 7 |
+| `vec_parallel_tracked::probe_vec_set_index` | 272 | 26 | 7 | 3 | 3 | 9 |
+| `vec_parallel_tracked::probe_vec_set_untracked` | 285 | 29 | 7 | 3 | 3 | 13 |
+| `vec_parallel_tracked::probe_vec_try_extend` | 552 | 23 | 28 | 3 | 1 | 3 |
+| `vec_parallel_untracked::probe_vec_as_slice_sum` | 120 | 8 | 0 | 0 | 0 | 0 |
+| `vec_parallel_untracked::probe_vec_get_index` | 72 | 8 | 0 | 1 | 0 | 0 |
+| `vec_parallel_untracked::probe_vec_get_set` | 76 | 9 | 0 | 1 | 0 | 0 |
+| `vec_parallel_untracked::probe_vec_pop` | 72 | None | 0 | 0 | 0 | 0 |
+| `vec_parallel_untracked::probe_vec_push` | 149 | 18 | 3 | 2 | 2 | 2 |
+| `vec_parallel_untracked::probe_vec_push_untracked` | 172 | 20 | 3 | 2 | 2 | 5 |
+| `vec_parallel_untracked::probe_vec_set_index` | 96 | 8 | 0 | 2 | 0 | 0 |
+| `vec_parallel_untracked::probe_vec_set_untracked` | 129 | 8 | 0 | 2 | 0 | 0 |
+| `vec_parallel_untracked::probe_vec_try_extend` | 384 | 20 | 24 | 2 | 2 | 2 |
+| `vec_trail_tracked::probe_vec_as_slice_sum` | 120 | 8 | 0 | 0 | 0 | 0 |
+| `vec_trail_tracked::probe_vec_get_index` | 72 | 8 | 0 | 1 | 0 | 0 |
+| `vec_trail_tracked::probe_vec_get_set` | 262 | 80 | 7 | 2 | 3 | 9 |
+| `vec_trail_tracked::probe_vec_mark_pop_scope` | 337 | 48 | 9 | 5 | 1 | 4 |
+| `vec_trail_tracked::probe_vec_mark_push_restore_and_pop` | 286 | 30 | 9 | 5 | 2 | 4 |
+| `vec_trail_tracked::probe_vec_mark_set_restore` | 367 | 15 | 10 | 5 | 2 | 10 |
+| `vec_trail_tracked::probe_vec_nested_marks` | 497 | 27 | 13 | 6 | 4 | 9 |
+| `vec_trail_tracked::probe_vec_pop` | 239 | 63 | 7 | 1 | 5 | 10 |
+| `vec_trail_tracked::probe_vec_push` | 205 | 29 | 7 | 3 | 2 | 4 |
+| `vec_trail_tracked::probe_vec_push_untracked` | 219 | 32 | 7 | 3 | 2 | 7 |
+| `vec_trail_tracked::probe_vec_set_index` | 272 | 26 | 7 | 3 | 3 | 9 |
+| `vec_trail_tracked::probe_vec_set_untracked` | 285 | 29 | 7 | 3 | 3 | 13 |
+| `vec_trail_tracked::probe_vec_try_extend` | 551 | 20 | 28 | 3 | 1 | 3 |
+| `vec_trail_untracked::probe_vec_as_slice_sum` | 120 | 8 | 0 | 0 | 0 | 0 |
+| `vec_trail_untracked::probe_vec_get_index` | 72 | 8 | 0 | 1 | 0 | 0 |
+| `vec_trail_untracked::probe_vec_get_set` | 76 | 9 | 0 | 1 | 0 | 0 |
+| `vec_trail_untracked::probe_vec_pop` | 72 | None | 0 | 0 | 0 | 0 |
+| `vec_trail_untracked::probe_vec_push` | 148 | 20 | 3 | 2 | 2 | 2 |
+| `vec_trail_untracked::probe_vec_push_untracked` | 171 | 26 | 3 | 2 | 2 | 5 |
+| `vec_trail_untracked::probe_vec_set_index` | 96 | 8 | 0 | 2 | 0 | 0 |
+| `vec_trail_untracked::probe_vec_set_untracked` | 129 | 8 | 0 | 2 | 0 | 0 |
+| `vec_trail_untracked::probe_vec_try_extend` | 383 | 88 | 24 | 2 | 2 | 2 |
+
+## Findings on the composites
+
+- **AppendOnlyVec**: parity or better in every row (verified 49 to 141
+  instructions against legacy 64 to 202, same 8 to 11 loops).
+- **SpMap / SpUniqueMap**: parity with legacy `Map` on intern and lookup
+  (8 to 11 loops); the hasher seed resolution is one call per construction.
+- **ListArena**: untracked append 37 versus 39, prepend 28 versus 30, iterate
+  8 versus 8, splice 48 versus 9 (a splice-path inlining difference worth a
+  look); tracked append 11 versus 10 but through an out-of-line `try_append`.
+  The earlier benchmark regression on tracked-off append (0.79x against
+  mainline) is a separate, diagnosed item: see below.
+- **SparseSet**: add and contains at parity; tracked `set` with no frame open
+  110 versus legacy 42, the same pattern as `Vec` since it is a `Vec` write.
+- **UnionFind**: comparable loops; the verified `find` and `union` are called
+  out of line in the e-classes probes.
+- **EClasses**: `try_add_singleton`, `add_use`, `find` and `merge_with` are
+  out-of-line calls in every probe (legacy inlines them); loop sizes are
+  otherwise comparable (merge 15 versus 15).
+- **BPlusTreeSet**: `try_insert` out of line on the verified side (legacy
+  inlines it, 37-instruction probe); contains at parity.
+- **CircularList**: `splice_core` and `guard_different_rings` out of line.
+
+Out-of-line hot calls seen across both probes, by frequency:
+
+- `History::pop_member::7vec_dyn::VecD::codegen_probe` (x6)
+- `History::restore_and_pop_member::7vec_dyn::VecD::codegen_probe` (x6)
+- `hasher_spec::resolve_default_seed` (x5)
+- `StoredVElem::VElem::14para::ParallelStore::try_add` (x5)
+- `codegen_probe_composites::StoredVElem::VElem::6NoJu::union_core` (x5)
+- `codegen_probe_composites::StoredVElem::VElem::6NoJu::find` (x4)
+- `StoredVRingKey::VRingKey::StoredVRingNode::VRingNode::guard_different_rings` (x4)
+- `History::restore_member::7vec_dyn::VecD::codegen_probe` (x3)
+- `codegen_probe_composites::StoredVElem::VElem::INtNtB7_12inline_::InlineStore` (x3)
+- `StoredVId::VId::12bplus::Layout256U32::try_insert` (x2)
+- `12bplus::Layout256U32::12bplus::BinarySearch::try_insert` (x2)
+- `StoredVL::StoredVN::10union::NoJust::merge_with` (x2)
+- `codegen_probe_composites::StoredVK::8StoredVE2VEEmINtNtB7_12in::InlineStore::mEE25runtime_appl` (x2)
+- `StoredVElem::VElem::12inlin::InlineStore::mEE25runtime_appl` (x2)
+- `codegen_probe_composites::StoredVK::8StoredVE2VEEmINtNtB7_12in::InlineStore::mEE19runtime_migr` (x2)
+- `NoJust::12inline::InlineStore::mEE18runtime_push_::codegen_probe_composites` (x2)
+- `StoredVNode::VNode::12inlin::InlineStore::mEE25runtime_appl` (x2)
+- `StoredVNode::VNode::12inlin::InlineStore::mEE19runtime_migr` (x2)
+- `StoredVList::VList::StoredVNode::VNode::try_append` (x2)
+- `map::5SpMa::try_insert::codegen_probe_composites` (x2)
+- `StoredVRingKey::VRingKey::StoredVRingNode::VRingNode::splice_core` (x2)
+- `StoredVElem::VElem::14paral::ParallelStore::with_store` (x2)
+- `StoredVElem::VElem::14para::ParallelStore::remove` (x2)
+- `StoredVL::StoredVN::10union::NoJust::try_add_singleton` (x1)
+- `StoredVL::StoredVN::10union::NoJust::add_use` (x1)
+- `StoredVL::StoredVE::12inlin::InlineStore::mEE25runtime_appl` (x1)
+- `codegen_probe_composites::StoredVE::14paral::ParallelStore::jEE25runtime_appl` (x1)
+- `StoredVL::StoredVE::12inlin::InlineStore::mEE19runtime_migr` (x1)
+- `codegen_probe_composites::StoredVE::14paral::ParallelStore::jEE19runtime_migr` (x1)
+- `StoredVNode::VNode::12inlin::InlineStore::mEE26reconstruct_` (x1)
+- `NtC::history::7Hist::restore_and_pop` (x1)
+- `codegen_probe_composites::StoredVElem::VElem::14paral::ParallelStore` (x1)
+- `codegen_probe_composites::StoredVElem::VElem::INtNtB8_12inline_s::InlineStore` (x1)
+- `StoredVElem::VElem::12inlin::InlineStore::mEE26reconstruct_` (x1)
+- `NoJust::12inlin::InlineStore::mEE21runtime_rest::codegen_probe_composites` (x1)
+
+### Composite audit table
+
+| function | instr | inner loop | verus calls | panic paths | carried | dup loads |
+|---|---:|---:|---:|---:|---:|---:|
+| `aov_tracked::probe_aov_get_p` | 114 | 8 | 1 | 0 | 0 | 0 |
+| `aov_tracked::probe_aov_get_v` | 101 | 8 | 1 | 0 | 0 | 0 |
+| `aov_tracked::probe_aov_iter_p` | 81 | 8 | 1 | 0 | 0 | 0 |
+| `aov_tracked::probe_aov_iter_v` | 68 | 8 | 1 | 0 | 0 | 0 |
+| `aov_tracked::probe_aov_mark_push_restore_p` | 202 | 10 | 1 | 3 | 0 | 0 |
+| `aov_tracked::probe_aov_mark_push_restore_v` | 141 | 11 | 2 | 1 | 0 | 0 |
+| `aov_tracked::probe_aov_push_p` | 64 | 9 | 1 | 0 | 0 | 0 |
+| `aov_tracked::probe_aov_push_v` | 49 | 9 | 1 | 0 | 0 | 0 |
+| `bplus_tracked::probe_bplus_contains_p` | 247 | 8 | 0 | 3 | 0 | 1 |
+| `bplus_tracked::probe_bplus_contains_v` | 224 | 10 | 2 | 3 | 0 | 0 |
+| `bplus_tracked::probe_bplus_insert_p` | 37 | None | 0 | 0 | 0 | 0 |
+| `bplus_tracked::probe_bplus_insert_v` | 62 | 8 | 2 | 1 | 0 | 0 |
+| `bplus_untracked::probe_bplus_contains_p` | 247 | 8 | 0 | 3 | 0 | 1 |
+| `bplus_untracked::probe_bplus_contains_v` | 224 | 10 | 2 | 3 | 0 | 0 |
+| `bplus_untracked::probe_bplus_insert_p` | 37 | None | 0 | 0 | 0 | 0 |
+| `bplus_untracked::probe_bplus_insert_v` | 62 | 8 | 2 | 1 | 0 | 0 |
+| `eclasses_tracked::probe_ec_add_singleton_use_p` | 193 | 13 | 0 | 1 | 0 | 0 |
+| `eclasses_tracked::probe_ec_add_singleton_use_v` | 72 | 9 | 3 | 1 | 0 | 0 |
+| `eclasses_tracked::probe_ec_find_p` | 135 | 8 | 1 | 2 | 1 | 0 |
+| `eclasses_tracked::probe_ec_find_v` | 65 | 10 | 1 | 1 | 0 | 0 |
+| `eclasses_tracked::probe_ec_mark_merge_restore_p` | 1834 | 8 | 9 | 12 | 8 | 5 |
+| `eclasses_tracked::probe_ec_mark_merge_restore_v` | 1038 | 9 | 46 | 6 | 10 | 19 |
+| `eclasses_tracked::probe_ec_merge_p` | 77 | 15 | 0 | 1 | 0 | 0 |
+| `eclasses_tracked::probe_ec_merge_v` | 80 | 15 | 1 | 1 | 0 | 0 |
+| `list_tracked::probe_list_append_p` | 91 | 10 | 1 | 2 | 0 | 0 |
+| `list_tracked::probe_list_append_v` | 109 | 11 | 4 | 2 | 0 | 0 |
+| `list_tracked::probe_list_iter_p` | 83 | 8 | 0 | 1 | 0 | 0 |
+| `list_tracked::probe_list_iter_v` | 84 | 8 | 0 | 1 | 0 | 0 |
+| `list_tracked::probe_list_mark_append_restore_p` | 640 | 8 | 4 | 7 | 2 | 1 |
+| `list_tracked::probe_list_mark_append_restore_v` | 1051 | 9 | 43 | 9 | 9 | 6 |
+| `list_tracked::probe_list_prepend_p` | 153 | 43 | 2 | 3 | 1 | 0 |
+| `list_tracked::probe_list_prepend_v` | 233 | 18 | 7 | 3 | 5 | 4 |
+| `list_tracked::probe_list_splice_p` | 168 | 13 | 0 | 3 | 0 | 2 |
+| `list_tracked::probe_list_splice_v` | 397 | 10 | 8 | 2 | 6 | 11 |
+| `list_untracked::probe_list_append_p` | 148 | 39 | 2 | 4 | 1 | 0 |
+| `list_untracked::probe_list_append_v` | 122 | 37 | 3 | 3 | 1 | 0 |
+| `list_untracked::probe_list_iter_p` | 83 | 8 | 0 | 1 | 0 | 0 |
+| `list_untracked::probe_list_iter_v` | 84 | 8 | 0 | 1 | 0 | 0 |
+| `list_untracked::probe_list_prepend_p` | 126 | 30 | 2 | 2 | 1 | 0 |
+| `list_untracked::probe_list_prepend_v` | 111 | 28 | 3 | 2 | 1 | 0 |
+| `list_untracked::probe_list_splice_p` | 262 | 9 | 0 | 3 | 0 | 0 |
+| `list_untracked::probe_list_splice_v` | 143 | 48 | 0 | 2 | 0 | 0 |
+| `map_tracked::probe_map_intern_p` | 179 | 11 | 0 | 1 | 0 | 0 |
+| `map_tracked::probe_map_intern_unique_v` | 199 | 8 | 2 | 1 | 0 | 0 |
+| `map_tracked::probe_map_intern_v` | 208 | 8 | 2 | 2 | 0 | 0 |
+| `map_tracked::probe_map_lookup_p` | 228 | 11 | 0 | 2 | 1 | 0 |
+| `map_tracked::probe_map_lookup_v` | 201 | 11 | 2 | 2 | 0 | 0 |
+| `map_tracked::probe_map_mark_insert_restore_p` | 506 | 10 | 0 | 5 | 1 | 0 |
+| `map_tracked::probe_map_mark_insert_restore_v` | 622 | 8 | 7 | 7 | 0 | 0 |
+| `map_untracked::probe_map_intern_p` | 179 | 11 | 0 | 1 | 0 | 0 |
+| `map_untracked::probe_map_lookup_p` | 228 | 11 | 0 | 2 | 1 | 0 |
+| `map_untracked::probe_map_lookup_v` | 325 | 8 | 2 | 3 | 0 | 0 |
+| `ring_tracked::probe_ring_add_splice_v` | 121 | 36 | 6 | 1 | 1 | 1 |
+| `ring_tracked::probe_ring_walk_v` | 146 | 36 | 6 | 2 | 1 | 1 |
+| `ring_untracked::probe_ring_add_splice_v` | 117 | 29 | 4 | 1 | 0 | 1 |
+| `ring_untracked::probe_ring_walk_v` | 117 | 26 | 4 | 1 | 0 | 1 |
+| `sparse_tracked::probe_sparse_add_p` | 66 | None | 0 | 0 | 0 | 0 |
+| `sparse_tracked::probe_sparse_add_v` | 62 | 8 | 2 | 1 | 0 | 0 |
+| `sparse_tracked::probe_sparse_contains_get_p` | 110 | 10 | 0 | 2 | 0 | 0 |
+| `sparse_tracked::probe_sparse_contains_get_v` | 110 | 9 | 0 | 3 | 0 | 0 |
+| `sparse_tracked::probe_sparse_mark_churn_restore_p` | 491 | 8 | 2 | 6 | 2 | 3 |
+| `sparse_tracked::probe_sparse_mark_churn_restore_v` | 648 | 9 | 13 | 9 | 0 | 0 |
+| `sparse_tracked::probe_sparse_remove_add_p` | 65 | 13 | 0 | 1 | 0 | 0 |
+| `sparse_tracked::probe_sparse_remove_add_v` | 84 | 15 | 2 | 2 | 0 | 0 |
+| `sparse_tracked::probe_sparse_set_p` | 125 | 42 | 0 | 3 | 0 | 1 |
+| `sparse_tracked::probe_sparse_set_v` | 206 | 110 | 2 | 5 | 1 | 6 |
+| `sparse_untracked::probe_sparse_add_p` | 66 | None | 0 | 0 | 0 | 0 |
+| `sparse_untracked::probe_sparse_add_v` | 62 | 8 | 2 | 1 | 0 | 0 |
+| `sparse_untracked::probe_sparse_contains_get_p` | 110 | 10 | 0 | 2 | 0 | 0 |
+| `sparse_untracked::probe_sparse_contains_get_v` | 110 | 9 | 0 | 3 | 0 | 0 |
+| `sparse_untracked::probe_sparse_remove_add_p` | 134 | 14 | 0 | 3 | 1 | 0 |
+| `sparse_untracked::probe_sparse_remove_add_v` | 151 | 19 | 1 | 4 | 1 | 0 |
+| `sparse_untracked::probe_sparse_set_p` | 110 | 22 | 0 | 3 | 0 | 0 |
+| `sparse_untracked::probe_sparse_set_v` | 117 | 21 | 0 | 3 | 0 | 0 |
+| `uf_tracked::probe_uf_find_const_p` | 98 | 8 | 0 | 1 | 0 | 0 |
+| `uf_tracked::probe_uf_find_const_v` | 118 | 12 | 1 | 5 | 0 | 0 |
+| `uf_tracked::probe_uf_mark_union_restore_p` | 230 | 8 | 1 | 2 | 1 | 2 |
+| `uf_tracked::probe_uf_mark_union_restore_v` | 843 | 9 | 17 | 12 | 3 | 1 |
+| `uf_tracked::probe_uf_union_find_p` | 155 | 8 | 1 | 2 | 1 | 0 |
+| `uf_tracked::probe_uf_union_find_v` | 84 | 21 | 2 | 3 | 0 | 0 |
+| `uf_untracked::probe_uf_find_const_p` | 98 | 8 | 0 | 1 | 0 | 0 |
+| `uf_untracked::probe_uf_find_const_v` | 118 | 12 | 1 | 5 | 0 | 0 |
+| `uf_untracked::probe_uf_union_find_p` | 158 | 9 | 0 | 2 | 0 | 0 |
+| `uf_untracked::probe_uf_union_find_v` | 136 | 14 | 2 | 5 | 0 | 1 |
+
+## The systemic cause, and what was ruled out
+
+The tracked-write reloads and the list-append regression share one
+mechanism: values that live in the container's stack frame (lengths,
+pointers, watermarks, head fields) are re-read every iteration instead of
+being carried in registers, even though nothing in the loop can change them.
+Ruled out with evidence, in order: an un-inlined method (removing the call
+changed nothing), a stack-carried loop counter (removing it changed nothing
+in time), drop glue capturing the container (forgetting it changed nothing),
+the container's address escaping (every callee that receives it is
+`captures(none)`, no address is ever stored), loop size against LLVM's
+threshold (doubling it changed nothing). What does work, mechanically:
+forcing LLVM to peel one loop iteration restores the mainline code exactly,
+and mainline's early full-unroll pass peels this loop on its own while the
+branch's does not. A hand-inspection of the pre-unroll IR shows the branch
+loop reaching that pass with its head fields still loaded from memory, so the
+peel heuristic sees nothing to specialise. Why the earlier passes leave them
+in memory on the branch and not on mainline is the open question; no `opt`
+matching rustc's LLVM 22 is installed here to print MemorySSA's view.
+
+## Fix list
+
+| # | change | status |
+|---|---|---|
+| F1 | `#[inline(always)]` on `VecD` forwarders and `Vec` per-element entry points | applied, awaiting gate |
+| F2 | reorder `try_append`: read the node count before the heads bounds check | applied earlier, removed the carried slot, no time change; kept for the codegen it buys |
+| F3 | tracked writes: test the watermark before the tier dispatch so a no-capture write does one load and one compare | proposed; needs a Verus proof for the new fast path |
+| F4 | `#[inline]` on the composite hot methods LLVM declined (`EClasses::{add_use, find, try_add_singleton}`, `SparseSet::{try_add, remove}`, `ListArena::try_append`, `CircularList::{splice_core, guard_different_rings}`) | proposed; measure, since call overhead may be minor relative to the bodies |
+| F5 | list append regression: make the early peel fire (or make it unnecessary) | open; mechanism known, source trigger not yet found |
+
+Every fix is validated first by the audit (the loop shape must change) and
+then by the paired benchmark protocol (`tools/bench_compare.py`, tau 1.08,
+two interleaved rounds, mainline as the reference), before the gate.
