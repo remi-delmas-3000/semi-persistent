@@ -64,7 +64,10 @@ jobs:
           # Detect the Rust toolchain Verus needs
           rust_toolchain=""
           if [ -f verus/version.json ]; then
-            rust_toolchain="$(python3 -c 'import json; print(json.load(open("verus/version.json")).get("verus", {}).get("toolchain", ""))' 2>/dev/null || true)"
+            # The field may carry a trailing rustup note such as
+            # "(overridden by environment variable RUSTUP_TOOLCHAIN)"
+            # (release 0.2026.09.20); keep only the toolchain token.
+            rust_toolchain="$(python3 -c 'import json; t = json.load(open("verus/version.json")).get("verus", {}).get("toolchain", ""); print(t.split()[0] if t else "")' 2>/dev/null || true)"
           fi
           if [ -z "$rust_toolchain" ]; then
             rust_toolchain="$(./verus/verus 2>&1 | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -n1 || true)"
