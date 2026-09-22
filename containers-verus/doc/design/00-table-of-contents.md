@@ -101,6 +101,13 @@ listing's order.
     theorem in the presence of collisions, restore with no index work, the
     two droppability rules, and the public contracts of the three e-graph
     caches derived by bi-abduction. Not yet implemented beyond `hinted_arena`.
+20. **[Hot-Path Discipline](20-hot-path-discipline.md)**: writing verified
+    code the optimizer can optimize. Each optimization hint from the 2026-09
+    performance work confirmed or refuted against the code with its
+    measurement; the rules that follow (inline the per-element entry points;
+    check once at the public boundary, `requires` on internal cores; const
+    generics tested before any read; one executable write path); the list
+    append peel; the second-pass review table; the validation protocol.
 
 ## The class layer
 
