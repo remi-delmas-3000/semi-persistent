@@ -821,23 +821,144 @@ impl<T: Copy, I: IndexLike> DictFrame<T, I> {
         requires self.wf(),
         ensures r@ == self.decode(),
     {
-        let mut out: Vec<(T, I)> = Vec::new();
+        // Sequential decoder: the code width is selected once, the output is
+        // reserved once, and each arm walks its own column; the code bound is
+        // `wf`'s (one code per index), not a check per element. The packed
+        // arm walks words with a running word index and shift instead of a
+        // division and a modulus per code.
         let n = self.idxs.len();
-        let mut t: usize = 0;
-        while t < n
-            invariant
-                t <= n,
-                n == self.idxs@.len(),
-                self.wf(),
-                out@.len() == t,
-                forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
-            decreases n - t,
-        {
-            let code = self.codes.get(t);
-            let v = self.dict[code];
-            let idx = self.idxs[t];
-            out.push((v, idx));
-            t += 1;
+        let mut out: Vec<(T, I)> = Vec::with_capacity(n);
+        match &self.codes {
+            Codes::U8(v) => {
+                let mut t: usize = 0;
+                while t < n
+                    invariant
+                        self.wf(), n == self.idxs@.len(), self.codes == Codes::U8(*v),
+                        n == v@.len(), t <= n, out@.len() == t,
+                        forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
+                    decreases n - t,
+                {
+                    let code = v[t] as usize;
+                    proof {
+                        assert(self.codes.view()[t as int] == code as nat);
+                    }
+                    out.push((self.dict[code], self.idxs[t]));
+                    t += 1;
+                }
+            }
+            Codes::U16(v) => {
+                let mut t: usize = 0;
+                while t < n
+                    invariant
+                        self.wf(), n == self.idxs@.len(), self.codes == Codes::U16(*v),
+                        n == v@.len(), t <= n, out@.len() == t,
+                        forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
+                    decreases n - t,
+                {
+                    let code = v[t] as usize;
+                    proof {
+                        assert(self.codes.view()[t as int] == code as nat);
+                    }
+                    out.push((self.dict[code], self.idxs[t]));
+                    t += 1;
+                }
+            }
+            Codes::U32(v) => {
+                let mut t: usize = 0;
+                while t < n
+                    invariant
+                        self.wf(), n == self.idxs@.len(), self.codes == Codes::U32(*v),
+                        n == v@.len(), t <= n, out@.len() == t,
+                        forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
+                    decreases n - t,
+                {
+                    let code = v[t] as usize;
+                    proof {
+                        assert(self.codes.view()[t as int] == code as nat);
+                    }
+                    out.push((self.dict[code], self.idxs[t]));
+                    t += 1;
+                }
+            }
+            Codes::Usize(v) => {
+                let mut t: usize = 0;
+                while t < n
+                    invariant
+                        self.wf(), n == self.idxs@.len(), self.codes == Codes::Usize(*v),
+                        n == v@.len(), t <= n, out@.len() == t,
+                        forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
+                    decreases n - t,
+                {
+                    let code = v[t];
+                    proof {
+                        assert(self.codes.view()[t as int] == code as nat);
+                    }
+                    out.push((self.dict[code], self.idxs[t]));
+                    t += 1;
+                }
+            }
+            Codes::Packed { words, bits, len } => {
+                let bits_u: u8 = *bits;
+                let per_word: usize = 64 / (bits_u as usize);
+                let mask: u64 = if bits_u == 1 { 1u64 } else if bits_u == 2 { 3u64 } else { 15u64 };
+                proof {
+                    assert(sub(1u64 << 1u64, 1) == 1u64 && sub(1u64 << 2u64, 1) == 3u64
+                        && sub(1u64 << 4u64, 1) == 15u64) by (bit_vector);
+                }
+                let mut wi: usize = 0;
+                let mut f: usize = 0;
+                let mut t: usize = 0;
+                while t < n
+                    invariant
+                        self.wf(), n == self.idxs@.len(),
+                        self.codes == (Codes::Packed { words: *words, bits: *bits, len: *len }),
+                        bits_u == *bits, (bits_u == 1 || bits_u == 2 || bits_u == 4),
+                        per_word == 64usize / (bits_u as usize), per_word > 0,
+                        mask == sub(1u64 << (bits_u as u64), 1),
+                        n == *len, (*len as nat) <= words@.len() * (per_word as nat),
+                        t <= n, t == wi * per_word + f, f < per_word,
+                        out@.len() == t,
+                        forall|k: int| 0 <= k < t ==> out@[k] == self.decode()[k],
+                    decreases n - t,
+                {
+                    proof {
+                        vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(
+                            t as int, per_word as int, wi as int, f as int);
+                        assert(wi < words@.len()) by (nonlinear_arith)
+                            requires per_word > 0, t == wi * per_word + f, f < per_word,
+                                t < n, (n as nat) <= words@.len() * (per_word as nat);
+                        assert((f as u64) * (bits_u as u64) + (bits_u as u64) <= 64) by (nonlinear_arith)
+                            requires f < per_word, per_word == 64usize / (bits_u as usize),
+                                (bits_u == 1 || bits_u == 2 || bits_u == 4);
+                    }
+                    proof {
+                        assert((t as int) / (per_word as int) == wi as int);
+                        assert((t as int) % (per_word as int) == f as int);
+                    }
+                    let word = words[wi];
+                    let shift = (f as u64) * (bits_u as u64);
+                    let code = ((word >> shift) & mask) as usize;
+                    proof {
+                        assert(code as nat == packed_code_at(words@, bits_u as nat, t as int));
+                        assert(self.codes.view()[t as int] == code as nat);
+                    }
+                    out.push((self.dict[code], self.idxs[t]));
+                    let ghost (t0, wi0, f0) = (t as int, wi as int, f as int);
+                    t += 1;
+                    f += 1;
+                    if f == per_word {
+                        f = 0;
+                        wi += 1;
+                    }
+                    proof {
+                        assert(t == wi * per_word + f) by (nonlinear_arith)
+                            requires t0 == wi0 * (per_word as int) + f0, f0 + 1 <= per_word as int,
+                                t == t0 + 1,
+                                (f0 + 1 < per_word as int) ==> (f == f0 + 1 && wi == wi0),
+                                (f0 + 1 == per_word as int) ==> (f == 0 && wi == wi0 + 1);
+                    }
+                }
+            }
         }
         assert(out@ =~= self.decode());
         out
