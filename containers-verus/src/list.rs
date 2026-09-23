@@ -173,6 +173,33 @@ impl<T, N: DenseId + Tagged> ListNode<T, N> {
 }
 
 impl<T, N: DenseId + Tagged + core::default::Default> ListNode<T, N> {
+    /// A fresh node holding `payload` with a null next pointer. One
+    /// constructor, no default-then-overwrite (production's `ListNode::new`).
+    #[inline(always)]
+    pub(crate) fn with_payload(payload: T) -> (r: ListNode<T, N>)
+        ensures r.next_wf(), r.next_ref().is_null(), r.payload == payload,
+    {
+        let o = crate::opt::Opt::<N>::none();
+        ListNode { payload, next_repr: o.into_raw() }
+    }
+
+    /// Write the next pointer from an already-typed id: no `usize` round trip
+    /// and no range check, the id carries its own bound.
+    #[inline(always)]
+    pub(crate) fn set_next_id(&mut self, id: N)
+        ensures
+            final(self).next_wf(),
+            final(self).next_ref() == (NodeRef { some: true, idx: id.id_nat() as usize }),
+            final(self).payload == old(self).payload,
+    {
+        let o = crate::opt::Opt::<N>::some(id);
+        self.next_repr = o.into_raw();
+        proof {
+            assert(!N::tag_of(self.next_repr));
+            assert(N::value_of(self.next_repr) == id);
+        }
+    }
+
     /// Write the next pointer (pack into the niche). `r.idx` must be a
     /// representable id (callers hold `idx < N::id_bound()` from the arena's
     /// allocation guard).
@@ -355,6 +382,52 @@ impl<N: DenseId + Tagged> ListHead<N> {
 }
 
 impl<N: DenseId + Tagged + core::default::Default> ListHead<N> {
+    /// Emptiness is the head word's tag bit (production's `ListHead::is_empty`);
+    /// no `Opt` decode, no `NodeRef` build.
+    #[inline(always)]
+    pub(crate) fn is_empty_exec(&self) -> (b: bool)
+        requires self.head_wf(),
+        ensures b == self.head_ref().is_null(),
+    {
+        N::tag(&self.head_repr)
+    }
+
+    /// The tail as its typed id (meaningful only when non-empty).
+    #[inline(always)]
+    pub(crate) fn tail_id(&self) -> (r: N)
+        ensures r == self.tail,
+    {
+        self.tail
+    }
+
+    /// Head write from an already-typed id: no range check.
+    #[inline(always)]
+    pub(crate) fn set_head_id(&mut self, id: N)
+        ensures
+            N::repr_wf(final(self).head_repr),
+            final(self).tail == old(self).tail,
+            final(self).len == old(self).len,
+            final(self).head_ref() == (NodeRef { some: true, idx: id.id_nat() as usize }),
+    {
+        let o = crate::opt::Opt::<N>::some(id);
+        self.head_repr = o.into_raw();
+        proof {
+            assert(!N::tag_of(self.head_repr));
+            assert(N::value_of(self.head_repr) == id);
+        }
+    }
+
+    /// Tail write from an already-typed id: no range check.
+    #[inline(always)]
+    pub(crate) fn set_tail_id(&mut self, id: N)
+        ensures
+            final(self).head_repr == old(self).head_repr,
+            final(self).len == old(self).len,
+            final(self).tail == id,
+    {
+        self.tail = id;
+    }
+
     /// Read the head pointer (unpack).
     pub(crate) fn head(&self) -> (r: NodeRef)
         requires self.head_wf(),
@@ -1315,9 +1388,10 @@ where
     /// `lemma_insert_fresh_disjoint`; the enclosing proof still exceeds the
     /// default solver budget, so this function carries an explicit margin.
     #[verifier::rlimit(300)]
-    pub(crate) fn append_raw(&mut self, l: usize, payload: T)
+    pub(crate) fn append_raw(&mut self, l: usize, payload: T, n: usize)
         requires
             old(self).wf(),
+            n == old(self).nodes_view().len(),
             (l as int) < old(self).model_view().len(),
             old(self).nodes_view().len() + 1 < usize::MAX,
             // Packing headroom, per id family; see `prepend_raw`.
@@ -1350,22 +1424,33 @@ where
         proof { self.lemma_len_bounded(l as int); }
         let ghost old_nodes = self.nodes_view();
         let ghost old_model = self.model@;
-        let h0 = self.heads.get_at(self.head_ix(l));
-        let was_empty = h0.head().is_null_exec();
+        // Every index is converted once and carried; every value stays in
+        // its typed form. The only range check left is the fresh slot's
+        // `from_usize`, and the `requires` discharges it.
+        let li = self.head_ix(l);
+        let h0 = self.heads.get_at(li);
+        let was_empty = h0.is_empty_exec();
 
-        let slot = self.nodes_len();
-        let mut new_node: ListNode<T, N> = ListNode::default();
-        new_node.payload = payload;
-        new_node.set_next(NodeRef::null());
-        proof { Self::lemma_node_push_fits(self.nodes_view().len()); }
-        self.nodes.push(new_node);
+        // The node count arrives validated from `try_append`; it is not
+        // re-read here (it equals the current count by precondition).
+        let slot = n;
+        let slot_id = N::from_usize(slot);
+        proof {
+            assert(slot_id.id_nat() == slot as nat);
+            Self::lemma_node_push_fits(self.nodes_view().len());
+        }
+        self.nodes.push(ListNode::with_payload(payload));
 
         if !was_empty {
             // relink old tail node forward to slot.
-            let old_tail = h0.tail();
-            let mut tnode = self.nodes.get_at(self.node_ix(old_tail));
-            tnode.set_next(NodeRef::to(slot));
-            let ti = self.node_ix(old_tail);
+            let ti = h0.tail_id().to_index();
+            proof {
+                crate::opt::lemma_id_nat_fits_usize(h0.tail);
+                assert(ti.as_nat() == h0.tail_spec() as nat);
+            }
+            let mut tnode = self.nodes.get_at(ti);
+            tnode.set_next_id(slot_id);
+            proof { assert(tnode.next_ref() == (NodeRef { some: true, idx: slot })); }
             self.nodes.set_at(ti, tnode);
         }
 
@@ -1375,9 +1460,11 @@ where
         // Single head read (production parity): h0 is still current.
         let mut h = h0;
         if was_empty {
-            h.set_head(NodeRef::to(slot));
+            h.set_head_id(slot_id);
+            proof { assert(h.head_ref() == (NodeRef { some: true, idx: slot })); }
         }
-        h.set_tail(slot);
+        h.set_tail_id(slot_id);
+        proof { assert(h.tail_spec() == slot); }
         // Same chain as `prepend_raw`: old count <= old arena, arena grew by the pushed
         // node, and the store's `wf` bounds the grown arena by `N::Index`'s range.
         proof {
@@ -1386,7 +1473,6 @@ where
             assert(self.nodes_view().len() == old_nodes.len() + 1);
         }
         h.len = Self::len_incr(h.len);
-        let li = self.head_ix(l);
         self.heads.set_at(li, h);
 
         proof {
@@ -1970,7 +2056,7 @@ where
             && N::try_new(n).is_some()
             && (N::bit_stealing() || N::try_new(n + 1).is_some())
         {
-            self.append(l, payload);
+            self.append(l, payload, n);
             Ok(())
         } else {
             Err(crate::error::ContainerError::CapacityExhausted)
@@ -2317,9 +2403,10 @@ where
 
     /// O(1) append through the typed handle (cached tail).
     #[inline(always)]
-    pub(crate) fn append(&mut self, l: L, payload: T)
+    pub(crate) fn append(&mut self, l: L, payload: T, n: usize)
         requires
             old(self).wf(),
+            n == old(self).nodes_view().len(),
             l.id_nat() < old(self).model_view().len(),
             old(self).nodes_view().len() + 1 < usize::MAX,
             // node allocation stays within N's id range; see `prepend`.
@@ -2351,7 +2438,7 @@ where
         // them (the total `try_append` checks them once), so nothing is re-read or
         // re-checked here.
         proof { l.lemma_as_nat_is_id_nat(); }  // as_usize -> id_nat bridge. prod-parity
-        self.append_raw(l.as_usize(), payload)
+        self.append_raw(l.as_usize(), payload, n)
     }
 
     /// O(1) verified length through the typed handle.
@@ -3026,5 +3113,89 @@ where
     /// Whole footprint of both columns (read-only).
     pub fn total_bytes(&self) -> usize {
         self.heads.total_bytes() + self.nodes.total_bytes()
+    }
+}
+
+#[cfg(test)]
+mod append_edge_tests {
+    //! Edge cases of the append path: the head update on an empty list, the
+    //! tail relink on a non-empty one, node-column growth under the validated
+    //! count threaded from `try_append`, and an open tracked frame restored
+    //! across appends.
+    use super::ListArena;
+    use crate::group::ForkHistory;
+    use crate::vec::ShrinkPolicy;
+
+    crate::define_id31! { pub struct TElem / StoredTElem, "e"; }
+    crate::define_id31! { pub struct TList / StoredTList, "l"; }
+    crate::define_id31! { pub struct TNode / StoredTNode, "n"; }
+
+    type Arena = ForkHistory<ListArena<TElem, TList, TNode, true>>;
+
+    fn arena() -> Arena {
+        ForkHistory::new(ListArena::new())
+    }
+
+    fn read(a: &Arena, l: TList) -> std::vec::Vec<u32> {
+        a.iter(l).map(|e| e.raw()).collect()
+    }
+
+    #[test]
+    fn append_to_empty_sets_head_and_tail() {
+        let mut a = arena();
+        let l = a.try_new_list().expect("list id");
+        assert_eq!(read(&a, l), Vec::<u32>::new());
+        a.try_append(l, TElem::new(7)).expect("append to empty");
+        assert_eq!(read(&a, l), vec![7]);
+        assert_eq!(a.len(l), 1);
+    }
+
+    #[test]
+    fn append_to_non_empty_relinks_tail() {
+        let mut a = arena();
+        let l = a.try_new_list().expect("list id");
+        for v in 1..=5u32 {
+            a.try_append(l, TElem::new(v)).expect("append");
+        }
+        assert_eq!(read(&a, l), vec![1, 2, 3, 4, 5]);
+        assert_eq!(a.len(l), 5);
+    }
+
+    #[test]
+    fn append_across_node_column_growth() {
+        // Interleaved appends on three lists across many column growths; the
+        // threaded count must equal the live count at every push.
+        let mut a = arena();
+        let ls: std::vec::Vec<TList> = (0..3).map(|_| a.try_new_list().expect("list id")).collect();
+        let mut want: std::vec::Vec<std::vec::Vec<u32>> = vec![vec![]; 3];
+        for i in 0..5000u32 {
+            let k = (i % 3) as usize;
+            a.try_append(ls[k], TElem::new(i)).expect("append across growth");
+            want[k].push(i);
+        }
+        for k in 0..3 {
+            assert_eq!(read(&a, ls[k]), want[k]);
+            assert_eq!(a.len(ls[k]) as usize, want[k].len());
+        }
+    }
+
+    #[test]
+    fn append_under_open_tracked_frame_then_restore() {
+        let mut a = arena();
+        let l = a.try_new_list().expect("list id");
+        for v in 1..=3u32 {
+            a.try_append(l, TElem::new(v)).expect("append before mark");
+        }
+        let t = a.mark(ShrinkPolicy::Never).expect("mark");
+        for v in 4..=300u32 {
+            a.try_append(l, TElem::new(v)).expect("append under open frame");
+        }
+        assert_eq!(read(&a, l).len(), 300);
+        assert!(a.restore(t), "own live token");
+        assert_eq!(read(&a, l), vec![1, 2, 3]);
+        assert_eq!(a.len(l), 3);
+        // The list is appendable again after the restore.
+        a.try_append(l, TElem::new(9)).expect("append after restore");
+        assert_eq!(read(&a, l), vec![1, 2, 3, 9]);
     }
 }
