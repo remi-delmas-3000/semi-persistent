@@ -257,7 +257,15 @@ re-push, nested restores, migrated histories.
 4. The repeated traversals (union-find, e-classes, B+ cursor): done
    2026-09-23; the B+ cursor reads through borrowed reprs (no node copy),
    shuffled seek 2.1×, sequential seek 8.8× against the start of the wave.
-5. Compression and log items, tracked separately.
+5. The hash-keyed structures (SpMap intern, HintedArena probe, e-class
+   min-monomial rows): done 2026-09-23; `HintedArena` is generic over the
+   store like `Vec`, intern hits on heap keys 1.8×, probe 1.1× to 1.9×.
+   The CircularList and ListArena rows were already closed (c9ff2bb,
+   bc15b6c). Two lessons: a second length read in the same operation is a
+   second range check and a second dependency wherever it sits (25 per cent
+   on the probe hit path); a bench group's placement noise floor is measured
+   (same source, shifted text) before any row inside it is read as a signal.
+6. Compression and log items, tracked separately.
 
 ---
 [← 19 Verified Node Caches](19-verified-node-caches.md) · [Table of contents](00-table-of-contents.md)

@@ -629,3 +629,58 @@ legacy tree (572 µs vs 956).
 Rule confirmed from a new side: a by-value read of a large decoded value is
 a copy whether it is a "reload" or a "return", and only a borrow removes
 it; the proofs carry over on the value the borrowed repr decodes to.
+
+## Wave 4 (2026-09-23): per-call waste in the hash-keyed structures
+
+**Change 7, SpMap intern (eb24e29).** `intern_entry` cloned the key before
+`entry`, so a hit paid a clone it then dropped. The key moves into `entry`;
+the miss path clones from the vacant entry's own key, once. The retained
+`map/intern*` rows are all-miss workloads (`id_of` then `try_insert`) and
+did not move (10 pass, 2 legacy rows inconclusive); a hit-path group
+`spmap/intern_hit/{u64pair,string,vec32}` was added to the discipline
+bench: String keys 1.85×/1.84×, Vec keys 1.76×/1.80×, Copy keys 1.00×.
+Codegen: `try_intern<String>` 143 → 134 instructions, `<Vec<u32>>` 145 →
+135, same call set.
+
+**Change 8, HintedArena probe (f282386).** The arena's column was a `VecD`,
+so `probe` re-selected the store per bucket candidate and re-checked the
+bound its own liveness test had established. The arena is now generic over
+the store like `Vec` (`HintedArena<T, I, S, TRACK>`, `new()` per store),
+`probe` binds the bucket once and reads the column length once before the
+hash lookup, and the scan reads through the proof-checked `get_at`. New
+bench `hinted_arena/probe/{inline,parallel}{,_hits_only,_misses_only}`.
+Measured against the `VecD` arena on the same rows: inline 1.33×/1.32×,
+inline misses 1.89×/1.69×, parallel 1.17×/1.10×, parallel hits 1.21×/1.18×.
+`probe` now inlines into its callers (the 172-instruction three-arm body is
+gone).
+
+Two things learned on the way, both recorded so they are not relearned:
+
+- A first draft left the original `live = self.col.len()` at the top of
+  `probe` and added a second read inside the scan, after the hash lookup.
+  That alone cost 25 per cent on the parallel hit path (0.79×/0.76×), with
+  loops that were instruction-identical to the old ones apart from the
+  removed bounds check. Threading the single read cured it. The H4/H7 rule
+  reads "once per operation" in both directions: a second length read is
+  a second range check and a second dependency, wherever it sits.
+- The placement noise floor of this group was measured directly (same
+  library source in both trees, one bench binary shifted by an unused
+  function): up to 10 per cent per row, with the inline rows at 4096 cells
+  placement-dominated (working set at the L1 edge) and stable at 2048. A
+  row inside that band is not evidence in either direction; the rows above
+  are all outside it.
+
+**Change 9, e-class `set_min_monomial` (c86e31e).** The fresh-row arm
+pushed `min_width` empties through `try_push` one at a time under a loop
+that carried the whole class state as invariant. `Vec::try_push_repeat`
+validates headroom once and appends `n` copies; its contract is total and
+closure-free (length, unchanged prefix, filled tail). Measured:
+`set_min_monomial/verified` 1.07×/1.07×, retained twin 1.00×; the verified
+batched routine 353 → 349 instructions, 28 → 27 conditional branches.
+
+**Changes 10 and 11, already in place.** The only proven `CircularList`
+splice caller, the e-class merge, has used `splice_absorb_core` since
+c9ff2bb; the remaining `.splice(` calls are `ListArena`'s. `ListArena`'s
+construct-from-payload row was closed by wave 2 (bc15b6c, `with_payload`).
+No commit for either.
+
