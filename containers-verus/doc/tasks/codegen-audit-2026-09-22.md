@@ -593,3 +593,39 @@ handful of instructions either way, splice tracked drops one stack-carried
 slot. Reported as neutral: the conversions and re-reads this removes were
 already folded by LLVM on this path; the change is the code stating what the
 proof established, which is the shape rule, not a speed claim.
+
+## Wave 3 (2026-09-23): repeated traversals
+
+**Change 4, e-class directed merge (2139ae9).** `prefer_a_by_uses_roots`
+finds both roots once (compressing) and `merge_with` passes them to a new
+roots-level `union_directed_roots_core`, so the union no longer finds them
+again. The roots core is inline-always: out of line it cost a call per
+directed merge (548-byte symbol) and 7 per cent, which the symbol table
+showed. Measured: directed cascade 1.03×/1.01×, undirected cascade 0.98×
+(the larger `merge_with` body), reported as such.
+
+**Change 5, union-find explain (b4f5562).** Five `find_const` traversals
+per call became two; the private `explain_from_lca` carries the common-root
+fact as a documented, debug-asserted contract (plain Rust, outside the
+verified block). Measured: `explain_deep_chain/verified` 1.05×/1.04×,
+bounded by the two path walks and the extraction.
+
+**Change 6, B+ cursor (c29a0d9 and 8564c81).** First the current-leaf fast
+path, proved by two lemmas (the cached leaf is a strictly sorted window of
+the model; a target inside its range resolves to `chain_offset(gleaf) +
+find_ge`): sequential seek 6.15×/6.16× tracked, 5.93×/5.91× untracked.
+Returning the leaf from `seek_leaf` by value was measured and rejected
+(0.88×/0.89× on the shuffled seek: a fifth 1 KB copy). Then the copies
+themselves: the Tagged law `value_of(into_repr(v)) == v` rules out making
+the stored repr the node type, so the read path borrows the repr in place
+(`ReprBorrow` on the inline store, `&Repr` accessors on the layout, the
+cursor holding `Option<&'a Repr>` with `leaf_cached` over `value_of`).
+Measured against the fast-path commit: shuffled seek 2.08×/2.07×,
+branchless 1.60×/1.77×, sequential 1.43×/1.43× and 1.31×/1.30×, scan 1.03×;
+inserts and bulk load unchanged. Against the wave's start the sequential
+seek is 8.8× tracked and 7.8× untracked, and the shuffled seek is below the
+legacy tree (572 µs vs 956).
+
+Rule confirmed from a new side: a by-value read of a large decoded value is
+a copy whether it is a "reload" or a "return", and only a borrow removes
+it; the proofs carry over on the value the borrowed repr decodes to.

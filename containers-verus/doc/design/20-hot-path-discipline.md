@@ -254,7 +254,9 @@ re-push, nested restores, migrated histories.
 1. Vec: one executable write path (H6), on the checked accessors (H4).
 2. SparseSet lookup reuse.
 3. List append on the check-once rule (H4), measured for the peel (H7): done, peel restored by the H7 rule.
-4. The repeated traversals (union-find, e-classes, B+ cursor).
+4. The repeated traversals (union-find, e-classes, B+ cursor): done
+   2026-09-23; the B+ cursor reads through borrowed reprs (no node copy),
+   shuffled seek 2.1×, sequential seek 8.8× against the start of the wave.
 5. Compression and log items, tracked separately.
 
 ---
