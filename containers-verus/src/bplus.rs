@@ -9482,6 +9482,128 @@ pub(crate) proof fn lemma_cursor_node_wf_at<K, L, S, const TRACK: bool, P>(
 /// the cursor set to `(node := lids[gm], pos, gleaf := gm, gidx := ti)`,
 /// `cursor_wf` holds and `idx == ti`. The positioned arm, with the node != NIL
 /// fact from the real-id bound.
+/// The cursor's cached leaf, as the fast path needs it: the arena leaf it
+/// stands on, well-formed, a leaf, and with strictly sorted keys (its keys are
+/// a window of the strictly sorted model).
+pub(crate) proof fn seek_fast_path_pre<K, L, S, const TRACK: bool, P>(c: &BPlusCursor<K, L, S, TRACK, P>)
+    where
+        K: DenseId,
+        L: NodeLayout<Word = K::Index>,
+        S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
+    requires
+        c.cursor_ok(),
+        c.node.as_nat() != nil_link::<L>(),
+    ensures
+        c.node.as_nat() < c.tree.arena().len(),
+        c.leaf == c.tree.arena()[c.node.as_nat() as int],
+        L::node_wf(c.leaf),
+        L::is_leaf_spec(c.leaf),
+        crate::bplus_tree::strictly_sorted(
+            Seq::new(L::keys_view(c.leaf).len(), |i: int| L::keys_view(c.leaf)[i].as_nat())),
+{
+    lemma_cursor_node_wf::<K, L, S, TRACK, P>(c);
+    let arena = c.tree.arena();
+    let lids = crate::bplus_tree::tree_leaf_ids(c.tree.tree@);
+    let gm = c.gleaf@;
+    let model = c.model();
+    lemma_chain_yields_sorted_model::<K, L, S, TRACK, P>(c.tree);
+    lemma_chain_keys_slice::<L>(arena, lids, gm);
+    let off = chain_offset::<L>(arena, lids, gm) as int;
+    let ks = leaf_word_keys::<L>(arena, lids[gm]);
+    let ck = chain_keys::<L>(arena, lids);
+    assert(ck == model);
+    assert(c.node.as_nat() == lids[gm]);
+    assert forall|i: int, j: int| 0 <= i < j < ks.len() implies (#[trigger] ks[i]) < (#[trigger] ks[j]) by {
+        assert(ck[off + i] == ks[i]);
+        assert(ck[off + j] == ks[j]);
+        assert(model[off + i] < model[off + j]);
+    }
+    assert(Seq::new(L::keys_view(c.leaf).len(), |i: int| L::keys_view(c.leaf)[i].as_nat()) =~= ks);
+}
+
+/// The fast path's finish: a target inside the current leaf's key range sits
+/// at `chain_offset(gleaf) + p`, where `p` is the in-leaf split `leaf_find_ge`
+/// returned, because every earlier model key is below the leaf's first key
+/// and every later one above its last (the model is strictly sorted and the
+/// leaf's keys are its window at `chain_offset(gleaf)`).
+pub(crate) proof fn seek_fast_path_finish<K, L, S, const TRACK: bool, P>(
+    c: &BPlusCursor<K, L, S, TRACK, P>, oldc: &BPlusCursor<K, L, S, TRACK, P>, p: usize, tgt: nat,
+)
+    where
+        K: DenseId,
+        L: NodeLayout<Word = K::Index>,
+        S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
+    requires
+        oldc.cursor_ok(),
+        oldc.node.as_nat() != nil_link::<L>(),
+        c.tree == oldc.tree,
+        c.node == oldc.node,
+        c.leaf == oldc.leaf,
+        c.gleaf@ == oldc.gleaf@,
+        c.pos == p,
+        ({
+            let ks = leaf_word_keys::<L>(c.tree.arena(), c.node.as_nat());
+            &&& ks.len() >= 1
+            &&& ks[0] <= tgt
+            &&& tgt <= ks[ks.len() - 1]
+            &&& p <= ks.len()
+            &&& (forall|i: int| 0 <= i < p ==> #[trigger] ks[i] < tgt)
+            &&& (forall|i: int| p <= i < ks.len() ==> tgt <= #[trigger] ks[i])
+        }),
+        c.gidx@ == seek_target_idx(c.model(), tgt),
+    ensures
+        c.cursor_ok(),
+        c.idx() == seek_target_idx(c.model(), tgt),
+{
+    let arena = c.tree.arena();
+    let lids = crate::bplus_tree::tree_leaf_ids(c.tree.tree@);
+    let gm = c.gleaf@;
+    let model = c.model();
+    assert(c.node.as_nat() == lids[gm]);
+    lemma_chain_yields_sorted_model::<K, L, S, TRACK, P>(c.tree);
+    lemma_chain_keys_slice::<L>(arena, lids, gm);
+    let off = chain_offset::<L>(arena, lids, gm) as int;
+    let ks = leaf_word_keys::<L>(arena, lids[gm]);
+    let n = ks.len() as int;
+    let ck = chain_keys::<L>(arena, lids);
+    assert(ck == model);
+    assert(off + n <= model.len());
+    // The leaf's keys are the model window at `off` (the slice lemma, stated
+    // on the chain term; instantiated here per position).
+    assert forall|q: int| 0 <= q < n implies #[trigger] model[off + q] == ks[q] by {
+        assert(ck[off + q] == ks[q]);
+    }
+    // p < n: the last key is >= tgt, and every key before p is < tgt.
+    assert(p < n) by {
+        if p == n {
+            assert(ks[n - 1] < tgt);
+        }
+    }
+    let r = off + p;
+    assert forall|i: int| 0 <= i < r implies #[trigger] model[i] < tgt by {
+        if i < off {
+            assert(model[i] < model[off]);
+            assert(model[off + 0] == ks[0]);
+        } else {
+            assert(model[off + (i - off)] == ks[i - off]);
+        }
+    }
+    assert forall|i: int| r <= i < model.len() implies tgt <= #[trigger] model[i] by {
+        if i < off + n {
+            assert(model[off + (i - off)] == ks[i - off]);
+        } else {
+            assert(model[off + (n - 1)] == ks[n - 1]);
+            if i > off + n - 1 {
+                assert(model[off + n - 1] < model[i]);
+            }
+        }
+    }
+    lemma_seek_target_idx_unique(model, tgt, r);
+    assert(c.gidx@ == off + p);
+}
+
 pub(crate) proof fn seek_finish_in_leaf<K, L, S, const TRACK: bool, P>(
     c: &BPlusCursor<K, L, S, TRACK, P>, oldc: &BPlusCursor<K, L, S, TRACK, P>, gm: int, pos: usize, tgt: nat,
 )
@@ -9990,6 +10112,57 @@ impl<'a, K, L, S, const TRACK: bool, P> BPlusCursor<'a, K, L, S, TRACK, P>
     /// optimization, omitted from the verified version, which always descends. The
     /// observable result is identical; the fast path is exercised by the property
     /// tests on the production-shaped exec.)
+    /// The current leaf answers a target inside its own key range: position
+    /// there and return true; otherwise leave the cursor untouched and return
+    /// false (the caller descends). The cached copy is the arena leaf
+    /// (`leaf_cached`), so no arena read. A target below the first key may
+    /// belong to an earlier leaf and one above the last to a later one.
+    #[inline(always)]
+    fn seek_current_leaf(&mut self, word: L::Word, target: K) -> (r: bool)
+        requires
+            old(self).cursor_ok(),
+            old(self).node.as_nat() != nil_link::<L>(),
+            word.as_nat() == target.id_nat(),
+        ensures
+            final(self).tree_ref() == old(self).tree_ref(),
+            r ==> final(self).cursor_ok()
+                && final(self).idx() == seek_target_idx(final(self).model(), target.id_nat()),
+            !r ==> *final(self) == *old(self),
+    {
+        proof { seek_fast_path_pre::<K, L, S, TRACK, P>(self); }
+        let ghost ti = seek_target_idx(self.model(), target.id_nat());
+        let cur = self.leaf;
+        let keys = L::keys(&cur);
+        let n = keys.len();
+        if n == 0 {
+            return false;
+        }
+        let first = keys[0];
+        let last = keys[n - 1];
+        if !(first.as_usize() <= word.as_usize() && word.as_usize() <= last.as_usize()) {
+            return false;
+        }
+        let p = self.tree.leaf_find_ge(&cur, word);
+        self.pos = p;
+        proof {
+            self.gidx@ = ti;
+            // Bridge: the exec words are the leaf's nat keys.
+            let ks = leaf_word_keys::<L>(self.tree.arena(), self.node.as_nat());
+            L::lemma_keys_view_len(cur);  // count_spec == |keys_view|, the split's bound
+            assert(ks.len() == keys@.len());
+            assert(ks[0] == first.as_nat());
+            assert(ks[ks.len() - 1] == last.as_nat());
+            assert forall|i: int| 0 <= i < p implies #[trigger] ks[i] < target.id_nat() by {
+                assert(ks[i] == L::keys_view(cur)[i].as_nat());
+            }
+            assert forall|i: int| p <= i < ks.len() implies target.id_nat() <= #[trigger] ks[i] by {
+                assert(ks[i] == L::keys_view(cur)[i].as_nat());
+            }
+            seek_fast_path_finish::<K, L, S, TRACK, P>(self, old(self), p, target.id_nat());
+        }
+        true
+    }
+
     pub fn seek(&mut self, target: K)
         requires old(self).cursor_ok(),
         ensures
@@ -10001,8 +10174,22 @@ impl<'a, K, L, S, const TRACK: bool, P> BPlusCursor<'a, K, L, S, TRACK, P>
         let word: L::Word = target.to_index();    // word.as_nat() == target.id_nat()
         let ghost lids = crate::bplus_tree::tree_leaf_ids(self.tree.tree@);
         let ghost ti = seek_target_idx(self.model(), target.id_nat());
+
+        // Fast path (production parity, chapter 20 item 4): the leaf the cursor
+        // stands on answers a target inside its own key range without a
+        // descent; see `seek_current_leaf`.
+        if self.node.as_usize() != nil.as_usize() {
+            proof { assert(self.node.as_nat() != nil_link::<L>()); }
+            if self.seek_current_leaf(word, target) {
+                return;
+            }
+        }
+
         let (leaf, pos, gm) = self.tree.seek_leaf(word);
         // seek_leaf: leaf == lids[gm@], pos <= |leaf gm@|, chain_offset(gm@)+pos == ti.
+        // The leaf is decoded here once for the cursor's cached copy. (Returning
+        // it from `seek_leaf` by value was measured: a node is a decoded 1 KB
+        // value, and the extra copy cost the shuffled seek 11 to 13 per cent.)
         proof {
             // leaf == lids[gm@] is a real leaf id, so it is in arena range (for get).
             lemma_cursor_node_wf_at::<K, L, S, TRACK, P>(self.tree, gm@);
