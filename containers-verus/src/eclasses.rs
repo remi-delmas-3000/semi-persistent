@@ -1669,9 +1669,26 @@ where
     // rlimit raised alongside lemma_merge_wf: the F2.4 EqSpec impl's ambient
     // axioms nudged this proof past the default budget, content unchanged.
     #[verifier::rlimit(120)]
-    pub(crate) fn merge_with(&mut self, a: T, b: T, directed: bool, prefer_a: bool)
-        -> (r: Option<MergeInfo<T, L>>)
-        requires old(self).wf(),
+    pub(crate) fn merge_with(
+        &mut self,
+        a: T,
+        b: T,
+        roots: Option<(T, T)>,
+        directed: bool,
+        prefer_a: bool,
+    ) -> (r: Option<MergeInfo<T, L>>)
+        requires
+            old(self).wf(),
+            // Roots found by the caller (`prefer_a_by_uses_roots`), passed
+            // down so the union does not find them again.
+            roots matches Some((ra, rb)) ==> {
+                &&& a.id_nat() < old(self).n_spec()
+                &&& b.id_nat() < old(self).n_spec()
+                &&& ra.id_nat() == old(self).roots_view()[a.id_nat() as int] as nat
+                &&& rb.id_nat() == old(self).roots_view()[b.id_nat() as int] as nat
+                &&& ra.id_nat() < old(self).n_spec()
+                &&& rb.id_nat() < old(self).n_spec()
+            },
         ensures
             final(self).wf(),
             final(self).n_spec() == old(self).n_spec(),
@@ -1710,7 +1727,17 @@ where
         let ghost o = *old(self);
         let ghost n = o.n_spec();
         let res = if directed {
-            self.uf.union_directed_core(a, b, prefer_a)
+            match roots {
+                Some((ra, rb)) => {
+                    proof {
+                        // Canonicity: the root of a root is itself.
+                        assert(o.uf.roots_view()[ra.id_nat() as int] as nat == ra.id_nat());
+                        assert(o.uf.roots_view()[rb.id_nat() as int] as nat == rb.id_nat());
+                    }
+                    self.uf.union_directed_roots_core(ra, rb, prefer_a)
+                }
+                None => self.uf.union_directed_core(a, b, prefer_a),
+            }
         } else {
             self.uf.union_core(a, b)
         };
@@ -2784,21 +2811,46 @@ where
             crate::guard::refuse(
                 "union() called on a PROOFS=true UnionFind; use union_justified() instead");
         }
-        self.merge_with(a, b, false, false)
+        self.merge_with(a, b, None, false, false)
     }
 
     /// Whether `find(a)`'s class has at least as many parents as `find(b)`'s
-    /// (production's survivor policy for directed merges).
-    fn prefer_a_by_uses(&self, a: T, b: T) -> (r: bool)
-        requires self.wf(),
+    /// (production's survivor policy for directed merges), with the two roots
+    /// it found returned so the merge passes them down instead of finding
+    /// them again (chapter 20 item 4). The finds compress paths; every view
+    /// the aggregate's `wf` reads is unchanged.
+    fn prefer_a_by_uses_roots(&mut self, a: T, b: T) -> (r: (bool, T, T))
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).n_spec() == old(self).n_spec(),
+            final(self).min_width_spec() == old(self).min_width_spec(),
+            final(self).roots_view() == old(self).roots_view(),
+            final(self).num_classes_spec() == old(self).num_classes_spec(),
+            final(self).entries == old(self).entries,
+            final(self).reprs == old(self).reprs,
+            final(self).uses == old(self).uses,
+            final(self).min_pool == old(self).min_pool,
+            // Returning at all means the range check passed (it refuses
+            // otherwise), so the facts are unconditional.
+            a.id_nat() < old(self).n_spec(),
+            b.id_nat() < old(self).n_spec(),
+            r.1.id_nat() == old(self).roots_view()[a.id_nat() as int] as nat,
+            r.2.id_nat() == old(self).roots_view()[b.id_nat() as int] as nat,
+            r.1.id_nat() < old(self).n_spec(),
+            r.2.id_nat() < old(self).n_spec(),
     {
         if !(a.to_usize() < self.uf.len().as_usize()
             && b.to_usize() < self.uf.len().as_usize())
         {
             crate::guard::refuse("EClasses::merge_directed: node id out of range");
         }
-        let ra = self.uf.find_const(a);
-        let rb = self.uf.find_const(b);
+        proof {
+            crate::opt::lemma_id_nat_fits_usize(a);
+            crate::opt::lemma_id_nat_fits_usize(b);
+        }
+        let ra = self.uf.find(a);
+        let rb = self.uf.find(b);
         let la = match self.repr_id(ra) {
             Some(k) => self.use_list_len(k),
             None => 0,
@@ -2807,7 +2859,7 @@ where
             Some(k) => self.use_list_len(k),
             None => 0,
         };
-        la >= lb
+        (la >= lb, ra, rb)
     }
 
     /// Like [`Self::merge`], but keeps the larger-use-list class as
@@ -2835,8 +2887,8 @@ where
             crate::guard::refuse(
                 "union_directed() called on a PROOFS=true UnionFind; use union_justified_directed()");
         }
-        let prefer_a = self.prefer_a_by_uses(a, b);
-        self.merge_with(a, b, true, prefer_a)
+        let (prefer_a, ra, rb) = self.prefer_a_by_uses_roots(a, b);
+        self.merge_with(a, b, Some((ra, rb)), true, prefer_a)
     }
 
     /// The directed core with an explicit survivor flag (`merge_with`'s
@@ -2861,7 +2913,7 @@ where
                     })
             },
     {
-        self.merge_with(a, b, true, prefer_a)
+        self.merge_with(a, b, None, true, prefer_a)
     }
 }
 
@@ -3411,7 +3463,7 @@ where
 {
     /// Merge with justification (records the proof edge `a—b`).
     pub fn merge_justified(&mut self, a: T, b: T, just: J) -> Option<MergeInfo<T, L>> {
-        let r = self.merge_with(a, b, false, false);
+        let r = self.merge_with(a, b, None, false, false);
         if r.is_some() {
             self.uf.record_proof_edge(a, b, just);
         }
@@ -3420,8 +3472,8 @@ where
 
     /// Justified counterpart of [`Self::merge_directed`].
     pub fn merge_justified_directed(&mut self, a: T, b: T, just: J) -> Option<MergeInfo<T, L>> {
-        let prefer_a = self.prefer_a_by_uses(a, b);
-        let r = self.merge_with(a, b, true, prefer_a);
+        let (prefer_a, ra, rb) = self.prefer_a_by_uses_roots(a, b);
+        let r = self.merge_with(a, b, Some((ra, rb)), true, prefer_a);
         if r.is_some() {
             self.uf.record_proof_edge(a, b, just);
         }
@@ -3437,7 +3489,7 @@ where
         prefer_a: bool,
         just: J,
     ) -> Option<MergeInfo<T, L>> {
-        let r = self.merge_with(a, b, true, prefer_a);
+        let r = self.merge_with(a, b, None, true, prefer_a);
         if r.is_some() {
             self.uf.record_proof_edge(a, b, just);
         }

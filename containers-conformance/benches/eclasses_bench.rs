@@ -139,6 +139,61 @@ fn bench_merge_cascade(c: &mut Criterion) {
     g.finish();
 }
 
+/// The directed cascade: the survivor chosen by use-list length, which on
+/// the verified side found both roots twice before chapter 20 item 4.
+fn bench_merge_directed_cascade(c: &mut Criterion) {
+    let mut g = c.benchmark_group("eclasses/merge_directed_cascade");
+    g.throughput(Throughput::Elements(N as u64));
+
+    g.bench_function(BenchmarkId::new("retained", N), |b| {
+        b.iter_batched(
+            build_retained,
+            |(mut ec, ids)| {
+                let mut stride = 1;
+                while stride < N {
+                    let mut i = 0;
+                    while i + stride < N {
+                        if let Some(mi) = ec.merge_directed(ids[i], ids[i + stride]) {
+                            let sk = ec.repr_id(mi.survivor).unwrap();
+                            let uses = ec.use_list_id(sk);
+                            ec.splice_uses(uses, mi.absorbed_uses);
+                        }
+                        i += stride * 2;
+                    }
+                    stride *= 2;
+                }
+                black_box(ec.num_classes())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    g.bench_function(BenchmarkId::new("verified", N), |b| {
+        b.iter_batched(
+            build_verified,
+            |(mut ec, ids)| {
+                let mut stride = 1;
+                while stride < N {
+                    let mut i = 0;
+                    while i + stride < N {
+                        if let Some(mi) = ec.merge_directed(ids[i], ids[i + stride]) {
+                            let sk = ec.repr_id(mi.survivor).unwrap();
+                            let uses = ec.use_list_id(sk);
+                            ec.splice_uses(uses, mi.absorbed_uses);
+                        }
+                        i += stride * 2;
+                    }
+                    stride *= 2;
+                }
+                black_box(ec.num_classes())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    g.finish();
+}
+
 /// Merge schedule for the opaque cascade: the tournament pairs, generated
 /// once and laundered through `black_box` so the class count and the pair
 /// order are runtime values for both arms.
@@ -396,6 +451,7 @@ criterion_group!(
     benches,
     bench_merge_cascade,
     bench_merge_cascade_opaque,
+    bench_merge_directed_cascade,
     bench_set_min_monomial,
     bench_union_find_explain_deep_chain,
     bench_find_sweep,
