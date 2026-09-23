@@ -1602,7 +1602,11 @@ where
         if !PROOFS {
             return false;
         }
-        if self.find_const(a) != self.find_const(b) {
+        // Each root found once (chapter 20 item 4): the same-root test, the
+        // LCA seed and the extraction below all use these two.
+        let ra = self.find_const(a);
+        let rb = self.find_const(b);
+        if ra != rb {
             return false;
         }
         let pp = self.parent_proof.as_ref().unwrap();
@@ -1620,7 +1624,7 @@ where
         for id in &buf.path_a {
             buf.seen.insert(id.as_usize());
         }
-        let mut lca = self.find_const(a);
+        let mut lca = ra;
         for &node in &buf.path_b {
             if buf.seen.contains(&node.as_usize()) {
                 lca = node;
@@ -1628,7 +1632,7 @@ where
             }
         }
 
-        self.explain_with_lca(a, b, lca, buf)
+        self.explain_from_lca(a, b, lca, buf)
     }
 
     /// Explain `a ≡ b` using an LCA supplied by a batch proof-forest index.
@@ -1641,6 +1645,15 @@ where
         if !PROOFS || self.find_const(a) != self.find_const(b) {
             return false;
         }
+        self.explain_from_lca(a, b, lca, buf)
+    }
+
+    /// The extraction, with the common root already established by the
+    /// caller (`explain` found both roots once; `explain_with_lca` tested
+    /// them). Outside the verified block, so the contract is documented and
+    /// debug-asserted rather than a `requires`.
+    fn explain_from_lca(&self, a: T, b: T, lca: T, buf: &mut ProofBuf<T, J>) -> bool {
+        debug_assert!(PROOFS && self.find_const(a) == self.find_const(b));
         let pp = self.parent_proof.as_ref().unwrap();
         let j = self.justification.as_ref().unwrap();
         let steps_start = buf.steps.len();
