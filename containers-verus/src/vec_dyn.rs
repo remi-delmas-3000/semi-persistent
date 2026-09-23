@@ -216,22 +216,6 @@ where
         }
     }
 
-    pub(crate) fn push(&mut self, value: T)
-        requires
-            old(self).wf(),
-            old(self).view().len() + 1 < I::max_nat(),
-        ensures
-            final(self).wf(),
-            final(self).view() == old(self).view().push(value),
-            final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        match self {
-            VecD::Inline(v) => v.push(value),
-            VecD::Parallel(v) => v.push(value),
-            VecD::Trail(v) => v.push(value),
-        }
-    }
-
     #[inline(always)]
     pub fn can_push(&self) -> (b: bool)
         requires self.wf(),

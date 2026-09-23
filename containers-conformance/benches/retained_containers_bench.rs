@@ -1413,8 +1413,111 @@ fn bench_map_restore_small_suffix(c: &mut Criterion) {
     });
     g.finish();
 }
+// hinted_arena/probe: the fingerprint index in the shape the e-graph's
+// node-content cache takes. Coarse fingerprints (`a = i % 256`) give buckets
+// of sixteen candidates; every live content is probed (a hit at every bucket
+// depth) and one absent content per fingerprint (a full scan to a miss).
+// Counts and the fingerprint modulus pass through `black_box` once so the
+// bucket depth is not a compile-time constant.
+fn bench_hinted_arena_probe(c: &mut Criterion) {
+    use verus::Pair;
+    use verus::hinted_arena::HintedArena;
+    let mut g = c.benchmark_group("hinted_arena/probe");
+    // 2048 cells keep the whole working set (cells, keys, buckets, table)
+    // well inside L1 on every core class; at 4096 the inline store's 12-byte
+    // cells put it at the edge and the rows became placement-dominated.
+    let n = black_box(2048u32);
+    let fps = black_box(128u32);
+    fn arm<S: verus::diff_store::DiffStore<Pair<u32, u32>, u32, true>>(
+        g: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+        label: &str,
+        mut arena: HintedArena<Pair<u32, u32>, u32, S, true>,
+        n: u32,
+        fps: u32,
+    ) {
+        let mut live = Vec::new();
+        for i in 0..n {
+            let p = Pair { a: i % fps, b: i };
+            arena.push(p).expect("capacity");
+            live.push(p);
+        }
+        let absent: Vec<Pair<u32, u32>> = (0..fps)
+            .map(|a| Pair {
+                a,
+                b: 0xDEAD_0000 + a,
+            })
+            .collect();
+        g.bench_function(label, |b| {
+            b.iter(|| {
+                let mut hits = 0usize;
+                for p in &live {
+                    if arena.probe(p).is_some() {
+                        hits += 1;
+                    }
+                }
+                for p in &absent {
+                    if arena.probe(p).is_some() {
+                        hits += 1;
+                    }
+                }
+                black_box(hits)
+            })
+        });
+        g.bench_function(format!("{label}_hits_only"), |b| {
+            b.iter(|| {
+                let mut hits = 0usize;
+                for p in &live {
+                    if arena.probe(p).is_some() {
+                        hits += 1;
+                    }
+                }
+                black_box(hits)
+            })
+        });
+        g.bench_function(format!("{label}_misses_only"), |b| {
+            b.iter(|| {
+                let mut hits = 0usize;
+                for _ in 0..16 {
+                    for p in &absent {
+                        if arena.probe(p).is_some() {
+                            hits += 1;
+                        }
+                    }
+                }
+                black_box(hits)
+            })
+        });
+    }
+    arm(
+        &mut g,
+        "inline",
+        HintedArena::<
+            Pair<u32, u32>,
+            u32,
+            verus::inline_store::InlineStore<Pair<u32, u32>, u32>,
+            true,
+        >::new(),
+        n,
+        fps,
+    );
+    arm(
+        &mut g,
+        "parallel",
+        HintedArena::<
+            Pair<u32, u32>,
+            u32,
+            verus::parallel_store::ParallelStore<Pair<u32, u32>, u32>,
+            true,
+        >::new(),
+        n,
+        fps,
+    );
+    g.finish();
+}
+
 criterion_group!(
     benches,
+    bench_hinted_arena_probe,
     bench_vec_try_extend,
     bench_vec_mark_set_restore,
     bench_vec_restore_replay,

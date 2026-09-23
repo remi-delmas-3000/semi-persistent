@@ -9,9 +9,13 @@
 //! (a cell rewritten to new content and then rolled BACK to the old one, with
 //! another cell holding that same old content), plus deep restores past
 //! several marks.
+use semi_persistent_containers_verus::ShrinkPolicy;
+use semi_persistent_containers_verus::diff_store::DiffStore;
 use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::hinted_arena::HintedArena;
-use semi_persistent_containers_verus::{ShrinkPolicy, StoreKind};
+use semi_persistent_containers_verus::inline_store::InlineStore;
+use semi_persistent_containers_verus::parallel_store::ParallelStore;
+use semi_persistent_containers_verus::trail_store::TrailStore;
 
 type Node = semi_persistent_containers_verus::Pair<u32, u32>;
 
@@ -23,7 +27,11 @@ fn oracle_probe(live: &[Node], t: &Node) -> Option<usize> {
     live.iter().position(|c| c.a == t.a && c.b == t.b)
 }
 
-fn check(arena: &HintedArena<Node, u32, true>, live: &[Node], ctx: &str) {
+fn check<S: DiffStore<Node, u32, true>>(
+    arena: &HintedArena<Node, u32, S, true>,
+    live: &[Node],
+    ctx: &str,
+) {
     // Every live content must be findable (completeness), and every probe
     // answer must really collide (soundness).
     for (i, c) in live.iter().enumerate() {
@@ -54,8 +62,14 @@ fn check(arena: &HintedArena<Node, u32, true>, live: &[Node], ctx: &str) {
 
 #[test]
 fn probe_matches_scan_through_marks_and_restores() {
-    for kind in [StoreKind::Inline, StoreKind::Parallel, StoreKind::Trail] {
-        let mut arena = ForkHistory::new(HintedArena::<Node, u32, true>::new_kind(kind));
+    run_probe_scenario(HintedArena::<Node, u32, InlineStore<Node, u32>, true>::new());
+    run_probe_scenario(HintedArena::<Node, u32, ParallelStore<Node, u32>, true>::new());
+    run_probe_scenario(HintedArena::<Node, u32, TrailStore<Node, u32>, true>::new());
+}
+
+fn run_probe_scenario<S: DiffStore<Node, u32, true>>(arena: HintedArena<Node, u32, S, true>) {
+    {
+        let mut arena = ForkHistory::new(arena);
         let mut live: Vec<Node> = Vec::new();
         let mut marks: Vec<(semi_persistent_containers_verus::VecToken, Vec<Node>)> = Vec::new();
 

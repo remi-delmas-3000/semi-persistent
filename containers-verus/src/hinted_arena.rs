@@ -29,7 +29,6 @@
 
 use vstd::prelude::*;
 
-use crate::dyn_store::StoreKind;
 use crate::error::ContainerError;
 use crate::index_like::IndexLike;
 use crate::tagged::Tagged;
@@ -68,13 +67,16 @@ pub trait HintContent: Sized {
 // the map: `crate::map::lemma_last_occurrence_exists`.
 
 /// The verified arena + fingerprint index pair.
-pub struct HintedArena<T, I, const TRACK: bool = true>
+pub struct HintedArena<T, I, S, const TRACK: bool = true>
 where
     T: Sized + Copy + Tagged + HintContent,
     I: IndexLike,
+    S: crate::diff_store::DiffStore<T, I, TRACK>,
 {
-    /// The semi-persistent column (runtime-selected store kind).
-    pub(crate) col: crate::VecD<T, I, TRACK>,
+    /// The semi-persistent column. The store is a type parameter, as on
+    /// `Vec` itself: every operation runs one static column's body, and a
+    /// probe scans against one store with no per-candidate selection.
+    pub(crate) col: crate::vec::Vec<T, I, S, TRACK>,
     /// Fingerprint -> spill bucket index. UNTRACKED on purpose: restore must
     /// not roll the hint index back - that is the zero-maintenance theorem.
     /// Unique-keyed: a fingerprint is inserted once, so the map's own
@@ -85,10 +87,11 @@ where
     pub(crate) spill: Vec<Vec<I>>,
 }
 
-impl<T, I, const TRACK: bool> HintedArena<T, I, TRACK>
+impl<T, I, S, const TRACK: bool> HintedArena<T, I, S, TRACK>
 where
     T: Sized + Copy + Tagged + HintContent,
     I: IndexLike,
+    S: crate::diff_store::DiffStore<T, I, TRACK>,
 {
     /// The bucket ids hinted under `fp` (empty when the fingerprint is
     /// unknown).
@@ -165,8 +168,13 @@ where
         &&& self.complete()
     }
 
-    /// Empty arena of the selected store kind.
-    pub fn new_kind(kind: StoreKind) -> (r: Self)
+    /// Empty arena over an empty column (the per-store `new` constructors
+    /// below build the column; this is the shared body).
+    fn with_column(col: crate::vec::Vec<T, I, S, TRACK>) -> (r: Self)
+        requires
+            col.wf(),
+            col.view().len() == 0,
+            col.snapshots_view().len() == 0,
         ensures
             r.wf(),
             r.complete(),
@@ -174,7 +182,7 @@ where
             r.snapshots_view().len() == 0,
     {
         HintedArena {
-            col: crate::VecD::new_kind(kind),
+            col,
             index: crate::SpMap::new(),
             spill: Vec::new(),
         }
@@ -357,58 +365,89 @@ where
             }
             Some(slotr) => {
                 let slot = *slotr;
-                let blen = self.spill[slot].len();
-                let mut e: usize = 0;
-                while e < blen
-                    invariant
-                        self.wf(),
-                        fp == t.fp_spec(),
-                        live.as_nat() == self.view().len(),
-                        self.index.index_view().contains_key(fp),
-                        slot < self.spill@.len(),
-                        self.bucket_spec(fp) == self.spill@[slot as int]@,
-                        blen == self.bucket_spec(fp).len(),
-                        0 <= e <= blen,
-                        // No candidate so far collided while live.
-                        forall|q: int| 0 <= q < e ==> {
-                            let cid = #[trigger] self.bucket_spec(fp)[q];
-                            !(cid.as_nat() < self.view().len()
-                                && T::eq_spec(&self.view()[cid.as_nat() as int], t))
-                        },
-                    decreases blen - e,
-                {
-                    let cand = self.spill[slot][e];
-                    if cand.as_usize() < live.as_usize() {
-                        let v = self.col.get_index(cand);
-                        if T::content_eq(&v, t) {
-                            proof {
-                                cand.lemma_as_nat_bounded();
-                                live.lemma_as_nat_bounded();
+                proof { assert(self.bucket_spec(fp) == self.spill@[slot as int]@); }
+                // Bind the bucket once; the store is the type's, so the scan
+                // runs against one static column.
+                let bucket = &self.spill[slot];
+                let r = Self::scan_bucket(&self.col, live, bucket, t);
+                match r {
+                    Some(id) => Some(id),
+                    None => {
+                        proof {
+                            // Scanned the whole bucket with no live collision. Any
+                            // colliding live cell would be hinted under fp (complete
+                            // + fp respects eq), hence appear in this bucket, hence
+                            // have been rejected by the scan - contradiction.
+                            assert forall|j: int| #![trigger self.view()[j]] 0 <= j < self.view().len()
+                                implies !T::eq_spec(&self.view()[j], t) by {
+                                if T::eq_spec(&self.view()[j], t) {
+                                    T::lemma_fp_respects_eq(&self.view()[j], t);
+                                    assert(self.hinted(fp, j as nat));
+                                    let q = choose|q: int| 0 <= q < self.bucket_spec(fp).len()
+                                        && (#[trigger] self.bucket_spec(fp)[q]).as_nat() == j as nat;
+                                    assert(0 <= q < bucket@.len());
+                                }
                             }
-                            return Some(cand);
                         }
-                    }
-                    e += 1;
-                }
-                proof {
-                    // Scanned the whole bucket with no live collision. Any
-                    // colliding live cell would be hinted under fp (complete
-                    // + fp respects eq), hence appear in this bucket, hence
-                    // have been rejected by the scan - contradiction.
-                    assert forall|j: int| #![trigger self.view()[j]] 0 <= j < self.view().len()
-                        implies !T::eq_spec(&self.view()[j], t) by {
-                        if T::eq_spec(&self.view()[j], t) {
-                            T::lemma_fp_respects_eq(&self.view()[j], t);
-                            assert(self.hinted(fp, j as nat));
-                            let q = choose|q: int| 0 <= q < self.bucket_spec(fp).len()
-                                && (#[trigger] self.bucket_spec(fp)[q]).as_nat() == j as nat;
-                            assert(0 <= q < blen);
-                        }
+                        None
                     }
                 }
-                None
             }
         }
+    }
+
+    /// One bucket scanned against the column: the first candidate that is
+    /// live and collides with `t`, else `None` with every candidate rejected.
+    /// The liveness test each candidate passes is the store read's
+    /// precondition, not a second bounds check.
+    fn scan_bucket(
+        col: &crate::vec::Vec<T, I, S, TRACK>,
+        live: I,
+        bucket: &Vec<I>,
+        t: &T,
+    ) -> (r: Option<I>)
+        requires
+            col.wf(),
+            live.as_nat() == col.view().len(),
+        ensures
+            match r {
+                Some(id) => id.as_nat() < col.view().len()
+                    && T::eq_spec(&col.view()[id.as_nat() as int], t),
+                None => forall|q: int| 0 <= q < bucket@.len() ==> {
+                    let cid = #[trigger] bucket@[q];
+                    !(cid.as_nat() < col.view().len()
+                        && T::eq_spec(&col.view()[cid.as_nat() as int], t))
+                },
+            },
+    {
+        let live_us = live.as_usize();
+        let blen = bucket.len();
+        let mut e: usize = 0;
+        while e < blen
+            invariant
+                col.wf(),
+                live.as_nat() == col.view().len(),
+                live_us as nat == live.as_nat(),
+                blen == bucket@.len(),
+                0 <= e <= blen,
+                // No candidate so far collided while live.
+                forall|q: int| 0 <= q < e ==> {
+                    let cid = #[trigger] bucket@[q];
+                    !(cid.as_nat() < col.view().len()
+                        && T::eq_spec(&col.view()[cid.as_nat() as int], t))
+                },
+            decreases blen - e,
+        {
+            let cand = bucket[e];
+            if cand.as_usize() < live_us {
+                let v = col.get_at(cand);
+                if T::content_eq(&v, t) {
+                    return Some(cand);
+                }
+            }
+            e += 1;
+        }
+        None
     }
 
     /// Record a hint: `id` (a real cell id, `id.as_nat() == j`) currently or
@@ -584,10 +623,11 @@ impl HintContent for crate::tagged::Pair<u32, u32> {
 // the surviving snapshot stack is a prefix (or the old stack plus that view).
 // ---------------------------------------------------------------------------
 
-impl<T, I, const TRACK: bool> crate::group::Member for HintedArena<T, I, TRACK>
+impl<T, I, S, const TRACK: bool> crate::group::Member for HintedArena<T, I, S, TRACK>
 where
     T: Sized + Copy + Tagged + HintContent + core::default::Default,
     I: IndexLike,
+    S: crate::diff_store::DiffStore<T, I, TRACK>,
 {
     type Model = Seq<T>;
 
@@ -620,17 +660,15 @@ where
     fn can_push_now(&self) -> (b: bool) {
         proof {
             self.col.lemma_snapshots_len();
-            self.col.lemma_member_specs();
         }
-        <crate::VecD<T, I, TRACK> as crate::group::Member>::can_push_now(&self.col)
+        <crate::vec::Vec<T, I, S, TRACK> as crate::group::Member>::can_push_now(&self.col)
     }
 
     fn depth_exec(&self) -> (d: usize) {
         proof {
             self.col.lemma_snapshots_len();
-            self.col.lemma_member_specs();
         }
-        <crate::VecD<T, I, TRACK> as crate::group::Member>::depth_exec(&self.col)
+        <crate::vec::Vec<T, I, S, TRACK> as crate::group::Member>::depth_exec(&self.col)
     }
 
     fn push_frame(&mut self, shrink: ShrinkPolicy) {
@@ -638,9 +676,7 @@ where
             crate::guard::refuse("Member::push_frame: the hinted arena cannot open another frame");
         }
         let ghost pre = *self;
-        proof { self.col.lemma_member_specs(); }
-        <crate::VecD<T, I, TRACK> as crate::group::Member>::push_frame(&mut self.col, shrink);
-        proof { self.col.lemma_member_specs(); }
+        <crate::vec::Vec<T, I, S, TRACK> as crate::group::Member>::push_frame(&mut self.col, shrink);
         proof {
             assert(self.index == pre.index && self.spill == pre.spill);
             assert forall|f2: u32, j2: nat| pre.hinted(f2, j2)
@@ -672,9 +708,7 @@ where
             crate::guard::refuse("Member::restore_frame: depth is not below the hinted arena's");
         }
         let ghost pre = *self;
-        proof { self.col.lemma_member_specs(); }
-        <crate::VecD<T, I, TRACK> as crate::group::Member>::restore_frame(&mut self.col, depth);
-        proof { self.col.lemma_member_specs(); }
+        <crate::vec::Vec<T, I, S, TRACK> as crate::group::Member>::restore_frame(&mut self.col, depth);
         proof { self.lemma_complete_after_cut(pre, depth as int, depth as int); }
     }
 
@@ -686,9 +720,7 @@ where
             crate::guard::refuse("Member::reset_frame: frame-stack depth at the u32 ceiling");
         }
         let ghost pre = *self;
-        proof { self.col.lemma_member_specs(); }
-        <crate::VecD<T, I, TRACK> as crate::group::Member>::reset_frame(&mut self.col, depth);
-        proof { self.col.lemma_member_specs(); }
+        <crate::vec::Vec<T, I, S, TRACK> as crate::group::Member>::reset_frame(&mut self.col, depth);
         proof { self.lemma_complete_after_cut(pre, depth as int, depth as int + 1); }
     }
 
@@ -698,17 +730,16 @@ where
             crate::guard::refuse("Member::pop_frame: no open frame");
         }
         let ghost pre = *self;
-        proof { self.col.lemma_member_specs(); }
-        <crate::VecD<T, I, TRACK> as crate::group::Member>::pop_frame(&mut self.col);
-        proof { self.col.lemma_member_specs(); }
+        <crate::vec::Vec<T, I, S, TRACK> as crate::group::Member>::pop_frame(&mut self.col);
         proof { self.lemma_complete_after_cut(pre, d as int - 1, d as int - 1); }
     }
 }
 
-impl<T, I, const TRACK: bool> HintedArena<T, I, TRACK>
+impl<T, I, S, const TRACK: bool> HintedArena<T, I, S, TRACK>
 where
     T: Sized + Copy + Tagged + HintContent,
     I: IndexLike,
+    S: crate::diff_store::DiffStore<T, I, TRACK>,
 {
     /// The zero-maintenance argument, once: after a column move that lands
     /// the view on `pre`'s archived snapshot `ti` and leaves the first `keep`
@@ -740,6 +771,45 @@ where
             assert(self.snapshots_view()[k] == pre.snapshots_view()[k]);
             assert(pre.hinted(pre.snapshots_view()[k][j].fp_spec(), j as nat));
         }
+    }
+}
+
+impl<T, I, const TRACK: bool> HintedArena<T, I, crate::inline_store::InlineStore<T, I>, TRACK>
+where
+    T: Sized + Copy + Tagged + HintContent,
+    I: IndexLike,
+{
+    /// Empty arena over an `InlineStore` column.
+    pub fn new() -> (r: Self)
+        ensures r.wf(), r.complete(), r.view().len() == 0, r.snapshots_view().len() == 0,
+    {
+        Self::with_column(crate::vec::Vec::<T, I, crate::inline_store::InlineStore<T, I>, TRACK>::new())
+    }
+}
+
+impl<T, I, const TRACK: bool> HintedArena<T, I, crate::parallel_store::ParallelStore<T, I>, TRACK>
+where
+    T: Sized + Copy + Tagged + HintContent,
+    I: IndexLike,
+{
+    /// Empty arena over a `ParallelStore` column.
+    pub fn new() -> (r: Self)
+        ensures r.wf(), r.complete(), r.view().len() == 0, r.snapshots_view().len() == 0,
+    {
+        Self::with_column(crate::vec::Vec::<T, I, crate::parallel_store::ParallelStore<T, I>, TRACK>::new())
+    }
+}
+
+impl<T, I, const TRACK: bool> HintedArena<T, I, crate::trail_store::TrailStore<T, I>, TRACK>
+where
+    T: Sized + Copy + Tagged + HintContent,
+    I: IndexLike,
+{
+    /// Empty arena over a `TrailStore` column.
+    pub fn new() -> (r: Self)
+        ensures r.wf(), r.complete(), r.view().len() == 0, r.snapshots_view().len() == 0,
+    {
+        Self::with_column(crate::vec::Vec::<T, I, crate::trail_store::TrailStore<T, I>, TRACK>::new())
     }
 }
 
