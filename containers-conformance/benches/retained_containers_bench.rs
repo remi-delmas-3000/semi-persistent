@@ -725,6 +725,225 @@ fn bench_sparse_set_churn(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Opaque-input variants (design chapter 20, validation protocol). The plan is
+// generated once from a seed, laundered through `black_box` at the group
+// boundary so LLVM cannot specialise on the literal sizes, and shared by both
+// arms. One `black_box` on the final checksum keeps the work alive; nothing
+// inside the loops is pinned.
+// ---------------------------------------------------------------------------
+
+/// One append plan: `lists` lists of `per_list` appends each, the fixed row's
+/// loop nest with the trip counts and payloads opaque. (A flat op sequence or
+/// a random list order is a different program: no loop to peel, or a
+/// memory-bound loop whose time moves 30 per cent with placement alone.)
+struct ListPlan {
+    lists: usize,
+    per_list: usize,
+    payloads: Vec<u32>,
+}
+
+fn list_plan(seed: u64, lists: usize, per_list: usize) -> ListPlan {
+    let mut rng = containers_conformance::Rng::new(seed);
+    let payloads = (0..lists * per_list)
+        .map(|_| (rng.next() as u32) & 0x7FFF_FFFF)
+        .collect();
+    black_box(ListPlan {
+        lists,
+        per_list,
+        payloads,
+    })
+}
+
+fn bench_list_append_iter_opaque(c: &mut Criterion) {
+    let mut g = c.benchmark_group("list/append_iter_opaque");
+    let plan = list_plan(0x5EED_A11D, LISTS, PER_LIST);
+
+    g.bench_function("legacy", |b| {
+        b.iter(|| {
+            let mut a: prod::ListArena<PElem, PList, PNode, false> = prod::ListArena::new();
+            let mut lists = Vec::with_capacity(plan.lists);
+            for _ in 0..plan.lists {
+                lists.push(a.new_list());
+            }
+            for (k, &l) in lists.iter().enumerate() {
+                for j in 0..plan.per_list {
+                    a.append(l, PElem::new(plan.payloads[k * plan.per_list + j]));
+                }
+            }
+            let mut acc = 0u64;
+            for &l in &lists {
+                for e in a.iter(l) {
+                    acc = acc.wrapping_add(e.raw() as u64);
+                }
+            }
+            black_box(acc)
+        })
+    });
+
+    g.bench_function("verified", |b| {
+        b.iter(|| {
+            let mut a: verus::ListArena<VElem, VList, VNode, false> = verus::ListArena::new();
+            let mut lists = Vec::with_capacity(plan.lists);
+            for _ in 0..plan.lists {
+                lists.push(a.try_new_list().expect("within id space"));
+            }
+            for (k, &l) in lists.iter().enumerate() {
+                for j in 0..plan.per_list {
+                    a.try_append(l, VElem::new(plan.payloads[k * plan.per_list + j]))
+                        .expect("within id space");
+                }
+            }
+            let mut acc = 0u64;
+            for &l in &lists {
+                for e in a.iter(l) {
+                    acc = acc.wrapping_add(e.raw() as u64);
+                }
+            }
+            black_box(acc)
+        })
+    });
+
+    g.finish();
+}
+
+/// One splice plan: `lists` lists of `per_list` appends, then a merge order.
+struct SplicePlan {
+    lists: usize,
+    per_list: usize,
+    payloads: Vec<u32>,
+    order: Vec<u32>,
+}
+
+fn splice_plan(seed: u64, lists: usize, per_list: usize) -> SplicePlan {
+    let mut rng = containers_conformance::Rng::new(seed);
+    let payloads = (0..lists * per_list)
+        .map(|_| (rng.next() as u32) & 0x7FFF_FFFF)
+        .collect();
+    // The fixed row's source order; only the counts and payloads are opaque.
+    let order: Vec<u32> = (1..lists as u32).collect();
+    black_box(SplicePlan {
+        lists,
+        per_list,
+        payloads,
+        order,
+    })
+}
+
+fn bench_list_splice_opaque(c: &mut Criterion) {
+    let mut g = c.benchmark_group("list/splice_opaque");
+    let plan = splice_plan(0x5EED_5B1C, LISTS, 4);
+
+    g.bench_function("legacy", |b| {
+        b.iter(|| {
+            let mut a: prod::ListArena<PElem, PList, PNode, false> = prod::ListArena::new();
+            let mut lists = Vec::with_capacity(plan.lists);
+            for k in 0..plan.lists {
+                let l = a.new_list();
+                for j in 0..plan.per_list {
+                    a.append(l, PElem::new(plan.payloads[k * plan.per_list + j]));
+                }
+                lists.push(l);
+            }
+            let dst = lists[0];
+            for &src in &plan.order {
+                a.splice(dst, lists[src as usize]);
+            }
+            black_box(a.len(dst))
+        })
+    });
+
+    g.bench_function("verified", |b| {
+        b.iter(|| {
+            let mut a: verus::ListArena<VElem, VList, VNode, false> = verus::ListArena::new();
+            let mut lists = Vec::with_capacity(plan.lists);
+            for k in 0..plan.lists {
+                let l = a.try_new_list().expect("within id space");
+                for j in 0..plan.per_list {
+                    a.try_append(l, VElem::new(plan.payloads[k * plan.per_list + j]))
+                        .expect("within id space");
+                }
+                lists.push(l);
+            }
+            let dst = lists[0];
+            for &src in &plan.order {
+                a.splice(dst, lists[src as usize]);
+            }
+            black_box(a.len(dst))
+        })
+    });
+
+    g.finish();
+}
+
+/// One churn plan: `n` initial adds, then `steps` of `(slot, value)`.
+struct ChurnPlan {
+    n: usize,
+    steps: Vec<(u32, u64)>,
+}
+
+fn churn_plan(seed: u64, n: usize) -> ChurnPlan {
+    let mut rng = containers_conformance::Rng::new(seed);
+    let steps = (0..n / 2)
+        .map(|_| (rng.below(n as u64) as u32, rng.next()))
+        .collect();
+    black_box(ChurnPlan { n, steps })
+}
+
+fn bench_sparse_set_churn_opaque(c: &mut Criterion) {
+    let mut g = c.benchmark_group("sparse_set/churn_opaque");
+    let plan = churn_plan(0x5EED_C4A1, 20_000);
+
+    g.bench_function("legacy", |b| {
+        b.iter(|| {
+            let mut s: prod::SparseSet<u64, PElem, prod::ParallelStore<u64, PElem>, true> =
+                prod::SparseSet::new();
+            let mut ids = Vec::with_capacity(plan.n);
+            for i in 0..plan.n {
+                ids.push(s.add(i as u64));
+            }
+            let tok = s.mark(prod::ShrinkPolicy::Never);
+            for &(k, x) in &plan.steps {
+                let id = ids[k as usize];
+                if s.contains(id) {
+                    s.remove(id);
+                } else {
+                    ids[k as usize] = s.add(x);
+                }
+            }
+            s.restore(tok);
+            black_box(s.len().raw())
+        })
+    });
+
+    g.bench_function("verified", |b| {
+        b.iter(|| {
+            let mut s: ForkHistory<
+                verus::SparseSet<u64, VElem, verus::ParallelStore<u64, VElem>, true>,
+            > = ForkHistory::new(verus::SparseSet::new());
+            let mut ids = Vec::with_capacity(plan.n);
+            for i in 0..plan.n {
+                ids.push(s.try_add(i as u64).expect("add: within id space"));
+            }
+            let tok = s
+                .mark(verus::ShrinkPolicy::Never)
+                .expect("mark: depth bounded by this harness");
+            for &(k, x) in &plan.steps {
+                let id = ids[k as usize];
+                if s.contains(id) {
+                    s.remove(id);
+                } else {
+                    ids[k as usize] = s.try_add(x).expect("add: within id space");
+                }
+            }
+            assert!(s.restore_and_pop(tok), "restore: own token");
+            black_box(s.len().raw())
+        })
+    });
+
+    g.finish();
+}
+
+// ---------------------------------------------------------------------------
 // aov/log: AppendOnlyVec as the append log it is (node store pattern) —
 // bulk push, slice scan, mark/restore.
 //
@@ -1145,6 +1364,9 @@ criterion_group!(
     bench_map_intern_composite,
     bench_map_restore_small_suffix,
     bench_sparse_set_churn,
+    bench_list_append_iter_opaque,
+    bench_list_splice_opaque,
+    bench_sparse_set_churn_opaque,
     bench_aov_log,
     bench_aov_phases,
 );

@@ -138,6 +138,65 @@ fn bench_merge_cascade(c: &mut Criterion) {
     g.finish();
 }
 
+/// Merge schedule for the opaque cascade: the tournament pairs, generated
+/// once and laundered through `black_box` so the class count and the pair
+/// order are runtime values for both arms.
+fn cascade_plan(n: usize) -> (usize, Vec<(u32, u32)>) {
+    let mut pairs = Vec::with_capacity(n);
+    let mut stride = 1;
+    while stride < n {
+        let mut i = 0;
+        while i + stride < n {
+            pairs.push((i as u32, (i + stride) as u32));
+            i += stride * 2;
+        }
+        stride *= 2;
+    }
+    black_box((n, pairs))
+}
+
+fn bench_merge_cascade_opaque(c: &mut Criterion) {
+    let mut g = c.benchmark_group("eclasses/merge_cascade_opaque");
+    let (n, pairs) = cascade_plan(N);
+    g.throughput(Throughput::Elements(n as u64));
+
+    g.bench_function(BenchmarkId::new("retained", n), |b| {
+        b.iter_batched(
+            build_retained,
+            |(mut ec, ids)| {
+                for &(x, y) in &pairs {
+                    if let Some(mi) = ec.merge(ids[x as usize], ids[y as usize]) {
+                        let sk = ec.repr_id(mi.survivor).unwrap();
+                        let uses = ec.use_list_id(sk);
+                        ec.splice_uses(uses, mi.absorbed_uses);
+                    }
+                }
+                black_box(ec.num_classes())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    g.bench_function(BenchmarkId::new("verified", n), |b| {
+        b.iter_batched(
+            build_verified,
+            |(mut ec, ids)| {
+                for &(x, y) in &pairs {
+                    if let Some(mi) = ec.merge(ids[x as usize], ids[y as usize]) {
+                        let sk = ec.repr_id(mi.survivor).unwrap();
+                        let uses = ec.use_list_id(sk);
+                        ec.splice_uses(uses, mi.absorbed_uses);
+                    }
+                }
+                black_box(ec.num_classes())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    g.finish();
+}
+
 fn merged_retained() -> (RetainedEC, Vec<RetainedE>) {
     let (mut ec, ids) = build_retained();
     for i in 1..N {
@@ -233,6 +292,7 @@ fn bench_mark_merge_restore(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_merge_cascade,
+    bench_merge_cascade_opaque,
     bench_find_sweep,
     bench_mark_merge_restore,
 );
