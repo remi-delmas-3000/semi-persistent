@@ -27,6 +27,41 @@ verus! {
 ///
 /// Invariants (`wf`): all reprs are well-formed; `data@.len() < I::max_nat()`.
 /// The abstract `data()` is `T::value_of` applied pointwise. The abstract
+/// A borrowed read of the stored repr, for stores that hold reprs: the
+/// value is `T::value_of(*r)`, and nothing is decoded or copied. The B+ tree
+/// cursor reads its nodes this way (a decoded node is the size of its key
+/// array). Implemented by the inline store; the parallel and trail stores
+/// hold values, not reprs, and do not offer it.
+pub trait ReprBorrow<T, I, const TRACK: bool>: DiffStore<T, I, TRACK>
+where
+    T: Tagged,
+    I: IndexLike,
+{
+    /// Total with documented panic: an out-of-range index refuses; the
+    /// contract is conditional on the bound, which the verified callers hold
+    /// as a precondition of their own.
+    fn get_repr_ref(&self, i: I) -> (r: &T::Repr)
+        requires self.wf(),
+        ensures i.as_nat() < self.data().len() ==> {
+            &&& T::repr_wf(*r)
+            &&& T::value_of(*r) == self.data()[i.as_nat() as int]
+        };
+}
+
+impl<T, I, const TRACK: bool> ReprBorrow<T, I, TRACK> for InlineStore<T, I>
+where
+    T: Tagged,
+    I: IndexLike,
+{
+    #[inline(always)]
+    fn get_repr_ref(&self, i: I) -> (r: &T::Repr) {
+        if !(i.as_usize() < self.data.as_slice().len()) {
+            crate::guard::refuse("InlineStore::get_repr_ref: index out of bounds");
+        }
+        &self.data[i.as_usize()]
+    }
+}
+
 /// `captured()` is `T::tag_of` applied pointwise.
 pub struct InlineStore<T, I>
 where

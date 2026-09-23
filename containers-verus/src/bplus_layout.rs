@@ -331,6 +331,47 @@ pub trait NodeLayout: Sized {
     fn link(n: &Self::Node) -> (l: Self::ArenaIdx)
         ensures l.as_nat() == Self::link_view(*n);
 
+    // -- the same reads on a BORROWED stored repr (no decode, no node copy) --
+    //
+    // A node is a decoded value the size of its key array (1 KB for the 256
+    // layouts); the read path (`seek`, `step`, `key`) works on the repr the
+    // arena holds instead and never copies. Each accessor is the one above
+    // applied to `value_of(*r)`; the capture tag in the repr is ignored.
+
+    fn is_node_wf_r(r: &<Self::Node as Tagged>::Repr) -> (b: bool)
+        ensures <Self::Node as Tagged>::repr_wf(*r)
+            ==> b == Self::node_wf(<Self::Node as Tagged>::value_of(*r));
+
+    fn is_leaf_r(r: &<Self::Node as Tagged>::Repr) -> (b: bool)
+        ensures <Self::Node as Tagged>::repr_wf(*r)
+            ==> b == Self::is_leaf_spec(<Self::Node as Tagged>::value_of(*r));
+
+    fn count_r(r: &<Self::Node as Tagged>::Repr) -> (c: usize)
+        ensures <Self::Node as Tagged>::repr_wf(*r)
+            ==> c as nat == Self::count_spec(<Self::Node as Tagged>::value_of(*r));
+
+    fn key_r(r: &<Self::Node as Tagged>::Repr, i: usize) -> (k: Self::Word)
+        ensures (<Self::Node as Tagged>::repr_wf(*r)
+            && Self::node_wf(<Self::Node as Tagged>::value_of(*r))
+            && i < Self::count_spec(<Self::Node as Tagged>::value_of(*r)))
+            ==> (k == Self::keys_view(<Self::Node as Tagged>::value_of(*r))[i as int]);
+
+    fn keys_r(r: &<Self::Node as Tagged>::Repr) -> (s: &[Self::Word])
+        ensures (<Self::Node as Tagged>::repr_wf(*r)
+            && Self::node_wf(<Self::Node as Tagged>::value_of(*r)))
+            ==> (s@ == Self::keys_view(<Self::Node as Tagged>::value_of(*r)));
+
+    fn child_r(r: &<Self::Node as Tagged>::Repr, i: usize) -> (c: Self::ArenaIdx)
+        ensures (<Self::Node as Tagged>::repr_wf(*r)
+            && Self::node_wf(<Self::Node as Tagged>::value_of(*r))
+            && !Self::is_leaf_spec(<Self::Node as Tagged>::value_of(*r))
+            && i <= Self::count_spec(<Self::Node as Tagged>::value_of(*r)))
+            ==> (c.as_nat() == Self::child_view(<Self::Node as Tagged>::value_of(*r), i as int));
+
+    fn link_r(r: &<Self::Node as Tagged>::Repr) -> (l: Self::ArenaIdx)
+        ensures <Self::Node as Tagged>::repr_wf(*r)
+            ==> l.as_nat() == Self::link_view(<Self::Node as Tagged>::value_of(*r));
+
     // -- construction --
 
     /// A fresh empty leaf. Its `link` is NIL (`max_nat - 1`, the
@@ -917,6 +958,48 @@ macro_rules! gen_layout_u32 {
             }
             #[inline(always)]
             fn link(n: &$node) -> (l: u32) { n.link }
+            // -- borrowed reads on the stored repr (see the trait) --
+            #[inline(always)]
+            fn is_node_wf_r(r: &$repr) -> (b: bool) {
+                let leaf = (r.flags & 0x01u8) != 0;
+                if leaf { r.count as usize <= $leaf_cap } else { r.count as usize <= $key_cap }
+            }
+            #[inline(always)]
+            fn is_leaf_r(r: &$repr) -> (b: bool) { (r.flags & 0x01u8) != 0 }
+            #[inline(always)]
+            fn count_r(r: &$repr) -> (c: usize) { r.count as usize }
+            #[inline(always)]
+            fn key_r(r: &$repr, i: usize) -> (k: u32) {
+                let leaf = (r.flags & 0x01u8) != 0;
+                if !((if leaf { r.count as usize <= $leaf_cap } else { r.count as usize <= $key_cap }) && i < r.count as usize) {
+                    crate::guard::refuse("NodeLayout::key_r: malformed node or index past count");
+                }
+                arr_get(&r.data, i)
+            }
+            #[inline(always)]
+            fn keys_r(r: &$repr) -> (s: &[u32]) {
+                let leaf = (r.flags & 0x01u8) != 0;
+                if !(if leaf { r.count as usize <= $leaf_cap } else { r.count as usize <= $key_cap }) {
+                    crate::guard::refuse("NodeLayout::keys_r: malformed node");
+                }
+                let s = vstd::slice::slice_subrange(r.data.as_slice(), 0, r.count as usize);
+                proof {
+                    if <$node as Tagged>::repr_wf(*r) {
+                        assert(s@ =~= Self::keys_view(<$node as Tagged>::value_of(*r)));
+                    }
+                }
+                s
+            }
+            #[inline(always)]
+            fn child_r(r: &$repr, i: usize) -> (c: u32) {
+                let leaf = (r.flags & 0x01u8) != 0;
+                if !(!leaf && r.count as usize <= $key_cap && i <= r.count as usize) {
+                    crate::guard::refuse("NodeLayout::child_r: malformed node or child index past count");
+                }
+                if i < $key_cap { arr_get(&r.data, $key_cap + i) } else { r.link }
+            }
+            #[inline(always)]
+            fn link_r(r: &$repr) -> (l: u32) { r.link }
             #[inline(always)]
             fn new_leaf() -> (n: $node) {
                 $node { is_leaf: true, count: 0, _pad: 0, data: [0; $data_len], link: u32::MAX }
@@ -1421,6 +1504,55 @@ macro_rules! gen_layout_u64 {
             }
             #[inline(always)]
             fn link(n: &$node) -> (l: usize) { n.link }
+            // -- borrowed reads on the stored repr (see the trait) --
+            #[inline(always)]
+            fn is_node_wf_r(r: &$repr) -> (b: bool) {
+                let leaf = (r.flags & 0x01u8) != 0;
+                if leaf { r.count as usize <= $leaf_cap } else { r.count as usize <= $key_cap }
+            }
+            #[inline(always)]
+            fn is_leaf_r(r: &$repr) -> (b: bool) { (r.flags & 0x01u8) != 0 }
+            #[inline(always)]
+            fn count_r(r: &$repr) -> (c: usize) { r.count as usize }
+            #[inline(always)]
+            fn key_r(r: &$repr, i: usize) -> (k: u64) {
+                let leaf = (r.flags & 0x01u8) != 0;
+                if !((if leaf { r.count as usize <= $leaf_cap } else { r.count as usize <= $key_cap }) && i < r.count as usize) {
+                    crate::guard::refuse("NodeLayout::key_r: malformed node or index past count");
+                }
+                arr_get(&r.data, i)
+            }
+            #[inline(always)]
+            fn keys_r(r: &$repr) -> (s: &[u64]) {
+                let leaf = (r.flags & 0x01u8) != 0;
+                if !(if leaf { r.count as usize <= $leaf_cap } else { r.count as usize <= $key_cap }) {
+                    crate::guard::refuse("NodeLayout::keys_r: malformed node");
+                }
+                let s = vstd::slice::slice_subrange(r.data.as_slice(), 0, r.count as usize);
+                proof {
+                    if <$node as Tagged>::repr_wf(*r) {
+                        assert(s@ =~= Self::keys_view(<$node as Tagged>::value_of(*r)));
+                    }
+                }
+                s
+            }
+            #[inline(always)]
+            fn child_r(r: &$repr, i: usize) -> (c: usize) {
+                let leaf = (r.flags & 0x01u8) != 0;
+                if !(!leaf && r.count as usize <= $key_cap && i <= r.count as usize) {
+                    crate::guard::refuse("NodeLayout::child_r: malformed node or child index past count");
+                }
+                if i < $key_cap {
+                    assert($key_cap + i < $data_len);  // 2*key_cap <= data_len
+                    let c = arr_get(&r.data, $key_cap + i) as usize;
+                    proof { lemma_u64_usize_roundtrip(r.data[$key_cap as int + i as int]); }
+                    c
+                } else {
+                    r.link
+                }
+            }
+            #[inline(always)]
+            fn link_r(r: &$repr) -> (l: usize) { r.link }
             #[inline(always)]
             fn new_leaf() -> (n: $node) {
                 $node { is_leaf: true, count: 0, _pad: 0, data: [0; $data_len], link: usize::MAX }

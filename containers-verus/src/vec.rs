@@ -14757,6 +14757,25 @@ where
         self.set_at(i, value);
     }
 
+    /// Checked-by-proof borrowed read of the stored repr (see `get_at`; the
+    /// bound is a precondition). For stores that hold reprs: no decode, no
+    /// copy. The value read is `T::value_of(*r)`.
+    #[inline(always)]
+    pub(crate) fn get_repr_ref_at(&self, i: I) -> (r: &<T as crate::tagged::Tagged>::Repr)
+        where T: crate::tagged::Tagged, S: crate::inline_store::ReprBorrow<T, I, TRACK>
+        requires
+            self.wf(),
+            i.as_nat() < self.view().len(),
+        ensures
+            <T as crate::tagged::Tagged>::repr_wf(*r),
+            <T as crate::tagged::Tagged>::value_of(*r) == self.view()[i.as_nat() as int],
+    {
+        proof {
+            assert(self.store.wf()) by { reveal(Vec::wf); reveal(Vec::wf_for_snap); }
+        }
+        self.store.get_repr_ref(i)
+    }
+
     /// Checked-by-proof write: the bound is a precondition (see `get_at`).
     #[inline(always)]
     pub(crate) fn set_at(&mut self, i: I, value: T)
