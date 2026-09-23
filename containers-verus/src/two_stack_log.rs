@@ -250,6 +250,12 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
             final(self).wf(),
             final(self).frame_msets() == old(self).frame_msets(),
     {
+        // Zero-work exit: nothing to flush, nothing to rebase, and the
+        // contract holds on the unchanged state. (Every mark under a hot
+        // floor larger than the run lands here.)
+        if k == 0 {
+            return;
+        }
         let ghost hot0 = self.hot@;
         let ghost starts0 = self.hot_starts@;
         let ghost cold0_msets = self.cold.frame_msets();
@@ -319,24 +325,23 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
         two_stack_drop_front(&mut self.hot, m);
         assert(self.hot@ =~= hot0.subrange(m as int, hot0.len() as int));
 
-        // Rebuild hot_starts: keep frames [k, len), rebased by `m`.
-        let ghost old_starts = self.hot_starts@;
-        let mut new_starts: Vec<usize> = Vec::new();
+        // Rebase hot_starts in place: frames [k, len) slide down by `k`
+        // slots and by `m` entries; the allocation is kept.
         let slen = self.hot_starts.len();
         let mut i: usize = k;
         while i < slen
             invariant
-                k <= i <= slen,
+                1 <= k <= i <= slen,
                 k < starts0.len(),
-                slen == self.hot_starts@.len(),
-                self.hot_starts@ == old_starts,
-                old_starts == starts0,
+                slen == starts0.len(),
+                self.hot_starts@.len() == slen,
                 m == starts0[k as int],
                 forall|a: int, b: int| 0 <= a <= b < starts0.len() ==>
                     #[trigger] starts0[a] <= #[trigger] starts0[b],
-                new_starts@.len() == i - k,
                 forall|j: int| 0 <= j < i - k ==>
-                    #[trigger] new_starts@[j] == (starts0[k + j] - m) as int,
+                    #[trigger] self.hot_starts@[j] == (starts0[k + j] - m) as int,
+                forall|j: int| i - k <= j < slen ==>
+                    #[trigger] self.hot_starts@[j] == starts0[j],
             decreases slen - i,
         {
             let v = self.hot_starts[i];
@@ -345,10 +350,14 @@ impl<T: IndexLike, I: IndexFromNat> TwoStackLog<T, I> {
                 assert(starts0[k as int] <= starts0[i as int]);
                 assert(v >= m);
             }
-            new_starts.push(v - m);
+            self.hot_starts.set(i - k, v - m);
             i += 1;
         }
-        self.hot_starts = new_starts;
+        self.hot_starts.truncate(slen - k);
+        proof {
+            assert forall|j: int| 0 <= j < slen - k implies
+                #[trigger] self.hot_starts@[j] == (starts0[k + j] - m) as int by {}
+        }
 
         proof {
             // wf for the rebuilt hot_starts.
@@ -502,6 +511,10 @@ pub(crate) fn two_stack_drop_front<T: Copy, I: crate::index_like::IndexLike>(
     requires m <= old(d)@.len(),
     ensures final(d)@ == old(d)@.subrange(m as int, old(d)@.len() as int),
 {
+    // Deliberately a fresh, exactly sized tail rather than an in-place shift:
+    // the flush trigger reads `hot_bytes`, which is capacity-based, so a hot
+    // log that kept its capacity would keep the trigger firing on every mark
+    // and flush one frame at a time (measured 0.70x on the churn rows).
     let tail = crate::vec::log_subrange_vec(d, m, d.len());
     *d = tail;
 }
