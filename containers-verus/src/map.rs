@@ -774,8 +774,9 @@ where
         let ghost old_log = self.log_view();
         let ghost old_index = self.index@;
         let ghost old_prev = self.prev@;
-        let key_for_index = clone_key_exact(&key);
-        match self.index.entry(key_for_index) {
+        // The original key moves into `entry`; a hit does no clone. The miss
+        // path clones from the vacant entry's own key, exactly once.
+        match self.index.entry(key) {
             Entry::Occupied(e) => {
                 let id = *e.get();
                 (id, false)
@@ -784,7 +785,8 @@ where
                 proof {
                     lemma_absent_from_index_absent_from_log(old_log, old_index, key);
                 }
-                let id = self.log.push((key, val));
+                let key_for_log = clone_key_exact(e.key());
+                let id = self.log.push((key_for_log, val));
                 if !UNIQUE {
                     self.prev.push(None);
                 }

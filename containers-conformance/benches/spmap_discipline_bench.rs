@@ -212,6 +212,72 @@ fn bench_intern<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, 
     g.finish();
 }
 
+/// Hit every key on a FILLED table through the interning path, key handed in
+/// by value: the consumers' shape (registry, literal, term memo) on the hot
+/// side, where nearly every `try_intern` is a hit. What a hit costs beyond
+/// the hash is what the map does with the key it was handed.
+fn bench_intern_hit<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, keys: Vec<K>) {
+    let mut g = c.benchmark_group(format!("spmap/intern_hit/{shape}"));
+    if keys.len() > N {
+        g.sample_size(30);
+    }
+    let mut m: SpMap<K, u32> = SpMap::new();
+    let mut u: SpUniqueMap<K, u32> = SpUniqueMap::new();
+    let mut t: Intern<K, u32> = Intern::new();
+    for (i, k) in keys.iter().enumerate() {
+        m.try_intern(k.clone(), i as u32)
+            .expect("fits the index word");
+        u.try_intern(k.clone(), i as u32)
+            .expect("fits the index word");
+        t.intern(k.clone(), i as u32);
+    }
+    g.bench_function("spmap", |b| {
+        b.iter_batched(
+            || keys.clone(),
+            |ks| {
+                let mut hits = 0usize;
+                for (i, k) in ks.into_iter().enumerate() {
+                    let (_, fresh) = m.try_intern(k, i as u32).expect("fits the index word");
+                    if !fresh {
+                        hits += 1;
+                    }
+                }
+                hits
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.bench_function("spmap_unique", |b| {
+        b.iter_batched(
+            || keys.clone(),
+            |ks| {
+                let mut hits = 0usize;
+                for (i, k) in ks.into_iter().enumerate() {
+                    let (_, fresh) = u.try_intern(k, i as u32).expect("fits the index word");
+                    if !fresh {
+                        hits += 1;
+                    }
+                }
+                hits
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.bench_function("handrolled", |b| {
+        b.iter_batched(
+            || keys.clone(),
+            |ks| {
+                for (i, k) in ks.into_iter().enumerate() {
+                    t.intern(k, i as u32);
+                }
+                t.index.len()
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g.finish();
+}
+
 /// Hit every key once on a filled table.
 fn bench_lookup<K: Clone + Eq + Hash + 'static>(c: &mut Criterion, shape: &str, keys: Vec<K>) {
     let mut m: SpMap<K, u32> = SpMap::new();
@@ -338,6 +404,10 @@ fn benches(c: &mut Criterion) {
     // map's `try_intern` here and level with the hand-rolled table.
     bench_intern(c, "string_64k", strings(16 * N));
     bench_intern(c, "vec32_64k", vecs(16 * N));
+
+    bench_intern_hit(c, "u64pair", pairs(N));
+    bench_intern_hit(c, "string", strings(N));
+    bench_intern_hit(c, "vec32", vecs(N));
 
     bench_lookup(c, "u64pair", pairs(N));
     bench_lookup(c, "string", strings(N));
