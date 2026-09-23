@@ -575,3 +575,21 @@ Reopened as questions, not closed: the attribution of the last 8 per cent on
 the fixed append row to the tail-node bounds check (needs the single-variable
 measurement), and whether the five `loop { invariant false }` arms can go
 (only `unreached()` was measured, and it was slower).
+
+## Wave 2 (2026-09-23): prepend and splice on the typed-id shape
+
+bc15b6c. `prepend_raw` takes the node count `try_prepend` validated, builds
+the node in one constructor from the payload and the old head's packed word,
+converts the head index and the slot id once each. `splice_raw` converts both
+head indices once, reads both heads once (the old body read dst's head three
+times), relinks through the typed tail id and the packed head word, and uses
+the checked accessors throughout. Four crate-internal raw-word helpers; eight
+edge tests. Verified 2761/0 on both feature sets.
+
+Measured against 48c9512, two rounds, no drift: every list row at parity
+(splice 0.99×/1.00×, splice_opaque 1.00×/1.00×, append 1.01×/0.98×,
+append_opaque 0.98×/1.00×). Audit: prepend and splice probes move by a
+handful of instructions either way, splice tracked drops one stack-carried
+slot. Reported as neutral: the conversions and re-reads this removes were
+already folded by LLVM on this path; the change is the code stating what the
+proof established, which is the shape rule, not a speed claim.
