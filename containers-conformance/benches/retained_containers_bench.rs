@@ -1515,8 +1515,43 @@ fn bench_hinted_arena_probe(c: &mut Criterion) {
     g.finish();
 }
 
+// layered_span_map/flatten: the base-plus-delta span map regrouped into one
+// dense map, at three densities of the invalidated-key list (what the per-key
+// invalidation test scales with). Key count through `black_box` once.
+fn bench_layered_span_map_flatten(c: &mut Criterion) {
+    use verus::LayeredSpanMap;
+    use verus::dense_span_map::DenseSpanMap;
+    let mut g = c.benchmark_group("layered_span_map/flatten");
+    let num_keys = black_box(16_384usize);
+    let base_stream: Vec<(usize, u32)> = (0..num_keys)
+        .flat_map(|k| (0..4u32).map(move |j| (k, (k as u32) * 4 + j)))
+        .collect();
+    let delta_stream: Vec<(usize, u32)> = (0..num_keys)
+        .filter(|k| k % 4 == 0)
+        .map(|k| (k, 0xD000_0000 + k as u32))
+        .collect();
+    for (label, stride) in [
+        ("no_invalid", 0usize),
+        ("sparse_invalid", 64),
+        ("dense_invalid", 2),
+    ] {
+        let invalid: Vec<usize> = if stride == 0 {
+            Vec::new()
+        } else {
+            (0..num_keys).filter(|k| k % stride == 0).collect()
+        };
+        let base =
+            DenseSpanMap::<u32>::try_build(&base_stream, num_keys).expect("base keys in range");
+        let layered = LayeredSpanMap::<u32>::try_with_delta(base, &delta_stream, &invalid)
+            .expect("delta keys in range, invalid list ascending");
+        g.bench_function(label, |b| b.iter(|| black_box(layered.flatten().len())));
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
+    bench_layered_span_map_flatten,
     bench_hinted_arena_probe,
     bench_vec_try_extend,
     bench_vec_mark_set_restore,

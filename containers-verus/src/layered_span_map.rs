@@ -391,6 +391,64 @@ impl<V: Copy + Default> LayeredSpanMap<V> {
         }
     }
 
+    /// `get(k)` for keys visited in ascending order: `cursor` counts the
+    /// invalidated keys below `k` and steps past `k` when `k` is one of them,
+    /// so the invalidation test is one comparison against a strictly
+    /// ascending list instead of a binary search per key. `flatten` walks
+    /// with it; random access keeps `get`.
+    pub(crate) fn get_at_cursor(&self, k: usize, cursor: &mut usize) -> (r: (&[V], &[V]))
+        requires
+            *old(cursor) <= self.invalid@.len(),
+            self.wf() ==> {
+                &&& forall|i: int| 0 <= i < *old(cursor) ==> (#[trigger] self.invalid@[i]) < k
+                &&& (*old(cursor) < self.invalid@.len() ==> self.invalid@[*old(cursor) as int] >= k)
+            },
+        ensures
+            *final(cursor) <= self.invalid@.len(),
+            self.wf() ==> {
+                &&& forall|i: int| 0 <= i < *final(cursor) ==> (#[trigger] self.invalid@[i]) < k + 1
+                &&& (*final(cursor) < self.invalid@.len() ==> self.invalid@[*final(cursor) as int] >= k + 1)
+            },
+            self.wf() && k < self.view().len() ==> {
+                &&& r.0@ == self.base_segment(k as int)
+                &&& r.1@ == self.delta_segment(k as int)
+                &&& r.0@ + r.1@ == self.view()[k as int]
+            },
+    {
+        let delta_slice = self.delta.get(k);
+        let base_slice = self.base.get(k);
+        let c = *cursor;
+        let hit = c < self.invalid.len() && self.invalid[c] == k;
+        proof {
+            if self.wf() {
+                if hit {
+                    assert(self.invalidated(k as int));
+                    if c + 1 < self.invalid@.len() {
+                        lemma_ascending_pairwise(self.invalid@, c as int, c as int + 1);
+                    }
+                } else {
+                    assert forall|i: int| 0 <= i < self.invalid@.len()
+                        implies (#[trigger] self.invalid@[i]) as int != k as int by {
+                        if i > c as int {
+                            lemma_ascending_pairwise(self.invalid@, c as int, i);
+                        }
+                    }
+                    assert(!self.invalidated(k as int));
+                }
+            }
+        }
+        if hit {
+            *cursor = c + 1;
+            let (empty, _) = base_slice.split_at(0);
+            proof {
+                assert(empty@ =~= Seq::<V>::empty());
+            }
+            (empty, delta_slice)
+        } else {
+            (base_slice, delta_slice)
+        }
+    }
+
     /// Number of values under key `k`, across both generations.
     pub fn key_len(&self, k: usize) -> (n: usize)
         ensures
@@ -729,17 +787,22 @@ impl<V: Copy + Default> LayeredSpanMap<V> {
         let ghost ok = self.wf();
         let mut out: std::vec::Vec<(usize, V)> = std::vec::Vec::new();
         let mut k: usize = 0;
+        // Invalidation cursor: the invalidated keys below `k`, walked once.
+        let mut cursor: usize = 0;
         while k < n
             invariant
                 k <= n,
                 n == self.view().len(),
                 ok == self.wf(),
+                cursor <= self.invalid@.len(),
+                ok ==> forall|i: int| 0 <= i < cursor ==> (#[trigger] self.invalid@[i]) < k,
+                ok ==> (cursor < self.invalid@.len() ==> self.invalid@[cursor as int] >= k),
                 forall|i: int| 0 <= i < out@.len() ==> (#[trigger] out@[i]).0 < k,
                 ok ==> forall|j: int|
                     0 <= j < k ==> #[trigger] crate::dense_span_map::key_slice(out@, j as nat) == self.view()[j],
             decreases n - k,
         {
-            let (bseg, dseg) = self.get(k);
+            let (bseg, dseg) = self.get_at_cursor(k, &mut cursor);
             let ghost out0 = out@;
 
             let mut i: usize = 0;
