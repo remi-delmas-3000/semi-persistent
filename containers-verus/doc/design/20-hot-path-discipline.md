@@ -182,6 +182,13 @@ change), a config-read barrier (no atomic load in the loop). Forced peeling
 (`-unroll-force-peel-count=1`) takes the legacy arm to the same 160 µs, which
 is the proof that the whole gap is the peel and nothing else.
 
+One reach limit, measured after the fix with an opaque-input variant of the
+same benchmark: the early full-unroll pass only peels a loop whose trip count
+is a compile-time constant. With a runtime count neither arm is peeled and the
+verified append is at parity with legacy. The rule below still holds, since
+the assume is the library's to remove and costs nothing; the peel it enables
+is the caller's constant to provide.
+
 **Rule.** *A length read on a per-element path returns the slice length, not
 `Vec::len`.* std's `Vec::len` is not a plain load: it carries an assumption
 that keeps the loaded value alive as a separate use and can block the
@@ -232,11 +239,15 @@ one that counts:
    by more than the tolerance between rounds, that round is discarded.
 
 Then the per-commit gate (both feature sets verified, the crate and consumer
-tests, the partial-API and trust gates). Coverage to add beyond the current
-microbenchmarks: tracked and untracked, static and runtime stores, `PROOFS`
-on and off, repeated capture, pop then re-push, nested restores, migrated
-histories, sequential B+ seeks, expensive map keys, long compression runs,
-zero-frame flushes.
+tests, the partial-API and trust gates). Every fixed-size row has, or gets,
+an opaque-input twin (sizes and payloads through `black_box` once at the
+group boundary, one plan shared by both arms, one `black_box` on the result):
+a gap that appears only in the fixed row is a compile-time-constant effect and
+is reported as such. Coverage added on 2026-09-23: sequential B+ seeks tracked
+and untracked, expensive map keys, long compression runs with a zero-frame
+flush, union-find explain on a deep chain, min-monomial rows. Still to add:
+static and runtime stores, `PROOFS` on and off, repeated capture, pop then
+re-push, nested restores, migrated histories.
 
 ## Order of work
 

@@ -535,3 +535,43 @@ instruction pair: our loop keeps the std bounds check on the old tail's node
 read (`nodes.get_at` → `data[i]`), which mainline's explicit `get_index`
 pre-check let LLVM fold. Removing it needs an unchecked read, which the trust
 policy excludes; it stays as measured.
+
+## Wave 1 (2026-09-23): the harness
+
+**Opaque-input variants** (8444bd1) beside the fixed rows: `list/append_iter_opaque`,
+`list/splice_opaque`, `sparse_set/churn_opaque`, `eclasses/merge_cascade_opaque`.
+One plan per group from the seeded `Rng`, laundered through `black_box` once,
+shared by both arms; the fixed rows' loop nests with runtime trip counts.
+
+Check G, same process, mean times:
+
+| row | 4cb5f1b legacy / verified | cb54a69 legacy / verified |
+|---|---|---|
+| append_iter (fixed) | 199.3 / 168.3 µs (0.84) | 199.9 / 202.6 µs (1.01) |
+| append_iter_opaque | 217.5 / 217.0 µs (1.00) | 219.0 / 216.8 µs (0.99) |
+| churn_opaque | 358.4 / 277.9 µs (0.78) | 358.1 / 280.9 µs (0.78) |
+| merge_cascade_opaque | 152.7 / 101.4 µs | 151.5 / 96.9 µs |
+
+The opaque append does not reproduce the fixed row's sign, and the reason is
+found: the peel is LLVM's early full-unroll pass, which acts only on a loop
+whose trip count is a compile-time constant. With a runtime count neither
+arm is peeled and the verified append is at parity with legacy on both trees.
+So 3c33709's gain is real for constant-count callers and neutral otherwise;
+H7's mechanism stands, its reach is narrower than the fixed row suggested.
+Two plan shapes were rejected by measurement before this one: a random list
+order (memory-bound; the unchanged legacy arm moved 30 per cent between
+builds) and a flat op sequence (no loop nest, nothing to peel, both arms
+244 µs).
+
+**Coverage** (eb3e16c): `bplus/cursor_seek_sequential` (prod and verus,
+tracked and untracked), `map/intern_expensive_key`, `two_stack/long_run`
+(zero-frame flush and hot-4 rows), `eclasses/set_min_monomial`,
+`union_find/explain_deep_chain`. First numbers: the B+ sequential seek is
+4.4× on the verified side (980 vs 221 µs untracked, 955 vs 196 tracked),
+which is item 6's missing current-leaf fast path measured; the other four
+are at parity before their changes.
+
+Reopened as questions, not closed: the attribution of the last 8 per cent on
+the fixed append row to the tail-node bounds check (needs the single-variable
+measurement), and whether the five `loop { invariant false }` arms can go
+(only `unreached()` was measured, and it was slower).
