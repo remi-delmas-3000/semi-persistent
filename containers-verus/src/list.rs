@@ -3170,7 +3170,8 @@ mod append_edge_tests {
         let mut want: std::vec::Vec<std::vec::Vec<u32>> = vec![vec![]; 3];
         for i in 0..5000u32 {
             let k = (i % 3) as usize;
-            a.try_append(ls[k], TElem::new(i)).expect("append across growth");
+            a.try_append(ls[k], TElem::new(i))
+                .expect("append across growth");
             want[k].push(i);
         }
         for k in 0..3 {
@@ -3188,14 +3189,16 @@ mod append_edge_tests {
         }
         let t = a.mark(ShrinkPolicy::Never).expect("mark");
         for v in 4..=300u32 {
-            a.try_append(l, TElem::new(v)).expect("append under open frame");
+            a.try_append(l, TElem::new(v))
+                .expect("append under open frame");
         }
         assert_eq!(read(&a, l).len(), 300);
         assert!(a.restore(t), "own live token");
         assert_eq!(read(&a, l), vec![1, 2, 3]);
         assert_eq!(a.len(l), 3);
         // The list is appendable again after the restore.
-        a.try_append(l, TElem::new(9)).expect("append after restore");
+        a.try_append(l, TElem::new(9))
+            .expect("append after restore");
         assert_eq!(read(&a, l), vec![1, 2, 3, 9]);
     }
 }
