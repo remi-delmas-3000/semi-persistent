@@ -2290,30 +2290,26 @@ where
                     None => crate::guard::refuse(
                         "EClasses::set_min_monomial: row number exceeds the id index range"),
                 };
-                let mut i: usize = 0;
-                while i < self.min_width
-                    invariant
-                        o.wf(),
-                        self.min_width == o.min_width,
-                        self.min_width > 0,
-                        i <= self.min_width,
-                        self.entries == o.entries,
-                        self.reprs == o.reprs,
-                        self.uf == o.uf,
-                        self.uses == o.uses,
-                        self.min_pool.wf(),
-                        self.min_pool.view().len() == o.min_pool.view().len() + i as nat,
-                        self.min_pool.snapshots_view() == o.min_pool.snapshots_view(),
-                        forall|j: int| 0 <= j < self.min_pool.view().len()
-                            ==> (#[trigger] self.min_pool.view()[j]).wf(),
-                    decreases self.min_width - i,
-                {
-                    match self.min_pool.try_push(Opt::none()) {
-                        Ok(()) => (),
-                        Err(_) => crate::guard::refuse(
-                            "EClasses::set_min_monomial: min-monomial pool exhausted"),
+                // One batch: headroom validated once, `min_width` empties
+                // appended without a per-cell capacity check.
+                let empty: Opt<T> = Opt::none();
+                match self.min_pool.try_push_repeat(empty, self.min_width) {
+                    Ok(()) => (),
+                    Err(_) => crate::guard::refuse(
+                        "EClasses::set_min_monomial: min-monomial pool exhausted"),
+                }
+                proof {
+                    assert(self.min_pool.view().len() == o.min_pool.view().len() + w);
+                    assert forall|j: int| 0 <= j < self.min_pool.view().len()
+                        implies (#[trigger] self.min_pool.view()[j]).wf() by {
+                        if j < o.min_pool.view().len() {
+                            assert(self.min_pool.view()[j]
+                                == self.min_pool.view().subrange(0, o.min_pool.view().len() as int)[j]);
+                            assert(self.min_pool.view()[j] == o.min_pool.view()[j]);
+                        } else {
+                            assert(self.min_pool.view()[j] == empty);
+                        }
                     }
-                    i = i + 1;
                 }
                 data.min_row = Some(row);
                 self.reprs.set_live(raw_key, data);

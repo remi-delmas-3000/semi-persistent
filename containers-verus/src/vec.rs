@@ -12853,6 +12853,64 @@ where
         Ok(())
     }
 
+    /// `n` copies of `value` appended as one batch: headroom validated once,
+    /// then plain pushes. What a known-width row initialisation wants instead
+    /// of `n` calls of `try_push`, each re-checking capacity and re-matching
+    /// its result. Total: `Err(CapacityExhausted)` leaves the vector as it was.
+    pub fn try_push_repeat(&mut self, value: T, n: usize) -> (r: Result<(), crate::error::ContainerError>)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            r is Ok ==> {
+                &&& final(self).view().len() == old(self).view().len() + n
+                &&& final(self).view().subrange(0, old(self).view().len() as int) == old(self).view()
+                &&& forall|j: int| old(self).view().len() <= j < final(self).view().len()
+                    ==> #[trigger] final(self).view()[j] == value
+            },
+            r is Err ==> final(self).view() == old(self).view(),
+            final(self).snapshots_view() == old(self).snapshots_view(),
+            r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted,
+    {
+        hide(Vec::wf);
+        proof { self.lemma_store_wf(); }
+        let len0 = self.store.raw_len();
+        let cap = <I as crate::index_like::IndexLike>::max().as_usize();
+        proof {
+            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
+            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
+            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
+            assert(len0 as nat == self.view().len());
+            assert(cap as nat == I::max_nat() - 1);
+        }
+        if len0 > cap || n > cap - len0 {
+            return Err(crate::error::ContainerError::CapacityExhausted);
+        }
+        let ghost old_view = self.view();
+        let mut i: usize = 0;
+        while i < n
+            invariant
+                self.wf(),
+                i <= n,
+                self.view().len() == old_view.len() + i,
+                self.view().subrange(0, old_view.len() as int) == old_view,
+                forall|j: int| old_view.len() <= j < self.view().len()
+                    ==> #[trigger] self.view()[j] == value,
+                self.snapshots_view() == old(self).snapshots_view(),
+                old_view.len() + n < I::max_nat(),
+            decreases n - i,
+        {
+            let ghost before = self.view();
+            self.push(value);
+            proof {
+                assert(self.view() == before.push(value));
+                assert(self.view().subrange(0, old_view.len() as int)
+                    =~= before.subrange(0, old_view.len() as int));
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
     /// Exec counterpart of `mark`'s preconditions (TRACK, depth headroom, length
     /// representable in the token's saved_len).
     pub fn can_mark(&self) -> (b: bool)
