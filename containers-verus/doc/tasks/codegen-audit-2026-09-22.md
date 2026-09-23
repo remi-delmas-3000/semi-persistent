@@ -684,3 +684,55 @@ c9ff2bb; the remaining `.splice(` calls are `ListArena`'s. `ListArena`'s
 construct-from-payload row was closed by wave 2 (bc15b6c, `with_payload`).
 No commit for either.
 
+## Wave 5 (2026-09-23): compression and log items
+
+**Change 12, Vec diff-log shadow (47722b0).** The inert
+`diff_log: std::vec::Vec<(T, I)>` that nothing appended is removed with
+everything that only spoke about it: the spec twin, the `proof_compat_ok`
+predicate and its 47 mentions, the lemma and the three `== 0` ensures, the
+equality clauses in the mark and restore contracts, the test that pushed
+into it. Two proofs moved with the changed axiom set, without raising a
+limit: one confines the cold-prefix contract to the assertion that needs
+it, the other hands the cold tier to a new sibling lemma with its own
+query. Measured on the wave 1 coverage: neutral (two empty-vector clears
+and a shrink per restore or mark), the 10^6..10^8-element churn rows
+inconclusive in both directions on prod and verus alike.
+
+**Change 13, adaptive policy (dd8ba88).** `runtime_closed_history_bytes`
+folded over every trail and hot frame up to three times per decision.
+Frame 0 starts at 0 and each header end is the next start, so the closed
+counts telescope to the last closed frame's header end: one load per
+tier. Neutral on the adaptive rows (the walk was a small share of a
+decision on these frame counts); reported as neutral.
+
+**Change 14, `flush_cold(0)` (7716360).** The `k == 0` call ran an empty
+loop and still copied the whole hot log and rebuilt `hot_starts`. Now an
+early return, and for `k > 0` an in-place rebase of `hot_starts`.
+Zero-frame flush 1.476 ms → 31.7 µs (46.6×), hot4 flushing 1.08×. The
+in-place tail shift was measured and taken back out: the flush trigger
+reads `hot_bytes`, which is capacity-based, so a hot log that kept its
+capacity kept the trigger firing and flushed one frame per mark (0.70× on
+the churn rows). The helper records the reason.
+
+**Change 15, LayeredSpanMap flatten (eaac3d5).** `flatten` visits keys in
+order and binary-searched the invalidated-key list per key. A cursor over
+the strictly ascending list decides invalidation with one comparison and
+steps past a hit. Dense invalidations 2.34×, sparse 1.26×, none neutral;
+new bench group `layered_span_map/flatten`.
+
+**Change 16, Dict decoder (ef555d4).** `decode_exec` re-selected the code
+width and re-checked the code bound per element, with a division and a
+modulus per packed code. The width is matched once, the output reserved
+once, each arm walks its column, and the packed arm walks words with a
+running index and shift under the same `packed_code_at` spec. Cold pop
+long run (valuedict) 1.18×/1.16×, dict decode rows 1.05× to 2.09×, plain
+and runs decoders untouched and neutral. The pop through
+`CompressedStack` is the only path that reaches the decoders (the
+two-stack log has no cold restore yet); `two_stack/cold_pop_long_run` is
+the coverage row of record.
+
+Open questions carried, not closed: the last 8 per cent on the
+fixed-count append (the tail bounds check attribution is unconfirmed),
+and whether the five `loop { invariant false }` arms can go
+(`unreached()` measured 3 per cent slower once).
+

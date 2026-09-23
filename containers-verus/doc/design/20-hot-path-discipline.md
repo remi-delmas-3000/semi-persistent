@@ -265,7 +265,19 @@ re-push, nested restores, migrated histories.
    second range check and a second dependency wherever it sits (25 per cent
    on the probe hit path); a bench group's placement noise floor is measured
    (same source, shifted text) before any row inside it is read as a signal.
-6. Compression and log items, tracked separately.
+6. Compression and log items (Vec diff-log shadow, adaptive policy walk,
+   `flush_cold(0)`, LayeredSpanMap flatten, Dict decoder): done 2026-09-23.
+   The shadow is removed outright (two clears, a shrink, 24 bytes per
+   `Vec`; neutral as it should be), the adaptive count reads frame
+   boundaries (neutral on the adaptive rows), `flush_cold(0)` exits with
+   no work (46× on the zero-frame-flush run), flatten walks an
+   invalidation cursor (2.3× dense, 1.26× sparse), the dict decoder
+   selects the code width once and walks packed words (1.2× on the cold
+   pop run, up to 2.1× on the decode rows). One lesson: "retain the
+   allocation" is not free when a policy reads capacity; the flush
+   trigger's `hot_bytes` is capacity-based, and a hot log that kept its
+   capacity flushed one frame per mark (0.70× on the churn rows), so the
+   tail copy stays a fresh vector and the helper says why.
 
 ---
 [← 19 Verified Node Caches](19-verified-node-caches.md) · [Table of contents](00-table-of-contents.md)
