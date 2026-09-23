@@ -18,6 +18,7 @@ use semi_persistent_containers as retained;
 use semi_persistent_containers_verus as verified;
 use std::hint::black_box;
 use verified::group::ForkHistory;
+use verified::opt::DenseId as _;
 
 retained::define_id31! { pub struct RetainedE / StoredRetainedE, "re"; }
 retained::define_id31! { pub struct RetainedK / StoredRetainedK, "rk"; }
@@ -197,6 +198,108 @@ fn bench_merge_cascade_opaque(c: &mut Criterion) {
     g.finish();
 }
 
+/// Min-monomial rows: `set_min_width` once, then every class gets a full row
+/// written column by column (chapter 20 second pass, `set_min_monomial`).
+fn bench_set_min_monomial(c: &mut Criterion) {
+    const W: usize = 8;
+    let mut g = c.benchmark_group("eclasses/set_min_monomial");
+    g.throughput(Throughput::Elements((N * W) as u64));
+
+    g.bench_function(BenchmarkId::new("retained", N), |b| {
+        b.iter_batched(
+            || {
+                let (mut ec, ids) = build_retained();
+                ec.set_min_width(W);
+                (ec, ids)
+            },
+            |(mut ec, ids)| {
+                for &id in &ids {
+                    let key = ec.repr_id(id).unwrap();
+                    for col in 0..W {
+                        ec.set_min_monomial(key, col, id);
+                    }
+                }
+                black_box(ec.num_classes())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    g.bench_function(BenchmarkId::new("verified", N), |b| {
+        b.iter_batched(
+            || {
+                let (mut ec, ids) = build_verified();
+                ec.set_min_width(W);
+                (ec, ids)
+            },
+            |(mut ec, ids)| {
+                for &id in &ids {
+                    let key = ec.repr_id(id).unwrap();
+                    for col in 0..W {
+                        ec.set_min_monomial(key, col, id);
+                    }
+                }
+                black_box(ec.num_classes())
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    g.finish();
+}
+
+type RetainedProofUf = retained::union_find::UnionFind<RetainedE, u8, true, true>;
+type VerifiedProofUf = ForkHistory<verified::union_find::UnionFind<VerifiedE, u8, true, true>>;
+
+/// `explain` across a deep chain: N sets unioned into one path, then the two
+/// ends explained (chapter 20 item 4, the repeated `find_const` traversals).
+fn bench_union_find_explain_deep_chain(c: &mut Criterion) {
+    let mut r = RetainedProofUf::new();
+    let mut v = VerifiedProofUf::new(verified::union_find::UnionFind::new());
+    for i in 0..N {
+        r.make_set(<RetainedE as retained::DenseId>::from_usize(i));
+        v.make_set(VerifiedE::from_usize(i));
+    }
+    for i in 0..N - 1 {
+        r.union_justified(
+            <RetainedE as retained::DenseId>::from_usize(i),
+            <RetainedE as retained::DenseId>::from_usize(i + 1),
+            (i % 251) as u8,
+        );
+        v.union_justified(
+            VerifiedE::from_usize(i),
+            VerifiedE::from_usize(i + 1),
+            (i % 251) as u8,
+        );
+    }
+    let mut g = c.benchmark_group("union_find/explain_deep_chain");
+    g.bench_function(BenchmarkId::new("retained", N), |b| {
+        let mut buf = retained::union_find::ProofBuf::new();
+        b.iter(|| {
+            buf.clear();
+            let ok = r.explain(
+                <RetainedE as retained::DenseId>::from_usize(0),
+                <RetainedE as retained::DenseId>::from_usize(N - 1),
+                &mut buf,
+            );
+            black_box((ok, buf.steps.len()))
+        })
+    });
+    g.bench_function(BenchmarkId::new("verified", N), |b| {
+        let mut buf = verified::union_find::ProofBuf::new();
+        b.iter(|| {
+            buf.clear();
+            let ok = v.explain(
+                VerifiedE::from_usize(0),
+                VerifiedE::from_usize(N - 1),
+                &mut buf,
+            );
+            black_box((ok, buf.steps.len()))
+        })
+    });
+    g.finish();
+}
+
 fn merged_retained() -> (RetainedEC, Vec<RetainedE>) {
     let (mut ec, ids) = build_retained();
     for i in 1..N {
@@ -293,6 +396,8 @@ criterion_group!(
     benches,
     bench_merge_cascade,
     bench_merge_cascade_opaque,
+    bench_set_min_monomial,
+    bench_union_find_explain_deep_chain,
     bench_find_sweep,
     bench_mark_merge_restore,
 );

@@ -85,6 +85,30 @@ fn bench_two_stack(c: &mut Criterion) {
     g.finish();
 }
 
+/// A long run whose every mark trips the size trigger while the hot floor
+/// keeps every frame: `frames_to_compress` is 0 and `flush_cold(0)` runs on
+/// each mark (chapter 20 item 5, the zero-work exit). Beside it, the same run
+/// with a floor of 4 for the frames actually moving.
+fn bench_two_stack_long_run(c: &mut Criterion) {
+    let base_bytes = 1 << 10; // small "live payload": the 5% trigger fires on every mark
+    let distinct = 256u32;
+    let zero_frame = ColumnConfig::value_dict(5, 1 << 20);
+    let moving = ColumnConfig::value_dict(5, 4);
+
+    let mut g = c.benchmark_group("two_stack/long_run");
+    g.bench_with_input(
+        BenchmarkId::new("valuedict", "zero_frame_flush"),
+        &zero_frame,
+        |b, &cfg| b.iter(|| black_box(run(cfg, base_bytes, distinct))),
+    );
+    g.bench_with_input(
+        BenchmarkId::new("valuedict", "hot4_flushing"),
+        &moving,
+        |b, &cfg| b.iter(|| black_box(run(cfg, base_bytes, distinct))),
+    );
+    g.finish();
+}
+
 fn report_footprints(
     base_bytes: usize,
     distinct: u32,
@@ -136,5 +160,5 @@ fn report_footprints(
     eprintln!();
 }
 
-criterion_group!(benches, bench_two_stack);
+criterion_group!(benches, bench_two_stack, bench_two_stack_long_run);
 criterion_main!(benches);

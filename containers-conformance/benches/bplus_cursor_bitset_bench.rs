@@ -32,6 +32,15 @@ type VerusTreeBr = verus::bplus::BPlusTreeSet<
     false,
 >;
 
+type ProdTreeT =
+    prod::bplus::BPlusTreeSet<PId, prod::bplus::Layout256, prod::bplus::BinarySearch, true>;
+type VerusTreeT = verus::bplus::BPlusTreeSet<
+    VId,
+    verus::bplus_layout::Layout256,
+    verus::bplus_search::BinarySearch,
+    true,
+>;
+
 const N: u32 = 1 << 14;
 
 fn shuffled(n: u32) -> Vec<u32> {
@@ -105,6 +114,77 @@ fn bench_bplus_seek(c: &mut Criterion) {
             let mut hits = 0u32;
             for &k in &probes {
                 let mut c = vt.cursor();
+                c.seek(VId::new(k));
+                if c.key() == Some(VId::new(k)) {
+                    hits += 1;
+                }
+            }
+            black_box(hits)
+        })
+    });
+    g.finish();
+}
+
+/// Sequential seeks with one cursor over the sorted key space: the shape the
+/// cursor's current-leaf fast path serves (chapter 20 item 4). Tracked and
+/// untracked trees, since the tracked leaf path differs.
+fn bench_bplus_seek_sequential(c: &mut Criterion) {
+    let keys = shuffled(N);
+    let mut pt = ProdTree::new();
+    let mut vt = VerusTree::new();
+    let mut ptt = ProdTreeT::new();
+    let mut vtt = VerusTreeT::new();
+    for &k in &keys {
+        pt.insert(PId::new(k));
+        vt.try_insert(VId::new(k)).expect("bench: within capacity");
+        ptt.insert(PId::new(k));
+        vtt.try_insert(VId::new(k)).expect("bench: within capacity");
+    }
+    let mut g = c.benchmark_group("bplus/cursor_seek_sequential");
+    g.bench_function("prod_untracked", |b| {
+        b.iter(|| {
+            let mut hits = 0u32;
+            let mut c = pt.cursor();
+            for k in 0..N {
+                c.seek(PId::new(k));
+                if c.key() == Some(PId::new(k)) {
+                    hits += 1;
+                }
+            }
+            black_box(hits)
+        })
+    });
+    g.bench_function("verus_untracked", |b| {
+        b.iter(|| {
+            let mut hits = 0u32;
+            let mut c = vt.cursor();
+            for k in 0..N {
+                c.seek(VId::new(k));
+                if c.key() == Some(VId::new(k)) {
+                    hits += 1;
+                }
+            }
+            black_box(hits)
+        })
+    });
+    g.bench_function("prod_tracked", |b| {
+        b.iter(|| {
+            let mut hits = 0u32;
+            let mut c = ptt.cursor();
+            for k in 0..N {
+                c.seek(PId::new(k));
+                if c.key() == Some(PId::new(k)) {
+                    hits += 1;
+                }
+            }
+            black_box(hits)
+        })
+    });
+    g.bench_function("verus_tracked", |b| {
+        b.iter(|| {
+            let mut hits = 0u32;
+            let mut c = vtt.cursor();
+            for k in 0..N {
                 c.seek(VId::new(k));
                 if c.key() == Some(VId::new(k)) {
                     hits += 1;
@@ -317,6 +397,7 @@ criterion_group!(
     benches,
     bench_bplus_insert,
     bench_bplus_seek,
+    bench_bplus_seek_sequential,
     bench_bplus_from_sorted_scan,
     bench_bplus_from_sorted_only,
     bench_bplus_scan_only,

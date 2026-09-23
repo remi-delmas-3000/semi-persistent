@@ -1196,6 +1196,71 @@ fn bench_map_intern_string(c: &mut Criterion) {
     g.finish();
 }
 
+/// Interning with an expensive key: 256-byte strings, so a clone on a hit is
+/// a real allocation and copy (chapter 20 second pass, SpMap `intern_entry`).
+fn bench_map_intern_expensive_key(c: &mut Criterion) {
+    let mut g = c.benchmark_group("map/intern_expensive_key");
+    const N: usize = 5_000;
+
+    fn keys() -> Vec<String> {
+        (0..N)
+            .map(|i| {
+                let mut k = format!("op::namespace_{}::symbol_{:08}::", i % 37, i);
+                while k.len() < 256 {
+                    k.push_str("padding-to-make-the-key-expensive-");
+                }
+                k.truncate(256);
+                k
+            })
+            .collect()
+    }
+
+    g.bench_function("legacy", |b| {
+        let ks = keys();
+        b.iter(|| {
+            let mut m: prod::Map<String, u32, usize, true> = prod::Map::new();
+            for (i, k) in ks.iter().enumerate() {
+                if m.id_of(k).is_none() {
+                    m.insert(k.clone(), i as u32);
+                }
+            }
+            let mut hits = 0usize;
+            for _ in 0..4 {
+                for k in &ks {
+                    if m.id_of(k).is_some() {
+                        hits += 1;
+                    }
+                }
+            }
+            black_box(hits)
+        })
+    });
+
+    g.bench_function("verified", |b| {
+        let ks = keys();
+        b.iter(|| {
+            let mut m: verus::SpMap<String, u32, usize, true> = verus::SpMap::new();
+            for (i, k) in ks.iter().enumerate() {
+                if m.id_of(k).is_none() {
+                    m.try_insert(k.clone(), i as u32)
+                        .expect("insert: within index word");
+                }
+            }
+            let mut hits = 0usize;
+            for _ in 0..4 {
+                for k in &ks {
+                    if m.id_of(k).is_some() {
+                        hits += 1;
+                    }
+                }
+            }
+            black_box(hits)
+        })
+    });
+
+    g.finish();
+}
+
 fn bench_map_intern_composite(c: &mut Criterion) {
     let mut g = c.benchmark_group("map/intern_composite");
     const N: usize = 20_000;
@@ -1361,6 +1426,7 @@ criterion_group!(
     bench_class_ring_merge_restore,
     bench_map_intern,
     bench_map_intern_string,
+    bench_map_intern_expensive_key,
     bench_map_intern_composite,
     bench_map_restore_small_suffix,
     bench_sparse_set_churn,
