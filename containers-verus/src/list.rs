@@ -200,6 +200,28 @@ impl<T, N: DenseId + Tagged + core::default::Default> ListNode<T, N> {
         }
     }
 
+    /// A fresh node holding `payload` whose next word is `raw`, an already
+    /// well-formed packed word (a head's, for prepend): no decode, no re-pack.
+    #[inline(always)]
+    pub(crate) fn with_payload_next_raw(payload: T, raw: <N as Tagged>::Repr) -> (r: ListNode<T, N>)
+        requires N::repr_wf(raw),
+        ensures r.next_wf(), r.next_repr == raw, r.payload == payload,
+    {
+        ListNode { payload, next_repr: raw }
+    }
+
+    /// Write the next word from an already well-formed packed word.
+    #[inline(always)]
+    pub(crate) fn set_next_raw(&mut self, raw: <N as Tagged>::Repr)
+        requires N::repr_wf(raw),
+        ensures
+            final(self).next_wf(),
+            final(self).next_repr == raw,
+            final(self).payload == old(self).payload,
+    {
+        self.next_repr = raw;
+    }
+
     /// Write the next pointer (pack into the niche). `r.idx` must be a
     /// representable id (callers hold `idx < N::id_bound()` from the arena's
     /// allocation guard).
@@ -426,6 +448,28 @@ impl<N: DenseId + Tagged + core::default::Default> ListHead<N> {
             final(self).tail == id,
     {
         self.tail = id;
+    }
+
+    /// The packed head word as is (for a copy into a node's next word or
+    /// another head, both `Repr`-typed).
+    #[inline(always)]
+    pub(crate) fn head_raw(&self) -> (r: <N as Tagged>::Repr)
+        ensures r == self.head_repr,
+    {
+        self.head_repr
+    }
+
+    /// Write the head word from an already well-formed packed word.
+    #[inline(always)]
+    pub(crate) fn set_head_raw(&mut self, raw: <N as Tagged>::Repr)
+        requires N::repr_wf(raw),
+        ensures
+            N::repr_wf(final(self).head_repr),
+            final(self).head_repr == raw,
+            final(self).tail == old(self).tail,
+            final(self).len == old(self).len,
+    {
+        self.head_repr = raw;
     }
 
     /// Read the head pointer (unpack).
@@ -1171,9 +1215,10 @@ where
     // rlimit pinned: borderline against the default budget (z3-seed flaky once
     // the crate's function count shifts the solver ordering).
     #[verifier::rlimit(800)]
-    pub(crate) fn prepend_raw(&mut self, l: usize, payload: T)
+    pub(crate) fn prepend_raw(&mut self, l: usize, payload: T, n: usize)
         requires
             old(self).wf(),
+            n == old(self).nodes_view().len(),
             (l as int) < old(self).model_view().len(),
             old(self).nodes_view().len() + 1 < usize::MAX,
             // Packing headroom, per id family: the fresh slot's id must be
@@ -1215,15 +1260,24 @@ where
         proof { self.lemma_len_bounded(l as int); }
         let ghost old_nodes = self.nodes_view();
         let ghost old_model = self.model@;
-        let h0 = self.heads.get_at(self.head_ix(l));
-        let old_head = h0.head();
-        let was_empty = old_head.is_null_exec();
+        // Every index is converted once and carried; every value stays in
+        // its typed form. The node count arrives validated from `try_prepend`
+        // (it equals the current count by precondition); the fresh slot's id
+        // is the one range check left, and the `requires` discharges it.
+        let li = self.head_ix(l);
+        let h0 = self.heads.get_at(li);
+        let ghost old_head = h0.head_ref();
+        let was_empty = h0.is_empty_exec();
 
-        let slot = self.nodes_len();
-        let mut new_node: ListNode<T, N> = ListNode::default();
-        new_node.payload = payload;
-        new_node.set_next(old_head);
-        proof { Self::lemma_node_push_fits(self.nodes_view().len()); }
+        let slot = n;
+        let slot_id = N::from_usize(slot);
+        proof {
+            assert(slot_id.id_nat() == slot as nat);
+            Self::lemma_node_push_fits(self.nodes_view().len());
+        }
+        // The new node's next word is the old head word, copied as is.
+        let new_node = ListNode::with_payload_next_raw(payload, h0.head_raw());
+        proof { assert(new_node.next_ref() == old_head); }
         self.nodes.push(new_node);
 
         // model[l] := [slot] ++ model[l]
@@ -1232,9 +1286,11 @@ where
         // Single head read (production parity): h0 is still current — the
         // heads vec is untouched since it was read.
         let mut h = h0;
-        h.set_head(NodeRef::to(slot));
+        h.set_head_id(slot_id);
+        proof { assert(h.head_ref() == (NodeRef { some: true, idx: slot })); }
         if was_empty {
-            h.set_tail(slot);
+            h.set_tail_id(slot_id);
+            proof { assert(h.tail_spec() == slot); }
         }
         // `h.len + 1` is representable, with no help from the caller. `h.len` is the OLD
         // model length (old `cache_len`), which `lemma_len_bounded` above bounded by the
@@ -1248,7 +1304,6 @@ where
             assert(self.nodes_view().len() == old_nodes.len() + 1);
         }
         h.len = Self::len_incr(h.len);
-        let li = self.head_ix(l);
         self.heads.set_at(li, h);
 
         proof {
@@ -1716,10 +1771,17 @@ where
         }
         let ghost old_nodes = self.nodes_view();
         let ghost old_model = self.model@;
-        let hd = self.heads.get_index(self.head_ix(dst));
-        let hs = self.heads.get_index(self.head_ix(src));
-        let dst_empty = hd.head().is_null_exec();
-        let src_empty = hs.head().is_null_exec();
+        // Each head index converted once, each head read once; the relink
+        // goes from the typed tail id to the store index, and the takeover
+        // copies src's packed head word as is. The bounds are this function's
+        // preconditions (`wf` plus the two handle ranges), so the reads and
+        // writes are the checked-by-proof accessors.
+        let di = self.head_ix(dst);
+        let si = self.head_ix(src);
+        let hd = self.heads.get_at(di);
+        let hs = self.heads.get_at(si);
+        let dst_empty = hd.is_empty_exec();
+        let src_empty = hs.is_empty_exec();
         // hd.len == |old dst|, hs.len == |old src| (old cache_len); sum <= nodes.len()
         // < N::Index::max_nat() from the two lemmas above.
         proof {
@@ -1731,29 +1793,35 @@ where
         if !src_empty {
             if dst_empty {
                 // dst takes over src's head/tail.
-                let mut h = self.heads.get_index(self.head_ix(dst));
-                h.set_head(hs.head());
-                h.set_tail(hs.tail());
+                let mut h = hd;
+                h.set_head_raw(hs.head_raw());
+                h.set_tail_id(hs.tail_id());
                 h.len = new_dst_len;
-                let di = self.head_ix(dst);
-                self.heads.set_index(di, h);
+                proof {
+                    assert(h.head_ref() == hs.head_ref());
+                    assert(h.tail_spec() == hs.tail_spec());
+                }
+                self.heads.set_at(di, h);
             } else {
                 // link dst's tail node forward to src's head.
-                let dtail = hd.tail();
-                let mut tnode = self.nodes.get_index(self.node_ix(dtail));
-                tnode.set_next(hs.head());
-                let ti = self.node_ix(dtail);
-                self.nodes.set_index(ti, tnode);
-                let mut h = self.heads.get_index(self.head_ix(dst));
-                h.set_tail(hs.tail());
+                let ti = hd.tail_id().to_index();
+                proof {
+                    crate::opt::lemma_id_nat_fits_usize(hd.tail);
+                    assert(ti.as_nat() == hd.tail_spec() as nat);
+                }
+                let mut tnode = self.nodes.get_at(ti);
+                tnode.set_next_raw(hs.head_raw());
+                proof { assert(tnode.next_ref() == hs.head_ref()); }
+                self.nodes.set_at(ti, tnode);
+                let mut h = hd;
+                h.set_tail_id(hs.tail_id());
                 h.len = new_dst_len;
-                let di = self.head_ix(dst);
-                self.heads.set_index(di, h);
+                proof { assert(h.tail_spec() == hs.tail_spec()); }
+                self.heads.set_at(di, h);
             }
         }
         // clear src (len resets to 0 via default).
-        let si = self.head_ix(src);
-        self.heads.set_index(si, ListHead::default());
+        self.heads.set_at(si, ListHead::default());
 
         // model: dst := dst ++ src; src := [].
         self.model = Ghost(
@@ -2097,7 +2165,7 @@ where
             && N::try_new(n).is_some()
             && (N::bit_stealing() || N::try_new(n + 1).is_some())
         {
-            self.prepend(l, payload);
+            self.prepend(l, payload, n);
             Ok(())
         } else {
             Err(crate::error::ContainerError::CapacityExhausted)
@@ -2352,9 +2420,10 @@ where
 
     /// O(1) prepend through the typed handle.
     #[inline(always)]
-    pub(crate) fn prepend(&mut self, l: L, payload: T)
+    pub(crate) fn prepend(&mut self, l: L, payload: T, n: usize)
         requires
             old(self).wf(),
+            n == old(self).nodes_view().len(),
             l.id_nat() < old(self).model_view().len(),
             old(self).nodes_view().len() + 1 < usize::MAX,
             // node allocation stays within N's id range (production's
@@ -2398,7 +2467,7 @@ where
             assert(self.model_view()[lu as int]
                 =~= self.model_view()[l.id_nat() as int]);
         }
-        self.prepend_raw(lu, payload)
+        self.prepend_raw(lu, payload, n)
     }
 
     /// O(1) append through the typed handle (cached tail).
@@ -3200,5 +3269,129 @@ mod append_edge_tests {
         a.try_append(l, TElem::new(9))
             .expect("append after restore");
         assert_eq!(read(&a, l), vec![1, 2, 3, 9]);
+    }
+    #[test]
+    fn prepend_to_empty_sets_head_and_tail() {
+        let mut a = arena();
+        let l = a.try_new_list().expect("list id");
+        a.try_prepend(l, TElem::new(7)).expect("prepend to empty");
+        assert_eq!(read(&a, l), vec![7]);
+        assert_eq!(a.len(l), 1);
+    }
+
+    #[test]
+    fn prepend_to_non_empty_links_old_head() {
+        let mut a = arena();
+        let l = a.try_new_list().expect("list id");
+        for v in 1..=5u32 {
+            a.try_prepend(l, TElem::new(v)).expect("prepend");
+        }
+        assert_eq!(read(&a, l), vec![5, 4, 3, 2, 1]);
+        assert_eq!(a.len(l), 5);
+    }
+
+    #[test]
+    fn prepend_across_node_column_growth() {
+        let mut a = arena();
+        let ls: std::vec::Vec<TList> = (0..3).map(|_| a.try_new_list().expect("list id")).collect();
+        let mut want: std::vec::Vec<std::vec::Vec<u32>> = vec![vec![]; 3];
+        for i in 0..5000u32 {
+            let k = (i % 3) as usize;
+            a.try_prepend(ls[k], TElem::new(i))
+                .expect("prepend across growth");
+            want[k].insert(0, i);
+        }
+        for k in 0..3 {
+            assert_eq!(read(&a, ls[k]), want[k]);
+            assert_eq!(a.len(ls[k]) as usize, want[k].len());
+        }
+    }
+
+    #[test]
+    fn prepend_under_open_tracked_frame_then_restore() {
+        let mut a = arena();
+        let l = a.try_new_list().expect("list id");
+        for v in 1..=3u32 {
+            a.try_append(l, TElem::new(v)).expect("append before mark");
+        }
+        let t = a.mark(ShrinkPolicy::Never).expect("mark");
+        for v in 4..=300u32 {
+            a.try_prepend(l, TElem::new(v))
+                .expect("prepend under open frame");
+        }
+        assert_eq!(read(&a, l).len(), 300);
+        assert_eq!(read(&a, l)[0], 300);
+        assert!(a.restore(t), "own live token");
+        assert_eq!(read(&a, l), vec![1, 2, 3]);
+        a.try_prepend(l, TElem::new(9))
+            .expect("prepend after restore");
+        assert_eq!(read(&a, l), vec![9, 1, 2, 3]);
+    }
+
+    fn filled(a: &mut Arena, vals: &[u32]) -> TList {
+        let l = a.try_new_list().expect("list id");
+        for &v in vals {
+            a.try_append(l, TElem::new(v)).expect("append");
+        }
+        l
+    }
+
+    #[test]
+    fn splice_empty_into_non_empty() {
+        let mut a = arena();
+        let dst = filled(&mut a, &[1, 2, 3]);
+        let src = filled(&mut a, &[]);
+        a.splice(dst, src);
+        assert_eq!(read(&a, dst), vec![1, 2, 3]);
+        assert_eq!(read(&a, src), Vec::<u32>::new());
+        assert_eq!(a.len(dst), 3);
+        assert_eq!(a.len(src), 0);
+    }
+
+    #[test]
+    fn splice_non_empty_into_empty() {
+        let mut a = arena();
+        let dst = filled(&mut a, &[]);
+        let src = filled(&mut a, &[4, 5]);
+        a.splice(dst, src);
+        assert_eq!(read(&a, dst), vec![4, 5]);
+        assert_eq!(read(&a, src), Vec::<u32>::new());
+        assert_eq!(a.len(dst), 2);
+        // dst is appendable and prependable after the takeover.
+        a.try_append(dst, TElem::new(6))
+            .expect("append after splice");
+        a.try_prepend(dst, TElem::new(3))
+            .expect("prepend after splice");
+        assert_eq!(read(&a, dst), vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn splice_both_non_empty_relinks_tail() {
+        let mut a = arena();
+        let dst = filled(&mut a, &[1, 2]);
+        let src = filled(&mut a, &[3, 4, 5]);
+        a.splice(dst, src);
+        assert_eq!(read(&a, dst), vec![1, 2, 3, 4, 5]);
+        assert_eq!(read(&a, src), Vec::<u32>::new());
+        a.try_append(dst, TElem::new(6))
+            .expect("append after splice");
+        assert_eq!(read(&a, dst), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(a.len(dst), 6);
+    }
+
+    #[test]
+    fn splice_under_open_tracked_frame_then_restore() {
+        let mut a = arena();
+        let dst = filled(&mut a, &[1, 2]);
+        let src = filled(&mut a, &[3, 4]);
+        let t = a.mark(ShrinkPolicy::Never).expect("mark");
+        a.splice(dst, src);
+        assert_eq!(read(&a, dst), vec![1, 2, 3, 4]);
+        assert_eq!(read(&a, src), Vec::<u32>::new());
+        assert!(a.restore(t), "own live token");
+        assert_eq!(read(&a, dst), vec![1, 2]);
+        assert_eq!(read(&a, src), vec![3, 4]);
+        assert_eq!(a.len(dst), 2);
+        assert_eq!(a.len(src), 2);
     }
 }
