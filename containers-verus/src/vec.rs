@@ -2371,11 +2371,6 @@ where
     VC: crate::value_compressor::ValueCompressor<T>,
 {
     pub(crate) store: S,
-    /// Inert proof-compatibility shadow retained until the deferred proof
-    /// campaign is rewritten against the three physical representations.
-    /// Executable capture, migration, and restore never read or append it.
-    #[allow(dead_code)]
-    pub(crate) diff_log: std::vec::Vec<(T, I)>,
     /// Chronological duplicate-preserving history. Only the newest frame is
     /// mutable for a TrailStore protocol.
     pub(crate) trail_value_pool: std::vec::Vec<(T, I)>,
@@ -2476,11 +2471,6 @@ where
     /// Frame k's saved_len, ghost form: pinned by its snapshot's length.
     pub open(crate) spec fn g_saved_len(&self, k: int) -> nat {
         self.snapshots@[k].len()
-    }
-
-    /// Diff-log length (spec counterpart of `diff_log_len()`).
-    pub open(crate) spec fn diff_log_len_spec(&self) -> nat {
-        self.diff_log@.len()
     }
 
     /// The top (open) frame's `diff_start`, or 0 when no frame is live. The sorted
@@ -2941,13 +2931,6 @@ where
             ==> depth > 0 && j < self.active_saved_len.as_nat())
     }
 
-    /// Non-authoritative compatibility facts for proof-era storage that runtime
-    /// capture and restore never read. This predicate must not be used for
-    /// physical reconstruction, frame extents, or ingress ownership.
-    pub closed spec fn proof_compat_ok(&self) -> bool {
-        self.trail_frames@.len() == 0 ==> self.diff_log@.len() == 0
-    }
-
     /// Compatibility refinement between the selected authoritative ingress
     /// pool and the canonical ghost top stratum. It carries no facts about the
     /// inert `diff_log`.
@@ -3069,7 +3052,6 @@ where
         &&& self.trail_repr_ok()
         &&& self.cold_repr_ok()
         &&& self.open_ingress_ok()
-        &&& self.proof_compat_ok()
     }
 
     /// Stable accessor for callers that need the named general invariant
@@ -3083,7 +3065,6 @@ where
             self.trail_repr_ok(),
             self.cold_repr_ok(),
             self.open_ingress_ok(),
-            self.proof_compat_ok(),
     {
     }
 
@@ -3382,7 +3363,6 @@ where
         requires
             self.hot_defer_wf(),
             self.wf_for_snap(),
-            self.proof_compat_ok(),
         ensures
             self.wf(),
     {
@@ -3393,7 +3373,6 @@ where
         reveal(Vec::trail_repr_ok);
         reveal(Vec::cold_repr_ok);
         reveal(Vec::open_ingress_ok);
-        reveal(Vec::proof_compat_ok);
         assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
             self.hot_defer_end(i) == self.phys_hot_end(i) by {}
         assert(self.hot_repr_ok());
@@ -3462,15 +3441,6 @@ where
         self.trail_frames@.len() == 0
     }
 
-    /// The inert compatibility log is empty when there are no logical frames.
-    /// This is intentionally not a physical representation theorem.
-    pub(crate) proof fn lemma_untracked_diff_log_empty(&self)
-        requires self.wf(), self.untracked(),
-        ensures self.diff_log@.len() == 0,
-    {
-        reveal(Vec::proof_compat_ok);
-    }
-
     /// Observational equivalence to `std::Vec` while untracked: push appends,
     /// set updates, pop drops the last element — exactly the std operations on
     /// the view — AND the vector stays untracked with no diff log. These are
@@ -3485,7 +3455,6 @@ where
             (old(self).untracked() && old(self).view().len() + 1 < I::max_nat()) ==> {
                 &&& final(self).untracked()
                 &&& final(self).view() == old(self).view().push(value)
-                &&& final(self).diff_log_len_spec() == 0
             },
     {
         if !(self.depth_exec() == 0) {
@@ -3501,7 +3470,6 @@ where
             crate::guard::refuse("Vec::push_untracked: index word exhausted");
         }
         self.push(value);
-        proof { self.lemma_untracked_diff_log_empty(); }
     }
 
     #[inline(always)]
@@ -3516,14 +3484,12 @@ where
                 &&& (old(self).view().len() > 0
                     ==> r == Some(old(self).view().last())
                         && final(self).view() == old(self).view().drop_last())
-                &&& final(self).diff_log_len_spec() == 0
             },
     {
         if !(self.depth_exec() == 0) {
             crate::guard::refuse("Vec::pop_untracked: vector has live frames");
         }
         let r = self.pop();
-        proof { self.lemma_untracked_diff_log_empty(); }
         r
     }
 
@@ -3536,7 +3502,6 @@ where
             (old(self).untracked() && i.as_nat() < old(self).view().len()) ==> {
                 &&& final(self).untracked()
                 &&& final(self).view() == old(self).view().update(i.as_nat() as int, value)
-                &&& final(self).diff_log_len_spec() == 0
             },
     {
         if !(self.depth_exec() == 0) {
@@ -3546,7 +3511,6 @@ where
             crate::guard::refuse("Vec::set_untracked: index out of bounds");
         }
         self.set_index(i, value);
-        proof { self.lemma_untracked_diff_log_empty(); }
     }
 
     #[inline(always)]
@@ -3694,7 +3658,6 @@ where
         };
         let v = Vec {
             store,
-            diff_log: std::vec::Vec::new(),
             trail_value_pool: std::vec::Vec::new(),
             trail_stack: std::vec::Vec::new(),
             hot_value_pool: std::vec::Vec::new(),
@@ -4027,7 +3990,7 @@ where
     proof fn lemma_ingress_capture_snap(&self, pre: Self, index: I)
         requires pre.wf(), self.ingress_capture_effect(pre, index),
             index.as_nat() < pre.view().len(), index.as_nat() < pre.active_saved_len.as_nat(),
-        ensures self.frame_partition_ok(), self.wf_for_snap(), self.proof_compat_ok(),
+        ensures self.frame_partition_ok(), self.wf_for_snap(),
     {
         hide(Vec::wf);
         hide(Vec::wf_for_snap);
@@ -4036,8 +3999,6 @@ where
         reveal(Vec::frame_partition_ok);
         assert(self.frame_partition_ok());
         self.lemma_canonical_history_repartition(pre);
-        reveal(Vec::proof_compat_ok);
-        assert(self.proof_compat_ok());
     }
 
     /// Cold-side part of `wf` after an ingress capture: no Cold cell moves, so
@@ -4083,7 +4044,7 @@ where
     proof fn lemma_full_trail_physical_framing(&self, physical: Self)
         requires physical.wf(), *self == (Self { full_trail: self.full_trail, ..physical }),
         ensures self.frame_partition_ok(), self.hot_repr_ok(), self.trail_repr_ok(),
-            self.cold_repr_ok(), self.open_ingress_ok(), self.proof_compat_ok(),
+            self.cold_repr_ok(), self.open_ingress_ok(),
     {
         hide(Vec::wf);
         hide(Vec::wf_for_snap);
@@ -4097,14 +4058,12 @@ where
         reveal(Vec::cold_repr_ok);
         reveal(Vec::cold_payload_ok);
         reveal(Vec::open_ingress_ok);
-        reveal(Vec::proof_compat_ok);
         assert forall|f: int| 0 <= f < self.depth_spec() implies
             #[trigger] self.layer_above_at(f) == physical.layer_above_at(f) by {}
         assert(self.frame_partition_ok());
         assert(self.hot_repr_ok());
         assert(self.trail_repr_ok());
         assert(self.open_ingress_ok());
-        assert(self.proof_compat_ok());
         assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
             #[trigger] self.cold_reconstructs(f) by {
             self.lemma_cold_reconstructs_transfer(physical, f);
@@ -4490,7 +4449,6 @@ where
         self.lemma_push_cold_repr(pre, value);
         reveal(Vec::frame_partition_ok);
         reveal(Vec::open_ingress_ok);
-        reveal(Vec::proof_compat_ok);
         reveal(Vec::wf);
     }
 
@@ -4762,7 +4720,6 @@ where
             self.lemma_cold_reconstructs_layer_transfer(pre, f);
         }
         assert(self.cold_repr_ok());
-        reveal(Vec::proof_compat_ok);
         reveal(Vec::wf);
     }
 
@@ -5103,6 +5060,28 @@ where
         reveal(Vec::open_ingress_ok);
         self.store.lemma_wf_captured_len();
         assert(self.open_ingress_ok());
+        self.lemma_raw_set_cold_repr(pre, index, value);
+        // Scoped: the definition of `wf` enters only the closing query.
+        assert(self.wf()) by {
+            reveal(Vec::wf);
+        }
+    }
+
+    /// The cold tier after a raw set: untouched by the write, so every cold
+    /// frame still reconstructs. Its own query, as for the hot and trail
+    /// siblings: the cold predicates' run quantifiers stay out of the parent.
+    #[verifier::spinoff_prover]
+    proof fn lemma_raw_set_cold_repr(&self, pre: Self, index: I, value: T)
+        requires pre.wf(), self.raw_set_effect(pre, index, value),
+            index.as_nat() < pre.view().len(),
+        ensures self.cold_repr_ok(),
+    {
+        hide(frame_inv_range);
+        hide(stratum_unique);
+        hide(Vec::wf);
+        hide(Vec::wf_for_snap);
+        pre.lemma_wf_named_parts();
+        reveal(Vec::raw_set_effect);
         reveal(Vec::cold_repr_ok);
         reveal(Vec::cold_payload_ok);
         assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
@@ -5111,9 +5090,6 @@ where
             assert(self.layer_above_at(f) == pre.layer_above_at(f));
             self.lemma_cold_reconstructs_layer_transfer(pre, f);
         }
-        assert(self.cold_repr_ok());
-        reveal(Vec::proof_compat_ok);
-        reveal(Vec::wf);
     }
 
     #[verifier::spinoff_prover]
@@ -6305,7 +6281,7 @@ where
     #[verifier::spinoff_prover]
     proof fn lemma_trail_fixed_history(&self, pre: Self, count: nat)
         requires pre.wf(), self.trail_retained_effect(pre, count), self.frame_partition_ok(),
-        ensures self.wf_for_snap(), self.cold_repr_ok(), self.proof_compat_ok(),
+        ensures self.wf_for_snap(), self.cold_repr_ok(),
     {
         hide(Vec::wf);
         reveal(Vec::trail_retained_effect);
@@ -6314,7 +6290,6 @@ where
         self.lemma_canonical_history_repartition(pre);
         reveal(Vec::cold_repr_ok);
         reveal(Vec::cold_payload_ok);
-        reveal(Vec::proof_compat_ok);
         assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
             #[trigger] self.cold_reconstructs(f) by {
             self.lemma_cold_reconstructs_transfer(pre, f);
@@ -6434,7 +6409,7 @@ where
 
     proof fn lemma_wf_from_named_parts(&self)
         requires self.wf_for_snap(), self.hot_repr_ok(), self.trail_repr_ok(),
-            self.cold_repr_ok(), self.open_ingress_ok(), self.proof_compat_ok(),
+            self.cold_repr_ok(), self.open_ingress_ok(),
         ensures self.wf(),
     { reveal(Vec::wf); }
 
@@ -8054,14 +8029,13 @@ where
         requires pre.wf(), self.frame_partition_ok(),
             self.view() == pre.view(), self.snapshots@ == pre.snapshots@,
             self.trail_frames@ == pre.trail_frames@, self.full_trail@ == pre.full_trail@,
-            self.diff_log@ == pre.diff_log@, self.store == pre.store,
-        ensures self.wf_for_snap(), self.proof_compat_ok(),
+            self.store == pre.store,
+        ensures self.wf_for_snap(),
     {
         hide(Vec::wf);
         pre.lemma_wf_named_parts();
         assert(self.store.wf()) by { reveal(Vec::wf_for_snap); }
         self.lemma_canonical_history_repartition(pre);
-        reveal(Vec::proof_compat_ok);
     }
 
     /// Accessor: Cold storage of `pre` is a prefix and the tier is laid out.
@@ -8322,14 +8296,17 @@ where
         hide(frame_inv_range);
         hide(Vec::phys_frame_inv_range_holds);
         mid.lemma_hot_migrating_frame(pre, count);
-        mid.lemma_hot_migrating_cold_prefix(pre, count);
         self.lemma_hot_retired_frame(mid, count);
         self.lemma_hot_migration_hot_map(mid, pre, count, i);
         let g = count + i;
         let cc = pre.cold_stack@.len() as int;
         pre.lemma_pair_tier_contract(false, g);
         pre.lemma_pair_tier_frame_layout(false, g);
-        assert(self.cold_stack@.len() == cc + count);
+        // Scoped: the cold-prefix contract (and its run quantifiers) serves
+        // only the cold count.
+        assert(self.cold_stack@.len() == cc + count) by {
+            mid.lemma_hot_migrating_cold_prefix(pre, count);
+        }
         assert(self.snapshots@ == pre.snapshots@);
         assert(self.trail_frames@ == pre.trail_frames@);
         assert(self.view() == pre.view());
@@ -8486,7 +8463,6 @@ where
         hide(Vec::trail_repr_ok);
         hide(Vec::open_ingress_ok);
         hide(Vec::cold_repr_ok);
-        hide(Vec::proof_compat_ok);
         hide(Vec::frame_partition_ok);
         hide(Vec::repr_ok);
         hide(Vec::cold_payload_ok);
@@ -9098,7 +9074,6 @@ where
             final(self).view() == old(self).view(),
             final(self).hot_value_pool@ == old(self).hot_value_pool@,
             final(self).full_trail@ == old(self).full_trail@,
-            final(self).diff_log@ == old(self).diff_log@,
             final(self).hot_stack@.len() == old(self).hot_stack@.len() + 1,
             final(self).snapshots@ == old(self).snapshots@.push(old(self).view()),
             final(self).trail_frames@ == old(self).trail_frames@.push(
@@ -9295,8 +9270,6 @@ where
             // Reuse the tier-independent canonical opening theorem.
             pre.lemma_wf_named_parts();
             self.lemma_canonical_mark(pre);
-            reveal(Vec::proof_compat_ok);
-            assert(self.proof_compat_ok());
             self.lemma_hot_defer_snap_implies_wf();
         }
     }
@@ -9343,7 +9316,6 @@ where
             assert(self.snapshots@ == marked.snapshots@);
             assert(self.trail_frames@ == marked.trail_frames@);
             assert(self.full_trail@ == marked.full_trail@);
-            assert(self.diff_log@ == marked.diff_log@);
             assert(self.active_saved_len == marked.active_saved_len);
             assert forall|i: int| 0 <= i < self.hot_stack@.len() implies
                 #[trigger] self.layer_above_at(i) == marked.layer_above_at(i) by {}
@@ -9351,7 +9323,6 @@ where
             self.lemma_hot_defer_transfer_canonical(marked);
             marked.lemma_wf_named_parts();
             self.lemma_wf_for_snap_transfer(marked);
-            assert(self.proof_compat_ok());
             self.lemma_hot_defer_snap_implies_wf();
             assert(self.hot_defer_scope());
         }
@@ -9987,14 +9958,13 @@ where
     #[verifier::spinoff_prover]
     proof fn lemma_mark_ingress(&self, pre: Self)
         requires pre.wf(), self.mark_open_effect(pre),
-        ensures self.open_ingress_ok(), self.proof_compat_ok(),
+        ensures self.open_ingress_ok(),
     {
         hide(Vec::wf);
         reveal(Vec::mark_open_effect);
         pre.lemma_wf_named_parts();
         self.store.lemma_wf_captured_len();
         reveal(Vec::open_ingress_ok);
-        reveal(Vec::proof_compat_ok);
     }
 
     #[verifier::spinoff_prover]
@@ -10183,15 +10153,15 @@ where
     #[verifier::spinoff_prover]
     proof fn lemma_survivor_history_transfer(&self, pre: Self)
         requires pre.wf_for_snap(), pre.hot_repr_ok(), pre.trail_repr_ok(), pre.cold_repr_ok(),
-            pre.proof_compat_ok(), self.store.wf(), self.view() == pre.view(),
+            self.store.wf(), self.view() == pre.view(),
             self.full_trail@ == pre.full_trail@, self.trail_frames@ == pre.trail_frames@,
-            self.snapshots@ == pre.snapshots@, self.diff_log@ == pre.diff_log@,
+            self.snapshots@ == pre.snapshots@,
             self.cold_stack@ == pre.cold_stack@, self.cold_index_runs@ == pre.cold_index_runs@,
             self.cold_value_pool@ == pre.cold_value_pool@,
             self.hot_stack@ == pre.hot_stack@, self.hot_value_pool@ == pre.hot_value_pool@,
             self.trail_stack@ == pre.trail_stack@, self.trail_value_pool@ == pre.trail_value_pool@,
         ensures self.wf_for_snap(), self.hot_repr_ok(), self.trail_repr_ok(),
-            self.cold_repr_ok(), self.proof_compat_ok(),
+            self.cold_repr_ok(),
     {
         assert forall|f: int| 0 <= f < self.depth_spec() implies
             #[trigger] self.layer_above_at(f) == pre.layer_above_at(f) by {};
@@ -10199,7 +10169,6 @@ where
         reveal(Vec::hot_repr_ok);
         reveal(Vec::trail_repr_ok);
         reveal(Vec::cold_repr_ok);
-        reveal(Vec::proof_compat_ok);
         assert forall|f: int| 0 <= f < self.cold_stack@.len() implies
             #[trigger] self.cold_reconstructs(f) by {
             self.lemma_cold_reconstructs_transfer(pre, f);
@@ -10332,7 +10301,7 @@ where
     fn finish_survivor_checked(&mut self)
         requires TRACK, old(self).wf_for_snap(),
             old(self).hot_repr_ok(), old(self).trail_repr_ok(), old(self).cold_repr_ok(),
-            old(self).proof_compat_ok(), old(self).depth_spec() > 0,
+            old(self).depth_spec() > 0,
             old(self).store.unique_capture_spec() ==> old(self).trail_stack@.len() == 0
                 && old(self).hot_stack@.len() > 0,
             !old(self).store.unique_capture_spec() ==> old(self).trail_stack@.len() > 0
@@ -10372,7 +10341,6 @@ where
             self.lemma_survivor_history_transfer(pre);
             self.store.lemma_wf_captured_len();
             reveal(Vec::open_ingress_ok);
-            reveal(Vec::proof_compat_ok);
             reveal(Vec::wf);
             assert(self.wf());
             self.lemma_persistence_store_framing(pre);
@@ -10459,11 +10427,11 @@ where
     #[verifier::spinoff_prover]
     proof fn lemma_hot_survivor_promotion(&self, pre: Self)
         requires pre.wf_for_snap(), pre.hot_repr_ok(), pre.trail_repr_ok(), pre.cold_repr_ok(),
-            pre.proof_compat_ok(), pre.trail_stack@.len() == 0, pre.hot_stack@.len() > 0,
+            pre.trail_stack@.len() == 0, pre.hot_stack@.len() > 0,
             pre.hot_stack@[pre.hot_stack@.len() - 1].end == pre.hot_value_pool@.len(),
             self.hot_survivor_promoted(pre),
         ensures self.wf_for_snap(), self.hot_repr_ok(), self.trail_repr_ok(),
-            self.cold_repr_ok(), self.proof_compat_ok(),
+            self.cold_repr_ok(),
             self.hot_stack@.len() > 0 ==>
                 self.hot_stack@[self.hot_stack@.len() - 1].end == self.hot_value_pool@.len(),
     {
@@ -10476,7 +10444,6 @@ where
         reveal(Vec::frame_partition_ok);
         reveal(Vec::trail_repr_ok);
         reveal(Vec::cold_repr_ok);
-        reveal(Vec::proof_compat_ok);
         let n = pre.hot_stack@.len();
         let top = pre.hot_stack@[n - 1];
         let cc = pre.cold_stack@.len();
@@ -10560,13 +10527,13 @@ where
     #[verifier::spinoff_prover]
     fn promote_hot_survivor_checked(&mut self)
         requires old(self).wf_for_snap(), old(self).hot_repr_ok(), old(self).trail_repr_ok(),
-            old(self).cold_repr_ok(), old(self).proof_compat_ok(),
+            old(self).cold_repr_ok(),
             old(self).trail_stack@.len() == 0, old(self).hot_stack@.len() > 0,
             old(self).hot_stack@[old(self).hot_stack@.len() - 1].end == old(self).hot_value_pool@.len(),
         ensures final(self).hot_survivor_promoted(*old(self)),
             final(self).persistence_model() == old(self).persistence_model(),
             final(self).wf_for_snap(), final(self).hot_repr_ok(), final(self).trail_repr_ok(),
-            final(self).cold_repr_ok(), final(self).proof_compat_ok(),
+            final(self).cold_repr_ok(),
             final(self).hot_stack@.len() > 0 ==>
                 final(self).hot_stack@[final(self).hot_stack@.len() - 1].end == final(self).hot_value_pool@.len(),
     {
@@ -10749,11 +10716,10 @@ where
 
     #[verifier::spinoff_prover]
     proof fn lemma_cold_survivor_promotion(&self, pre: Self)
-        requires pre.wf_for_snap(), pre.cold_repr_ok(), pre.proof_compat_ok(),
+        requires pre.wf_for_snap(), pre.cold_repr_ok(),
             pre.cold_stack@.len() > 0, pre.hot_stack@.len() == 0, pre.trail_stack@.len() == 0,
             self.cold_survivor_promoted(pre),
         ensures self.wf_for_snap(), self.cold_repr_ok(), self.hot_repr_ok(), self.trail_repr_ok(),
-            self.proof_compat_ok(),
             self.hot_stack@.len() > 0 ==> self.hot_stack@[self.hot_stack@.len() - 1].end == self.hot_value_pool@.len(),
     {
         hide(Vec::wf_for_snap);
@@ -10775,7 +10741,6 @@ where
         reveal(Vec::cold_prefix_of);
         reveal(Vec::hot_repr_ok);
         reveal(Vec::trail_repr_ok);
-        reveal(Vec::proof_compat_ok);
     }
 
     #[verifier::spinoff_prover]
@@ -10827,14 +10792,14 @@ where
 
     #[verifier::spinoff_prover]
     fn promote_cold_survivor_checked(&mut self)
-        requires old(self).wf_for_snap(), old(self).cold_repr_ok(), old(self).proof_compat_ok(),
+        requires old(self).wf_for_snap(), old(self).cold_repr_ok(),
             old(self).cold_stack@.len() > 0,
             old(self).hot_stack@.len() == 0, old(self).hot_value_pool@.len() == 0,
             old(self).trail_stack@.len() == 0, old(self).trail_value_pool@.len() == 0,
         ensures final(self).cold_survivor_promoted(*old(self)),
             final(self).persistence_model() == old(self).persistence_model(),
             final(self).wf_for_snap(), final(self).cold_repr_ok(),
-            final(self).hot_repr_ok(), final(self).trail_repr_ok(), final(self).proof_compat_ok(),
+            final(self).hot_repr_ok(), final(self).trail_repr_ok(),
             final(self).hot_stack@.len() > 0 ==> final(self).hot_stack@[final(self).hot_stack@.len() - 1].end
                 == final(self).hot_value_pool@.len(),
     {
@@ -10964,7 +10929,6 @@ where
         }
         self.hot_stack.clear();
         self.hot_value_pool.clear();
-        self.diff_log.clear();
         proof {
             self.full_trail@ = Seq::empty();
             self.trail_frames@ = Seq::empty();
@@ -10978,9 +10942,7 @@ where
                 implies !(#[trigger] self.store.captured()[j]) by {}
             assert(self.hot_defer_wf());
             reveal(Vec::frame_partition_ok);
-            reveal(Vec::proof_compat_ok);
             assert(self.wf_for_snap());
-            assert(self.proof_compat_ok());
             self.lemma_hot_defer_snap_implies_wf();
         }
     }
@@ -11441,10 +11403,8 @@ where
             }
             self.hot_defer_restore_nonzero_finish(pre, target, cut, top_start);
             reveal(Vec::frame_partition_ok);
-            reveal(Vec::proof_compat_ok);
             assert(self.frame_partition_ok());
             self.lemma_restore_canonical_prefix(pre, target);
-            assert(self.proof_compat_ok());
             self.lemma_hot_defer_snap_implies_wf();
         }
     }
@@ -11609,7 +11569,6 @@ where
         &&& self.snapshots@ == pre.snapshots@.subrange(0, target as int)
         &&& self.trail_frames@ == pre.trail_frames@.subrange(0, target as int)
         &&& self.full_trail@ == pre.full_trail@.subrange(0, pre.trail_frames@[target as int] as int)
-        &&& self.diff_log@ == if target == 0 { Seq::empty() } else { pre.diff_log@ }
     }
 
     #[verifier::spinoff_prover]
@@ -12255,9 +12214,6 @@ where
                 self.cold_value_pool.truncate(values_cut);
             }
         }
-        if target == 0 {
-            self.diff_log.clear();
-        }
         proof {
             let boundary = self.trail_frames@[target as int] as int;
             self.full_trail@ = self.full_trail@.subrange(0, boundary);
@@ -12282,7 +12238,7 @@ where
             self.hot_stack@.len() == 0, self.hot_value_pool@.len() == 0,
             self.trail_stack@.len() == 0, self.trail_value_pool@.len() == 0,
             self.snapshots@.len() == 0, self.trail_frames@.len() == 0,
-            self.full_trail@.len() == 0, self.diff_log@.len() == 0,
+            self.full_trail@.len() == 0,
     {
         pre.lemma_wf_named_parts();
         pre.lemma_truncation_bounds(0);
@@ -12298,7 +12254,7 @@ where
             self.cold_value_pool@.len() == 0,
             self.hot_stack@.len() == 0, self.hot_value_pool@.len() == 0,
             self.trail_stack@.len() == 0, self.trail_value_pool@.len() == 0,
-            self.diff_log@.len() == 0, self.active_saved_len == I::min_spec(),
+            self.active_saved_len == I::min_spec(),
             TRACK ==> forall|j: int| 0 <= j < self.store.captured().len() ==>
                 !(#[trigger] self.store.captured()[j]),
         ensures self.wf(),
@@ -12308,7 +12264,6 @@ where
         reveal(Vec::trail_repr_ok);
         reveal(Vec::cold_repr_ok);
         reveal(Vec::open_ingress_ok);
-        reveal(Vec::proof_compat_ok);
     }
 
     /// Complete zero-target restore for every tier layout and store protocol.
@@ -12395,7 +12350,6 @@ where
         self.truncate_restored_history_checked(target, Ghost(pre));
         proof {
             reveal(Vec::restored_history_prefix);
-            reveal(Vec::proof_compat_ok);
         }
         self.finish_survivor_checked();
         self.reclaim_cold_checked();
@@ -12440,7 +12394,6 @@ where
         proof {
             self.lemma_restored_hot_promotion_ready(pre, target);
             reveal(Vec::restored_history_prefix);
-            reveal(Vec::proof_compat_ok);
         }
         self.promote_hot_survivor_checked();
         proof { reveal(Vec::hot_survivor_promoted); }
@@ -12477,7 +12430,6 @@ where
             reveal(Vec::restored_history_prefix);
             reveal(Vec::hot_repr_ok);
             reveal(Vec::trail_repr_ok);
-            reveal(Vec::proof_compat_ok);
         }
         self.promote_cold_survivor_checked();
         proof {
@@ -12509,7 +12461,6 @@ where
             reveal(Vec::hot_defer_wf);
             reveal(Vec::hot_defer_end);
             reveal(Vec::frame_partition_ok);
-            reveal(Vec::proof_compat_ok);
             assert(self.hot_defer_wf());
             assert forall|k: int| 0 <= k < self.trail_frames@.len() implies
                 #[trigger] self.layer_above_at(k) == pre.layer_above_at(k) by {}
@@ -12572,9 +12523,7 @@ where
     /// Capacity reclamation (production parity). `Never` is a no-op;
     /// `IfOverallocated` asks the store to shrink its backing capacity. Both
     /// are observationally inert: `shrink_if` preserves `data()`/`captured()`,
-    /// so `view()`, `wf`, and all tracked sequences are unchanged. (The
-    /// production diff_log capacity hint is omitted — it's a pure allocator
-    /// hint with no effect on `diff_log@`.)
+    /// so `view()`, `wf`, and all tracked sequences are unchanged.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(2000)]
     fn maybe_shrink(&mut self, policy: ShrinkPolicy)
@@ -12584,7 +12533,6 @@ where
             final(self).store.unique_capture_spec()
                 == old(self).store.unique_capture_spec(),
             final(self).view() == old(self).view(),
-            final(self).diff_log@ == old(self).diff_log@,
             final(self).trail_frames@ == old(self).trail_frames@,
             final(self).full_trail@ == old(self).full_trail@,
             final(self).snapshots@ == old(self).snapshots@,
@@ -12611,10 +12559,6 @@ where
             ShrinkPolicy::Never => {}
             ShrinkPolicy::IfOverallocated { factor, headroom } => {
                 self.store.shrink_if(factor, headroom);
-                // Production parity: the same overallocation check applies to
-                // the diff log at mark time (shrink-at-mark ratcheting).
-                // Observably inert (contract: element sequence unchanged).
-                log_shrink_capacity(&mut self.diff_log, factor, headroom);
             }
         }
         proof {
@@ -15878,8 +15822,8 @@ mod adaptive_compaction_tests {
         // The open (top) frame is always hot by construction.
         let top = v.hot_stack.len() - 1;
         let ds = v.hot_stack[top].start;
-        let n = v.diff_log.len();
-        let diffs = super::log_subrange_vec(&v.diff_log, ds, n);
+        let n = v.hot_value_pool.len();
+        let diffs = super::log_subrange_vec(&v.hot_value_pool, ds, n);
         choose_mode(&diffs)
     }
 
@@ -16199,25 +16143,6 @@ where
     }
 }
 
-#[cfg(test)]
-mod restore_prefix_tests {
-    #[test]
-    fn zero_restore_clears_inert_compatibility_shadow() {
-        let mut g = crate::group::ForkHistory::new(crate::VecT::<u32, u32, true>::new_with_policy(
-            crate::TierPolicy::smt(),
-        ));
-        g.member.try_push(7).unwrap();
-        let token = g.mark(crate::ShrinkPolicy::Never).expect("mark");
-        // At nonzero depth the inert compatibility vector is unconstrained by
-        // wf; restoration must use physical history and retire this shadow.
-        g.member.diff_log.push((99, 0));
-        g.member.set(0u32, 8);
-        assert!(g.restore(token), "restore: own live token");
-        assert_eq!(g.member.get(0u32), 7);
-        assert!(g.member.diff_log.is_empty());
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Byte reporters — OUTSIDE the verified perimeter (stratified; see
 // `diagnostics.rs`). Read-only capacity sums over the crate-private fields;
@@ -16234,8 +16159,7 @@ where
     /// Heap bytes of the tracking structures (diff logs, frame stacks, pools),
     /// capacity-based. Production parity: `tracking_bytes`.
     pub fn tracking_bytes(&self) -> usize {
-        self.diff_log.capacity() * core::mem::size_of::<(T, I)>()
-            + self.trail_value_pool.capacity() * core::mem::size_of::<(T, I)>()
+        self.trail_value_pool.capacity() * core::mem::size_of::<(T, I)>()
             + self.trail_stack.capacity() * core::mem::size_of::<crate::frame::TrailFrame<I>>()
             + self.hot_value_pool.capacity() * core::mem::size_of::<(T, I)>()
             + self.hot_stack.capacity() * core::mem::size_of::<crate::frame::HotFrame<I>>()

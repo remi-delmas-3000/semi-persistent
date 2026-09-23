@@ -91,14 +91,6 @@ where
         }
     }
 
-    pub open(crate) spec fn diff_log_len_spec(&self) -> nat {
-        match self {
-            VecD::Inline(v) => v.diff_log_len_spec(),
-            VecD::Parallel(v) => v.diff_log_len_spec(),
-            VecD::Trail(v) => v.diff_log_len_spec(),
-        }
-    }
-
     /// Frame `f` (any tier) captures index `j`.
     pub open(crate) spec fn frame_captures(&self, f: int, j: nat) -> bool {
         match self {
@@ -290,7 +282,6 @@ where
             (old(self).untracked() && old(self).view().len() + 1 < I::max_nat()) ==> {
                 &&& final(self).untracked()
                 &&& final(self).view() == old(self).view().push(value)
-                &&& final(self).diff_log_len_spec() == 0
             },
     {
         match self {
@@ -312,7 +303,6 @@ where
                 &&& (old(self).view().len() > 0
                     ==> r == Some(old(self).view().last())
                         && final(self).view() == old(self).view().drop_last())
-                &&& final(self).diff_log_len_spec() == 0
             },
     {
         match self {
@@ -330,7 +320,6 @@ where
             (old(self).untracked() && i.as_nat() < old(self).view().len()) ==> {
                 &&& final(self).untracked()
                 &&& final(self).view() == old(self).view().update(i.as_nat() as int, value)
-                &&& final(self).diff_log_len_spec() == 0
             },
     {
         match self {
