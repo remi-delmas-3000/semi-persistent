@@ -5363,57 +5363,28 @@ where
         requires self.wf(),
     {
         hide(Vec::wf);
-        // Fold over the whole stack (the loop bound is the length, so the
-        // per-frame index carries no second bound) and take the open frame
-        // back out once; the closed sum is the same either way.
+        // Closed entries per tier are read off the frame boundaries, not
+        // folded over the stack: frame 0 starts at 0 and every frame's header
+        // end is the next frame's start (`lemma_pair_tier_frame_layout`), so
+        // the closed frames' entry counts telescope to the last closed
+        // frame's header end. One load per tier instead of a walk per frame,
+        // three times per adaptive call.
         let trail_len = self.trail_stack.len();
         let trail_closed = trail_len.saturating_sub(1);
-        let mut trail_total = 0usize;
-        let mut f = 0usize;
-        while f < trail_len
-            invariant f <= trail_len, trail_len == self.trail_stack@.len(), self.wf(),
-            decreases trail_len - f,
-        {
-            let n = self.pair_frame_entries(true, f);
-            trail_total = match trail_total.checked_add(n) {
-                Some(v) => v,
-                None => crate::guard::refuse("logical closed-history entry count overflow"),
-            };
-            f += 1;
-        }
-        let trail_entries = if trail_len > 0 {
-            let open = self.pair_frame_entries(true, trail_len - 1);
-            match trail_total.checked_sub(open) {
-                Some(v) => v,
-                None => crate::guard::refuse("logical closed-history entry count underflow"),
-            }
+        let trail_entries = if trail_closed > 0 {
+            proof { self.lemma_pair_tier_frame_layout(true, trail_closed as int - 1); }
+            self.trail_stack[trail_closed - 1].end
         } else {
             0
         };
         let hot_len = self.hot_stack.len();
         let hot_open = self.store.unique_capture() && hot_len > 0;
         let hot_closed = if hot_open { hot_len - 1 } else { hot_len };
-        let mut hot_total = 0usize;
-        let mut g = 0usize;
-        while g < hot_len
-            invariant g <= hot_len, hot_len == self.hot_stack@.len(), self.wf(),
-            decreases hot_len - g,
-        {
-            let n = self.pair_frame_entries(false, g);
-            hot_total = match hot_total.checked_add(n) {
-                Some(v) => v,
-                None => crate::guard::refuse("logical closed-history entry count overflow"),
-            };
-            g += 1;
-        }
-        let hot_entries = if hot_open {
-            let open = self.pair_frame_entries(false, hot_len - 1);
-            match hot_total.checked_sub(open) {
-                Some(v) => v,
-                None => crate::guard::refuse("logical closed-history entry count underflow"),
-            }
+        let hot_entries = if hot_closed > 0 {
+            proof { self.lemma_pair_tier_frame_layout(false, hot_closed as int - 1); }
+            self.hot_stack[hot_closed - 1].end
         } else {
-            hot_total
+            0
         };
         let trail = Self::closed_history_add(
             Self::closed_history_mul(trail_closed, core::mem::size_of::<crate::frame::TrailFrame<I>>()),
