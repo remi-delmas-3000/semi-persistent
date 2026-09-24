@@ -246,6 +246,30 @@ Ghost views: `data(): Seq<T>`, `captured(): Seq<bool>`, `wf(): bool`. Methods:
 
 ## 5. Vec layout (L4)
 
+### Current implementation
+
+The executable vector stores its live `store`, Trail and Hot value pools and
+frame stacks, Cold headers/value/index-run pools, tier policy, migration
+scratch, and the active saved-length cache. `full_trail`, `trail_frames`, and
+`snapshots` are ghost state. The former compatibility `diff_log` was removed
+in `47722b0`. History ownership is external, as described in chapter 10.
+These executable history fields currently remain in the type even for
+`TRACK=false`; history-free representation is not an implemented optimization.
+
+[Chapter 17](17-three-tier-frame-grid.md) describes the current physical
+representation and its proof obligations. Tracked push/set/pop now share one
+executable path per operation, with separate proof cases for history protocols.
+
+### Historical single-log model
+
+The layout and derivations below, including sections 6–8, explain the original
+single-log proof model. They are not a literal inventory of current fields or
+method bodies. In the current implementation, tier-specific reconstruction
+refines the shared logical history; Trail may retain duplicate captures and
+Hot uses unique captures. Public token validation belongs to the external
+manager, and restore keeps the target checkpoint open (chapter 08).
+
+
 ```
 struct Vec<T, I, S, const TRACK: bool> {
     store: S,                        // the DiffStore backend

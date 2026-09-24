@@ -22,9 +22,10 @@ actually deep-copying on each `mark` would cost O(state) time and memory per mar
 and O(N · state) for N nested marks.
 
 The implementation avoids it by storing a **sparse negative diff** instead of the
-copies. On the first write to a cell after a mark, it records that cell's old
-value in a diff log; subsequent writes to the same cell record nothing
-(first-write-wins). `restore` truncates the log to the mark and replays the
+copies. Hot capture records a cell's old value on its first write after a mark;
+subsequent writes need no additional capture. Trail capture can retain
+duplicate writes, and Cold history compresses closed frames. Chapter 17
+describes these representations and their common reconstruction model. `restore` truncates the log to the mark and replays the
 recorded old values in reverse, restoring each first-written cell to its
 mark-time value; untouched cells were never logged. No deep copy is ever
 materialized: a marked state is represented implicitly as the current contents
@@ -44,9 +45,9 @@ wrong replay order, a cell restored from the wrong mark) silently producing a
 state that differs from the deep-copy specification. The proof rules this out by
 carrying the specification explicitly. The container holds a **ghost field**
 `snapshots`: the stack of deep copies, defined in ghost code and erased before
-compilation. The compiled container retains its ordinary value store, sparse
-diff log, frame metadata, fork history, identity, and capture-state fields, but
-not the ghost deep copies. The headline
+compilation. The compiled column retains its live value store, tiered history pools, frame
+metadata, policy and capture state, but not the ghost deep copies. Fork history
+and identity belong to the external manager. The headline
 theorem is the equivalence between the diff engine and the deep-copy
 specification:
 
@@ -58,7 +59,7 @@ will accept: each `mark` opens a branch in a fork history, each `restore` cuts t
 branches it discards, and a token naming a discarded state is rejected. The
 development uses no `admit`s or `assume`s; run `cargo verus verify` for the
 per-module tally. (That does not mean nothing is trusted; the current
-execution-first branch has 85 default-build `external_body` markers, 90 with
+implementation has 12 default-build `external_body` markers, 17 with
 `literal-types`, enumerated in [Chapter 2](02-trust-boundary.md).)
 
 ## Reference: what is in the crate

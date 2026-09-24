@@ -3,9 +3,9 @@
 *The crate is verified with **no `admit`s and no `assume`s**. The only code the
 verifier takes on trust is a small set of items marked
 `#[verifier::external_body]` (their bodies are hidden; only their signatures /
-`ensures` are believed) plus a small set of `broadcast axiom fn`s (one in the
-default build (the SpMap index hasher fact) and five more behind the
-`literal-types` feature). This chapter enumerates exactly what is trusted and,
+`ensures` are believed) plus a small set of `broadcast axiom fn`s (four in the default build and five more behind
+`literal-types`, plus an axiom for each consumer-defined ID type; see the
+table below). This chapter enumerates exactly what is trusted and,
 for each, why it is trusted rather than proved.*
 
 *Counts, by configuration:*

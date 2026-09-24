@@ -59,9 +59,8 @@ conversion.
 The proofs read the frame grid from the tier pools and nothing else: the
 `hot_value_pool`, the `trail_value_pool` and the Cold runs are the physical
 authority for what a frame captured, and every capture extent, every
-reconstruction and every restore is justified from them. The compatibility
-`diff_log` that production's shape carries is inert: no lemma may cite it to
-justify a capture, an extent or a reconstructed value. Each Trail, Hot and
+reconstruction and every restore is justified from them. The former inert compatibility `diff_log` field and its proof scaffolding
+were removed in `47722b0`; no shadow runtime log remains. Each Trail, Hot and
 Cold frame owns its own `saved_len`; nothing relates a frame's saved length to
 its neighbours' (§2), and a Hot frame's payload count is bounded by that
 saved length while an undeduplicated Trail frame's is not, because duplicate
