@@ -3489,8 +3489,7 @@ where
         if !(self.depth_exec() == 0) {
             crate::guard::refuse("Vec::pop_untracked: vector has live frames");
         }
-        let r = self.pop();
-        r
+        self.pop()
     }
 
     #[inline(always)]

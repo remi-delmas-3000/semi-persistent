@@ -221,36 +221,6 @@ impl<T, N: DenseId + Tagged + core::default::Default> ListNode<T, N> {
     {
         self.next_repr = raw;
     }
-
-    /// Write the next pointer (pack into the niche). `r.idx` must be a
-    /// representable id (callers hold `idx < N::id_bound()` from the arena's
-    /// allocation guard).
-    pub(crate) fn set_next(&mut self, r: NodeRef)
-        requires !r.is_null() ==> (r.idx as nat) < N::id_bound(),
-        ensures
-            final(self).next_wf(),
-            final(self).next_ref() == r || (r.is_null() && final(self).next_ref() == NodeRef { some: false, idx: 0 }),
-            final(self).payload == old(self).payload,
-    {
-        if r.some {
-            let id = N::from_usize(r.idx);
-            let o = crate::opt::Opt::<N>::some(id);
-            self.next_repr = o.into_raw();
-            proof {
-                assert(!N::tag_of(self.next_repr));
-                assert(N::value_of(self.next_repr) == id);
-                assert(id.id_nat() == r.idx as nat);
-                assert(self.next_ref() == r);
-            }
-        } else {
-            let o = crate::opt::Opt::<N>::none();
-            self.next_repr = o.into_raw();
-            proof {
-                assert(N::tag_of(self.next_repr));
-                assert(self.next_ref() == NodeRef { some: false, idx: 0 });
-            }
-        }
-    }
 }
 
 impl<T: core::default::Default, N: DenseId + Tagged + core::default::Default>
@@ -489,56 +459,6 @@ impl<N: DenseId + Tagged + core::default::Default> ListHead<N> {
             NodeRef { some: true, idx: id.as_usize() }
         }
     }
-
-    /// Read the tail index (the tail is a bare id; no unpacking needed).
-    pub(crate) fn tail(&self) -> (r: usize)
-        requires self.head_wf(),
-        ensures r == self.tail_spec(),
-    {
-        let id = self.tail;
-        proof { id.lemma_as_nat_is_id_nat(); }  // as_usize -> id_nat bridge. prod-parity
-        id.as_usize()
-    }
-
-    /// Write the head pointer (pack).
-    pub(crate) fn set_head(&mut self, r: NodeRef)
-        requires !r.is_null() ==> (r.idx as nat) < N::id_bound(),
-        ensures
-            N::repr_wf(final(self).head_repr),
-            final(self).tail == old(self).tail,
-            final(self).len == old(self).len,
-            final(self).head_ref() == r
-                || (r.is_null() && final(self).head_ref() == NodeRef { some: false, idx: 0 }),
-    {
-        if r.some {
-            let id = N::from_usize(r.idx);
-            let o = crate::opt::Opt::<N>::some(id);
-            self.head_repr = o.into_raw();
-            proof {
-                assert(!N::tag_of(self.head_repr));
-                assert(N::value_of(self.head_repr) == id);
-                assert(self.head_ref() == r);
-            }
-        } else {
-            let o = crate::opt::Opt::<N>::none();
-            self.head_repr = o.into_raw();
-        }
-    }
-
-    /// Write the tail index (`t < N::id_bound()` from allocation). The tail is
-    /// a bare id, so this is a direct store — no niche packing.
-    pub(crate) fn set_tail(&mut self, t: usize)
-        requires (t as nat) < N::id_bound(),
-        ensures
-            final(self).head_repr == old(self).head_repr,
-            final(self).len == old(self).len,
-            final(self).tail_spec() == t,
-    {
-        let id = N::from_usize(t);
-        self.tail = id;
-        proof { assert(id.id_nat() == t as nat); }
-    }
-
 }
 
 impl<N: DenseId + Tagged + core::default::Default> core::default::Default for ListHead<N> {
@@ -796,15 +716,6 @@ where
         ensures n as nat == self.heads_view().len(),
     {
         self.heads.len().as_usize()
-    }
-
-    /// `nodes.len()` as a `usize` row count. Same bridge as `heads_len`.
-    #[inline(always)]
-    pub(crate) fn nodes_len(&self) -> (n: usize)
-        requires self.nodes.wf(),
-        ensures n as nat == self.nodes_view().len(),
-    {
-        self.nodes.len().as_usize()
     }
 
     /// Push headroom, per id family: an arena with room for one more
