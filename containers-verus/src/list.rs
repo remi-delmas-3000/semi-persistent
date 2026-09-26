@@ -283,6 +283,10 @@ impl<T: Tagged, N: DenseId + Tagged> Tagged for ListNode<T, N> {
     fn from_repr(r: &Self::Repr) -> (v: Self) {
         ListNode { payload: T::from_repr(&r.a), next_repr: r.b }
     }
+    #[inline(always)]
+    fn from_repr_clean(r: &Self::Repr, tok: crate::tagged::CrateOnly) -> (v: Self) {
+        ListNode { payload: T::from_repr_clean(&r.a, tok), next_repr: r.b }
+    }
     fn tag(r: &Self::Repr) -> (b: bool) {
         T::tag(&r.a)
     }
@@ -1390,12 +1394,14 @@ where
         proof { self.lemma_len_bounded(l as int); }
         let ghost old_nodes = self.nodes_view();
         let ghost old_model = self.model@;
-        // Every index is converted once and carried; every value stays in
-        // its typed form. The only range check left is the fresh slot's
-        // `from_usize`, and the `requires` discharges it.
+        // Carry typed indices; ordinary store indexing still checks bounds.
         let li = self.head_ix(l);
         let h0 = self.heads.get_at(li);
-        let was_empty = h0.is_empty_exec();
+        // The cached count agrees with the head's emptiness by cache_ok/cache_len.
+        // Testing it directly lets the increment establish non-emptiness for
+        // the next append without recovering that fact from the packed head.
+        let was_empty = h0.len.as_usize() == 0;
+        proof { self.lemma_cache_ends_at(l as int); }
 
         // The node count arrives validated from `try_append`; it is not
         // re-read here (it equals the current count by precondition).
@@ -1415,6 +1421,14 @@ where
                 assert(ti.as_nat() == h0.tail_spec() as nat);
             }
             let mut tnode = self.nodes.get_at(ti);
+            // Keep the old tail's rewrite full width: re-encode the payload
+            // through the masked decode (an identity by the Tagged contracts),
+            // so the node is written back as one 8-byte store. Written as a
+            // 4-byte store to the next field alone, with its address loaded
+            // from the head the previous append just stored, it stalls the
+            // backend on Apple M4: +2.8 cycles per append, all ARM_STALL_BACKEND,
+            // no extra instructions (kperf counters, 2026-09-25).
+            tnode.payload = T::from_repr(&tnode.payload.into_repr());
             tnode.set_next_id(slot_id);
             proof { assert(tnode.next_ref() == (NodeRef { some: true, idx: slot })); }
             self.nodes.set_at(ti, tnode);
