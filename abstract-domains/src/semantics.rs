@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Concrete operation semantics that transfer-function contracts refer to.
 //!
-//! A `Semantics` names a value type `V` and the meaning of each operator on it.
+//! A `Semantics` names a value type `V` and the meaning of each operator on it
+//! (zero test, add, sub, neg, mul, div, rem).
 //! Transfer traits are indexed by a semantics (`DivRem<S>`), so one domain type
 //! can carry several semantics over the same carrier:
 //!
@@ -32,6 +33,8 @@ pub trait Semantics {
     spec fn sub(a: Self::V, b: Self::V) -> Self::V;
 
     spec fn neg(a: Self::V) -> Self::V;
+
+    spec fn mul(a: Self::V, b: Self::V) -> Self::V;
 
     /// Meaningful only for a nonzero divisor.
     spec fn div(a: Self::V, b: Self::V) -> Self::V;
@@ -94,6 +97,10 @@ impl<W: Word> Semantics for Unsigned<W> {
         W::from_int(-(a.view() as int))
     }
 
+    open spec fn mul(a: W, b: W) -> W {
+        W::from_int(a.view() as int * b.view() as int)
+    }
+
     open spec fn div(a: W, b: W) -> W {
         W::from_int(a.view() as int / b.view() as int)
     }
@@ -129,6 +136,10 @@ impl<W: Word> Semantics for Signed<W> {
         W::from_int(-signed_view(a))
     }
 
+    open spec fn mul(a: W, b: W) -> W {
+        W::from_int(signed_view(a) * signed_view(b))
+    }
+
     /// Wraps on MIN / -1, as the two's-complement result does.
     open spec fn div(a: W, b: W) -> W {
         W::from_int(tdiv(signed_view(a), signed_view(b)))
@@ -162,6 +173,10 @@ impl Semantics for Euclid {
         -a
     }
 
+    open spec fn mul(a: int, b: int) -> int {
+        a * b
+    }
+
     /// Verus `int` division is Euclidean: `0 <= a % b < |b|`.
     open spec fn div(a: int, b: int) -> int {
         a / b
@@ -193,6 +208,10 @@ impl Semantics for Trunc {
 
     open spec fn neg(a: int) -> int {
         -a
+    }
+
+    open spec fn mul(a: int, b: int) -> int {
+        a * b
     }
 
     open spec fn div(a: int, b: int) -> int {

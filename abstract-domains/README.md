@@ -10,7 +10,7 @@ This crate provides **tristate numbers (Tnums)**, **additive tristate numbers (A
 **reduced product TAIU** -- abstract domains for reasoning about bitvector arithmetic
 with bitwise uncertainty.
 
-The ordinary verification run reports **1116 verified conditions and 0
+The ordinary verification run reports **1187 verified conditions and 0
 errors**. A CI source gate rejects executable `admit()` and `assume()` calls in
 this crate. The pinned `vstd` dependency contains admitted specifications and
 is part of the trust boundary, as are the `IBig` wrapper's `external_body`
@@ -100,7 +100,7 @@ Every domain implements one interface, specified in
 
 - domains are bottomless, and `BotOr<D>` is the external bottom (as in Verasco);
 - representations are canonical, and each domain proves `lemma_canonical`;
-- machine domains are generic over `W: Word` (u8..u64);
+- machine domains are generic over `W: Word` (u8..u128);
 - transfer functions are indexed by a `Semantics`: `Unsigned<W>`, `Signed<W>`,
   `Euclid` or `Trunc`;
 - division reports a `DivZero` flag.
@@ -150,7 +150,7 @@ cargo run --features bin
 
 ## Verification status
 
-- 1116 Verus conditions, 0 errors
+- 1187 Verus conditions, 0 errors
 - no project-local `admit()`/`assume()` calls (CI source gate)
 - pinned `vstd` admitted specifications remain in the trust boundary
 - `IBig` (`num-bigint` wrapper): 7 `external_body` functions and 1 axiom, listed in the

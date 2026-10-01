@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Forward transfer functions, indexed by a concrete semantics.
 //!
-//! `Arith<S>` and `DivRem<S>` state soundness against `S`'s operators: every
+//! `Arith<S>`, `Mul<S>` and `DivRem<S>` state soundness against `S`'s operators: every
 //! concrete result of operands drawn from the arguments' concretizations is in
 //! the concretization of the abstract result. A domain implements a transfer
 //! trait once per semantics it supports (for example both `DivRem<Unsigned<W>>`
@@ -40,6 +40,18 @@ pub trait Arith<S: Semantics>: Domain<C = S::V> {
         ensures
             r.wf(),
             forall|x: S::V| self.gamma(x) ==> #[trigger] r.gamma(S::neg(x)),
+    ;
+}
+
+pub trait Mul<S: Semantics>: Domain<C = S::V> {
+    fn mul(&self, o: &Self) -> (r: Self)
+        requires
+            self.wf(),
+            o.wf(),
+        ensures
+            r.wf(),
+            forall|x: S::V, y: S::V|
+                self.gamma(x) && o.gamma(y) ==> #[trigger] r.gamma(S::mul(x, y)),
     ;
 }
 

@@ -1,12 +1,12 @@
 # Abstract Domains Proof Status
 
-Last refreshed: 2026-09-26.
+Last refreshed: 2026-10-01.
 
 ## Current result
 
 ```text
 cargo verus verify
-1116 verified, 0 errors
+1187 verified, 0 errors
 ```
 
 The project source contains no executable `admit()` or `assume()` calls. CI

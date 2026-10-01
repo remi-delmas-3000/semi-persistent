@@ -88,7 +88,17 @@ pub trait Domain: Sized {
             },
     ;
 
-    /// Soundness only; `self` is the previous iterate.
+    /// Widening, `self ∇ o`: any value covering both `self` (the previous
+    /// iterate) and `o` (the new one, typically `F(self)` or `self ⊔ F(self)`).
+    /// Callers test stabilization with `leq` (`o.leq(self)`) and call `widen`
+    /// only when `o` escapes `self`; `widen` need not detect the fixpoint.
+    ///
+    /// The contract states soundness only, and `join` satisfies it. Termination
+    /// is not required: the analysis is bounded by fuel, as in Verasco. A
+    /// domain whose ascending chains are long should go beyond `o` on the
+    /// unstable bounds so that widening sequences stabilize quickly, and
+    /// document the measure it uses (finite bounds remaining, arc size
+    /// doubling, thresholds).
     fn widen(&self, o: &Self) -> (r: Self)
         requires
             self.wf(),

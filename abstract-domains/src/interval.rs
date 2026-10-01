@@ -14,6 +14,7 @@ use crate::semantics::*;
 use crate::transfer::*;
 use crate::word::*;
 use vstd::arithmetic::div_mod::*;
+use vstd::arithmetic::mul::*;
 use vstd::prelude::*;
 
 verus! {
@@ -33,6 +34,30 @@ proof fn lemma_from_small<W: Word>(i: int)
 {
     W::lemma_from_int(i);
     lemma_small_mod(i as nat, W::modulus());
+}
+
+/// `from_int` subtracts the modulus once on `[M, 2M)`.
+proof fn lemma_from_over<W: Word>(i: int)
+    requires
+        W::modulus() <= i < 2 * W::modulus(),
+    ensures
+        W::from_int(i).view() == i - W::modulus(),
+{
+    W::lemma_from_int(i);
+    lemma_mod_sub_multiples_vanish(i, W::modulus() as int);
+    lemma_small_mod((i - W::modulus()) as nat, W::modulus());
+}
+
+/// `from_int` adds the modulus once on `[-M, 0)`.
+proof fn lemma_from_under<W: Word>(i: int)
+    requires
+        -(W::modulus() as int) <= i < 0,
+    ensures
+        W::from_int(i).view() == i + W::modulus(),
+{
+    W::lemma_from_int(i);
+    lemma_mod_add_multiples_vanish(i, W::modulus() as int);
+    lemma_small_mod((i + W::modulus()) as nat, W::modulus());
 }
 
 proof fn lemma_from_zero<W: Word>()
@@ -183,7 +208,7 @@ impl<W: Word> Domain for Interval<W> {
 }
 
 impl<W: Word> Arith<Unsigned<W>> for Interval<W> {
-    /// Exact when no sum wraps, top otherwise.
+    /// Exact when no sum wraps or every sum wraps once; top otherwise.
     fn add(&self, o: &Self) -> (r: Self) {
         match self.hi.checked_add(o.hi) {
             Some(hi) => {
@@ -202,11 +227,30 @@ impl<W: Word> Arith<Unsigned<W>> for Interval<W> {
                 }
                 r
             },
-            None => Self::top(),
+            None => {
+                if self.lo.checked_add(o.lo).is_none() {
+                    // every sum lies in [M, 2M): subtract M from both bounds
+                    let r = Interval { lo: self.lo.wrapping_add(o.lo), hi: self.hi.wrapping_add(o.hi) };
+                    proof {
+                        self.hi.lemma_view_bounded();
+                        o.hi.lemma_view_bounded();
+                        lemma_from_over::<W>(self.lo.view() as int + o.lo.view() as int);
+                        lemma_from_over::<W>(self.hi.view() as int + o.hi.view() as int);
+                        assert forall|x: W, y: W| self.gamma(x) && o.gamma(y) implies #[trigger] r.gamma(
+                            Unsigned::<W>::add(x, y),
+                        ) by {
+                            lemma_from_over::<W>(x.view() as int + y.view() as int);
+                        }
+                    }
+                    r
+                } else {
+                    Self::top()
+                }
+            },
         }
     }
 
-    /// Exact when no difference wraps, top otherwise.
+    /// Exact when no difference wraps or every difference wraps once; top otherwise.
     fn sub(&self, o: &Self) -> (r: Self) {
         if o.hi.le(self.lo) {
             let lo = match self.lo.checked_sub(o.hi) {
@@ -225,6 +269,21 @@ impl<W: Word> Arith<Unsigned<W>> for Interval<W> {
                 ) by {
                     x.lemma_view_bounded();
                     lemma_from_small::<W>(x.view() as int - y.view() as int);
+                }
+            }
+            r
+        } else if self.hi.lt(o.lo) {
+            // every difference lies in [-M, 0): add M to both bounds
+            let r = Interval { lo: self.lo.wrapping_sub(o.hi), hi: self.hi.wrapping_sub(o.lo) };
+            proof {
+                o.hi.lemma_view_bounded();
+                lemma_from_under::<W>(self.lo.view() as int - o.hi.view() as int);
+                lemma_from_under::<W>(self.hi.view() as int - o.lo.view() as int);
+                assert forall|x: W, y: W| self.gamma(x) && o.gamma(y) implies #[trigger] r.gamma(
+                    Unsigned::<W>::sub(x, y),
+                ) by {
+                    y.lemma_view_bounded();
+                    lemma_from_under::<W>(x.view() as int - y.view() as int);
                 }
             }
             r
@@ -332,6 +391,9 @@ impl<W: Word> DivRem<Unsigned<W>> for Interval<W> {
         }
     }
 
+    /// When every quotient is the same `q`, `x % y = x - q * y` is
+    /// `[lo - q * d.hi, hi - q * d.lo']` (`d.lo'` the least nonzero divisor),
+    /// which includes the identity case `hi < d.lo` (q = 0). Otherwise
     /// `[0, min(hi, d.hi - 1)]`.
     fn rem(&self, d: &Self) -> (r: (BotOr<Self>, DivZero)) {
         let z = W::zero();
@@ -339,34 +401,119 @@ impl<W: Word> DivRem<Unsigned<W>> for Interval<W> {
             lemma_from_zero::<W>();
         }
         if d.hi.eq(z) {
-            (BotOr::Bot, DivZero::Always)
+            return (BotOr::Bot, DivZero::Always);
+        }
+        let dm1 = match d.hi.checked_sub(W::one()) {
+            Some(v) => v,
+            None => { return (BotOr::Bot, DivZero::Always); },  // unreachable
+        };
+        let dlo1 = if d.lo.eq(z) {
+            W::one()
         } else {
-            let dm1 = match d.hi.checked_sub(W::one()) {
-                Some(v) => v,
-                None => { return (BotOr::Bot, DivZero::Always); },  // unreachable
-            };
-            let hi = if self.hi.le(dm1) {
-                self.hi
-            } else {
-                dm1
-            };
-            let r = Interval { lo: z, hi };
-            proof {
-                assert forall|x: W, y: W|
-                    self.gamma(x) && d.gamma(y) && !Unsigned::<W>::is_zero(y) implies #[trigger] r.gamma(
-                    Unsigned::<W>::rem(x, y),
-                ) by {
-                    x.lemma_view_bounded();
-                    lemma_mod_bound(x.view() as int, y.view() as int);
-                    lemma_mod_decreases(x.view(), y.view());
-                    lemma_from_small::<W>(x.view() as int % y.view() as int);
+            d.lo
+        };
+        let flag = if d.lo.eq(z) {
+            DivZero::Maybe
+        } else {
+            DivZero::Never
+        };
+        let q = self.lo.udiv(d.hi);
+        let same_q = q.eq(self.hi.udiv(dlo1));
+        if let (true, Some(qh), Some(ql)) = (same_q, q.checked_mul(d.hi), q.checked_mul(dlo1)) {
+            {
+                proof {
+                    lemma_fundamental_div_mod(self.lo.view() as int, d.hi.view() as int);
+                    lemma_mod_bound(self.lo.view() as int, d.hi.view() as int);
+                    lemma_fundamental_div_mod(self.hi.view() as int, dlo1.view() as int);
+                    lemma_mod_bound(self.hi.view() as int, dlo1.view() as int);
+                    lemma_mul_inequality(dlo1.view() as int, d.hi.view() as int, q.view() as int);
+                    lemma_mul_is_commutative(q.view() as int, d.hi.view() as int);
+                    lemma_mul_is_commutative(q.view() as int, dlo1.view() as int);
                 }
+                let lo_r = match self.lo.checked_sub(qh) {
+                    Some(v) => v,
+                    None => { return (BotOr::Val(Self::top()), flag); },  // unreachable
+                };
+                let hi_q = match self.hi.checked_sub(ql) {
+                    Some(v) => v,
+                    None => { return (BotOr::Val(Self::top()), flag); },  // unreachable
+                };
+                let hi_r = if hi_q.le(dm1) {
+                    hi_q
+                } else {
+                    dm1
+                };
+                let r = Interval { lo: lo_r, hi: hi_r };
+                proof {
+                    assert forall|x: W, y: W|
+                        self.gamma(x) && d.gamma(y) && !Unsigned::<W>::is_zero(y) implies #[trigger] r.gamma(
+                        Unsigned::<W>::rem(x, y),
+                    ) by {
+                        let (xv, yv, qv) = (x.view() as int, y.view() as int, q.view() as int);
+                        x.lemma_view_bounded();
+                        // x / y == q: lo/d.hi <= lo/y <= x/y <= hi/y <= hi/d.lo'
+                        lemma_div_is_ordered(self.lo.view() as int, xv, yv);
+                        lemma_div_is_ordered_by_denominator(self.lo.view() as int, yv, d.hi.view() as int);
+                        lemma_div_is_ordered(xv, self.hi.view() as int, yv);
+                        lemma_div_is_ordered_by_denominator(self.hi.view() as int, dlo1.view() as int, yv);
+                        lemma_fundamental_div_mod(xv, yv);
+                        lemma_mod_bound(xv, yv);
+                        lemma_mul_inequality(yv, d.hi.view() as int, qv);
+                        lemma_mul_inequality(dlo1.view() as int, yv, qv);
+                        lemma_mul_is_commutative(qv, yv);
+                        lemma_from_small::<W>(xv % yv);
+                    }
+                }
+                return (BotOr::Val(r), flag);
             }
-            if d.lo.eq(z) {
-                (BotOr::Val(r), DivZero::Maybe)
-            } else {
-                (BotOr::Val(r), DivZero::Never)
+        }
+        let hi = if self.hi.le(dm1) {
+            self.hi
+        } else {
+            dm1
+        };
+        let r = Interval { lo: z, hi };
+        proof {
+            assert forall|x: W, y: W|
+                self.gamma(x) && d.gamma(y) && !Unsigned::<W>::is_zero(y) implies #[trigger] r.gamma(
+                Unsigned::<W>::rem(x, y),
+            ) by {
+                x.lemma_view_bounded();
+                lemma_mod_bound(x.view() as int, y.view() as int);
+                lemma_mod_decreases(x.view(), y.view());
+                lemma_from_small::<W>(x.view() as int % y.view() as int);
             }
+        }
+        (BotOr::Val(r), flag)
+    }
+}
+
+impl<W: Word> Mul<Unsigned<W>> for Interval<W> {
+    /// `[lo * o.lo, hi * o.hi]` when no product wraps, top otherwise.
+    fn mul(&self, o: &Self) -> (r: Self) {
+        match (self.lo.checked_mul(o.lo), self.hi.checked_mul(o.hi)) {
+            (Some(lo), Some(hi)) => {
+                let r = Interval { lo, hi };
+                proof {
+                    hi.lemma_view_bounded();
+                    lemma_mul_upper_bound(
+                        self.lo.view() as int,
+                        self.hi.view() as int,
+                        o.lo.view() as int,
+                        o.hi.view() as int,
+                    );
+                    assert forall|x: W, y: W| self.gamma(x) && o.gamma(y) implies #[trigger] r.gamma(
+                        Unsigned::<W>::mul(x, y),
+                    ) by {
+                        let (xv, yv) = (x.view() as int, y.view() as int);
+                        lemma_mul_upper_bound(xv, self.hi.view() as int, yv, o.hi.view() as int);
+                        lemma_mul_upper_bound(self.lo.view() as int, xv, o.lo.view() as int, yv);
+                        lemma_from_small::<W>(xv * yv);
+                    }
+                }
+                r
+            },
+            _ => Self::top(),
         }
     }
 }
