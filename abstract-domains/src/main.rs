@@ -11,9 +11,7 @@
 )]
 use vstd::prelude::*;
 
-fn main() {
-    semi_persistent_abstract_domains::demo::demo();
-}
+fn main() {}
 verus! {
 
 // ================================================================

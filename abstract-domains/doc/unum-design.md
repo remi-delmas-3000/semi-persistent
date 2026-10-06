@@ -164,15 +164,10 @@ inventory until the missing executable postconditions are added.
 
 ## Reduced Product
 
-`ReducedProduct` contains a Tnum, Anum, Interval, and Unum. Addition computes
-all four component transfers and then calls `reduce`; this entire operation
-has a universal containment theorem.
-
-Bitwise operations preserve only the Tnum result and set the other components
-to top before reduction. Other arithmetic operations call available component
-implementations, but most currently guarantee only well-formed results at
-Layer 4. The exact operation inventory is maintained in
-[`proof-status.md`](proof-status.md).
+Unum is combined with other domains through `reduce::Product` and the fact
+record `Facts<W>` (see [`reduced-product.md`](reduced-product.md)), once it
+implements `Domain` and `Refine`. The hand-written `ReducedProduct` of Tnum,
+Anum, Interval and Unum was removed in #123.
 
 `reduce` narrows interval bounds from all components, narrows Tnum and Anum
 using the resulting upper bound, and rebuilds the Unum from the interval. Its

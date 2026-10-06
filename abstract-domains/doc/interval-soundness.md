@@ -39,12 +39,10 @@ postconditions, not conclusions inferred from the Rust property tests.
 
 ## Reduced-product use
 
-`ReducedProduct` denotes the intersection of its Tnum, Anum, Interval, and Unum
-components. Its reduction step narrows interval bounds using information from
-the other domains and then rebuilds compatible component values. Operations
-without an interval transfer function use `Interval::top()`. This loses
-interval precision but remains sound because `top` contains every machine
-value and the other components continue to constrain the product.
+The interval is the `u` field of the fact record `Facts<W>`, and other domains
+reduce against it through `reduce::Product`; see
+[`reduced-product.md`](reduced-product.md). #123 removed the earlier
+`ReducedProduct` of Tnum, Anum, Interval and Unum.
 
 ## Scope
 

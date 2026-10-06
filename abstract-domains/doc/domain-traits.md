@@ -14,7 +14,9 @@ two reference domains are `src/interval.rs` (machine words) and
    refinement, reduction, and division whose divisors are all zero. A domain
    has no `is_bottom` or `empty` flag and no `Bottom` variant.
 2. **Canonical representation.** `wf` admits exactly one value per
-   concretization, and every domain proves `lemma_canonical`. Structural
+   concretization, and every leaf domain proves `lemma_canonical` in its
+   `Canonical` impl. A `reduce::Product` is the exception: it is `Domain` but
+   not `Canonical` (doc/reduced-product.md, "Products are not canonical"). Structural
    equality is then set equality, so a fixpoint test cannot miss
    stabilization and a join cannot lose precision on an equivalent encoding.
    An enum with a payload per case is preferred over a flag next to fields
@@ -35,16 +37,18 @@ two reference domains are `src/interval.rs` (machine words) and
 ```rust
 pub trait Domain: Sized {
     type C;                                   // concrete values
-    spec fn wf(&self) -> bool;                // canonical invariant
+    spec fn wf(&self) -> bool;                // representation invariant
     spec fn gamma(&self, c: Self::C) -> bool;
-    proof fn lemma_nonempty(&self);           // bottomless
-    proof fn lemma_canonical(a: &Self, b: &Self); // same gamma ==> a == b
     fn dup(&self) -> Self;                    // no Copy bound: big numbers
     fn top() -> Self;
     fn leq(&self, o: &Self) -> bool;          // true ==> gamma inclusion
     fn join(&self, o: &Self) -> Self;         // any sound upper bound
     fn meet(&self, o: &Self) -> BotOr<Self>;  // Bot ==> disjoint
     fn widen(&self, o: &Self) -> Self;        // covers self and o; see below
+}
+pub trait Canonical: Domain {
+    proof fn lemma_nonempty(&self);           // bottomless
+    proof fn lemma_canonical(a: &Self, b: &Self); // same gamma ==> a == b
 }
 pub enum BotOr<D> { Bot, Val(D) }
 ```
@@ -140,14 +144,16 @@ Planned next, with the same shape:
 - `Bitwise`.
 - `Shift<S>`.
 - `Cast`: truncation, zero extension and sign extension between widths.
-- `Product<A, B>` with `reduce -> BotOr`.
+- `Product<A, B>` with `reduce -> BotOr`: done in `reduce.rs`, see
+  doc/reduced-product.md.
 
 ## 6. Reference domains
 
 **`Interval<W>`** (`interval.rs`) has private `lo`/`hi` with `lo <= hi`;
 `new` returns `None` otherwise. It implements:
 
-- `Domain`, with a proved `lemma_canonical`;
+- `Domain` and `Canonical`, with a proved `lemma_canonical`, and an exact
+  `meet_exact`;
 - Cousot widening;
 - `Arith<Unsigned<W>>`: add and sub exact when no result wraps or every
   result wraps once, top otherwise;
@@ -164,7 +170,7 @@ Planned next, with the same shape:
 finite. It has an internal top `[-inf, +inf]`, so it needs no Verasco `t+⊤`
 lift. It implements:
 
-- `Domain` with Cousot widening;
+- `Domain` and `Canonical`, with Cousot widening and an exact `meet_exact`;
 - `Arith<Euclid>` and `Arith<Trunc>`, both exact;
 - `DivRem<Euclid>` and `DivRem<Trunc>` as sound placeholders (top plus the
   exact zero flag).
@@ -190,7 +196,7 @@ it can claim injectivity. Un-normalized rationals falsify it.
 ## 8. Porting checklist
 
 - [ ] Payload struct or enum with no bottom flag and no `Bottom` variant. Empty results are `BotOr::Bot`.
-- [ ] `wf` is canonical and `lemma_canonical` is proved. Enumerate small widths to confirm there is one value per set.
+- [ ] `wf` is canonical and `lemma_canonical` is proved in `impl Canonical`. Enumerate small widths to confirm there is one value per set.
 - [ ] Fields are private, and constructors establish `wf`.
 - [ ] Generic over `W: Word`, one instance per width (not per signedness). No `IBig` in a machine domain.
 - [ ] `impl Domain`, with `top`, `leq`, `join`, `meet -> BotOr` and `widen` stated against `gamma`.

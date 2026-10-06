@@ -80,10 +80,10 @@ bootstrap confidence intervals.
 
 | claim | evidence | scope |
 | --- | --- | --- |
-| The enabled `u8`, `u16`, `u32`, and `u64` abstract-domain instances satisfy their stated Verus obligations | **proved** | ordinary verification reports 994 verified conditions and 0 errors; `u128` is disabled |
+| The enabled `u8`, `u16`, `u32`, and `u64` abstract-domain instances satisfy their stated Verus obligations | **proved** | `cargo verus verify` reports 0 errors in CI; `u128` is disabled |
 | The source contains no `admit()` or `assume()` | **proved by gate** | includes the formerly admitted `ExecUnum::{add,mul,from_interval}` obligations |
 | The separate Rust mirror fuzz suite passes 32 tests | **measured** | randomized and exhaustive finite evidence; it mirrors rather than executes the Verus definitions |
-| `ReducedProduct::add` no longer depends on an admitted `ExecUnum::add` contract | **proved** | the dependency is now discharged transitively |
+| `ReducedProduct::add` no longer depends on an admitted `ExecUnum::add` contract | **proved**, then **removed** | the dependency was discharged transitively; #123 removed `ReducedProduct` in favor of `reduce::Product` |
 
 ## 4. Anti-unification
 

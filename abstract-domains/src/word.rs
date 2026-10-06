@@ -216,47 +216,6 @@ proof fn lemma_tz_lt_bits(x: nat, t: nat, bits: nat)
     }
 }
 
-proof fn lemma_tz_from_shifts_u64(i: u64, t: u64)
-    requires
-        i != 0,
-        t < 64,
-        (i >> t) & 1u64 == 1u64,
-        i << sub(64, t) == 0,
-    ensures
-        tz_spec(i as nat, t as nat),
-{
-    vstd::bits::lemma_u64_shr_is_div(i, t);
-    let q = i >> t;
-    assert(q & 1u64 == 1u64 ==> q % 2 == 1) by (bit_vector);
-    assert(i << sub(64, t) == 0 ==> (i >> t) << t == i) by (bit_vector)
-        requires
-            t < 64,
-    ;
-    lemma_pow2_pos(t as nat);
-    lemma_fundamental_div_mod(i as int, pow2(t as nat) as int);
-    vstd::bits::lemma_u64_pow2_no_overflow(t as nat);
-    assert(q * pow2(t as nat) <= u64::MAX) by {
-        lemma_mod_pos_bound(i as int, pow2(t as nat) as int);
-    }
-    vstd::bits::lemma_u64_shl_is_mul(q, t);
-    lemma_mod_multiples_basic(q as int, pow2(t as nat) as int);
-}
-
-fn tz_u64(x: u64) -> (r: u32)
-    ensures
-        x == 0 ==> r == 64,
-        x != 0 ==> r < 64 && tz_spec(x as nat, r as nat),
-{
-    let r = x.trailing_zeros();
-    proof {
-        axiom_u64_trailing_zeros(x);
-        if x != 0 {
-            lemma_tz_from_shifts_u64(x, r as u64);
-        }
-    }
-    r
-}
-
 /// vstd specifies `trailing_zeros` only up to u64: split into two halves.
 fn tz_u128(x: u128) -> (r: u32)
     ensures
@@ -329,7 +288,9 @@ fn tz_u128(x: u128) -> (r: u32)
     }
 }
 
-/// `(a * b) mod m` for operands below 2^32, computed in u64.
+/// `(a * b) mod m` for operands below 2^32, computed in u64. For u8, u16 and
+/// u32 one widening product measured 0.9 ns against 39.6 ns for a u32
+/// double-and-add loop (examples/mulmod_width.rs), so these widths widen.
 fn mulmod_via_u64(a: u64, b: u64, m: u64) -> (r: u64)
     requires
         a < 0x1_0000_0000,
@@ -359,6 +320,29 @@ fn mulmod_via_u128(a: u64, b: u64, m: u64) -> (r: u64)
         lemma_mod_bound((a * b) as int, m as int);
     }
     ((a as u128) * (b as u128) % (m as u128)) as u64
+}
+
+/// `(a * b) mod m` for u64: the native product when it fits, else the u128
+/// product. The u128 product stays because the same-width double-and-add loop
+/// is slower: 83.4 ns against 23.3 ns on full-range operands, and 39.4 ns
+/// against 1.4 ns when both operands are below 2^32, where the `checked_mul`
+/// path applies (examples/mulmod_width.rs).
+fn mulmod_u64(a: u64, b: u64, m: u64) -> (r: u64)
+    requires
+        m > 0,
+    ensures
+        r < m,
+        r as int == (a * b) % (m as int),
+{
+    match a.checked_mul(b) {
+        Some(p) => {
+            proof {
+                lemma_mod_bound(p as int, m as int);
+            }
+            p % m
+        },
+        None => mulmod_via_u128(a, b, m),
+    }
 }
 
 /// `(x + y) mod m` for `x, y < m`, without overflow.
@@ -473,6 +457,95 @@ pub open spec fn signed_view<W: Word>(w: W) -> int {
 }
 
 } // verus!
+
+/// Native `trailing_zeros` at one width, from vstd's per-width axiom.
+macro_rules! tz_native {
+    ($tz:ident, $lemma:ident, $t:ty, $bits:literal, $axiom:ident, $shr:path, $pow2:path, $shl:path) => {
+        verus! {
+            proof fn $lemma(i: $t, t: $t)
+                requires
+                    i != 0,
+                    t < $bits,
+                    (i >> t) & 1 == 1,
+                    i << sub($bits, t) == 0,
+                ensures
+                    tz_spec(i as nat, t as nat),
+            {
+                $shr(i, t);
+                let q = i >> t;
+                assert(q & 1 == 1 ==> q % 2 == 1) by (bit_vector);
+                assert(i << sub($bits, t) == 0 ==> (i >> t) << t == i) by (bit_vector)
+                    requires
+                        t < $bits,
+                ;
+                lemma_pow2_pos(t as nat);
+                lemma_fundamental_div_mod(i as int, pow2(t as nat) as int);
+                $pow2(t as nat);
+                assert(q * pow2(t as nat) <= <$t>::MAX) by {
+                    lemma_mod_pos_bound(i as int, pow2(t as nat) as int);
+                }
+                $shl(q, t);
+                lemma_mod_multiples_basic(q as int, pow2(t as nat) as int);
+            }
+
+            fn $tz(x: $t) -> (r: u32)
+                ensures
+                    x == 0 ==> r == $bits,
+                    x != 0 ==> r < $bits && tz_spec(x as nat, r as nat),
+            {
+                let r = x.trailing_zeros();
+                proof {
+                    $axiom(x);
+                    if x != 0 {
+                        $lemma(x, r as $t);
+                    }
+                }
+                r
+            }
+        }
+    };
+}
+
+tz_native!(
+    tz_u8,
+    lemma_tz_from_shifts_u8,
+    u8,
+    8,
+    axiom_u8_trailing_zeros,
+    vstd::bits::lemma_u8_shr_is_div,
+    vstd::bits::lemma_u8_pow2_no_overflow,
+    vstd::bits::lemma_u8_shl_is_mul
+);
+tz_native!(
+    tz_u16,
+    lemma_tz_from_shifts_u16,
+    u16,
+    16,
+    axiom_u16_trailing_zeros,
+    vstd::bits::lemma_u16_shr_is_div,
+    vstd::bits::lemma_u16_pow2_no_overflow,
+    vstd::bits::lemma_u16_shl_is_mul
+);
+tz_native!(
+    tz_u32,
+    lemma_tz_from_shifts_u32,
+    u32,
+    32,
+    axiom_u32_trailing_zeros,
+    vstd::bits::lemma_u32_shr_is_div,
+    vstd::bits::lemma_u32_pow2_no_overflow,
+    vstd::bits::lemma_u32_shl_is_mul
+);
+tz_native!(
+    tz_u64,
+    lemma_tz_from_shifts_u64,
+    u64,
+    64,
+    axiom_u64_trailing_zeros,
+    vstd::bits::lemma_u64_shr_is_div,
+    vstd::bits::lemma_u64_pow2_no_overflow,
+    vstd::bits::lemma_u64_shl_is_mul
+);
 
 macro_rules! impl_word {
     ($t:ty, $bits:expr, $modulus:expr, $tz_ty:ty, $tz:ident, $mm_ty:ty, $mulmod:ident) => {
@@ -629,9 +702,9 @@ macro_rules! impl_word {
     };
 }
 
-impl_word!(u8, 8, 0x100, u64, tz_u64, u64, mulmod_via_u64);
-impl_word!(u16, 16, 0x1_0000, u64, tz_u64, u64, mulmod_via_u64);
-impl_word!(u32, 32, 0x1_0000_0000, u64, tz_u64, u64, mulmod_via_u64);
+impl_word!(u8, 8, 0x100, u8, tz_u8, u64, mulmod_via_u64);
+impl_word!(u16, 16, 0x1_0000, u16, tz_u16, u64, mulmod_via_u64);
+impl_word!(u32, 32, 0x1_0000_0000, u32, tz_u32, u64, mulmod_via_u64);
 impl_word!(
     u64,
     64,
@@ -639,7 +712,7 @@ impl_word!(
     u64,
     tz_u64,
     u64,
-    mulmod_via_u128
+    mulmod_u64
 );
 impl_word!(
     u128,

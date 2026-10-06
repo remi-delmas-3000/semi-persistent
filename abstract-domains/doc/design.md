@@ -1,7 +1,7 @@
 # Semi-Persistent Abstract Domains
 
-A proved abstract domains library for bitvector arithmetic. The ordinary Verus
-run has 1187 verified conditions and 0 errors, and a CI source gate rejects
+A proved abstract domains library for bitvector arithmetic. `cargo verus
+verify` reports 0 errors, and a CI source gate rejects
 project-local `admit()`/`assume()` calls. The pinned `vstd` dependency remains
 inside the trust boundary. A separate 32-test Rust mirror suite supplies finite
 randomized/exhaustive evidence.
@@ -174,26 +174,13 @@ addition is exact when endpoint arithmetic does not overflow and otherwise
 widens to top. Positive constant division is exact for unsigned,
 non-wrapping intervals. No interval-by-interval division is implemented.
 
-### ReducedProduct: combining all four
+### Combining the domains
 
-The reduced product combines all four domains:
-```
-ReducedProduct.has(x) ⟺ tnum.has(x) ∧ anum.has(x) ∧ interval.has(x) ∧ unum.has(x)
-```
-
-Each operation constructs the available component results. After each
-operation, `reduce()` cross-propagates information:
-
-1. Tighten interval from Tnum/Anum/Unum min/max bounds.
-2. Clear impossible high bits in Tnum/Anum using interval upper bound.
-3. Rebuild Unum from tightened interval.
-
-`reduce` has a universal containment theorem: narrowing never removes a value
-present in all components. `ReducedProduct::add` composes all four component
-containment proofs and then applies reduce containment. The other executable
-ReducedProduct methods currently guarantee well-formed results but do not yet
-carry universal containment postconditions; their intended composition is not
-a proved Layer 4 theorem until those contracts are added.
+These domains are combined through `reduce::Product` and the per-sort fact
+records, described in [`reduced-product.md`](reduced-product.md). #123 removed
+the earlier `ReducedProduct`, which combined exactly Tnum, Anum, Interval and
+Unum with a reduction written by hand for those four. Tnum, Anum and Unum join
+`Product` once they implement `Domain` with a `BotOr` bottom and `Refine`.
 
 The exact contracts implemented by the interval component are listed in
 [`interval-soundness.md`](interval-soundness.md). General division and alarms,
@@ -323,8 +310,8 @@ project-local admits.
 
 Native Rust implementations on u8, u16, u32, and u64 via macro generation.
 The u128 instantiation is disabled because its bitvector obligations exceed
-current solver capacity. Five domain types are enabled at each active width:
-ExecTnum, ExecAnum, ExecUnum, Interval, and ReducedProduct.
+current solver capacity. Four domain types are enabled at each active width:
+ExecTnum, ExecAnum, ExecUnum, and Interval.
 
 The **value bridge** connects native wrapping arithmetic to spec chopping:
 - `bridge_add(a, b)`: `wrapping_add(a,b) as nat == chop(nat_add(a,b), W)`
@@ -342,8 +329,7 @@ currently proved for:
 - `ExecTnum::{bw_or,bw_and,bw_xor,add,join,meet}`;
 - `ExecAnum::{add,div_const}`;
 - `ExecUnum::{top,add,from_interval,mul}`;
-- `Interval::{add,meet,join,div_const}`; and
-- `ReducedProduct::{reduce,add}`.
+- `Interval::{add,meet,join,div_const}`.
 
 Other executable operations currently prove well-formedness only. L2/L3
 soundness and finite mirror tests do not by themselves establish the missing

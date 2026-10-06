@@ -3,7 +3,7 @@
 //! Concrete operation semantics that transfer-function contracts refer to.
 //!
 //! A `Semantics` names a value type `V` and the meaning of each operator on it
-//! (zero test, add, sub, neg, mul, div, rem).
+//! (zero test, add, sub, neg, mul, div, rem) and of the order (lt, le).
 //! Transfer traits are indexed by a semantics (`DivRem<S>`), so one domain type
 //! can carry several semantics over the same carrier:
 //!
@@ -41,6 +41,12 @@ pub trait Semantics {
 
     /// Meaningful only for a nonzero divisor.
     spec fn rem(a: Self::V, b: Self::V) -> Self::V;
+
+    /// Strict order: unsigned for `Unsigned<W>`, two's complement for
+    /// `Signed<W>`, the integer order for `Euclid` and `Trunc`.
+    spec fn lt(a: Self::V, b: Self::V) -> bool;
+
+    spec fn le(a: Self::V, b: Self::V) -> bool;
 }
 
 pub open spec fn iabs(a: int) -> int {
@@ -108,6 +114,14 @@ impl<W: Word> Semantics for Unsigned<W> {
     open spec fn rem(a: W, b: W) -> W {
         W::from_int(a.view() as int % b.view() as int)
     }
+
+    open spec fn lt(a: W, b: W) -> bool {
+        a.view() < b.view()
+    }
+
+    open spec fn le(a: W, b: W) -> bool {
+        a.view() <= b.view()
+    }
 }
 
 impl<W: Word> Semantics for Signed<W> {
@@ -148,6 +162,14 @@ impl<W: Word> Semantics for Signed<W> {
     open spec fn rem(a: W, b: W) -> W {
         W::from_int(trem(signed_view(a), signed_view(b)))
     }
+
+    open spec fn lt(a: W, b: W) -> bool {
+        signed_view(a) < signed_view(b)
+    }
+
+    open spec fn le(a: W, b: W) -> bool {
+        signed_view(a) <= signed_view(b)
+    }
 }
 
 impl Semantics for Euclid {
@@ -185,6 +207,14 @@ impl Semantics for Euclid {
     open spec fn rem(a: int, b: int) -> int {
         a % b
     }
+
+    open spec fn lt(a: int, b: int) -> bool {
+        a < b
+    }
+
+    open spec fn le(a: int, b: int) -> bool {
+        a <= b
+    }
 }
 
 impl Semantics for Trunc {
@@ -220,6 +250,14 @@ impl Semantics for Trunc {
 
     open spec fn rem(a: int, b: int) -> int {
         trem(a, b)
+    }
+
+    open spec fn lt(a: int, b: int) -> bool {
+        a < b
+    }
+
+    open spec fn le(a: int, b: int) -> bool {
+        a <= b
     }
 }
 

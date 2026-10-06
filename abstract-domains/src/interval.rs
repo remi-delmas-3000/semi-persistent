@@ -104,6 +104,32 @@ impl<W: Word> Interval<W> {
         Interval { lo: c, hi: c }
     }
 
+    /// The intersection, exactly: an interval meet loses nothing.
+    pub fn meet_exact(&self, o: &Self) -> (r: BotOr<Self>)
+        requires
+            self.wf(),
+            o.wf(),
+        ensures
+            r.wf(),
+            forall|c: W| #[trigger] r.gamma(c) == (self.gamma(c) && o.gamma(c)),
+    {
+        let lo = if self.lo.le(o.lo) {
+            o.lo
+        } else {
+            self.lo
+        };
+        let hi = if self.hi.le(o.hi) {
+            self.hi
+        } else {
+            o.hi
+        };
+        if lo.le(hi) {
+            BotOr::Val(Interval { lo, hi })
+        } else {
+            BotOr::Bot
+        }
+    }
+
     pub fn bounds(&self) -> (r: (W, W))
         ensures
             r.0 == self.lo(),
@@ -122,16 +148,6 @@ impl<W: Word> Domain for Interval<W> {
 
     open spec fn gamma(&self, c: W) -> bool {
         self.lo().view() <= c.view() <= self.hi().view()
-    }
-
-    proof fn lemma_nonempty(&self) {
-        assert(self.gamma(self.lo));
-    }
-
-    proof fn lemma_canonical(a: &Self, b: &Self) {
-        assert(a.gamma(a.lo) && a.gamma(a.hi) && a.gamma(b.lo) && a.gamma(b.hi));
-        W::lemma_view_injective(a.lo, b.lo);
-        W::lemma_view_injective(a.hi, b.hi);
     }
 
     fn dup(&self) -> (r: Self) {
@@ -166,7 +182,10 @@ impl<W: Word> Domain for Interval<W> {
         Interval { lo, hi }
     }
 
-    fn meet(&self, o: &Self) -> (r: BotOr<Self>) {
+    // Duplicates `meet_exact`: calling it from here would make the impl
+    // depend on a function whose contract mentions the impl (a Verus cycle).
+    fn meet(&self, o: &Self) -> (r: BotOr<Self>)
+    {
         let lo = if self.lo.le(o.lo) {
             o.lo
         } else {
@@ -204,6 +223,18 @@ impl<W: Word> Domain for Interval<W> {
             }
         }
         r
+    }
+}
+
+impl<W: Word> Canonical for Interval<W> {
+    proof fn lemma_nonempty(&self) {
+        assert(self.gamma(self.lo));
+    }
+
+    proof fn lemma_canonical(a: &Self, b: &Self) {
+        assert(a.gamma(a.lo) && a.gamma(a.hi) && a.gamma(b.lo) && a.gamma(b.hi));
+        W::lemma_view_injective(a.lo, b.lo);
+        W::lemma_view_injective(a.hi, b.hi);
     }
 }
 

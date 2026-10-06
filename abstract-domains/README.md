@@ -10,8 +10,8 @@ This crate provides **tristate numbers (Tnums)**, **additive tristate numbers (A
 **reduced product TAIU** -- abstract domains for reasoning about bitvector arithmetic
 with bitwise uncertainty.
 
-The ordinary verification run reports **1187 verified conditions and 0
-errors**. A CI source gate rejects executable `admit()` and `assume()` calls in
+`cargo verus verify` reports 0 errors, and CI runs it on every pull request.
+A CI source gate rejects executable `admit()` and `assume()` calls in
 this crate. The pinned `vstd` dependency contains admitted specifications and
 is part of the trust boundary, as are the `IBig` wrapper's `external_body`
 functions and one axiom ([ledger](doc/domain-traits.md#7-trust)); a global `--no-cheating` run therefore fails in
@@ -76,21 +76,16 @@ bitvector obligations exceed current solver capacity):
 - **EUn**: Executable Unum. Proved-sound addition via the carry-out formula,
   widening to top when represented bounds or result ranges wrap.
 - **Interval**: `[lo, hi]` bounds tracking.
-- **ReducedProduct (TAIU)**: Tnum x Anum x Interval x Unum.
 
-The **reduced product** propagates information across domains:
-- Interval bounds clear impossible high bits in Tnum and Anum
-- Tnum/Anum/Unum min/max tighten the interval
-- Unum is rebuilt from tightened interval after bitwise ops
-- Unum is threaded directly through arithmetic operations. It retains the
-  proved unbounded field formula when fixed-width bounds do not wrap and
-  widens to top otherwise.
+These domains combine through `reduce::Product` and the fact records (see
+[the reduced-product note](doc/reduced-product.md)) once they implement
+`Domain` with a `BotOr` bottom and `Refine`.
 
 Every executable method verifies its stated contract. Universal containment
 theorems currently cover `ExecTnum` bitwise/add/join/meet,
 `ExecAnum` add/division by constant, `ExecUnum` top/add/from-interval/multiply,
-`Interval` add/meet/join/division by constant, and `ReducedProduct`
-reduce/add. Other Layer 4 methods currently prove well-formedness only; see
+`Interval` add/meet/join/division by constant. Other Layer 4 methods
+currently prove well-formedness only; see
 [the proof-status inventory](doc/proof-status.md).
 
 ### Shared domain interface (lattice.rs, word.rs, semantics.rs, transfer.rs)
@@ -150,7 +145,7 @@ cargo run --features bin
 
 ## Verification status
 
-- 1187 Verus conditions, 0 errors
+- `cargo verus verify` reports 0 errors (checked in CI)
 - no project-local `admit()`/`assume()` calls (CI source gate)
 - pinned `vstd` admitted specifications remain in the trust boundary
 - `IBig` (`num-bigint` wrapper): 7 `external_body` functions and 1 axiom, listed in the

@@ -11,9 +11,12 @@
 //! Verasco's `AdomLib` (`leb_correct`, `join_correct`, `meet_correct`,
 //! `widen_incr`). Widening is soundness only; analysis termination is by fuel.
 //!
-//! Beyond Verasco, every domain proves `lemma_canonical`: a well-formed value is
-//! determined by its concretization, so structural equality is set equality
-//! (fixpoint checks cannot miss stabilization; see doc/domain-traits.md).
+//! Beyond Verasco, every leaf domain implements `Canonical`: a well-formed value
+//! is nonempty and determined by its concretization, so structural equality is
+//! set equality (fixpoint checks cannot miss stabilization; see
+//! doc/domain-traits.md). `Domain` itself states soundness only, because a
+//! product of two canonical domains is neither nonempty nor canonical until its
+//! reduction is complete (doc/reduced-product.md).
 use vstd::prelude::*;
 
 verus! {
@@ -22,28 +25,11 @@ pub trait Domain: Sized {
     /// Concrete values.
     type C;
 
-    /// Representation invariant. Must admit exactly one value per concretization.
+    /// Representation invariant. For a `Canonical` domain it admits exactly one
+    /// value per concretization.
     spec fn wf(&self) -> bool;
 
     spec fn gamma(&self, c: Self::C) -> bool;
-
-    /// Nonempty: domains are bottomless.
-    proof fn lemma_nonempty(&self)
-        requires
-            self.wf(),
-        ensures
-            exists|c: Self::C| self.gamma(c),
-    ;
-
-    /// Canonical representation: equal concretizations are equal values.
-    proof fn lemma_canonical(a: &Self, b: &Self)
-        requires
-            a.wf(),
-            b.wf(),
-            forall|c: Self::C| #![trigger a.gamma(c)] a.gamma(c) == b.gamma(c),
-        ensures
-            *a == *b,
-    ;
 
     /// Copy of a value (domains over big numbers are not `Copy`).
     fn dup(&self) -> (r: Self)
@@ -106,6 +92,30 @@ pub trait Domain: Sized {
         ensures
             r.wf(),
             forall|c: Self::C| #[trigger] r.gamma(c) <== self.gamma(c) || o.gamma(c),
+    ;
+}
+
+/// A bottomless, canonical domain: every well-formed value denotes a nonempty
+/// set, and equal sets are equal values. Every leaf domain implements it; a
+/// `reduce::Product` does not, because its components can be jointly empty or
+/// redundant when the reduction stops early.
+pub trait Canonical: Domain {
+    /// Nonempty: domains are bottomless.
+    proof fn lemma_nonempty(&self)
+        requires
+            self.wf(),
+        ensures
+            exists|c: Self::C| self.gamma(c),
+    ;
+
+    /// Canonical representation: equal concretizations are equal values.
+    proof fn lemma_canonical(a: &Self, b: &Self)
+        requires
+            a.wf(),
+            b.wf(),
+            forall|c: Self::C| #![trigger a.gamma(c)] a.gamma(c) == b.gamma(c),
+        ensures
+            *a == *b,
     ;
 }
 

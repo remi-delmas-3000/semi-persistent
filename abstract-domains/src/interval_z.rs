@@ -181,6 +181,43 @@ impl IntervalZ {
         IntervalZ { lo: Lo::Fin(dup_ibig(&c)), hi: Hi::Fin(c) }
     }
 
+    /// The intersection, exactly: an interval meet loses nothing.
+    pub fn meet_exact(&self, o: &Self) -> (r: BotOr<Self>)
+        requires
+            self.wf(),
+            o.wf(),
+        ensures
+            r.wf(),
+            forall|c: int| #[trigger] r.gamma(c) == (self.gamma(c) && o.gamma(c)),
+    {
+        let lo = if lo_le(&self.lo, &o.lo) {
+            dup_lo(&o.lo)
+        } else {
+            dup_lo(&self.lo)
+        };
+        let hi = if hi_le(&self.hi, &o.hi) {
+            dup_hi(&self.hi)
+        } else {
+            dup_hi(&o.hi)
+        };
+        let ok = match (&lo, &hi) {
+            (Lo::Fin(a), Hi::Fin(b)) => a.le(b),
+            _ => true,
+        };
+        if ok {
+            BotOr::Val(IntervalZ { lo, hi })
+        } else {
+            proof {
+                assert forall|c: int| #[trigger] self.gamma(c) implies !o.gamma(c) by {
+                    if self.gamma(c) && o.gamma(c) {
+                        assert(lo_ok(lo, c) && hi_ok(hi, c));
+                    }
+                }
+            }
+            BotOr::Bot
+        }
+    }
+
     fn add_int(&self, o: &Self) -> (r: Self)
         requires
             self.wf(),
@@ -301,6 +338,81 @@ impl Domain for IntervalZ {
         lo_ok(self.lo(), c) && hi_ok(self.hi(), c)
     }
 
+    fn dup(&self) -> (r: Self) {
+        IntervalZ { lo: dup_lo(&self.lo), hi: dup_hi(&self.hi) }
+    }
+
+    fn top() -> (r: Self) {
+        IntervalZ { lo: Lo::NegInf, hi: Hi::PosInf }
+    }
+
+    fn leq(&self, o: &Self) -> (b: bool) {
+        lo_le(&o.lo, &self.lo) && hi_le(&self.hi, &o.hi)
+    }
+
+    fn join(&self, o: &Self) -> (r: Self) {
+        let lo = if lo_le(&self.lo, &o.lo) {
+            dup_lo(&self.lo)
+        } else {
+            dup_lo(&o.lo)
+        };
+        let hi = if hi_le(&self.hi, &o.hi) {
+            dup_hi(&o.hi)
+        } else {
+            dup_hi(&self.hi)
+        };
+        IntervalZ { lo, hi }
+    }
+
+    // Duplicates `meet_exact`: calling it from here would make the impl
+    // depend on a function whose contract mentions the impl (a Verus cycle).
+    fn meet(&self, o: &Self) -> (r: BotOr<Self>)
+    {
+        let lo = if lo_le(&self.lo, &o.lo) {
+            dup_lo(&o.lo)
+        } else {
+            dup_lo(&self.lo)
+        };
+        let hi = if hi_le(&self.hi, &o.hi) {
+            dup_hi(&self.hi)
+        } else {
+            dup_hi(&o.hi)
+        };
+        let ok = match (&lo, &hi) {
+            (Lo::Fin(a), Hi::Fin(b)) => a.le(b),
+            _ => true,
+        };
+        if ok {
+            BotOr::Val(IntervalZ { lo, hi })
+        } else {
+            proof {
+                assert forall|c: int| #[trigger] self.gamma(c) implies !o.gamma(c) by {
+                    if self.gamma(c) && o.gamma(c) {
+                        assert(lo_ok(lo, c) && hi_ok(hi, c));
+                    }
+                }
+            }
+            BotOr::Bot
+        }
+    }
+
+    /// Cousot-Cousot widening: an unstable bound jumps to infinity.
+    fn widen(&self, o: &Self) -> (r: Self) {
+        let lo = if lo_le(&self.lo, &o.lo) {
+            dup_lo(&self.lo)
+        } else {
+            Lo::NegInf
+        };
+        let hi = if hi_le(&o.hi, &self.hi) {
+            dup_hi(&self.hi)
+        } else {
+            Hi::PosInf
+        };
+        IntervalZ { lo, hi }
+    }
+}
+
+impl Canonical for IntervalZ {
     proof fn lemma_nonempty(&self) {
         match (self.lo, self.hi) {
             (Lo::Fin(a), _) => assert(self.gamma(a.view())),
@@ -373,76 +485,6 @@ impl Domain for IntervalZ {
             },
             _ => {},
         }
-    }
-
-    fn dup(&self) -> (r: Self) {
-        IntervalZ { lo: dup_lo(&self.lo), hi: dup_hi(&self.hi) }
-    }
-
-    fn top() -> (r: Self) {
-        IntervalZ { lo: Lo::NegInf, hi: Hi::PosInf }
-    }
-
-    fn leq(&self, o: &Self) -> (b: bool) {
-        lo_le(&o.lo, &self.lo) && hi_le(&self.hi, &o.hi)
-    }
-
-    fn join(&self, o: &Self) -> (r: Self) {
-        let lo = if lo_le(&self.lo, &o.lo) {
-            dup_lo(&self.lo)
-        } else {
-            dup_lo(&o.lo)
-        };
-        let hi = if hi_le(&self.hi, &o.hi) {
-            dup_hi(&o.hi)
-        } else {
-            dup_hi(&self.hi)
-        };
-        IntervalZ { lo, hi }
-    }
-
-    fn meet(&self, o: &Self) -> (r: BotOr<Self>) {
-        let lo = if lo_le(&self.lo, &o.lo) {
-            dup_lo(&o.lo)
-        } else {
-            dup_lo(&self.lo)
-        };
-        let hi = if hi_le(&self.hi, &o.hi) {
-            dup_hi(&self.hi)
-        } else {
-            dup_hi(&o.hi)
-        };
-        let ok = match (&lo, &hi) {
-            (Lo::Fin(a), Hi::Fin(b)) => a.le(b),
-            _ => true,
-        };
-        if ok {
-            BotOr::Val(IntervalZ { lo, hi })
-        } else {
-            proof {
-                assert forall|c: int| #[trigger] self.gamma(c) implies !o.gamma(c) by {
-                    if self.gamma(c) && o.gamma(c) {
-                        assert(lo_ok(lo, c) && hi_ok(hi, c));
-                    }
-                }
-            }
-            BotOr::Bot
-        }
-    }
-
-    /// Cousot-Cousot widening: an unstable bound jumps to infinity.
-    fn widen(&self, o: &Self) -> (r: Self) {
-        let lo = if lo_le(&self.lo, &o.lo) {
-            dup_lo(&self.lo)
-        } else {
-            Lo::NegInf
-        };
-        let hi = if hi_le(&o.hi, &self.hi) {
-            dup_hi(&self.hi)
-        } else {
-            Hi::PosInf
-        };
-        IntervalZ { lo, hi }
     }
 }
 
