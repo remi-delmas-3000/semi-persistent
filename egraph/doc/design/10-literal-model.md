@@ -1,7 +1,6 @@
-# Chapter 13 — Extensible Literal Model
+# Chapter 10 — Extensible Literal Model
 
-[← Ch 12: Rule Application](12-rule-application.md) · [Table of Contents](00-table-of-contents.md) · [Ch 14: Soundness →](14-soundness.md)
-
+[← Ch 9: Saturation](09-saturation.md) · [Table of Contents](00-table-of-contents.md) · [Ch 11: Extraction →](11-extraction.md)
 
 ## The Problem
 
@@ -19,15 +18,22 @@ declared algebraic identity may intern values.
 ## `LitModel` Trait
 
 ```rust
-pub trait LitModel {
+pub trait LitModel: 'static {
     type Value: LitVal;
     fn sorts(&self) -> &[LitSortDesc<Self::Value>];
     fn ops(&self) -> &[LitOpDesc<Self::Value>];
     fn sort_of(val: &Self::Value) -> &'static str;
     fn parse_as(&self, sort_name: &str, token: &str) -> Option<Self::Value>;
+    fn parse_any(&self, token: &str) -> Option<(&'static str, Self::Value)>;
+    fn find_op(&self, name: &str) -> Option<&LitOpDesc<Self::Value>>;
+    fn is_lit_sort(&self, name: &str) -> bool;
     fn is_truthy(val: &Self::Value) -> bool;
 }
 ```
+
+`parse_as`, `parse_any`, `find_op`, and `is_lit_sort` have default bodies that scan
+`sorts()` or `ops()`; a model supplies `Value`, `sorts`, `ops`, `sort_of`, and
+`is_truthy`.
 
 Each model declares concrete sorts (IBig, bool, etc.) and primitive
 operations (+, -, *, <, etc.) with their evaluation functions.
@@ -36,9 +42,9 @@ operations (+, -, *, <, etc.) with their evaluation functions.
 
 | Model | Sorts | Use case |
 |-------|-------|----------|
-| `BignumModel` | bool, IBig, UBig, RBig | Arbitrary precision |
+| `BignumModel` | bool, IBig, UBig, RBig | Arbitrary precision; the CLI default (`--types bignum`) |
 | `MachineModel` | bool, i64, u64, f64, usize, String | Machine and string operations |
-| `AllModel` | All of the above | Testing (full sort set) |
+| `AllModel` | All of the above | Full sort set (`--types machine,bignum`) |
 | `NiraModel` | bool, IBig, RBig | Internal unit tests |
 
 ## `LitValStore`
@@ -135,4 +141,4 @@ If the user writes bare `42` where `Expr` is expected, it is a sort
 mismatch error. The user must explicitly write `(Num 42)`.
 
 ---
-[← Ch 12: Rule Application](12-rule-application.md) · [Table of Contents](00-table-of-contents.md) · [Ch 14: Soundness →](14-soundness.md)
+[← Ch 9: Saturation](09-saturation.md) · [Table of Contents](00-table-of-contents.md) · [Ch 11: Extraction →](11-extraction.md)

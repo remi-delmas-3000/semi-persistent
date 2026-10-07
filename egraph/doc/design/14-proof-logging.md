@@ -1,7 +1,6 @@
-# Chapter 15 — Proof Logging
+# Chapter 14 — Proof Logging
 
-[← Ch 14: Soundness](14-soundness.md) · [Table of Contents](00-table-of-contents.md) · [Ch 16: Extraction →](16-extraction.md)
-
+[← Ch 13: Soundness](13-soundness.md) · [Table of Contents](00-table-of-contents.md)
 
 ## Motivation
 
@@ -29,11 +28,12 @@ have been saved before re-canonization.
 
 ### Copy-on-First-Re-Canonization
 
-During rebuild, when `recanonize_node` is about to update a node's
-children:
+During rebuild, when `recanonize_node` finds that a node's children changed:
 
 1. Check the history bit.
-2. If clear: save the original children to a proof buffer, set the bit.
+2. If clear: append the original node to the cache's `history` column (variadic
+   caches use `history_nodes` and `history_children`), and write the recanonized
+   node with the bit set.
 3. If already set: skip (children were already saved in a previous
    rebuild cycle).
 
@@ -44,7 +44,7 @@ multiple rebuild cycles.
 ## `Justification`
 
 ```rust
-pub enum Justification<G: Copy> {
+pub enum Justification<G: DenseId> {
     Filler,
     Rewrite { rule_id: RuleId },
     Congruence { node_a: G, node_b: G },
@@ -54,6 +54,7 @@ pub enum Justification<G: Copy> {
     ACAxiomCP { node_a: G, node_b: G },
     Cancellative { node_a: G, node_b: G },
     InverseCancel { node_a: G, node_b: G },
+    Assumption { lit: <G as DenseId>::Index },
 }
 ```
 
@@ -65,6 +66,10 @@ pub enum Justification<G: Copy> {
   another caller-supplied axiom merge.
 - The five AC-specific variants identify critical-pair, inter-reduction,
   semantic-axiom, cancellative, and inverse-cancellation merges.
+- `Assumption`: a companion solver (the `satcore` crate's EUF layer) asserted an
+  equality atom true, and the merge is that assertion. `lit` is an opaque word of the
+  configuration's index width whose encoding the client owns; proof extraction
+  surfaces it as a leaf antecedent for the client's conflict analysis.
 
 The distinction between `Rewrite` and `Axiom` matters for proof
 presentation: rewrites reference user-defined rules (by index),
@@ -76,7 +81,7 @@ The union-find stores a `Justification` edge for each union operation
 in the `justification` vector (only allocated when `PROOFS = true`).
 
 The proof forest uses the uncompressed `parent_proof` vector
-(see Chapter 2), not the path-compressed `parent`. This
+(see Chapter 2), not the path-halved `parent`. This
 preserves the original merge tree so the proof system can walk from
 any node to the root, collecting justifications along the way.
 
@@ -171,7 +176,7 @@ Two variants are provided:
 The compact table has the same O(n) build bound and O(log n) query bound
 because its block size is O(log n).
 
-The production batch path is `EGraph::dump_all_proofs`, exposed by
+The batch path is `EGraph::dump_all_proofs`, exposed by
 `--proofs --dump-proofs FILE`. It builds one `LcaTable`, queries one LCA per
 e-node, and writes the path from each node to its current representative.
 Writing remains O(total emitted proof steps); O(1) describes the LCA query,
@@ -263,4 +268,4 @@ Accordingly, this chapter does not claim a machine-checked theorem that every
 emitted explanation is a valid independently checked certificate.
 
 ---
-[← Ch 14: Soundness](14-soundness.md) · [Table of Contents](00-table-of-contents.md) · [Ch 16: Extraction →](16-extraction.md)
+[← Ch 13: Soundness](13-soundness.md) · [Table of Contents](00-table-of-contents.md)

@@ -1,6 +1,320 @@
-# Chapter 18 — Semi-Naive Evaluation
+# Chapter 9 — Saturation: the Interpreter, Naive and Semi-Naive Evaluation
 
-[← Ch 17: Interpreter and Saturation Loop](17-interpreter.md) · [Table of Contents](00-table-of-contents.md) · [Ch 19: Anti-Unification →](19-anti-unification.md)
+[← Ch 8: Indexes and Leapfrog](08-indexes-and-leapfrog.md) · [Table of Contents](00-table-of-contents.md) · [Ch 10: Literal Model →](10-literal-model.md)
+
+## 9.1 Interpreter and Saturation Loop
+
+### Putting It All Together
+
+The interpreter is the top-level driver that ties every component
+together. It processes a sequence of `CCommand`s (the output of
+sortcheck, §7.2) against a live e-graph. Declaration commands
+register sorts and operators. Ground terms are built bottom-up.
+Rules are compiled and stored. `(run N)` triggers the saturation
+loop. `(push)`/`(pop)` snapshot and restore the mutable logical state:
+the e-graph, runtime globals, and rules added after the mark. Static
+registries, configuration, scratch capacity, and last-run diagnostics are
+not rolled back. `(pop)` is the fused `EGraph::restore_and_pop`: it returns to
+the checkpoint and drops that scope in one move, on one pop core per column,
+which is what makes it cost what the pre-semantics-B restore cost (containers
+doc 08 §1). This path requires `TRACK = true` (as used by the CLI); an untracked
+member cannot take a frame, so the group refuses the mark.
+
+The saturation loop itself is the classic equality saturation
+algorithm: rebuild, index, schedule, match, apply, repeated until
+fixpoint or the iteration limit.
+
+### `Interpreter`
+
+```rust
+pub struct Interpreter<Cfg, L, M, const TRACK: bool, const PROOFS: bool> {
+    pub eg: EGraph<Cfg, L, TRACK, PROOFS>,
+    pub model: M,
+    rules: Vec<saturate::Rule<Cfg::O, Cfg::S, L>>, // Ordinary(PreparedRule) or Sequence(..)
+    globals: GlobalCtx<Cfg::S, Cfg::G>,
+    marks: Vec<Mark<Cfg, Cfg::O>>,
+    shrink_policy: ShrinkPolicy,
+    strategy: SaturationStrategy,          // naive or semi-naive (run N) dispatch
+    ac_mode: AcMode,                       // Off, Eager, or Lazy completion
+    lazy_ac_rounds: usize,                 // alternation budget for a lazy check's second phase
+    lazy_txn: Option<EGraphToken>,         // the shared lazy-check transaction, Some while open
+    last_sat: Option<SatResult>,           // outcome of the most recent (run …)
+    last_run_time: Option<Duration>,       // wall time of the most recent (run …)
+    index_scratch: IndexScratch<Cfg>,      // index build scratch, reused across runs
+}
+
+struct Mark<Cfg, O> {
+    token: EGraphToken,
+    rules_len: usize,
+    globals_len: usize,
+    _phantom: PhantomData<(Cfg, O)>,
+}
+```
+
+### Command Execution
+
+The `run_checked` method processes each `CCommand` in order. Declaration
+commands are no-ops: they were already registered during sortcheck.
+Ground-term commands (`Let`, `Insert`, `Union`, `Check*`, `Extract`)
+build `CTerm`s bottom-up and then act on the resulting ids. Rule
+commands compile the RHS and append to the rule set. `Run(n)` enters
+the saturation loop for up to `n` iterations. `Push`/`Pop` snapshot
+and restore the e-graph along with rule and global counts. Surface-language
+declarations are static: the full program is sortchecked first, so every
+declaration has already been registered before any interpreted `Push`.
+
+| Command | Action |
+|---------|--------|
+| `Decl(_)` | No-op (registered during sortcheck) |
+| `Let(name, ct)` | Build CTerm → bind in globals |
+| `Insert(ct)` | Build CTerm |
+| `Union(a, b)` | Build both → merge → rebuild |
+| `Check(ct)` | Build CTerm (assert exists) |
+| `CheckEq(a, b)` | Build both → rebuild → check equality; Lazy may run goal-directed completion |
+| `CheckNeq(a, b)` | Build both → rebuild → check current non-membership; Lazy searches before accepting |
+| `Extract(ct)` | Build → rebuild → extract_best → print |
+| `ExtractWith { .. }` | Build → rebuild → extract under a cost model (`cost_models::run`) |
+| `CollectionRule(r)` | Register the sequence rule → push to rules |
+| `DumpEGraph { root, file }` | Build → rebuild → write the e-graph JSON to `file` |
+| `Rewrite { query, rhs, .. }` | Compile RHS → push to rules (with its ruleset) |
+| `Rule { query, actions, .. }` | Compile actions → push to rules (with its ruleset) |
+| `Run { ruleset, limit, until }` | Build the goal terms → saturate under a `RunSpec` |
+| `PrintSize(op)` | Per-op node counts and total, or one op's count |
+| `PrintStats(file)` | Last run's counters, as text or JSON |
+| `AntiUnify { .. }` | Build both → rebuild → construct `AuSnapshot` → run Exact or UCT |
+| `CheckAu { .. }` | Build both → rebuild → construct `AuSnapshot` → run AU and assert the returned size bound |
+| `Push(shrink)` | With `TRACK = true`, snapshot e-graph + rule/global counts (`:shrink` reclaims capacity) |
+| `Pop` | `restore_and_pop` the e-graph + truncate rules and runtime globals; `PopWithoutPush` with no open mark |
+
+### Building a `CTerm`
+
+```rust
+fn build_cterm(&mut self, ct: &CTerm) -> Result<(G, S), InterpError> {
+    Ok(match ct {
+        CTerm::Lit(val, sort) => {
+            let lit_op = eg.ops().lit_op_for_sort(sort);
+            let vid = eg.lits_mut().intern(val.clone());
+            (eg.add_lit(lit_op, vid), sort)
+        }
+        CTerm::App { op, sort, children } => {
+            let kids = match op's AssocDir {
+                None => children.map(|c| self.build_counted(c)?),   // (id, count) pairs
+                Some(dir) => self.push_seq_args(children, op, dir)?, // flatten the nesting
+            };
+            (eg.add_with_counts(op, &kids)?, sort)
+        }
+        CTerm::Counted(t, _) => self.build_cterm(t)?,  // the count is read by the parent
+        CTerm::Global(name, sort) => {
+            let (_, _, id) = self.globals.get(name);
+            (eg.find(id), sort)
+        }
+    })
+}
+```
+
+Applications and literals need no name lookup or sort check. The
+`CTerm::Global` arm intentionally performs a `GlobalCtx` hash lookup because
+checked global ground terms retain their source name.
+
+### Saturation Loop
+
+```rust
+pub fn saturate_rules_naive(rules, eg, model, spec, globals, scratch)
+    -> Result<SatResult, SatError> {
+    for i in 0..spec.limit {
+        eg.rebuild();
+        width_check(eg)?;
+        if goal_met(spec, eg) { return Ok(goal_result(i)); }
+        let index = IndexStore::build_with(eg, scratch);
+        let stats = IndexStats::from_index(&index);
+        let mut changes = 0;
+        for ordinary rule in rules matching spec.ruleset {
+            changes += apply_rule_pooled(rule, eg, index, stats, model, globals)?;
+        }
+        changes += apply_sequence_batch(sequence rules, eg, &index, &stats, ..)?;
+        index.recycle_into(scratch, true);
+        if changes == 0 {
+            return Ok(saturated_result(i + 1));
+        }
+    }
+    if spec.until.is_some() {
+        eg.rebuild();
+    }
+    Ok(budget_result(spec.limit, goal_met(spec, eg)))
+}
+```
+
+Each iteration begins by rebuilding (propagating pending merges and
+detecting congruences), then constructs sorted indices from scratch,
+schedules each rule based on current cardinalities, executes the
+plans via leapfrog triejoin, and applies the resulting actions. If
+the action counter is zero, `SatResult::saturated` reports an operational
+fixpoint for this driver. This is not a theorem of logical completeness.
+`Union` increments only for a new merge, but `Insert` increments whenever it is
+applied and `Subsume` increments whenever it is applied; those conservative
+counters can keep a run from reporting saturation even when an insertion
+hash-conses to an existing node.
+
+`SatResult` also carries `match_steps`: one count per executed lowered
+matching step plus one per emitted match, across all rounds. It is populated
+only when match-step counting is enabled (off by default; see the
+instrumentation note below). It is an implementation work proxy, not a count
+of semantic matches or a machine-independent runtime measure.
+
+### Saturation Strategy
+
+The loop above is the **naive** strategy: every round rediscovers all
+matches against the freshly-built full index. The interpreter can
+instead run **semi-naive** evaluation, which matches only what changed
+each round:
+
+```rust
+pub enum SaturationStrategy { Naive, SemiNaive }  // default: Naive
+
+interp.set_strategy(SaturationStrategy::SemiNaive);
+```
+
+`(run N)` calls `EGraph::saturate_rules_in`, which dispatches on the selected
+strategy: `Naive` calls `saturate_rules_naive`, and `SemiNaive` calls
+`saturate_rules_semi` with merge-member tracking switched on for the run. On the CLI the strategy
+is chosen with `--use-semi-naive` or `--use-naive` (mutually exclusive;
+the default is naive), and match-step counting is enabled with
+`--count-match-steps`, which prints the total match work at the end of
+the run. Semi-naive does not switch the whole run to naive automatically.
+Individual rules use a full-index match in rounds after the first when they
+are tagged `:flatten`, have no scanning atom, or contain equality/global constraints
+whose enabling merge is not represented by an atom delta. Its mechanism (the `touched` log, delta index,
+`VariantIndex`, and the k-variant fan-out) is the subject of §9.2.
+
+A ruleset with sequence rules runs them in each round, after the round's ordinary
+rules and on the same snapshot, as entries of the rule list (`saturate::Rule::Sequence`); the strategy flag
+covers them too (§7.6, "Semi-naive evaluation"). `(run … :until …)` works over
+such a ruleset.
+The intended soundness and naive-fixpoint equivalence are justified by the
+delta decomposition and finite differential/regression tests; they are not
+machine-checked end-to-end theorems.
+
+### Run Control: Rulesets and Goals
+
+`(run N)` runs the **default** ruleset: the rules with no `:ruleset`
+tag. `(run name N)` runs the rules
+tagged `:ruleset name` and nothing else. Both directions of that scoping
+matter: a scoped experiment (an AC block, say) must not fire under the
+main run, and the main run's rules must not fire under it. Ruleset ids
+are assigned by sortcheck in declaration order and stored on the
+`PreparedRule`, so the driver's filter is one integer comparison per
+rule per round.
+
+Ruleset names and ids are static: their name table lives for one
+`sortcheck_program` call and is not rolled back. Rule entries themselves
+are runtime state, so a rule command interpreted after `(push)` is removed
+by the matching `(pop)`.
+
+`(run [ruleset] N :until (= a b))`, or `(!= a b)`, stops the run as
+soon as the goal holds. The goal's terms are ground, so they are built
+once, before the run; only their classes move afterwards, and the check
+is two `find`s. Every observation follows rebuild, then occurs before rule
+matching, including in the first iteration, so a goal that already holds costs
+zero iterations. If the final permitted round changes the graph, one last
+rebuild and goal check occurs at budget exhaustion. `SatResult.goal_met`
+distinguishes stopping on the goal from reaching a fixpoint: the goal can be
+met with rules still firing.
+
+Building the goal's terms adds those nodes to the e-graph, which is
+observable: the same nodes a `(check …)` of the goal would add.
+
+For `:until (!= a b)`, "holds" means the two current representatives differ.
+It is not a maintained semantic disequality, and it commonly succeeds at
+iteration zero when the rebuilt terms begin apart.
+
+### Statistics
+
+`(print-size)` lists the node count of every operator that has nodes,
+then the total; `(print-size Op)` prints one operator's count as a bare
+integer. `(print-stats)` reports the e-graph's current size and the
+counters of the most recent run: nodes, classes, iterations, match
+steps, wall time, whether it saturated, and whether its goal was met.
+`(print-stats :file "p.json")` writes the same numbers as a flat JSON
+object for a harness to parse.
+
+Match steps are only accumulated into the thread-local total while its counter
+is armed. Each query first tallies into its `MatchPool`; the total is folded
+into the thread-local once per query, not loaded once per matching step. The
+interpreter arms counting when the program contains `print-stats`, so asking
+for stats is enough to get a nonzero work count.
+
+`wall_time_ms` measures the saturation call. Construction and any pre-run
+rebuild required by newly inserted `:until` goal terms occur before the timer
+starts. The driver's unconditional rebuilds are included.
+
+### AC Completion Modes
+
+- `Off` (default): each rebuild alternates `rebuild_congruence`, including
+  structural canonization and local algebraic normalization, with
+  `canon_repair_round` (inverse-pair cancellation) until neither changes anything,
+  without global AC completion.
+- `Eager`: rebuild interleaves congruence with completion rounds. Only
+  `CompletionOutcome::Converged` means the implementation reached its
+  full-round operational fixpoint; it is not by itself a machine-checked
+  semantic-completeness result.
+- `Lazy`: ordinary saturation keeps completion off. Consecutive equality
+  checks share a marked, goal-directed completion transaction, and the first
+  non-equality command restores it. Goal or resource stopping can leave the
+  completion search intentionally unfinished.
+
+### Push/Pop Scoping
+
+```rust
+Push(shrink) => {
+    let policy = if shrink {
+        ShrinkPolicy::IfOverallocated { factor: 4, headroom: 2 }
+    } else {
+        self.shrink_policy  // default: Never
+    };
+    marks.push(Mark {
+        token: eg.mark(policy),
+        rules_len: rules.len(),
+        globals_len: globals.len(),
+    });
+}
+
+Pop => {
+    let mark = marks.pop().ok_or(InterpError::PopWithoutPush)?;
+    eg.restore_and_pop(mark.token);           // restore, then drop the scope
+    rules.truncate(mark.rules_len);
+    globals.truncate(mark.globals_len);
+}
+```
+
+`(push)` snapshots with the interpreter's default policy (normally
+`Never`, so capacity ratchets to the high-water mark). `(push :shrink)`
+forces `IfOverallocated`, reclaiming excess capacity before the
+snapshot. This is useful for top-level marks after major search resets
+where the previous branch was much larger than the next one will be.
+
+Restore takes no policy; it just undoes. Shrinking at restore time
+would cause unnecessary reallocations when the next branch grows back
+to a similar size (see Chapter 2).
+
+`EGraph::mark` delegates to tracked containers, so executing `Push` or
+`Pop` on `Interpreter<..., TRACK = false, ...>` is unsupported. The generic
+type remains useful for programs that do not use snapshots.
+
+### `GlobalCtx` Synchronization
+
+During sortcheck, `GlobalCtx<S, ()>` tracks global names and sorts
+(no runtime bindings). During interpretation, `GlobalCtx<S, G>` tracks
+names, sorts, and actual e-class bindings.
+
+Both process `Let` commands in the same order and truncate at the same
+`Push`/`Pop` boundaries, so `GlobalVarId` indices assigned during sortcheck
+match those assigned at runtime. `GlobalCtx::truncate` also restores an outer
+name when a discarded inner `let` shadowed it; names first introduced in the
+discarded suffix are removed. Patterns reference globals via
+`PatVar::Global(GlobalVarId)`, which indexes directly into the interpreter's
+`GlobalCtx`.
+
+## 9.2 Semi-Naive Evaluation
 
 **Status**: implemented. Select with `saturate_semi` / the
 `SaturationStrategy::SemiNaive` interpreter strategy / `--use-semi-naive`
@@ -8,18 +322,18 @@ on the CLI. The default remains naive; there is no
 automatic fallback. Deferred: delta-size fallback, trigger pre-filter,
 and the pluggable B+tree full-index backend (see Open Questions).
 
-The delta index is built through the arena in Chapter 6, so its construction
+The delta index is built through the arena in §8.1, so its construction
 work is proportional to the delta stream rather than the full index's key
 space. Older hand-timed dense-span and single-round results are historical and
 do not establish current end-to-end performance. Current naive/semi-naive
 comparisons belong in the `saturate_bench` Criterion harness and must use the
 same revision and workload.
 **Scope**: e-matching loop and `IndexStore`.
-**Depends on**: [Ch 6: Index](06-index.md), [Ch 7: Leapfrog Triejoin](07-leapfrog.md), [Ch 8: Query Compilation](08-query-compilation.md), [Ch 9: Pattern Matching](09-pattern-matching.md).
+**Depends on**: [§8.1: Index](08-indexes-and-leapfrog.md#81-index-construction), [§8.2: Leapfrog Triejoin](08-indexes-and-leapfrog.md#82-leapfrog-triejoin), [§7.3: Query Compilation](07-rules-and-pattern-matching.md#73-query-compilation-and-scheduling), [§7.4: Pattern Matching](07-rules-and-pattern-matching.md#74-pattern-matching-execution).
 
-## Motivation
+### Motivation
 
-The naive saturation loop (Chapter 17) can rediscover the same matches every
+The naive saturation loop (§9.1) can rediscover the same matches every
 round.
 
 Each round:
@@ -36,7 +350,7 @@ frozen index; they become visible after the next rebuild and index build.
 
 In a simple model where match sets only grow, the total discovery work over
 N rounds is `sum |M_K|`, which can approach `O(N * |M_N|)` even though
-only the increments are new. Production match sets are not generally
+only the increments are new. The implemented match sets are not generally
 monotone: subsumption removes nodes from indices, and recanonicalization can
 change which tuples a snapshot contains. The model illustrates repeated
 discovery; it is not a general invariant of the engine.
@@ -52,7 +366,7 @@ recanonicalized, or exposed through class growth. Rules whose enabling
 events cannot be represented by that delta use the full matcher every
 round.
 
-## The Key Invariant and Its Scope
+### The Key Invariant and Its Scope
 
 For a rule accepted by the delta path, every match that becomes available
 across two round snapshots has at least one scanning atom whose node is in
@@ -73,7 +387,51 @@ A naive way to compute `delta_matches` would be "compute all matches,
 filter for the ∃ condition." Semi-naive decomposes it into a disjoint
 union of k restricted joins, one per atom position.
 
-## The K-Variant Decomposition
+#### A soundness requirement on every index filter
+
+The invariant above says every new match has a scanning atom whose node is in `delta`.
+That holds only if the index build keeps, among the touched nodes, a representative of
+every content that became matchable. **A filter the index build applies may exclude a
+node only if the node's content is unmatchable, never merely because another node
+carries the same content.** The second kind of filter is correct against `full` and
+unsound against `delta`, because `full` and `delta` do not hold the same witnesses.
+
+The case that forced this out is `FLAG_CONGRUENT_DUP` (`node_types.rs`;
+Chapter 6 §6c). When a merge makes `f(x)` and `f(y)` congruent,
+rebuild recanonicalizes the node whose child moved, say `f(x)`, onto `f(y)`'s content,
+and the collision flags `f(x)` as the redundant copy. The touched log receives `f(x)`,
+whose canonical form changed, and not `f(y)`, whose content did not. So in `delta` the
+flagged copy is the *only* witness of that content. An index that skipped it — a filter
+that is correct in `full`, where `f(y)` stands in — would leave `delta` without it, and
+every variant whose delta atom is an `f` atom would miss the matches the merge enabled.
+Naive, reading `full`, finds them through `f(y)`: the two strategies would derive
+different equalities, and nothing would report it.
+
+This was the flag's first placement, and it was wrong. The rule that follows: the
+matcher keeps `FLAG_CONGRUENT_DUP` nodes and pays for redundant matches, which the match
+deduplication collapses; only consumers that enumerate a class's members as *distinct
+alternatives* — the dump and the extractors, which read the whole graph and never a
+delta — skip them. `FLAG_SUBSUMED` is the contrasting case: subsumption makes the
+node's own content unmatchable by definition, so skipping it in `delta` loses no witness
+the semantics requires.
+
+Pinned by `index::tests::congruent_dup_is_the_only_delta_representative`, which builds
+the delta from the rebuild's touched log and asserts the flagged copy is its only `f`
+node; `index::tests::congruent_dup_stays_in_the_full_index`; and end to end by the
+naive/semi-naive nested-growth property in `saturate::tests::prop`. Reintroducing the
+skip fails all three.
+
+The same requirement applies to a *join* filter, and `:flatten` is the first construct it constrains
+(§7.5, "Flattened Matching"). A flattened atom matches its node's views, and a view
+can contain a class that is not a stored child. So the scheduler gives a flattened
+atom's join no `by_contains` filter. For the same reason a flattened rule falls back to
+naive matching (`needs_naive_match`): its views change when a class below the node gains
+a member of the node's operator, an event that only the nested node's relation records.
+The fallback stays for ordinary flattened rules. Sequence rules under `:flatten` do not
+need it: their `Δ_collect` adds the climb through nesting from every affected and
+touched class, and the semi-filter test descends through the views' classes (§7.6, "Semi-naive evaluation").
+
+### The K-Variant Decomposition
 
 For a rule with k atoms, semi-naive runs k variants of the rule's
 query plan each round. Variant `i` (for `i ∈ 0..k`) restricts atoms
@@ -111,12 +469,13 @@ Without it, a match with multiple delta atoms (at positions
 `i < j`) would be found by variant `i` *and* variant `j`, producing
 duplicate emissions.
 
-### Which Atoms Count as Positions
+#### Which Atoms Count as Positions
 
 The "k atoms" above are the **join-producing atoms**: those that
 scan an index to generate candidate nodes. In our `RAtom` enum these
 are `Plain`, `AExact`, `APrefix`, `ASuffix`, `ABoth`, `ACExact`,
-`ACSub`, `ACIExact`, `ACISub`, `Lit`, and `LitBind`. The built-in
+`Comm`, `ACSub`, `ACIExact`, `ACISub`, `Lit`, `LitBind`, and `Collect` (`saturate::atom_op`).
+The built-in
 constraint atoms `Eq`, `EqGlobal` and `Pred` are **excluded** from the
 variant count: they do not scan a relation, they only check or
 propagate bindings between already-bound variables. They have no
@@ -133,16 +492,20 @@ merge); a class's membership grows without any node changing shape.
 The third kind exists because the union can keep the representative
 the parents already store: nothing recanonicalizes, yet joins through
 that class gain tuples. `merge_in_classes` therefore records the
-absorbed class's member nodes in the touched log on every merge (the
+absorbed class's member nodes in the touched log on every merge while merge tracking
+(`track_merge_members`) is on, which the semi-naive driver sets for its run (the
 class-growth delta), and `--union-by size` keeps that recording
 amortized by absorbing the smaller side. Constraint atoms are applied as
 filters uniformly across variants. Rules with constraint/global shapes
 that violate the premise bypass the variants.
 
-**Two rule shapes have no delta to read and match the whole graph
+**Three rule shapes have no delta to read and match the whole graph
 every round** (`saturate::needs_naive_match`):
 
-- A constraint between two atoms' *node* variables, which the
+- An ordinary rule tagged `:flatten`: its views are not a function of the delta
+  rows the variants read (§7.5, "Naive under semi-naive").
+- An `Eq` constraint with a *node* variable on either side, or an `EqGlobal` on a
+  node variable, which the
   root-binding form `(= v pat)` produces. The match becomes available
   when the two classes merge, and neither atom's relation gains a
   tuple it scans for. The `matrix` translation exposed this correctness
@@ -160,14 +523,14 @@ every round** (`saturate::needs_naive_match`):
   companion `semi_merge_membership_delta.egg` pins the class-growth
   delta itself, where a scanning atom exists and the delta suffices.
 
-## Worked Example: Nested Patterns and Flattening
+### Worked Example: Nested Patterns and Flattening
 
 The invariant above talks about k atoms in abstract. For our e-graph,
 atoms come from flattening nested patterns, so it's worth walking
 through a concrete case to see how nesting interacts with the
 k-variant partition.
 
-### Pattern
+#### Pattern
 
 Consider a rule with a nested LHS:
 
@@ -180,7 +543,7 @@ child being an `add(?x, ?y)` and its second child being another
 `mul(?z, ?y)`. The `?y` variable is shared between the two inner
 atoms.
 
-### Flattening (Ch 11)
+#### Flattening (§7.2)
 
 The flattening pass (`flatten_surface`) emits child applications
 left-to-right before their parent, and the resolver preserves that order.
@@ -201,7 +564,7 @@ After flattening, there is no "nested" atom anymore: there are three
 atoms sitting in a flat list, joined by shared variables. **Semi-naive
 operates on this flat list**; it never sees the pattern tree.
 
-### Matches are Node-Tuples
+#### Matches are Node-Tuples
 
 A match of R is a 3-tuple of nodes `(n_0, n_1, n_2)` such that:
 
@@ -215,7 +578,7 @@ A match of R is a 3-tuple of nodes `(n_0, n_1, n_2)` such that:
 "Atom `i` is in delta" means `n_i` was added, recanonicalized, or
 logged because its class was absorbed during the transition.
 
-### The Three Variants
+#### The Three Variants
 
 For this 3-atom rule, semi-naive runs three plan variants. In each,
 one atom is delta-restricted (all index lookups for that atom read from
@@ -260,7 +623,7 @@ The outer-mul join reads its delta bucket. Extracting its children binds
 the two inner node variables; their re-joins both use
 `FullMinusDelta` cursors.
 
-### Why This Partitions Matches Correctly
+#### Why This Partitions Matches Correctly
 
 Consider a match where **all three** nodes happen to be in delta
 this round: `(n_0 ∈ delta, n_1 ∈ delta, n_2 ∈ delta)`. This can
@@ -288,7 +651,7 @@ Now consider a mixed match where only atom 1 is in delta:
 
 Again, found exactly once.
 
-### Why the Upper Half Stays Unrestricted
+#### Why the Upper Half Stays Unrestricted
 
 Why not symmetric: why not restrict *both* halves (lower and upper)
 to `full \ delta` around the one delta atom?
@@ -325,13 +688,13 @@ sub-bins keyed on which higher positions are also new: that's
 `2^k` variants instead of `k`. Linearity is what makes the algorithm
 tractable.
 
-### Atom Numbering vs Execution Order
+#### Atom Numbering vs Execution Order
 
 A subtle but important point: **atom numbering** (used to define
 "position `i`", variant `i`, lower-vs-upper) is separate from
 **execution order** (chosen by the scheduler per variant).
 
-The scheduler in Ch 8 picks atom order by selectivity. Within a
+The scheduler in §7.3 picks atom order by selectivity. Within a
 variant, the delta-restricted atom has its delta-bucket base cardinality, but
 fanout and sampled-selectivity terms can still make another atom the first
 driver regardless of where either atom sits in the numbering.
@@ -344,7 +707,8 @@ step sequence per variant per round from that round's cardinalities. Under
 `Runtime`, and under `Auto` for a rule whose measured skew crosses the
 threshold, the matcher instead chooses the next atom per partial binding
 (falling back to the static plan for queries wider than 64 atoms or node
-variables). Chapter 20 describes those modes. In every case the stable atom
+variables, and for sequence and `:flatten` queries, whose `Collect` and `Flatten`
+steps only the static scheduler lowers). §8.3 describes those modes. In every case the stable atom
 number, not execution position, selects the semi-naive index mode, so
 reordering changes cost rather than the variant's result set.
 
@@ -356,7 +720,7 @@ restriction on atom 0 applies regardless of whether the scheduler
 probed it first or last: it's a filter on atom 0's index, not an
 ordering constraint.
 
-### The Payoff
+#### The Payoff
 
 For this rule, naive matching each round sees only full-index modes.
 Semi-naive runs three variants, each with one atom restricted to its delta
@@ -371,7 +735,7 @@ nesting*: it just picks which atom is delta-driven, using the same
 k-variant machinery that would apply to a non-nested rule with k
 independent atoms.
 
-## Where the Savings Come From
+### Where the Savings Come From
 
 The following model isolates outer-loop discovery work: iterate the driver
 atom's index and probe the remaining atoms for each element. Current
@@ -379,7 +743,7 @@ atom's index and probe the remaining atoms for each element. Current
 is linear in driver size. Whether this component dominates a workload is a
 Criterion measurement, not an invariant.
 
-The scheduler (Ch 8) already picks the driver by selectivity. When the
+The scheduler (§7.3) already picks the driver by selectivity. When the
 delta-restricted atom is the smallest in its variant, the scheduler drives from
 it.
 
@@ -396,7 +760,7 @@ It sees a mode-specific base cardinality for every atom via
 picks the cheapest. Semi-naive falls out of providing the right per-atom stats
 for each variant.
 
-## Illustrative Cost Model: 4-Atom Pattern, 100K Full, 1K Delta
+### Illustrative Cost Model: 4-Atom Pattern, 100K Full, 1K Delta
 
 The following arithmetic makes the asymptotic argument concrete. It is a model,
 not benchmark evidence. Setup:
@@ -409,7 +773,7 @@ not benchmark evidence. Setup:
 - Join constraints: each inner probe narrows to ~1% of the driver
   (typical for `by_child_pos` with one bound variable)
 
-### Outer-Loop Iteration Count (Dominant Cost)
+#### Outer-Loop Iteration Count (Dominant Cost)
 
 | Approach       | Per-variant outer size | Variants | Total outer iters |
 |----------------|------------------------|----------|-------------------|
@@ -418,7 +782,7 @@ not benchmark evidence. Setup:
 
 **Modeled outer-loop ratio: 25×.**
 
-### Probe and `Difference` Cost
+#### Probe and `Difference` Cost
 
 The 25× figure above models driver iterations only. It cannot be converted to
 a comparison-count ratio from the relation sizes alone. A
@@ -449,7 +813,7 @@ harness (and seek instrumentation) because probe gaps, cache behavior,
 scheduling, deduplication, and match application do not scale by that count
 alone.
 
-### Sensitivity to Delta Size
+#### Sensitivity to Delta Size
 
 Fix `|full| = 100K`, k = 4. Vary `|delta|`:
 
@@ -469,7 +833,7 @@ to the naive path is the right move (see Open Questions).
 Actual crossover also includes index construction, scheduling, filtering,
 deduplication, and match application, so it must be measured.
 
-### Sensitivity to Pattern Size
+#### Sensitivity to Pattern Size
 
 Fix `|full| = 100K`, `|delta| = 1K`. Vary k:
 
@@ -486,7 +850,7 @@ The modeled ratio decays as
 `|full_driver| / (k × |delta_driver|)`; the last row is 10× under
 the table's uniform-selectivity assumptions.
 
-### Saturation Where It Wins Asymmetrically
+#### Saturation Where It Wins Asymmetrically
 
 The model gives semi-naive its largest ratio when a saturation does most of its
 growth early and then converges slowly. Example: round 1 adds 100K nodes;
@@ -504,7 +868,7 @@ In the outer-loop model, tail rounds become cheap when delta is tiny, while
 naive still pays a full scan. Criterion must determine how much of that
 asymmetry survives the fixed and non-matching costs.
 
-### Caveats
+#### Caveats
 
 These modeled numbers assume **uniform selectivity across atoms**. Real
 patterns have bottleneck atoms: one very rare op can drive the join
@@ -517,7 +881,7 @@ matches while the eligible semi-naive path omits them. Both use the same
 action implementation for a match they do emit, but they need not emit the
 same number of applications per round.
 
-## The Three Index Flavors
+### The Three Index Flavors
 
 Semi-naive requires three logical index flavors per index family
 (`by_op`, `by_repr`, `by_child_pos`, `by_contains`):
@@ -541,10 +905,10 @@ impl<K, A, B> SortedCursor for Difference<A, B>
 where A: SortedCursor<Key = K>, B: SortedCursor<Key = K>
 {
     type Key = K;
-    // skip routine, run on every access:
+    // skip routine, run by new() and after every step/seek:
     //   loop { k = full.key()?; delta.seek(k);
     //          if delta.key() == Some(k) { full.step() } else { break } }
-    //   key()  = skip(); full.key()
+    //   key()  = full.key()
     //   step() = full.step(); skip()
     //   seek(t)= full.seek(t); delta.seek(t); skip()
 }
@@ -563,11 +927,11 @@ It is built **only** for `full \ delta` atoms (`j < i`); full and delta
 atoms use bare base cursors. See "How a Variant Executes" for how the
 two cursor types coexist without an enum or trait object.
 
-### The Delta Index
+#### The Delta Index
 
 The delta index exists for exactly one round. It's built from a
 **touched log**: an append-only list of node ids that were created,
-recanonicalized, or members of a class absorbed by a merge during the
+recanonicalized, or subsumed, or members of a class absorbed by a merge during the
 round (the class-growth delta). (The same
 log has a second consumer: AC completion's incremental superposition
 watermarks it to superpose only critical pairs with a changed endpoint,
@@ -590,16 +954,18 @@ round. The canonicalization behind those keys is stored once, on `full`
 (`IndexStore::repr`), and every canonicalization the matcher performs reads
 it rather than the live union-find, including the ones inside a variant's
 `Difference` cursors, which would otherwise subtract a delta bucket from a
-full bucket that a mid-round merge had moved. Chapter 09, "Which Snapshot",
+full bucket that a mid-round merge had moved. §7.4, "Which Snapshot",
 states the contract and why it is what makes a variant's match count
 comparable across variants and across rounds.
 
 The touched log is a single `Vec<Cfg::G>` field on `EGraph`,
 populated during rebuild via an out-param threaded through
 `recanonize_node` (one push per genuinely-changed node) and in
-`register_if_fresh` (one push per freshly-created node). It is
+`register_if_fresh` (one push per freshly-created node); `merge_in_classes` (under merge
+tracking) and `subsume` push into the same log. It is
 round-local scratch, cleared after each round's snapshots are built. Duplicates are
-removed by the sort-dedup in step 1, so no separate hash set is
+removed by the sort-dedup in step 2 (`IndexStore::build_delta_with`), so no separate
+hash set is
 needed.
 
 **The delta index has the same representation as the full index, a
@@ -607,7 +973,7 @@ needed.
 read once, discarded. The access pattern is pure outer-loop iteration, which
 favors contiguous memory.
 
-### Global, Not Per-Cache
+#### Global, Not Per-Cache
 
 The delta is stored **globally**: one delta `IndexStore` for the whole
 e-graph, mirroring the global full `IndexStore`. It is *not* partitioned
@@ -618,7 +984,7 @@ per node cache. This falls directly out of how indexing works today:
   pos)]`, `by_contains[repr]`. It is built by scanning every node id
   `0..node_count` once. It is not organized by arity-class.
 - The node **caches** (`FixedArityCache` for arity 0–3 / commutative,
-  `VariableArityCache` for A/AC/ACI, `LitCache`) partition nodes by
+  `VariableArityCache` for plain n-ary and A/AC/ACI, `LitCache`) partition nodes by
   arity-class for storage and hash-consing. One registered operator has
   one fixed kind, so a particular `by_op[op]` bucket comes from one
   cache. The index family as a whole spans all caches, while
@@ -633,7 +999,7 @@ nothing. Instead:
 - **Origin (per-cache + global)**: each cache's `recanonize_node` pushes
   changed node ids through the `&mut Vec<G>` out-param;
   `register_if_fresh` pushes new node ids. Both land in the single
-  `EGraph::touched` vector.
+  `EGraph::touched` vector, as do `merge_in_classes` and `subsume`.
 - **Storage (global)**: `IndexStore::build_delta(eg, &touched)` scans
   just the touched ids and buckets them into one global delta
   `IndexStore` with the same four crosscutting maps as `full`.
@@ -642,7 +1008,7 @@ The touched *log* is global scratch; the delta *index* is global; only
 the change-*detection* is per-cache, because that is simply where
 recanonicalization physically happens.
 
-### The Full Index
+#### The Full Index
 
 The full index is the performance-sensitive half. Its access patterns
 are different from delta's:
@@ -659,7 +1025,7 @@ are different from delta's:
 
 This is where the backend choice becomes interesting.
 
-## Backend Choice for the Full Index
+### Backend Choice for the Full Index
 
 Today the full index is **Option A below**: four `DenseSpanMap<G>`
 families bulk-built each round; each bucket is a contiguous sorted slice
@@ -680,7 +1046,7 @@ microbenchmarks alone cannot settle.
 The table states implementation shape, not a speed ranking. A ranking requires
 same-revision Criterion measurements over representative multi-round workloads.
 
-### Option A: `DenseSpanMap<G>`, bulk-rebuilt each round
+#### Option A: `DenseSpanMap<G>`, bulk-rebuilt each round
 
 What the current `IndexStore` does. It pays work proportional to the
 generated index streams plus occupied keys each round. Those streams include
@@ -699,7 +1065,7 @@ others, so `O(|full|)` is only shorthand when total arity is also linear.
 - **When it wins**: small graphs, or saturations where per-round work
   is match-bound rather than rebuild-bound.
 
-### Option B: `BPlusTreeSet<G, TRACK=false>`, incremental
+#### Option B: `BPlusTreeSet<G, TRACK=false>`, incremental
 
 B+tree with semi-persistence disabled. This is a candidate, not an
 implemented backend. A correct incremental index needs more than `insert`:
@@ -717,7 +1083,7 @@ would be rebuilt from the e-graph after `restore`.
 - **When it may win**: large graphs with many sparse-change rounds and rare
   `restore`; this requires end-to-end Criterion evidence.
 
-### Option C: `BPlusTreeSet<G, TRACK=true>`, semi-persistent
+#### Option C: `BPlusTreeSet<G, TRACK=true>`, semi-persistent
 
 Same as B, plus diff-log tracking. `restore` rolls the tree back by replaying
 the relevant diffs and rebuilding capture state rather than rebuilding the
@@ -734,7 +1100,7 @@ whole index.
   non-trivial full-index state that would otherwise be expensive to
   rebuild.
 
-### Why This Is an Empirical Question
+#### Why This Is an Empirical Question
 
 The choice is **workload-dependent** and cannot be resolved from
 microbenchmarks alone. The three axes that matter are:
@@ -752,7 +1118,7 @@ microbenchmarks alone. The three axes that matter are:
 Microbenchmarks answer parts of (1) but nothing about (2) or (3).
 Those need a full saturation loop with representative rulesets.
 
-### Status
+#### Status
 
 Option A is what ships: `DenseSpanMap` families with sorted bucket slices,
 bulk-rebuilt each round. The `saturate_bench` and corpus Criterion harnesses
@@ -761,7 +1127,7 @@ provide end-to-end measurement; implementing a mutable backend contract
 deferred and tracked in
 [`../future/semi-naive-deferred-work.md`](../future/semi-naive-deferred-work.md).
 
-## Interaction with the Existing Scheduler
+### Interaction with the Existing Scheduler
 
 Semi-naive keeps the scheduler's eager-pass + pick-cheapest structure. Its
 additional input is a per-atom cardinality override (`atom_card`), because
@@ -769,7 +1135,7 @@ two same-op atoms can have different full/delta modes in one variant.
 Fan-out statistics and optional sampled selectivity are otherwise shared
 with naive matching.
 
-### Scheduling Modes
+#### Scheduling Modes
 
 No plan is cached across rounds. Every rule is scheduled from the current
 index statistics:
@@ -785,7 +1151,8 @@ the query. With `Runtime`, the matcher runs the same eager lowering but
 chooses each next atom from concrete cursor lengths under the current
 partial binding. `Auto` enables that runtime path per rule/round when
 measured access-path skew exceeds 8. Queries with more than 64 atoms or
-node variables use the static fallback.
+node variables, sequence queries, and `:flatten` queries use the static fallback
+(`Adaptive::fits`).
 
 Static greedy scheduling is O(k²) in atom count. Runtime scheduling memoizes
 lowered blocks by atom/bound/used masks within one query execution, but
@@ -793,10 +1160,10 @@ neither mode caches plans across rounds or variants.
 
 The static cost model combines base relation cardinality, measured fan-outs,
 and optional cross-index samples. Runtime mode instead reads concrete cursor
-lengths per binding. Chapter 20 is the maintained design reference for these
+lengths per binding. §8.3 is the maintained design reference for these
 selectivity mechanisms.
 
-### How the Static Scheduler Works
+#### How the Static Scheduler Works
 
 The scheduler is not a simple "order atoms by selectivity." It's a
 plan compiler that emits a flat sequence of `Step`s via an
@@ -854,7 +1221,7 @@ Atom 0 never scans `by_op[add]` at full size: it only intersects
 within `?lhs`'s class. The eager pass caught it because `?lhs` was
 bound by atom 1's child extraction.
 
-### Why This Composes with Semi-Naive
+#### Why This Composes with Semi-Naive
 
 For variant `i`, we pass stats where each atom carries its own
 driver-scan cardinality *for this flavor*, set by its mode: atom `i`
@@ -880,7 +1247,7 @@ partial match is live. Semi-naive mode composes with all three because
 `VariantIndex::mode(atom_id)` selects the same full/delta slice regardless
 of when that atom is chosen.
 
-### Mode Lives on the Index, Not the Plan
+#### Mode Lives on the Index, Not the Plan
 
 The plan says *what* to look up (`ByOp(add)`, `ByChildPos(?x, 0)`).
 It does not say *where* to look. The variant context decides that.
@@ -912,7 +1279,7 @@ The plan is immutable and mode-agnostic. `LeapfrogJoin` is unchanged.
 The mode is realized purely in *which cursors get built* for that
 join: see "How a Variant Executes".
 
-### `atom_id` on `Step::Join`
+#### `atom_id` on `Step::Join`
 
 `Step::Join` carries a stable
 `atom_id: usize`, the atom's position in the compile-time numbering
@@ -940,17 +1307,17 @@ contract and can change operational change counts; direct disjointness
 tests therefore pin it even when repeated equality merges happen to be
 semantically idempotent.
 
-### Per-Variant Scheduling
+#### Per-Variant Scheduling
 
 At match time (rounds ≥ 1), for each rule, one variant per join atom
-(`saturate_semi` / `run_rule_variant`):
+(`saturate_rules_semi` / `run_rule_variant`):
 
 ```
 for di in join_atom_indices(&rule.query) {
     let stats = variant_stats(&rule.query, di, &full, &delta);
     let plan  = schedule_with_stats_sampled(&rule.query, &stats, &sampler);
     let view  = VariantIndex::variant(&full, &delta, di);
-    run_query_scheduled(&rule.query, &plan, eg, &view, globals);
+    run_query_scheduled_into(&rule.query, &plan, eg, &view, globals, &mut pool);
 }
 ```
 
@@ -963,7 +1330,7 @@ Re-scheduling per variant is O(k²) in atom count. Different variants can
 produce different plans: `variant_stats` gives atom `di` its delta
 cardinality, while the other atoms keep their full / full ∖ delta sizes.
 
-### What Changes, What Doesn't
+#### What Changes, What Doesn't
 
 Unchanged:
 
@@ -985,16 +1352,16 @@ Changed (small, localized):
 - `run_join` has a mode-branch (it builds full / delta / `Difference`
   cursors for this atom, then runs the generic leapfrog).
 - The pull-based `MatchIterator` stays full-only (naive); semi-naive
-  runs on the push path (`run_query`).
+  runs on the push path (`run_query_scheduled_into`).
 
-## How a Variant Executes
+### How a Variant Executes
 
 This section pins down three things the design depends on: how the
 fixed atom numbering survives dynamic scheduling, why a whole atom
 shares one mode, and how `full ∖ delta` cardinality is known without
 traversal.
 
-### Fixed Numbering vs Dynamic Execution Order
+#### Fixed Numbering vs Dynamic Execution Order
 
 Two orderings coexist and must not be conflated:
 
@@ -1021,7 +1388,7 @@ delta cardinality for atom `i` makes that small base relation visible to
 the cost model, but fan-out/selectivity can still make another atom the
 cheaper driver. Either order produces the same variant result set.
 
-### Why a Whole Atom Shares One Mode
+#### Why a Whole Atom Shares One Mode
 
 An atom binds **one** node `n`: the leapfrog *intersection* of its
 lookups (`by_op[f] ∩ by_child_pos[(c,0)] ∩ …`). The mode restricts
@@ -1038,12 +1405,12 @@ operands. With `A = by_op[f]`, `B = by_child_pos[(c,0)]`:
 So the mode is semantically a **property of the atom (its node)**, and
 applying it to one cursor would suffice. We apply it **uniformly to all
 of the atom's cursors** for one reason: `LeapfrogJoin` holds a
-`Vec<C>` of a single cursor type, so an atom's join must be all-`Base`
+`CursorVec<C>` (a `SmallVec<[C; 4]>`) of a single cursor type, so an atom's join must be all-`Base`
 or all-`Difference`. The set identities above show that applying the
 restriction to every operand preserves the intersection. Its runtime cost
 still depends on the relevant delta buckets.
 
-### Sizing `full ∖ delta` Without Traversal
+#### Sizing `full ∖ delta` Without Traversal
 
 The scheduler needs each atom's cardinality up front (`estimate_cost`
 reads the per-atom `atom_card`, which `variant_stats` fills). For a
@@ -1075,17 +1442,17 @@ Other selectivity terms still participate in the driver choice. The value is key
 (`atom_card[j]`), not by op, so same-op atoms in one flavor are sized
 independently.
 
-## Interaction with Rebuild
+### Interaction with Rebuild
 
 The existing `EGraph::rebuild()` already walks changed nodes and
-recanonicalizes them. Semi-naive reads three log points, all pushing
+recanonicalizes them. Semi-naive reads four log points, all pushing
 into the `EGraph::touched` vector:
 
 - **Fresh nodes**: `register_if_fresh` fires exactly once per
   newly-created node and pushes the node id there.
 - **Recanonicalized nodes**: the cache `recanonize_node` methods
   detect when a node's canonical `(op, children)` form changes (the
-  `new_hash != old_hash` / children-changed early-return) and push the
+  children-changed early-return, which compares the children with no hash) and push the
   node id immediately after that check, so unchanged nodes are not
   logged. The id is threaded out via a `&mut Vec<G>` out-param, the
   same mechanism by which `collisions` is passed through.
@@ -1093,15 +1460,18 @@ into the `EGraph::touched` vector:
   side's member nodes on every merge while the semi-naive driver has
   merge tracking enabled, so class growth that recanonicalizes nothing
   still reaches the next round's delta.
+- **Subsumed nodes**: `EGraph::subsume` pushes the subsumed node. Sequence rules read
+  these from `RoundDelta::subsumed`; the delta index skips them.
 
 The touched log is append-only per round, cleared at round
 boundaries, and materialized into delta `DenseSpanMap` buckets at the start of
 each match phase. Mechanically it is a scratch `Vec<Cfg::G>` field on
 `EGraph`, exactly like the existing `collisions`, `g_buf`, and
-`mset_buf` fields: cleared at the start of a round and threaded by
+`mset_buf` fields: cleared by `clear_touched` once the round's snapshots are built and
+threaded by
 `&mut` into `recanonize_node`.
 
-### Not To Be Confused With `has_history` (Proofs)
+#### Not To Be Confused With `has_history` (Proofs)
 
 The cache `recanonize_node` methods already do a copy-on-first-
 recanonicalize **for proof reconstruction**, unrelated to semi-naive.
@@ -1123,7 +1493,7 @@ times, once per round, whereas its original is saved only on the first
 recanonicalization in the current retained history. They share only the
 change-detection location.
 
-## Correctness Invariant
+### Correctness Invariant
 
 > For delta-eligible rules, the log covers every tuple-level or
 > class-membership event needed to expose a newly available match.
@@ -1152,17 +1522,17 @@ round and therefore add work or operational change counts. Missing an enabling
 event is a semi-naive completeness/equivalence failure, not an equality-
 soundness failure.
 
-### Where Spurious Entries Come From
+#### Where Spurious Entries Come From
 
 The recanonicalization log-push must be conditioned on **actual
 canonical-form change**, not just visitation. In the current rebuild
 pass, a node is visited whenever one of its e-classes participates in
 a merge, but if the merge preserves its canonical form (e.g., both
 endpoints were already in the same class), no change occurred. The
-existing `new_hash == old_hash` short-circuit in the cache
+existing children-unchanged early return in the cache
 `recanonize_node` methods is the right point for the log-push.
 
-## Interaction with Semi-Persistence
+### Interaction with Semi-Persistence
 
 The touched log is round-local scratch, not part of the persistent
 e-graph state. It is a plain `Vec<Cfg::G>` (no `TRACK` parameter):
@@ -1173,13 +1543,20 @@ restore, the loop simply starts the next round with an empty log and
 repopulates it during the following rebuild. No semi-persistent
 coordination is required.
 
-## Implementation Status
+### Implementation Status
 
-This design is **implemented**: `saturate_semi` in `egraph/src/saturate.rs`,
+This design is **implemented**: `saturate_rules_semi` in `egraph/src/saturate.rs`,
+reached through `EGraph::saturate_rules_in`,
 selectable via `Interpreter::set_strategy(SaturationStrategy::SemiNaive)` and
-the `--use-semi-naive` CLI flag (the default is naive).
+the `--use-semi-naive` CLI flag (the default is naive). The one flag covers sequence
+rules too: under it, the semi-naive driver hands the sequence rules of the rule list the
+round's delta, through `apply_sequence_batch`
+(`RoundDelta`: the delta index, the touched nodes, the subsumed nodes), and each
+sequence rule takes the strategy its estimates choose (§7.6). A separate
+switch for sequence rules (`SEMPER_SEQ_SEMI`) existed briefly and was removed on
+2026-10-02.
 
-This chapter is the **rationale and correctness** reference (why the
+This section is the **rationale and correctness** reference (why the
 decomposition is sound, how it composes with flattening and the
 scheduler, where the savings come from). Work intentionally left for
 later (the configurable mutable index backend, the delta-size fallback,
@@ -1187,7 +1564,7 @@ the trigger pre-filter, and current comparative Criterion campaigns) is
 tracked in
 [`../future/semi-naive-deferred-work.md`](../future/semi-naive-deferred-work.md).
 
-## Open Questions
+### Open Questions
 
 1. **Which full-index backend wins?** Decision deferred until the
    end-to-end Criterion comparison is current. There is no supported backend
@@ -1246,7 +1623,7 @@ tracked in
    `bound_element_discounts_variadic_cost`,
    `scheduler_drives_variadic_from_bound_element`.
 
-## Testing Strategy
+### Testing Strategy
 
 Correctness is supported by **differential testing** against the
 naive path: the same rules and input run both ways, with semi-naive
@@ -1285,8 +1662,8 @@ a universal proof. As built:
   (`variant_stats_per_atom_cardinality`); a bound element discounts a
   variadic atom's cost; the scheduler drives a high-cardinality variadic
   atom from a bound element via `ByContains`.
-- **Match-work instrumentation**: `SatResult.match_steps` (one count per
-  partial-match extension) lets tests assert semi-naive explores fewer
+- **Match-work instrumentation**: `SatResult.match_steps` (executed lowered
+  matching steps plus emitted matches) lets tests assert semi-naive explores fewer
   steps than naive on a focused fixture, and that `ByContains` keeps work
   independent of unrelated distractor count in its fixture.
 
@@ -1302,7 +1679,7 @@ The end-to-end `saturate_bench` and corpus Criterion harnesses exist.
 Current backend or speed claims still require a same-revision campaign with
 confidence intervals.
 
-## References
+### References
 
 - Abiteboul, Hull, Vianu, *Foundations of Databases* (1995), Chapter
   13: the canonical treatment of semi-naive evaluation in Datalog,
@@ -1315,4 +1692,4 @@ confidence intervals.
   fallback, trigger pre-filter, and performance campaigns).
 
 ---
-[← Ch 17: Interpreter and Saturation Loop](17-interpreter.md) · [Table of Contents](00-table-of-contents.md) · [Ch 19: Anti-Unification →](19-anti-unification.md)
+[← Ch 8: Indexes and Leapfrog](08-indexes-and-leapfrog.md) · [Table of Contents](00-table-of-contents.md) · [Ch 10: Literal Model →](10-literal-model.md)

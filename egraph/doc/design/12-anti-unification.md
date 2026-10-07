@@ -1,6 +1,6 @@
-# Chapter 19 — Anti-Unification
+# Chapter 12 — Anti-Unification
 
-[← Ch 18: Semi-Naive Evaluation](18-semi-naive-evaluation.md) · [Table of Contents](00-table-of-contents.md) · [Ch 20: Index Selectivity →](20-index-selectivity-and-delta-suffixes.md)
+[← Ch 11: Extraction](11-extraction.md) · [Table of Contents](00-table-of-contents.md) · [Ch 13: Soundness →](13-soundness.md)
 
 Describes the anti-unification solver in `egraph/src/au/`: the search space it
 builds over an e-graph, the two solvers that traverse it, the data structures
@@ -21,7 +21,7 @@ One word needs disambiguating on sight. A **certificate** here is the solver's
 internal claim that a result is optimal, discharged by the search itself. It is
 a different object from the externally checkable proof artifact specified in
 [`../future/au-proof-certificates.md`](../future/au-proof-certificates.md),
-which is not production functionality. `tests/au_proof_certificates.rs`
+which is not part of the implemented solver. `tests/au_proof_certificates.rs`
 prototypes projection materialization and proof-path extraction and exposed the
 need for two-phase replay; it is evidence for the proposed pipeline, not an
 exported certificate format or verified checker.
@@ -88,7 +88,7 @@ Pair-mode root Exact therefore closes the finite graph of reachable ordered
 pairs without recursing, then computes:
 
 ```text
-best[0, q]     = terminal_generalize(q)
+best[0, q]     = terminal(q)       // generalize, or the best ground term if l == r
 best[d + 1, q] = min(best[d, q],
                      every action composed from best[d, child])
 ```
@@ -203,7 +203,8 @@ action filtering binary-searches an interned sorted context.
 The same snapshot exposes `bs(c)`, the **best size**: the least fixpoint of the
 extraction recurrence over non-subsumed members. It is the true minimum only in
 that admissible snapshot grammar and only when the expanded size is strictly
-below `u32::MAX`, which is reserved as the no-finite-representative sentinel.
+below `u32::MAX - 1`; larger sizes saturate at `u32::MAX - 1` and rank last, and
+`u32::MAX` is reserved as the no-finite-representative sentinel.
 Search startup rejects a root whose reachable admissible grammar contains a
 class with no such representative. `bs` is a property of the frozen snapshot
 and of no search state, which is what makes the bounds of 9.2 admissible within
@@ -382,11 +383,13 @@ neither bound is claimed beyond it.
 Final result-term `size` and `variant_mass` use saturating `u32` arithmetic, so
 totals at or above `u32::MAX` tie at the worst representable quality instead of
 wrapping. Snapshot `bs` uses a different convention: `u32::MAX` is a sentinel,
-so a candidate reaching it is not admitted as a finite representative.
-Transport supplies and demands are narrowed to `u32`; a representation pair
-with any unrepresentable supply or demand entry is omitted from the supported
-action domain. Monomial totals are checked `u64` sums; overflowing that surface
-width currently panics rather than returning `AuError`.
+so a candidate with a child at the sentinel is not admitted as a finite
+representative; a finite total at or above `u32::MAX - 1` saturates there and is
+admitted. Transport supplies and demands stay `u64`, and the solver runs on `i128`
+capacities, so no representation pair is omitted because of a margin's width. A node's
+counts must total within `u64` (and within `Cfg::M` for an operator with an identity):
+`AuSnapshot::new` refuses any other graph with `AuError::CountTooWide`, so the sums
+inside the search cannot overflow.
 
 ### 2.7 What correctness means here
 
@@ -402,8 +405,8 @@ Four distinct claims, kept separate throughout:
    oracles support it, but no machine-checked theorem yet connects stabilization
    or the round bound to `OPT`. In either
    side mode, completion instead certifies the selected contextual action
-   graph. Transport pairs whose margins exceed the flow solver's `u32`
-   capacity are not in any mode's domain (3.4.4).
+   graph. Transport margins are `u64`, so no pair leaves any mode's domain
+   because of the flow solver's width (3.4.4).
 3. **UCT optimality assertion.** A UCT closure certificate covers every action
    surviving its configured cycle filter. It is not a global `OPT` claim.
 4. **Comparability.** All returned terms use the same quality key and projection
@@ -421,16 +424,16 @@ reads members and child classes through `AuSnapshot` (4.1) and compares child
 positions with `find`. It never asks whether two terms are equal in the AC
 theory. So a reported optimum is optimal for the relation the graph holds, and
 that relation is sound but not complete for `≈_AC`: it is exactly the relation
-`ac-congruence-completeness.md` Part I shows plain recanonicalization plus
+Chapter 6 Part I shows plain recanonicalization plus
 congruence closure computes.
 
 What plain mode does give the solver is every AC fact that is a property of one
 node, because those are representation facts settled at build time: argument
 order, flattening, multiplicity, the count clamp, and the dropped unit
-(`ac-algebraic-properties.md`). AC action generation is then AC-aware in the
+(§5.3). AC action generation is then AC-aware in the
 sense of 3.4.4, choosing child pairings by min-cost transport over canonical
 monomials. The gap is narrower than "plain mode is not AC-aware". It is exactly
-the erased class reference of `ac-congruence-completeness.md` §3: an equality
+the erased class reference of Chapter 6 §3: an equality
 between two AC nodes that follows from grouping a *known sub-sum* out of one of
 them, where flattening removed the sub-sum's class reference and congruence has
 nothing left to follow.
@@ -476,7 +479,7 @@ which restores the graph and discards the derived nodes. `AntiUnify` and
 Routing the solver through the lazy path instead is not a small change, and the
 reason is the shape of the search rather than the plumbing. Lazy mode is
 goal-directed: it installs one pair via `set_cc_goal` and stops completion the
-moment that pair joins (`ac-congruence-completeness.md` §13). Root Exact has one
+moment that pair joins (Chapter 6 §13). Root Exact has one
 OR node per reachable ordered class pair (2.1) and no single pair to install,
 because not knowing in advance which pairs matter is the search. A lazy variant
 would be one goal-directed completion search per visited pair, each inside its
@@ -508,7 +511,7 @@ For `Pair`, `exact_fixed.rs` first discovers the root-reachable bare pair graph
 with an iterative queue. It records non-AC actions directly and AC/ACI
 representation pairs as transport problems whose cells name child pair states.
 Unlike MCGS, this discovery path does not run a zero-cost feasibility flow
-before recording a transport descriptor; after count narrowing, infeasible
+before recording a transport descriptor; infeasible
 problems are ignored when a relaxation round invokes the solver. Discovery
 interns each ordered pair once, so graph construction terminates independently
 of grammar cycles.
@@ -524,7 +527,8 @@ equality of consecutive vectors is the implementation's completion condition.
 A wall-clock deadline is checked during graph discovery, baseline construction,
 and relaxation. Expiry returns the last fully achieved root incumbent with no
 completion claim. Projection pruning can skip an action only when its static
-size bound strictly exceeds that incumbent.
+size bound strictly exceeds the pair's current best size; a transport action whose
+bound flow is infeasible is skipped as well.
 
 For `AncestorOnly` and `CurrentInclusive`, root Exact uses `run_exact` in
 `exact.rs` from an empty side context. `run_exact_at` is the same contextual
@@ -537,7 +541,7 @@ the supplied context and mode.
 One playout: descend by selection from the root, expand the first unhandled
 action met, estimate fresh children by rollout, backpropagate along the path
 taken, then propagate any closure through the reverse edges. Repeat until the
-budget is spent or the root closes.
+budget is spent or, with `closed_bit` on, until the root closes.
 
 #### 3.3.1 Fully expanded, terminal, and expansion
 
@@ -620,20 +624,22 @@ exported, because the consumer wants a term and a certificate, not a policy.
 #### 3.3.7 Complete search
 
 Two equivalent notions of "done", one incremental and one structural. The
-**closed bit** is maintained during the run: a state closes when its last open
+**closed bit** is maintained during the run when `McgsConfig::closed_bit` is on (it is
+off by default): a state closes when its last open
 action slot resolves, and closure propagates through the reverse edges to every
 parent. The **structural check** walks the graph and asks whether every reachable
 action is handled and every reachable state complete, with a tri-state visited
 protocol so a re-entry on a cycle rejects conservatively. The structural check
-remains as the debug oracle for the bit; the run reads the bit (9.5).
+serves as the debug oracle for the bit when `closed_bit` is on, and the run reads the
+bit (9.5); with the flag off, the run decides completion by the structural check alone.
 
 #### 3.3.8 Main loop and reporting
 
 Seed the root's incumbent with the generalize term, take its rollout estimate,
-then run playouts until the budget is spent or the root closes. On completion,
+then run playouts until the budget is spent or, with `closed_bit` on, the root closes. On completion,
 one children-first pass recomputes every value and recomposes every AND, because
 path-only backpropagation may have left an off-path parent without a child's
-final improvement. The reported completion is `Exact` when the root closed, and
+final improvement. The reported completion is `Exact` when the completion check of 3.3.7 succeeds, and
 `BudgetExhausted` otherwise.
 
 ### 3.4 Action generation per node kind
@@ -674,7 +680,7 @@ feasibility flow succeeds with cycle-blocked cells forbidden. A pair can have
 legal cells and still be Hall-infeasible; excluding it prevents an unrealizable
 slot from blocking closure. Contextual Exact instead builds and solves the cell
 problem while visiting the pair, and pair-mode fixed-point Exact records the
-narrowed descriptor during graph discovery and tests feasibility during
+`u64` descriptor during graph discovery and tests feasibility during
 relaxation. These paths share representation and flow semantics, not one common
 admission step.
 
@@ -685,12 +691,11 @@ is recomputed from the unquantized child values, so quantization decides the
 argmin flow only. For composition the costs are the children's lexicographic
 qualities directly.
 
-Multiplicities are carried at the surface width and narrowed at each solver
-path's transport boundary. In MCGS that boundary is the feasibility gate and
-the resulting descriptor stores the narrowed vectors. Pair-mode Exact narrows
-during graph discovery; contextual Exact narrows when it constructs the final
-transport problem. An unrepresentable pair contributes no candidate
-(Appendix C.2).
+Multiplicities enter every transport path at `u64`, the width the search computes
+counts in, and no path narrows them, so every representation pair is a candidate.
+`AuSnapshot::new` refuses a graph whose node counts total past `u64` with
+`AuError::CountTooWide` (Appendix C.2). The MCGS descriptor stores the exact vectors
+its feasibility gate solved.
 
 #### 3.4.5 ACI operators (sets)
 
@@ -729,7 +734,8 @@ observed and every derived quantity stays consistent.
 ### 4.2 The search-space layer
 
 `SearchSpace` holds the states: aligned arrays for each state's left and right
-class, two opaque context-id slots, and the two representative sizes; separate
+class, two opaque context-id slots, a terminal flag set when the two classes are
+equal, and the two representative sizes; separate
 interners for side-class contexts and ordered-pair contexts; and the cycle
 mode. Side modes use both context-id slots. Pair mode stores its pair context in
 the first and leaves the second empty. `get_or_insert_or_node` is what makes
@@ -816,7 +822,8 @@ filtering), `actions.rs` (3.4), `ac_repr.rs` (AC and ACI representations),
 `exact.rs` (side-mode root Exact and contextual delegation), `mcgs.rs` (3.3), `terms.rs` (4.4),
 `results.rs` (4.5), `estimates.rs` (the bounds of 9.2), `census.rs` (action
 counting, independent of any run), `exact_memo.rs` (the contextual clean-solve
-memo of 9.4), `reward.rs` (2.5), `egraph_api.rs` (4.1), `pretty.rs`, `dump.rs`.
+memo of 9.4), `reward.rs` (2.5), `egraph_api.rs` (4.1), `group_members.rs` (the `AuMembers` view of 4.7), `pretty.rs`,
+`dump.rs`.
 
 ### 5.2 Container primitives
 
@@ -854,11 +861,14 @@ the log is the source of truth and the index is derived. Both are `SpUniqueMap`s
 (the container's unique-keys discipline), so neither the unwinding nor the
 per-frame bookkeeping is written here — on a frame move the map drops the keys
 above the target frame, one index removal per discarded entry, and the unwind
-costs the discarded suffix rather than the surviving entries. Every AU index is
+costs the discarded suffix rather than the surviving entries; when the discarded
+suffix outnumbers the survivors, the map rebuilds its index from the survivors instead. Every AU index is
 an interning table (a key is looked up and inserted only on a miss), which is
 what the discipline states: no key occurs twice in the log, so the map keeps no
 previous-occurrence column and an insert is one hash of the key (`try_intern`)
-and one log push. Where the value is expensive to build — the action cache's
+and one log push. The context interner, `by_structure`, `best_terms`, and `ExactMemo`
+intern this way; the OR state index `by_key` instead probes with `id_of` and inserts
+with `try_insert` on a miss, as `ActionCache::insert` does. Where the value is expensive to build — the action cache's
 list for a class pair, the or-statistics node — the entry is built inside
 `try_intern_with`, so the probe that decides membership is the only hash the
 visit pays; the action cache used to hash a pair three times per visit. The memo moved onto the map on 2026-09-19, retiring the last
@@ -888,8 +898,9 @@ status can vary with host scheduling.
 classes and prints the term, `:size`, the linear `:cr`, and `:completion`. It
 does not print `variant_mass`, so the complete lexicographic quality is
 available through the Rust result pool rather than this command's output.
-`(checkau e1 e2 :max_size n)` additionally asserts a size bound, which is what
-makes the `.egg` fixtures self-checking. Both accept `:algorithm exact|uct` and
+`(checkau e1 e2 :max_size n)` runs the same solver, prints nothing, and fails when
+the size exceeds `n` (default `u32::MAX`), which is what makes the `.egg` fixtures
+self-checking. Both accept `:playouts n` (default 1000), `:algorithm exact|uct`, and
 `:cycles sides|sides-current|pair`; the cycle option defaults to `sides`.
 
 ## 7. Configuration
@@ -953,12 +964,14 @@ mismatch is represented as `Variants(s, t)` and priced by the complete hidden
 mass `size(s) + size(t)`, not as a size-one syntactic variable. The file
 enumerates terms straight from the e-graph without using the snapshot's member
 list, runs that recurrence on every pair, and asserts pair-mode Exact agrees.
-This is finite evidence for the production quality objective on that fixture
+This is finite evidence for the implemented quality objective on that fixture
 domain, not evidence about the standard variable-count size of an lgg. The
 oracle does not use the solver's member ordering, so a
 representative-dependent answer would disagree on a checked fixture. It does
-not test the production distinction between admissible non-subsumed members and
-all retained e-nodes, AC/ACI quotient semantics, or unenumerated instances. A
+not test the implemented distinction between admissible non-subsumed members and
+all retained e-nodes, general AC/ACI quotient semantics, or unenumerated instances
+(one test, `ac_transport_agrees_with_exhaustive_member_matching`, checks the AC
+transport on small multiset fixtures against exhaustive member matching). A
 fixture whose term set is unbounded or too large is
 skipped rather than truncated, because a truncated enumeration is not an oracle,
 and the test asserts a floor on how many fixtures were actually enumerable so it
@@ -1123,7 +1136,9 @@ that a playout cannot enter a long exact solve.
 
 **The closed bit** lives in the statistics overlay and is structural: every
 action slot of this state is resolved, meaning realized and closed, or excluded
-by a bound. It is run-scoped and rewinds with the overlay. The root's closed bit
+by a bound. It is opt-in through `McgsConfig::closed_bit`, which defaults to `false`.
+A standalone `run_mcgs` starts with a fresh overlay; in a session the bit persists
+across `run_uct` calls and rewinds with the overlay on restore. The root's closed bit
 is the run's internal certificate: when set, its accounting says every reachable
 action was realized or excluded by a bound. The reported term is then marked
 optimal by the implementation. This is not an externally checkable or
@@ -1171,7 +1186,7 @@ pairs costing at least `max(bs, bs) + 1` each. The min-cost flow sends one unit
 through `(x,x)`, one unit through `(x,z)`, and one through `(y,z)`, and the
 resulting term is `x + V1 + V2` with two variant positions. The cell-cost matrix
 is materialized, but complete assignments are not enumerated: the assignment
-is the flow's argmin, and the flow's cost is the AND node's value.
+is the flow's argmin, and the flow's cost plus one for the operator is the AND node's value.
 
 ## Appendix C. Worked examples
 
@@ -1192,7 +1207,7 @@ is Plotkin's lgg, but its quality is not the standard syntactic lgg node count.
 An ordinary node contributes 1; a `Variants` node contributes no node of its
 own but contributes `size(s) + size(t)` through its hidden projections, and the
 same hidden mass contributes to `variant_mass`. Let
-`q_cert(s, t) = quality(cplgg(s, t))` under that production key. Define
+`q_cert(s, t) = quality(cplgg(s, t))` under that implemented key. Define
 
 ```text
   OPT(A, B) = lex-min over s in terms(A), t in terms(B) of q_cert(s, t)
@@ -1205,13 +1220,13 @@ survivor appears anywhere in `OPT`. What needs proof is not that `OPT` is well
 defined but that the solver computes it, since the solver *does* work with
 members and representatives.
 
-Production has a narrower executable domain that the refinement theorem must
+The implementation has a narrower executable domain that the refinement theorem must
 state explicitly: the snapshot grammar drops subsumed members, `bs` admits only
-expanded sizes below its `u32::MAX` sentinel, transport entries must fit `u32`,
+expanded sizes below its `u32::MAX` sentinel, each node's multiplicities must total within `u64` (`AuError::CountTooWide`),
 and AC/ACI terms are interpreted through canonical monomials plus optional
 identity padding. Thus the unqualified ideal equality below is a target theorem,
-not the exact contract already established for every Rust input. A production
-theorem must either define `terms_adm(C)` with these restrictions and prove
+not the exact contract already established for every Rust input. A theorem about the implementation
+must either define `terms_adm(C)` with these restrictions and prove
 optimality there, or prove that each restriction preserves the ideal `OPT` under
 explicit preconditions.
 
@@ -1337,7 +1352,7 @@ survivor or member ordering.
 5. Combine attainability (`OPT <= D*`) with the existing lower-bound direction
    (`D* <= OPT`) in one exported equality theorem, then refine the Rust
    synchronous loop to `D_d`.
-6. Separately refine the positional model to production AC/ACI transport,
+6. Separately refine the positional model to the implemented AC/ACI transport,
    identity padding, multiplicities, bounds/pruning, and certificate scopes.
    UCT cycle filtering must be specified as an intentionally smaller domain,
    not justified as preserving all finite derivations.
@@ -1346,7 +1361,7 @@ Until those steps are complete, `au_oracle.rs` is finite evidence for the Rust
 exact solver: it enumerates `OPT` on small acyclic, non-subsumed
 free-constructor fixtures, checks `lb_pair` against that optimum, and tests
 representation independence there. It is not a universal proof. The maintained
-theorem and production-refinement acceptance criteria are in
+theorem and implementation-refinement acceptance criteria are in
 [`../future/au-correctness-and-validation.md`](../future/au-correctness-and-validation.md).
 
 ---
@@ -1363,13 +1378,12 @@ interchangeable and could discard the better one.
 
 ### C.2 AC multiplicities
 
-Multiplicities are carried at the surface width and narrowed at the transport
-boundary. MCGS narrows in the feasibility gate that produces its descriptor;
-pair-mode Exact narrows while building its graph; contextual Exact narrows when
-it forms the solve request. A pair whose entries the transport solver cannot
-represent contributes no candidate. Only the MCGS descriptor guarantees that
-all later consumers reuse the exact vectors accepted by an earlier feasibility
-gate.
+Multiplicities are carried as `u64` from the surface to the transport solver, and
+nothing narrows them. `AuSnapshot::new` refuses a graph whose node counts total past
+`u64`, or past `Cfg::M` for an operator with an identity (`AuError::CountTooWide`), so
+every transport margin is representable and every representation pair is a candidate.
+The MCGS descriptor stores the supply and demand vectors its feasibility gate solved,
+so later MCGS consumers reuse exactly the vectors that gate accepted.
 
 ---
-[← Ch 18: Semi-Naive Evaluation](18-semi-naive-evaluation.md) · [Table of Contents](00-table-of-contents.md) · [Ch 20: Index Selectivity →](20-index-selectivity-and-delta-suffixes.md)
+[← Ch 11: Extraction](11-extraction.md) · [Table of Contents](00-table-of-contents.md) · [Ch 13: Soundness →](13-soundness.md)
