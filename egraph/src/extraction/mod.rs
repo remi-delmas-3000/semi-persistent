@@ -48,6 +48,8 @@ pub mod cnf;
 pub mod cost;
 pub mod dpw;
 pub mod graph;
+pub mod lp;
+pub mod mzn;
 pub mod oint;
 pub mod pb;
 pub mod rung;
