@@ -43,13 +43,16 @@
 //! See `doc/extraction/api.md#part-1-the-api` in the `ltl-eqsat` repository, and chapter 21
 //! of the design notes (`egraph/doc/design/21-cost-model-extraction.md`).
 
+pub mod asp;
 pub mod cnf;
 pub mod cost;
+pub mod dpw;
 pub mod graph;
 pub mod oint;
 pub mod pb;
 pub mod rung;
 pub mod seq;
+pub mod solve;
 pub mod target;
 pub mod totalizer;
 
