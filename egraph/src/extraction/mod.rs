@@ -53,6 +53,7 @@ pub mod mzn;
 pub mod oint;
 pub mod pb;
 pub mod rung;
+pub mod script;
 pub mod seq;
 pub mod solve;
 pub mod target;
