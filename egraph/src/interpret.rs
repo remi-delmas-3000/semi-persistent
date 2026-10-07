@@ -104,7 +104,7 @@ struct Mark<Cfg: EGraphConfig, O> {
 /// - `Off`: canonization and plain congruence only. Checks decide equality of
 ///   materialized canonical forms; AC-entailed equalities through erased
 ///   intermediate sums are not derived (the documented completeness gap,
-///   `ac-congruence-completeness.md` Part I).
+///   `06-ac-congruence-closure.md` Part I).
 /// - `Eager`: every rebuild attempts completion (the `--derive-ac-eqs`
 ///   behavior). `CompletionOutcome::Converged` reports an unchanged full
 ///   implementation round, not a semantic-completeness certificate; the growth
@@ -157,6 +157,8 @@ pub struct Interpreter<
     /// Alternation budget for a lazy check's second phase (rule rounds
     /// interleaved with completion fixpoints inside the transaction).
     lazy_ac_rounds: usize,
+    /// `--cost-bits`: the width of a cost model's values.
+    cost_bits: crate::cost_models::CostBits,
     /// The shared lazy-check transaction: `Some(mark)` while a run of
     /// consecutive equality checks accumulates completion state. Closed (and
     /// the graph restored) by the first non-check command or program end.
@@ -200,6 +202,7 @@ where
             strategy: crate::saturate::SaturationStrategy::default(),
             ac_mode: AcMode::Off,
             lazy_ac_rounds: 32,
+            cost_bits: Default::default(),
             lazy_txn: None,
             last_sat: None,
             last_run_time: None,
@@ -225,6 +228,7 @@ where
             strategy: crate::saturate::SaturationStrategy::default(),
             ac_mode: AcMode::Off,
             lazy_ac_rounds: 32,
+            cost_bits: Default::default(),
             lazy_txn: None,
             last_sat: None,
             last_run_time: None,
@@ -283,6 +287,10 @@ where
         self.lazy_ac_rounds = rounds;
     }
 
+    /// The width of a cost model's values (`--cost-bits`, default `big`, no cap).
+    pub fn set_cost_bits(&mut self, bits: crate::cost_models::CostBits) {
+        self.cost_bits = bits;
+    }
 
     /// Select the merge survivor policy (see `EGraph::set_union_by`).
     pub fn set_union_by(&mut self, u: crate::egraph::UnionBy) {
@@ -619,6 +627,32 @@ where
                     Err(e) => return Err(InterpError::ExtractFailed(e)),
                 }
             }
+            CCommand::ExtractWith {
+                term,
+                model,
+                rung,
+                budget,
+                solver,
+                file,
+                proof,
+                band,
+            } => {
+                let (id, _) = self.build_cterm(term)?;
+                self.eg.rebuild();
+                crate::cost_models::run(
+                    &self.eg,
+                    id,
+                    model,
+                    rung,
+                    *budget,
+                    solver,
+                    file.as_deref(),
+                    proof.as_deref(),
+                    *band,
+                    self.cost_bits,
+                )
+                .map_err(|e| InterpError::CheckFailed(format!("extract :cost: {e}")))?;
+            }
             CCommand::CollectionRule(r) => {
                 // Registered like an ordinary rule, so the unions it makes carry
                 // `Justification::Rewrite` with its id.
@@ -737,7 +771,7 @@ where
                 let t0 = std::time::Instant::now();
                 // Sequence rules are entries of the rule list: each round applies the
                 // ordinary rules, then the sequence rules on the same snapshot (Semper
-                // design chapter 23), naive or semi-naive with the ordinary rules.
+                // design §7.6), naive or semi-naive with the ordinary rules.
                 let result = self.eg.saturate_rules_in(
                     self.strategy,
                     &self.rules,
@@ -755,6 +789,14 @@ where
                     crate::saturate::SatError::Sequence(m) => InterpError::DeclError(m),
                 })?;
                 r.sequence.warn();
+                let skipped = self.eg.take_no_value();
+                if skipped > 0 {
+                    self.warn(format!(
+                        "{skipped} rule action(s) not applied: the right-hand side was an \
+                         application with no children of an operator without :identity, \
+                         which has no meaning"
+                    ));
+                }
                 self.last_sat = Some(r);
             }
             CCommand::PrintSize(op) => {

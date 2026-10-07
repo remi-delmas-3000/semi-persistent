@@ -18,6 +18,11 @@ struct Cli {
     #[arg(long, alias = "id-bits", default_value = "32", value_parser = parse_bits)]
     bits: u8,
 
+    /// Cost width for `(extract … :cost m)`: `big` (the default, no cap), or a cap of 32
+    /// or 64 bits, signed. Arithmetic is exact either way; a value outside a cap, or
+    /// outside the range of the solver the cost is exported to, is a reported error.
+    #[arg(long, default_value = "big", value_parser = semi_persistent_egraph::cost_models::CostBits::parse)]
+    cost_bits: semi_persistent_egraph::cost_models::CostBits,
 
     /// Push/pop mechanism: "diff" (semi-persistent undo log). "clone" (deep copy) is
     /// reserved and rejected: no such backend exists.
@@ -85,7 +90,7 @@ struct Cli {
 
     /// Choose each rule's atom order per binding, from the live bucket lengths,
     /// instead of once per round from the index averages. Off by default; the
-    /// finite differential tests compare the match sets (design chapter 20).
+    /// finite differential tests compare the match sets (design §8.3).
     #[arg(long, default_value_t = false, conflicts_with = "auto_scheduling")]
     runtime_scheduling: bool,
 
@@ -99,7 +104,7 @@ struct Cli {
 
     /// Price a bound key by sampling the emitter atom's relation instead of by
     /// the round's size-biased mean fan-out. Off by default; finite differential
-    /// tests compare the match sets (design chapter 20).
+    /// tests compare the match sets (design §8.3).
     #[arg(long, default_value_t = false)]
     sampled_selectivity: bool,
 
@@ -242,6 +247,7 @@ fn main() {
         basis_checks: cli.check_ac_basis,
         count_match_steps: cli.count_match_steps,
         flatten_rhs: cli.flatten_rhs,
+        cost_bits: cli.cost_bits,
         sched_mode,
         union_by: cli.union_by,
         dump_proofs: cli.dump_proofs.clone(),
@@ -298,6 +304,7 @@ struct EngineOptions {
     basis_checks: bool,
     count_match_steps: bool,
     flatten_rhs: bool,
+    cost_bits: semi_persistent_egraph::cost_models::CostBits,
     sched_mode: semi_persistent_egraph::ematch::SchedulingMode,
     union_by: semi_persistent_egraph::UnionBy,
     dump_proofs: Option<std::path::PathBuf>,
@@ -330,6 +337,7 @@ fn run<Cfg, L, M, const PROOFS: bool>(
     interp.set_union_by(opts.union_by);
     interp.set_basis_checks(opts.basis_checks);
     interp.eg.flatten_rhs = opts.flatten_rhs;
+    interp.set_cost_bits(opts.cost_bits);
     let mut globals = semi_persistent_egraph::resolve::GlobalCtx::new();
     let checked = match semi_persistent_egraph::sortcheck::sortcheck_program(
         surface_cmds.to_vec(),

@@ -85,6 +85,17 @@ pub enum CCommand<O, S, L> {
     CheckEq(CTerm<O, S, L>, CTerm<O, S, L>),
     CheckNeq(CTerm<O, S, L>, CTerm<O, S, L>),
     Extract(CTerm<O, S, L>),
+    /// `(extract t :cost NAME …)`, with the model compiled at check time.
+    ExtractWith {
+        term: CTerm<O, S, L>,
+        model: crate::cost_models::Handle,
+        rung: String,
+        budget: Option<u64>,
+        solver: crate::ast::SolverSpec,
+        file: Option<String>,
+        proof: Option<String>,
+        band: Option<(u64, u64, u64)>,
+    },
     /// A collection rule, installed when it executes.
     CollectionRule(std::sync::Arc<crate::collection::Rule<O, S, L>>),
     /// `(dump-egraph t :file path)`.
@@ -155,6 +166,9 @@ pub struct CGoal<O, S, L> {
 #[derive(Debug, Default)]
 struct RulesetTable {
     names: Vec<String>,
+    /// Cost models by name, compiled when declared. Static like rulesets, and for
+    /// the same reason kept in this table: both are names a later command refers to.
+    cost_models: std::collections::BTreeMap<String, crate::cost_models::Handle>,
     /// Collection rules checked so far, for their generated names.
     collection_rules: usize,
 }
@@ -324,10 +338,13 @@ where
                 let child_sort = child_sort_hint(&info.kind, i);
                 let ct = match child {
                     Term::Counted { term, count, span } => {
-                        if !matches!(
-                            info.kind,
-                            OpKind::A { .. } | OpKind::MSet { .. } | OpKind::Set { .. }
-                        ) {
+                        // An ACI operator stores a set, which has no multiplicities: a count
+                        // there would be silently discarded, so it is refused, as it is in a
+                        // pattern.
+                        if matches!(info.kind, OpKind::Set { .. }) {
+                            return Err(serr(set_count_message(op), *span));
+                        }
+                        if !matches!(info.kind, OpKind::A { .. } | OpKind::MSet { .. }) {
                             return Err(serr(
                                 format!(
                                     "operator '{op}' is not variadic: a child cannot carry a \
@@ -844,6 +861,14 @@ where
     }
 }
 
+/// The refusal of a count under an ACI operator, in a ground term or a right-hand side.
+pub(crate) fn set_count_message(op: &str) -> String {
+    format!(
+        "operator '{op}' is ACI (set); multiplicities not allowed (use AC): a set holds each \
+         element once"
+    )
+}
+
 fn flatten_mult_spec(m: &MultSpec) -> FlatMult {
     match m {
         MultSpec::Exact(n) => FlatMult::Exact(*n),
@@ -1060,6 +1085,80 @@ where
         Command::Extract(t) => {
             let ct = check_term(&t, None, eg.ops(), eg.sorts(), model, globals)?;
             Ok(CCommand::Extract(ct))
+        }
+        Command::CostModel { name, source, span } => {
+            // The script is compiled here, so its type errors, polarity errors
+            // included, stop the program before anything runs.
+            let h = crate::cost_models::compile(&source)
+                .map_err(|e| serr(format!("cost-model {name}: {e}"), span))?;
+            rulesets.cost_models.insert(name.clone(), h);
+            Ok(CCommand::Decl(Command::CostModel { name, source, span }))
+        }
+        Command::ExtractWith {
+            term,
+            cost,
+            rung,
+            budget,
+            solver,
+            file,
+            proof,
+            band,
+            span,
+        } => {
+            let ct = check_term(&term, None, eg.ops(), eg.sorts(), model, globals)?;
+            let h = rulesets
+                .cost_models
+                .get(&cost)
+                .cloned()
+                .ok_or_else(|| serr(format!("no cost model named '{cost}'"), span))?;
+            crate::cost_models::check_rung(&rung).map_err(|e| serr(e, span))?;
+            if band.is_some() && !matches!(solver, crate::ast::SolverSpec::Internal) {
+                return Err(serr(":band runs on the internal solver", span));
+            }
+            let mzn_solver = matches!(solver, crate::ast::SolverSpec::MiniZinc(_));
+            if crate::cost_models::is_minizinc(&h) != mzn_solver {
+                return Err(serr(
+                    if mzn_solver {
+                        format!(
+                            "cost-model {cost} is not written in MiniZinc: a MiniZinc solver takes (cost-model NAME :minizinc \"f.mzn\")"
+                        )
+                    } else {
+                        format!(
+                            "cost-model {cost} is written in MiniZinc: it is solved through minizinc, :solver (minizinc \"cp-sat\")"
+                        )
+                    },
+                    span,
+                ));
+            }
+            if crate::cost_models::is_asp(&h) && !matches!(solver, crate::ast::SolverSpec::Asp(_)) {
+                return Err(serr(
+                    format!(
+                        "cost-model {cost} is written in ASP: it is solved by clingo, :solver (asp \"clingo\")"
+                    ),
+                    span,
+                ));
+            }
+            if proof.is_some()
+                && !matches!(
+                    solver,
+                    crate::ast::SolverSpec::Opb(_) | crate::ast::SolverSpec::RoundingSat
+                )
+            {
+                return Err(serr(
+                    ":proof needs a proof-logging pseudo-Boolean solver, :solver (opb ...)",
+                    span,
+                ));
+            }
+            Ok(CCommand::ExtractWith {
+                term: ct,
+                model: h,
+                rung,
+                budget,
+                solver,
+                file,
+                proof,
+                band,
+            })
         }
         Command::DumpEGraph { root, file } => {
             let ct = check_term(&root, None, eg.ops(), eg.sorts(), model, globals)?;

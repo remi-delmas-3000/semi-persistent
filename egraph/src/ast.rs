@@ -475,7 +475,7 @@ pub enum MultExpr {
 
 /// A single composable algebraic-property tag on a function declaration. Tags combine freely
 /// at the surface (`:assoc :comm :idempotent`); the sortcheck resolver maps a tag *set* to a
-/// concrete `OpKind` and validates the combination (see `doc/design/ac-algebraic-properties.md`
+/// concrete `OpKind` and validates the combination (see `doc/design/05-algebraic-operators.md` §5.3
 /// Facet A). The old pre-combined `:assoc-comm` / `:assoc-comm-idem` are accepted as aliases
 /// that the parser expands into these basic tags.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -517,7 +517,42 @@ pub struct Variant {
     pub meta: OpMeta,
 }
 
+/// Where a cost model comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CostSource {
+    /// A Roto script, by path.
+    Script(String),
+    /// A cost registered in Rust, by name.
+    Rust(String),
+    /// Criteria in ASP, by path: appended to the ASP dump of the e-graph.
+    Asp(String),
+    /// Criteria in MiniZinc, by path: appended to the MiniZinc dump of the e-graph.
+    MiniZinc(String),
+}
 
+/// Which solver an `(extract … :cost …)` uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SolverSpec {
+    /// The internal incremental CNF descent.
+    Internal,
+    /// The internal descent with the objective bounded by rustsat's dynamic
+    /// polynomial watchdog instead of the totalizer.
+    Dpw,
+    /// RoundingSat, found as `$ROUNDINGSAT`, `~/.local/bin/roundingsat`, or on the
+    /// `PATH`.
+    RoundingSat,
+    /// No solving: Semper's additive-greedy term, scored by the cost model.
+    Greedy,
+    /// A pseudo-Boolean competition solver: the program and its arguments; the OPB
+    /// file's path is appended.
+    Opb(Vec<String>),
+    /// A MiniZinc solver by name (`cp-sat`, `chuffed`, ...), with further `minizinc`
+    /// arguments.
+    MiniZinc(Vec<String>),
+    /// An answer-set solver with clingo's JSON output: the program and its
+    /// arguments; the program's path is appended.
+    Asp(Vec<String>),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -562,6 +597,29 @@ pub enum Command {
     CheckEq(Term, Term),
     CheckNeq(Term, Term),
     Extract(Term),
+    /// `(cost-model NAME :script "file.roto")` or `(cost-model NAME :rust "id")`.
+    CostModel {
+        name: String,
+        source: CostSource,
+        span: Span,
+    },
+    /// `(extract t :cost NAME [:rung R] [:budget CLAUSES] [:solver internal |
+    /// (opb "cmd" "arg"…)] [:file "term.json"])`: extraction under a named cost
+    /// model. A rung whose estimated size exceeds the budget steps down the ladder.
+    ExtractWith {
+        term: Term,
+        cost: String,
+        rung: String,
+        budget: Option<u64>,
+        solver: SolverSpec,
+        file: Option<String>,
+        /// `:proof "dir"`: keep a VeriPB-checkable proof of the final solver call.
+        proof: Option<String>,
+        /// `:band lo hi [:count n]`: up to `n` (default 10) distinct terms whose cost
+        /// lies in `[lo, hi]`, instead of the optimum.
+        band: Option<(u64, u64, u64)>,
+        span: Span,
+    },
     /// `(dump-egraph t :file "p.json")` — write the whole e-graph, with `t`'s class
     /// marked as the root, as JSON for an external extractor to read.
     DumpEGraph {

@@ -25,8 +25,38 @@ fn expected(what: &'static str) -> ErrMode<ContextError> {
     ErrMode::Cut(e)
 }
 
+/// One of `keys`, consumed.
+fn keyword<'a>(input: &mut &str, keys: &[&'a str]) -> ModalResult<&'a str> {
+    ws(input)?;
+    for k in keys {
+        if input.starts_with(k)
+            && !input[k.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            *input = &input[k.len()..];
+            return Ok(k);
+        }
+    }
+    Err(expected("a keyword option"))
+}
 
+/// A cost model's name: an identifier that may also contain `-`, as `mltl-memory`.
+fn model_name<'s>(input: &mut &'s str) -> ModalResult<&'s str> {
+    ws(input)?;
+    let s = *input;
+    if !s.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+        return Err(expected("a cost model name"));
+    }
+    let len = s
+        .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(s.len());
+    *input = &s[len..];
+    Ok(&s[..len])
+}
 
+/// A quoted string without its quotes, as `parse_quoted_string` returns it with them.
+fn unquote(q: &str) -> String {
+    q[1..q.len() - 1].to_owned()
+}
 
 fn span_of(base: usize, start_ptr: usize, input: &mut &str) -> Span {
     let end_ptr = input.as_ptr() as usize;
@@ -174,6 +204,19 @@ fn number(input: &mut &str) -> ModalResult<u64> {
     })
 }
 
+/// A multiplicity written in a rule: a pattern count, a count constraint, or a literal in a
+/// multiplicity expression. Read as `u64`, the widest configured multiplicity; a longer
+/// number is refused here, naming the multiplicity, rather than as a generic "number".
+fn count_number(input: &mut &str) -> ModalResult<u64> {
+    let tok = num_token(input)?;
+    tok.parse::<u64>().map_err(|_| {
+        expected(
+            "a multiplicity of at most 2^64 - 1 (multiplicity overflow: a count past \
+             18446744073709551615 fits no configured multiplicity width)",
+        )
+    })
+}
+
 fn expect_char(input: &mut &str, c: char) -> ModalResult<()> {
     ws(input)?;
     if input.starts_with(c) {
@@ -251,6 +294,35 @@ fn parse_quoted_string(input: &mut &str) -> ModalResult<String> {
 
 // ── Ground terms ──
 
+/// An application's children, up to its closing parenthesis (not consumed), each possibly
+/// counted: `child:count`, written with no space before the count, is a multiplicity. Shared by
+/// nested terms and top-level insertions, so `(Add a:3 b)` parses in both places.
+fn parse_term_children(input: &mut &str, base: usize) -> ModalResult<Vec<Term>> {
+    let mut children = Vec::new();
+    loop {
+        ws(input)?;
+        if input.starts_with(')') {
+            return Ok(children);
+        }
+        let child_start = input.as_ptr() as usize;
+        let child = parse_term_inner(input, base)?;
+        if input.starts_with(':') && input[1..].starts_with(|c: char| c.is_ascii_digit()) {
+            *input = &input[1..];
+            let digits = num_token(input)?;
+            let count = digits
+                .parse::<num_bigint::BigUint>()
+                .map_err(|_| expected("a multiplicity: a whole number"))?;
+            children.push(Term::Counted {
+                term: Box::new(child),
+                count,
+                span: span_of(base, child_start, input),
+            });
+        } else {
+            children.push(child);
+        }
+    }
+}
+
 fn parse_term_inner(input: &mut &str, base: usize) -> ModalResult<Term> {
     ws(input)?;
     let start = input.as_ptr() as usize;
@@ -259,30 +331,7 @@ fn parse_term_inner(input: &mut &str, base: usize) -> ModalResult<Term> {
         let op = cut_err(op_expr)
             .context(StrContext::Label("operator name"))
             .parse_next(input)?;
-        let mut children = Vec::new();
-        loop {
-            ws(input)?;
-            if input.starts_with(')') {
-                break;
-            }
-            let child_start = input.as_ptr() as usize;
-            let child = parse_term_inner(input, base)?;
-            // `child:count`, written with no space before the count: a multiplicity.
-            if input.starts_with(':') && input[1..].starts_with(|c: char| c.is_ascii_digit()) {
-                *input = &input[1..];
-                let digits = num_token(input)?;
-                let count = digits
-                    .parse::<num_bigint::BigUint>()
-                    .map_err(|_| expected("a multiplicity: a whole number"))?;
-                children.push(Term::Counted {
-                    term: Box::new(child),
-                    count,
-                    span: span_of(base, child_start, input),
-                });
-            } else {
-                children.push(child);
-            }
-        }
+        let children = parse_term_children(input, base)?;
         cut_char(input, ')')?;
         Ok(Term::App {
             op,
@@ -450,7 +499,7 @@ fn parse_pat_child(input: &mut &str, base: usize) -> ModalResult<SurfacePatChild
 fn parse_mult_spec(input: &mut &str) -> ModalResult<MultSpec> {
     ws(input)?;
     if input.starts_with(|c: char| c.is_ascii_digit()) {
-        let n = number(input)?;
+        let n = count_number(input)?;
         Ok(MultSpec::Exact(n))
     } else {
         let name = ident(input)?;
@@ -488,7 +537,7 @@ fn parse_cmp_constraint(input: &mut &str) -> ModalResult<Option<(CmpOp, u64)>> {
     };
     match op {
         Some(cmp) => {
-            let n = number(input)?;
+            let n = count_number(input)?;
             Ok(Some((cmp, n)))
         }
         None => Ok(None),
@@ -759,7 +808,7 @@ fn parse_mult_expr(input: &mut &str) -> ModalResult<MultExpr> {
         cut_char(input, ')')?;
         Ok(MultExpr::Prim { op, args })
     } else if input.starts_with(|c: char| c.is_ascii_digit()) {
-        let n = number(input)?;
+        let n = count_number(input)?;
         Ok(MultExpr::Lit(n))
     } else {
         let name = ident(input)?;
@@ -1447,7 +1496,116 @@ fn parse_command(
         "pop" => SurfaceCommand::Pass(Command::Pop),
         "extract" => {
             let t = parse_term_inner(input, base)?;
-            SurfaceCommand::Pass(Command::Extract(t))
+            ws(input)?;
+            if input.starts_with(')') {
+                SurfaceCommand::Pass(Command::Extract(t))
+            } else {
+                let (mut cost, mut rung, mut budget, mut solver, mut file, mut proof) =
+                    (None, None, None, SolverSpec::Internal, None, None);
+                let (mut band, mut count): (Option<(u64, u64)>, Option<u64>) = (None, None);
+                loop {
+                    ws(input)?;
+                    if input.starts_with(')') {
+                        break;
+                    }
+                    let key = keyword(
+                        input,
+                        &[
+                            ":cost", ":rung", ":budget", ":solver", ":file", ":proof", ":band",
+                            ":count",
+                        ],
+                    )?;
+                    match key {
+                        ":cost" => cost = Some(model_name(input)?.to_owned()),
+                        ":rung" => rung = Some(ident(input)?.to_owned()),
+                        ":budget" => budget = Some(number(input)?),
+                        ":file" => file = Some(unquote(&parse_quoted_string(input)?)),
+                        ":proof" => proof = Some(unquote(&parse_quoted_string(input)?)),
+                        ":band" => {
+                            let lo = number(input)?;
+                            let hi = number(input)?;
+                            band = Some((lo, hi));
+                        }
+                        ":count" => count = Some(number(input)?),
+                        _ => {
+                            ws(input)?;
+                            solver = if input.starts_with('(') {
+                                *input = &input[1..];
+                                ws(input)?;
+                                let kw = ident(input)?;
+                                if kw != "opb" && kw != "asp" && kw != "minizinc" {
+                                    return Err(expected(
+                                        "(opb|asp|minizinc \"program\" \"arg\"...)",
+                                    ));
+                                }
+                                let mzn = kw == "minizinc";
+                                let asp = kw == "asp";
+                                let mut cmd = Vec::new();
+                                loop {
+                                    ws(input)?;
+                                    if input.starts_with(')') {
+                                        *input = &input[1..];
+                                        break;
+                                    }
+                                    cmd.push(unquote(&parse_quoted_string(input)?));
+                                }
+                                if cmd.is_empty() {
+                                    return Err(expected("a solver program"));
+                                }
+                                if mzn {
+                                    SolverSpec::MiniZinc(cmd)
+                                } else if asp {
+                                    SolverSpec::Asp(cmd)
+                                } else {
+                                    SolverSpec::Opb(cmd)
+                                }
+                            } else {
+                                match ident(input)? {
+                                    "internal" => SolverSpec::Internal,
+                                    "dpw" => SolverSpec::Dpw,
+                                    "roundingsat" => SolverSpec::RoundingSat,
+                                    "greedy" => SolverSpec::Greedy,
+                                    _ => {
+                                        return Err(expected(
+                                            "internal, dpw, roundingsat, greedy, or (opb|asp|minizinc \"program\" \"arg\"...)",
+                                        ));
+                                    }
+                                }
+                            };
+                        }
+                    }
+                }
+                let cost = cost.ok_or_else(|| expected(":cost NAME"))?;
+                SurfaceCommand::Pass(Command::ExtractWith {
+                    term: t,
+                    cost,
+                    rung: rung.unwrap_or_else(|| "selection".into()),
+                    budget,
+                    solver,
+                    file,
+                    proof,
+                    band: band.map(|(lo, hi)| (lo, hi, count.unwrap_or(10))),
+                    span: span_of(base, start, input),
+                })
+            }
+        }
+        "cost-model" => {
+            ws(input)?;
+            let name = model_name(input)?.to_owned();
+            ws(input)?;
+            let key = keyword(input, &[":script", ":rust", ":asp", ":minizinc"])?;
+            let arg = unquote(&parse_quoted_string(input)?);
+            let source = match key {
+                ":script" => CostSource::Script(arg),
+                ":asp" => CostSource::Asp(arg),
+                ":minizinc" => CostSource::MiniZinc(arg),
+                _ => CostSource::Rust(arg),
+            };
+            SurfaceCommand::Pass(Command::CostModel {
+                name,
+                source,
+                span: span_of(base, start, input),
+            })
         }
         "dump-egraph" => {
             let root = parse_term_inner(input, base)?;
@@ -1549,14 +1707,7 @@ fn parse_command(
         }
         _ => {
             // Ground term insertion: (op args...)
-            let mut children = Vec::new();
-            loop {
-                ws(input)?;
-                if input.starts_with(')') {
-                    break;
-                }
-                children.push(parse_term_inner(input, base)?);
-            }
+            let children = parse_term_children(input, base)?;
             let cmd = SurfaceCommand::Pass(Command::Insert(Term::App {
                 op: kw.to_owned(),
                 children,

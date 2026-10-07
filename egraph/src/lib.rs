@@ -20,6 +20,7 @@ pub mod classes;
 pub mod collection;
 pub mod compile;
 pub mod config;
+pub mod cost_models;
 pub mod director;
 pub mod dump;
 mod egraph;
