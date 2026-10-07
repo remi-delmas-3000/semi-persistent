@@ -26,6 +26,7 @@ mod egraph;
 mod egraph_proof_test;
 pub mod ematch;
 pub mod extract;
+pub mod extraction;
 pub mod flatten;
 pub(crate) mod group_members;
 pub mod id;
