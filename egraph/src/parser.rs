@@ -18,6 +18,16 @@ pub type ParseError = String;
 
 // ── Span helpers ──
 
+/// A cut error naming what was expected.
+fn expected(what: &'static str) -> ErrMode<ContextError> {
+    let mut e = ContextError::new();
+    e.push(StrContext::Expected(StrContextValue::Description(what)));
+    ErrMode::Cut(e)
+}
+
+
+
+
 fn span_of(base: usize, start_ptr: usize, input: &mut &str) -> Span {
     let end_ptr = input.as_ptr() as usize;
     Span::new((start_ptr - base) as u32, (end_ptr - base) as u32)
@@ -255,7 +265,23 @@ fn parse_term_inner(input: &mut &str, base: usize) -> ModalResult<Term> {
             if input.starts_with(')') {
                 break;
             }
-            children.push(parse_term_inner(input, base)?);
+            let child_start = input.as_ptr() as usize;
+            let child = parse_term_inner(input, base)?;
+            // `child:count`, written with no space before the count: a multiplicity.
+            if input.starts_with(':') && input[1..].starts_with(|c: char| c.is_ascii_digit()) {
+                *input = &input[1..];
+                let digits = num_token(input)?;
+                let count = digits
+                    .parse::<num_bigint::BigUint>()
+                    .map_err(|_| expected("a multiplicity: a whole number"))?;
+                children.push(Term::Counted {
+                    term: Box::new(child),
+                    count,
+                    span: span_of(base, child_start, input),
+                });
+            } else {
+                children.push(child);
+            }
         }
         cut_char(input, ')')?;
         Ok(Term::App {
@@ -303,30 +329,36 @@ fn parse_pattern(input: &mut &str, base: usize) -> ModalResult<SurfacePattern> {
             None
         };
 
-        // Children (Elem or ElemMult, no Rest)
+        // Children. A `..name` right before `)` is the suffix rest; one between
+        // children is a bare sequence, and `(..name base)` a filtered sequence, both
+        // of sequence patterns (`doc/sequence-patterns.md`), which only a rewrite's
+        // left-hand side accepts (the checkers reject them elsewhere).
         let mut children = Vec::new();
+        let mut suffix = None;
         loop {
             ws(input)?;
             if input.starts_with(')') {
                 break;
             }
+            if input.starts_with("(..") {
+                children.push(parse_filter(input, base)?);
+                continue;
+            }
             if input.starts_with("..") {
-                break; // suffix rest
+                let rstart = input.as_ptr() as usize;
+                *input = &input[2..];
+                let name = ident(input)?;
+                let sp = span_of(base, rstart, input);
+                ws(input)?;
+                if input.starts_with(')') {
+                    suffix = Some((name.to_owned(), sp));
+                    break;
+                }
+                children.push(SurfacePatChild::Seq(name.to_owned(), sp));
+                continue;
             }
             children.push(parse_pat_child(input, base)?);
         }
-
-        // Optional suffix rest: ..name
-        ws(input)?;
-        let suffix = if input.starts_with("..") {
-            let rstart = input.as_ptr() as usize;
-            *input = &input[2..];
-            let name = ident(input)?;
-            let sp = span_of(base, rstart, input);
-            Some((name.to_owned(), sp))
-        } else {
-            None
-        };
 
         cut_char(input, ')')?;
         // If prefix was parsed but there are no children and no suffix,
@@ -359,6 +391,46 @@ fn parse_pattern(input: &mut &str, base: usize) -> ModalResult<SurfacePattern> {
             Ok(SurfacePattern::Var(tok.to_owned(), sp))
         }
     }
+}
+
+/// `(..name[:mult] base [:except other])`.
+fn parse_filter(input: &mut &str, base: usize) -> ModalResult<SurfacePatChild> {
+    let start = input.as_ptr() as usize;
+    expect_char(input, '(')?;
+    *input = &input[2..];
+    let name = cut_err(ident)
+        .context(StrContext::Label("sequence name after (.."))
+        .parse_next(input)?
+        .to_owned();
+    // The multiplicity annotation of ordinary AC elements, `:k>=2` and the like.
+    let mult = if input.starts_with(':') {
+        *input = &input[1..];
+        Some(parse_mult_spec(input)?)
+    } else {
+        None
+    };
+    let pat = parse_pattern(input, base)?;
+    ws(input)?;
+    let except = if input.starts_with(":except") {
+        *input = &input[":except".len()..];
+        ws(input)?;
+        let es = input.as_ptr() as usize;
+        let other = cut_err(ident)
+            .context(StrContext::Label("sequence name after :except"))
+            .parse_next(input)?
+            .to_owned();
+        Some((other, span_of(base, es, input)))
+    } else {
+        None
+    };
+    cut_char(input, ')')?;
+    Ok(SurfacePatChild::Filter {
+        name,
+        mult,
+        base: Box::new(pat),
+        except,
+        span: span_of(base, start, input),
+    })
 }
 
 fn parse_pat_child(input: &mut &str, base: usize) -> ModalResult<SurfacePatChild> {
@@ -501,6 +573,12 @@ fn parse_rhs_dotdot(input: &mut &str, base: usize) -> ModalResult<RhsChild> {
         };
         ws(input)?;
         expect_kw(input, "for")?;
+        ws(input)?;
+        if let Some(row) =
+            parse_row_comp_tail(input, base, start, body.clone(), mult.clone(), '}', false)?
+        {
+            return Ok(row);
+        }
         let var = ident(input)?.to_owned();
         ws(input)?;
         let mult_var = if input.starts_with(':') {
@@ -544,6 +622,10 @@ fn parse_rhs_dotdot(input: &mut &str, base: usize) -> ModalResult<RhsChild> {
         let body = parse_rhs(input, base)?;
         ws(input)?;
         expect_kw(input, "for")?;
+        ws(input)?;
+        if let Some(row) = parse_row_comp_tail(input, base, start, body.clone(), None, ']', true)? {
+            return Ok(row);
+        }
         let var = ident(input)?.to_owned();
         ws(input)?;
         expect_kw(input, "in")?;
@@ -574,6 +656,80 @@ fn expect_kw(input: &mut &str, kw: &'static str) -> ModalResult<()> {
         return Err(ErrMode::Cut(e));
     }
     Ok(())
+}
+
+/// After `for`: a tuple binder `(x y:k z:_)`, a single binder whose source after
+/// `in` is an expression, or a single binder of a form only sequence rules have
+/// (`x:_`, a multiplicity on one side only) makes a `RowComp`; anything else is left
+/// for the single-binder comprehensions, and nothing is consumed.
+#[allow(clippy::too_many_arguments)]
+fn parse_row_comp_tail(
+    input: &mut &str,
+    base: usize,
+    start: usize,
+    body: RhsTerm,
+    mult: Option<MultExpr>,
+    close: char,
+    ordered: bool,
+) -> ModalResult<Option<RhsChild>> {
+    let save = *input;
+    let binder = |input: &mut &str| -> ModalResult<(String, BinderMult)> {
+        ws(input)?;
+        let name = ident(input)?.to_owned();
+        if input.starts_with(':') {
+            *input = &input[1..];
+            if input.starts_with('_') && !input[1..].starts_with(|c: char| c.is_alphanumeric()) {
+                *input = &input[1..];
+                return Ok((name, BinderMult::Drop));
+            }
+            return Ok((name, BinderMult::Var(ident(input)?.to_owned())));
+        }
+        Ok((name, BinderMult::None))
+    };
+    let tuple = input.starts_with('(');
+    let binders = if tuple {
+        *input = &input[1..];
+        let mut bs = Vec::new();
+        loop {
+            ws(input)?;
+            if input.starts_with(')') {
+                *input = &input[1..];
+                break;
+            }
+            bs.push(binder(input)?);
+        }
+        bs
+    } else {
+        vec![binder(input)?]
+    };
+    ws(input)?;
+    expect_kw(input, "in")?;
+    ws(input)?;
+    let expr_source = input.starts_with('(');
+    // A single binder the ordinary comprehensions do not have: `x:_`, `x:k` without a
+    // body multiplicity, or a body multiplicity over a binder without one.
+    let row_only = match &binders[..] {
+        [(_, BinderMult::Drop)] => true,
+        [(_, BinderMult::Var(_))] => mult.is_none(),
+        [(_, BinderMult::None)] => mult.is_some(),
+        _ => false,
+    };
+    if !tuple && !expr_source && !row_only {
+        *input = save;
+        return Ok(None);
+    }
+    let source = parse_rhs(input, base)?;
+    let filter = parse_optional_if(input, base)?;
+    cut_char(input, close)?;
+    Ok(Some(RhsChild::RowComp {
+        body: Box::new(body),
+        mult,
+        binders,
+        source: Box::new(source),
+        filter,
+        ordered,
+        span: span_of(base, start, input),
+    }))
 }
 
 fn parse_optional_if(input: &mut &str, base: usize) -> ModalResult<Option<Box<RhsTerm>>> {
@@ -671,17 +827,41 @@ fn parse_action(input: &mut &str, base: usize) -> ModalResult<Action> {
 struct RuleTags {
     when: Vec<SurfacePattern>,
     subsume: bool,
+    flatten: bool,
     ruleset: Option<String>,
+}
+
+/// Consumes `:flatten` if it is next, and rejects a second one in the same rule. The tag
+/// makes the rule match every n-ary operator it uses on the flattened form
+/// (`doc/goal-flatten-and-engine-completion.md`, decision 2).
+fn flatten_tag(input: &mut &str, seen: &mut bool) -> ModalResult<bool> {
+    if !input.starts_with(":flatten") {
+        return Ok(false);
+    }
+    *input = &input[":flatten".len()..];
+    if *seen {
+        let mut e = ContextError::new();
+        e.push(StrContext::Label(
+            "duplicate :flatten; a rule takes the tag once",
+        ));
+        return Err(ErrMode::Cut(e));
+    }
+    *seen = true;
+    Ok(true)
 }
 
 fn parse_rule_tags(input: &mut &str, base: usize) -> ModalResult<RuleTags> {
     let mut t = RuleTags {
         when: Vec::new(),
         subsume: false,
+        flatten: false,
         ruleset: None,
     };
     loop {
         ws(input)?;
+        if flatten_tag(input, &mut t.flatten)? {
+            continue;
+        }
         if input.starts_with(":when") {
             *input = &input[":when".len()..];
             cut_char(input, '(')?;
@@ -704,6 +884,201 @@ fn parse_rule_tags(input: &mut &str, base: usize) -> ModalResult<RuleTags> {
         }
     }
     Ok(t)
+}
+
+// ── Collection rules ──
+
+/// An expression of a collection rule: a term, a scalar or sequence expression,
+/// with `..name` splices and `..{body for (x y) in source}` comprehensions as
+/// children.
+fn parse_cexpr(input: &mut &str, base: usize) -> ModalResult<crate::collection::CExpr> {
+    use crate::collection::{CChild, CExpr};
+    ws(input)?;
+    let start = input.as_ptr() as usize;
+    if input.starts_with('(') {
+        expect_char(input, '(')?;
+        let op = cut_err(op_expr)
+            .context(StrContext::Label("operator name"))
+            .parse_next(input)?;
+        let mut children = Vec::new();
+        loop {
+            ws(input)?;
+            if input.starts_with(')') {
+                break;
+            }
+            if input.starts_with("..{") || input.starts_with("..[") {
+                let cstart = input.as_ptr() as usize;
+                let close = if input.starts_with("..[") { ']' } else { '}' };
+                *input = &input[3..];
+                let body = parse_cexpr(input, base)?;
+                ws(input)?;
+                expect_kw(input, "for")?;
+                ws(input)?;
+                let mut vars = Vec::new();
+                if input.starts_with('(') {
+                    *input = &input[1..];
+                    loop {
+                        ws(input)?;
+                        if input.starts_with(')') {
+                            *input = &input[1..];
+                            break;
+                        }
+                        vars.push(ident(input)?.to_owned());
+                    }
+                } else {
+                    vars.push(ident(input)?.to_owned());
+                }
+                ws(input)?;
+                expect_kw(input, "in")?;
+                let source = parse_cexpr(input, base)?;
+                cut_char(input, close)?;
+                children.push(CChild::Comp {
+                    body,
+                    vars,
+                    source,
+                    span: span_of(base, cstart, input),
+                });
+            } else if input.starts_with("..") {
+                let cstart = input.as_ptr() as usize;
+                *input = &input[2..];
+                let name = ident(input)?.to_owned();
+                children.push(CChild::Splice(name, span_of(base, cstart, input)));
+            } else {
+                children.push(CChild::Expr(parse_cexpr(input, base)?));
+            }
+        }
+        cut_char(input, ')')?;
+        Ok(CExpr::App {
+            op,
+            children,
+            span: span_of(base, start, input),
+        })
+    } else if input.starts_with('"') {
+        let s = parse_quoted_string(input)?;
+        Ok(CExpr::Lit(s, span_of(base, start, input)))
+    } else if let Ok(tok) = num_token(input) {
+        Ok(CExpr::Lit(tok.to_owned(), span_of(base, start, input)))
+    } else {
+        let tok = ident(input)?;
+        let sp = span_of(base, start, input);
+        if is_literal(tok) {
+            Ok(CExpr::Lit(tok.to_owned(), sp))
+        } else {
+            Ok(CExpr::Var(tok.to_owned(), sp))
+        }
+    }
+}
+
+type CollectionTags = (
+    Vec<(String, crate::collection::CExpr)>,
+    Vec<crate::collection::CExpr>,
+    Option<String>,
+);
+
+/// `:let ((name expr) ...)`, `:when (expr ...)`, and `:ruleset name`.
+fn parse_collection_tags(input: &mut &str, base: usize) -> ModalResult<CollectionTags> {
+    let (mut lets, mut when, mut ruleset) = (Vec::new(), Vec::new(), None);
+    // `:flatten` is read by `parse_seq_tags_rhs`, which rejects a duplicate; it is skipped
+    // here so that the tag does not drop the route-1 reading.
+    let mut flatten = false;
+    loop {
+        ws(input)?;
+        if flatten_tag(input, &mut flatten)? {
+            continue;
+        }
+        if input.starts_with(":let") {
+            *input = &input[":let".len()..];
+            cut_char(input, '(')?;
+            loop {
+                ws(input)?;
+                if input.starts_with(')') {
+                    break;
+                }
+                cut_char(input, '(')?;
+                let name = ident(input)?.to_owned();
+                let e = parse_cexpr(input, base)?;
+                cut_char(input, ')')?;
+                lets.push((name, e));
+            }
+            cut_char(input, ')')?;
+        } else if input.starts_with(":when") {
+            *input = &input[":when".len()..];
+            cut_char(input, '(')?;
+            loop {
+                ws(input)?;
+                if input.starts_with(')') {
+                    break;
+                }
+                when.push(parse_cexpr(input, base)?);
+            }
+            cut_char(input, ')')?;
+        } else if input.starts_with(":ruleset") {
+            *input = &input[":ruleset".len()..];
+            ruleset = Some(ident(input)?.to_owned());
+        } else {
+            break;
+        }
+    }
+    Ok((lets, when, ruleset))
+}
+
+struct SeqTags {
+    lets: Vec<(String, RhsTerm)>,
+    when: Vec<RhsTerm>,
+    ruleset: Option<String>,
+    flatten: bool,
+}
+
+/// A sequence rule's `:let ((name expr) ...)` and `:when (expr ...)` in the ordinary
+/// right-hand-side language, its `:ruleset`, and `:flatten`.
+fn parse_seq_tags_rhs(input: &mut &str, base: usize) -> ModalResult<SeqTags> {
+    let (mut lets, mut when, mut ruleset) = (Vec::new(), Vec::new(), None);
+    let mut flatten = false;
+    loop {
+        ws(input)?;
+        if flatten_tag(input, &mut flatten)? {
+            continue;
+        }
+        if input.starts_with(":let") {
+            *input = &input[":let".len()..];
+            cut_char(input, '(')?;
+            loop {
+                ws(input)?;
+                if input.starts_with(')') {
+                    break;
+                }
+                cut_char(input, '(')?;
+                let name = ident(input)?.to_owned();
+                let e = parse_rhs(input, base)?;
+                cut_char(input, ')')?;
+                lets.push((name, e));
+            }
+            cut_char(input, ')')?;
+        } else if input.starts_with(":when") {
+            *input = &input[":when".len()..];
+            cut_char(input, '(')?;
+            loop {
+                ws(input)?;
+                if input.starts_with(')') {
+                    break;
+                }
+                when.push(parse_rhs(input, base)?);
+            }
+            cut_char(input, ')')?;
+        } else if input.starts_with(":ruleset") {
+            *input = &input[":ruleset".len()..];
+            ws(input)?;
+            ruleset = Some(ident(input)?.to_owned());
+        } else {
+            break;
+        }
+    }
+    Ok(SeqTags {
+        lets,
+        when,
+        ruleset,
+        flatten,
+    })
 }
 
 /// Read a pattern as an RHS term — the conversion `(birewrite …)` needs to use each side as
@@ -731,6 +1106,13 @@ fn pattern_as_rhs(p: &SurfacePattern) -> ModalResult<RhsTerm> {
                         let mut e = ContextError::new();
                         e.push(StrContext::Label(
                             "birewrite side cannot carry a :mult annotation",
+                        ));
+                        return Err(ErrMode::Cut(e));
+                    }
+                    SurfacePatChild::Seq(..) | SurfacePatChild::Filter { .. } => {
+                        let mut e = ContextError::new();
+                        e.push(StrContext::Label(
+                            "birewrite side cannot carry a sequence pattern",
                         ));
                         return Err(ErrMode::Cut(e));
                     }
@@ -786,6 +1168,40 @@ fn parse_command(
     let cmd = match kw {
         "rewrite" => {
             let lhs = parse_pattern(input, base)?;
+            if crate::collection::has_sequence(&lhs) {
+                // The right-hand side and tags are the ordinary right-hand-side language,
+                // which `crate::seq_rhs` resolves and evaluates; the same text is read a
+                // second time as route 1's expressions, which debug builds evaluate too.
+                let rhs_start = *input;
+                let rhs_term = parse_rhs(input, base)?;
+                let tags = parse_seq_tags_rhs(input, base)?;
+                cut_char(input, ')')?;
+                // The route-1 reading is optional: a form only the ordinary language has
+                // (a binder `x:k`, a multiplicity `body:m`) leaves it out.
+                let mut again = rhs_start;
+                let legacy = (|| -> ModalResult<crate::collection::LegacyRhs> {
+                    let rhs = parse_cexpr(&mut again, base)?;
+                    let (lets, when, _) = parse_collection_tags(&mut again, base)?;
+                    ws(&mut again)?;
+                    if !again.starts_with(')') {
+                        return Err(ErrMode::Backtrack(ContextError::new()));
+                    }
+                    Ok(crate::collection::LegacyRhs { rhs, lets, when })
+                })()
+                .ok();
+                return Ok(SurfaceCommand::CollectionRewrite(
+                    crate::collection::SurfaceRule {
+                        lhs,
+                        legacy,
+                        rhs_term,
+                        lets_term: tags.lets,
+                        when_term: tags.when,
+                        ruleset: tags.ruleset,
+                        flatten: tags.flatten,
+                        span: span_of(base, start, input),
+                    },
+                ));
+            }
             let rhs = parse_rhs(input, base)?;
             let t = parse_rule_tags(input, base)?;
             SurfaceCommand::Rewrite {
@@ -793,6 +1209,7 @@ fn parse_command(
                 rhs,
                 when: t.when,
                 subsume: t.subsume,
+                flatten: t.flatten,
                 ruleset: t.ruleset,
             }
         }
@@ -816,6 +1233,7 @@ fn parse_command(
                 rhs: pattern_as_rhs(&lhs)?,
                 when: t.when.clone(),
                 subsume: false,
+                flatten: t.flatten,
                 ruleset: t.ruleset.clone(),
             });
             SurfaceCommand::Rewrite {
@@ -823,6 +1241,7 @@ fn parse_command(
                 lhs,
                 when: t.when,
                 subsume: false,
+                flatten: t.flatten,
                 ruleset: t.ruleset,
             }
         }
@@ -865,6 +1284,7 @@ fn parse_command(
             SurfaceCommand::Rule {
                 body,
                 head,
+                flatten: t.flatten,
                 ruleset: t.ruleset,
             }
         }
@@ -1028,6 +1448,24 @@ fn parse_command(
         "extract" => {
             let t = parse_term_inner(input, base)?;
             SurfaceCommand::Pass(Command::Extract(t))
+        }
+        "dump-egraph" => {
+            let root = parse_term_inner(input, base)?;
+            ws(input)?;
+            if !input.starts_with(":file") {
+                let mut e = ContextError::new();
+                e.push(StrContext::Expected(StrContextValue::Description(
+                    ":file \"path\"",
+                )));
+                return Err(ErrMode::Cut(e));
+            }
+            *input = &input[":file".len()..];
+            let quoted = parse_quoted_string(input)?;
+            // `parse_quoted_string` keeps the surrounding quotes; the path does not.
+            SurfaceCommand::Pass(Command::DumpEGraph {
+                root,
+                file: quoted[1..quoted.len() - 1].to_owned(),
+            })
         }
         "checkau" => {
             ws(input)?;
