@@ -36,8 +36,24 @@ typed_var_id! {
     pub struct RhsLocalMultVarId;
     #[doc = "Literal value variable (single LitValId binding from OpKind::Lit nodes)."]
     pub struct LitValVarId;
-    #[doc = "Global variable (let-bound, resolved at match time from global bindings)."]
-    pub struct GlobalVarId;
+    #[doc = "Literal-valued sequence variable: a sequence pattern's literal column, one value per element (`doc/sequence-patterns.md`, Typing)."]
+    pub struct LitSeqVarId;
+    #[doc = "RHS-local literal value introduced by a comprehension over a literal column or a primitive's rows."]
+    pub struct RhsLocalLitVarId;
+}
+
+/// Global variable (let-bound, resolved at match time from global bindings). A u32,
+/// unlike the per-rule variable ids above: globals accumulate over a whole program, and a
+/// benchmark can bind more than 65,536 of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GlobalVarId(pub u32);
+impl GlobalVarId {
+    pub const fn new(x: u32) -> Self {
+        Self(x)
+    }
+    pub const fn idx(self) -> usize {
+        self.0 as usize
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,14 +284,71 @@ pub enum Term {
         children: Vec<Term>,
         span: Span,
     },
+    /// `term:count` as a child of a variadic application: the child with its
+    /// multiplicity, at least 1, of any size (the configuration narrows it when the term
+    /// is built). An AC operator stores it as one counted child.
+    Counted {
+        term: Box<Term>,
+        count: num_bigint::BigUint,
+        span: Span,
+    },
 }
 
 impl Term {
     pub fn span(&self) -> Span {
         match self {
             Term::Lit(_, s) => *s,
-            Term::App { span, .. } => *span,
+            Term::App { span, .. } | Term::Counted { span, .. } => *span,
         }
+    }
+
+    /// How many entries of the written term are `sub`, compared by text: a child written
+    /// `x:k` is one occurrence. This is the count of e-class references in the term, the
+    /// number of times the class is named. See [`Self::weighted_occurrences`] for the
+    /// count with multiplicities.
+    pub fn occurrences(&self, sub: &Term) -> u64 {
+        let want = sub.to_string();
+        let mut n = 0u64;
+        let mut stack: Vec<&Term> = vec![self];
+        while let Some(t) = stack.pop() {
+            let inner = match t {
+                Term::Counted { term, .. } => term.as_ref(),
+                _ => t,
+            };
+            if inner.to_string() == want {
+                n = n.saturating_add(1);
+            }
+            if let Term::App { children, .. } = inner {
+                stack.extend(children.iter());
+            }
+        }
+        n
+    }
+
+    /// How many copies of `sub` the term denotes, compared by text: each occurrence
+    /// weighted by the product of the multiplicities on its path from the root, so the
+    /// child of `x:k` counts k times. This is the occurrence count of the term with every
+    /// multiset written out, computed without writing it out. Saturates at `u128::MAX`.
+    pub fn weighted_occurrences(&self, sub: &Term) -> u128 {
+        let want = sub.to_string();
+        let mut n = 0u128;
+        let mut stack: Vec<(&Term, u128)> = vec![(self, 1)];
+        while let Some((t, w)) = stack.pop() {
+            let (inner, w) = match t {
+                Term::Counted { term, count, .. } => {
+                    let k = u128::try_from(count).unwrap_or(u128::MAX);
+                    (term.as_ref(), w.saturating_mul(k))
+                }
+                _ => (t, w),
+            };
+            if inner.to_string() == want {
+                n = n.saturating_add(w);
+            }
+            if let Term::App { children, .. } = inner {
+                stack.extend(children.iter().map(|c| (c, w)));
+            }
+        }
+        n
     }
 }
 
@@ -290,6 +363,7 @@ impl std::fmt::Display for Term {
                 }
                 write!(f, ")")
             }
+            Term::Counted { term, count, .. } => write!(f, "{term}:{count}"),
         }
     }
 }
@@ -356,6 +430,27 @@ pub enum RhsChild {
         filter: Option<Box<RhsTerm>>,
         span: Span,
     },
+    /// A comprehension of a sequence rule whose binder is a tuple or whose source is
+    /// an expression: `..{ body[:mult] for (q a b) in (union-by p l u) }`, or
+    /// `..[ … ]` for an ordered result (`doc/sequence-patterns.md`, Typing and
+    /// "Multiplicities and `zip`").
+    RowComp {
+        body: Box<RhsTerm>,
+        mult: Option<MultExpr>,
+        binders: Vec<(String, BinderMult)>,
+        source: Box<RhsTerm>,
+        filter: Option<Box<RhsTerm>>,
+        ordered: bool,
+        span: Span,
+    },
+}
+
+/// A tuple binder's multiplicity: `x` (none), `x:k` (bound), `x:_` (dropped).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BinderMult {
+    None,
+    Var(String),
+    Drop,
 }
 
 /// Multiplicity expression in RHS multiset comprehension.
@@ -422,6 +517,8 @@ pub struct Variant {
     pub meta: OpMeta,
 }
 
+
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Sort(String),
@@ -465,6 +562,12 @@ pub enum Command {
     CheckEq(Term, Term),
     CheckNeq(Term, Term),
     Extract(Term),
+    /// `(dump-egraph t :file "p.json")` — write the whole e-graph, with `t`'s class
+    /// marked as the root, as JSON for an external extractor to read.
+    DumpEGraph {
+        root: Term,
+        file: String,
+    },
     AntiUnify {
         left: Term,
         right: Term,

@@ -12,9 +12,12 @@ struct Cli {
     /// Path to an .egg program file
     file: String,
 
-    /// E-class identifier width: 31 or 63 bits
-    #[arg(long, default_value = "31", value_parser = parse_id_bits)]
-    id_bits: u8,
+    /// Width preset, by storage word: 32 (31-bit ids, 32-bit multiplicities) or 64
+    /// (63-bit ids, 64-bit multiplicities). Operator and sort ids are 31-bit in both.
+    /// `--id-bits 31|63`, the earlier spelling by payload width, is accepted too.
+    #[arg(long, alias = "id-bits", default_value = "32", value_parser = parse_bits)]
+    bits: u8,
+
 
     /// Push/pop mechanism: "diff" (semi-persistent undo log). "clone" (deep copy) is
     /// reserved and rejected: no such backend exists.
@@ -66,6 +69,13 @@ struct Cli {
     /// checks; needs --derive-ac-eqs to have an effect. Off by default.
     #[arg(long, default_value_t = false)]
     check_ac_basis: bool,
+
+    /// Give an AC node a rewrite builds a flat alternative for every same-op child that
+    /// canonization keeps nested because its class is used elsewhere (operators with
+    /// `:inverse` excepted). Off by default: it adds nodes, and it saves the round a
+    /// flattening rule would take.
+    #[arg(long, default_value_t = false)]
+    flatten_rhs: bool,
 
     /// Count and report total e-matching steps (match-work instrumentation).
     /// Off by default; enabling it increments counters on the matching path and needs no
@@ -149,11 +159,11 @@ fn parse_push_pop(s: &str) -> Result<PushPop, String> {
         _ => Err(format!("expected 'diff', got '{s}'")),
     }
 }
-fn parse_id_bits(s: &str) -> Result<u8, String> {
+fn parse_bits(s: &str) -> Result<u8, String> {
     match s {
-        "31" => Ok(31),
-        "63" => Ok(63),
-        _ => Err(format!("expected '31' or '63', got '{s}'")),
+        "32" | "31" => Ok(32),
+        "64" | "63" => Ok(64),
+        _ => Err(format!("expected '32' or '64', got '{s}'")),
     }
 }
 
@@ -231,6 +241,7 @@ fn main() {
         ac_mode,
         basis_checks: cli.check_ac_basis,
         count_match_steps: cli.count_match_steps,
+        flatten_rhs: cli.flatten_rhs,
         sched_mode,
         union_by: cli.union_by,
         dump_proofs: cli.dump_proofs.clone(),
@@ -258,12 +269,16 @@ fn main() {
         };
     }
 
-    match (cli.id_bits, cli.proofs) {
-        (31, false) => dispatch!(semi_persistent_egraph::nodes::DefaultConfig, false),
-        (31, true) => dispatch!(semi_persistent_egraph::nodes::DefaultConfig, true),
-        (63, false) => dispatch!(semi_persistent_egraph::nodes::Config64, false),
-        (63, true) => dispatch!(semi_persistent_egraph::nodes::Config64, true),
-        _ => unreachable!(),
+    // The two built configurations: the multiplicity width follows the preset (u32 at 32
+    // bits, u64 at 64), with checked arithmetic. An unbounded width was built and removed
+    // (user, 2026-10-06), so `--mult-bits` is gone.
+    use semi_persistent_egraph::nodes::{Config64, DefaultConfig};
+    match (cli.bits, cli.proofs) {
+        (32, false) => dispatch!(DefaultConfig, false),
+        (32, true) => dispatch!(DefaultConfig, true),
+        (64, false) => dispatch!(Config64, false),
+        (64, true) => dispatch!(Config64, true),
+        _ => unreachable!("--bits is 32 or 64"),
     }
 
     // Prints only under the `phase-timing` feature with `EGRAPH_PHASE` set; a
@@ -282,6 +297,7 @@ struct EngineOptions {
     ac_mode: semi_persistent_egraph::interpret::AcMode,
     basis_checks: bool,
     count_match_steps: bool,
+    flatten_rhs: bool,
     sched_mode: semi_persistent_egraph::ematch::SchedulingMode,
     union_by: semi_persistent_egraph::UnionBy,
     dump_proofs: Option<std::path::PathBuf>,
@@ -313,6 +329,7 @@ fn run<Cfg, L, M, const PROOFS: bool>(
     interp.set_ac_mode(opts.ac_mode);
     interp.set_union_by(opts.union_by);
     interp.set_basis_checks(opts.basis_checks);
+    interp.eg.flatten_rhs = opts.flatten_rhs;
     let mut globals = semi_persistent_egraph::resolve::GlobalCtx::new();
     let checked = match semi_persistent_egraph::sortcheck::sortcheck_program(
         surface_cmds.to_vec(),
