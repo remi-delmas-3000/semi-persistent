@@ -1,6 +1,6 @@
-# Chapter 14: Correctness Claims and Boundaries
+# Chapter 13: Correctness Claims and Boundaries
 
-[Ch 13: Literal Model](13-literal-model.md) · [Table of Contents](00-table-of-contents.md) · [Ch 15: Proof Logging](15-proof-logging.md)
+[← Ch 12: Anti-Unification](12-anti-unification.md) · [Table of Contents](00-table-of-contents.md) · [Ch 14: Proof Logging →](14-proof-logging.md)
 
 This chapter states the supported correctness claims and their boundaries. The
 engine derives equalities from explicit unions, instantiated user rewrites,
@@ -46,21 +46,23 @@ under `rebuild_congruence` over `E_now`. Here "plain congruence" includes
 canonical C/A/AC/ACI representations plus local identity and nilpotent
 normalization; it excludes the global completion rounds that superpose and
 inter-reduce asserted equations. Explicit inverse pairs are canceled when they
-are visible during construction, while inverse pairs formed only by later
-merges require completion. This default closure is not full closure under all
+are visible during construction; pairs formed by later merges are canceled by
+`canon_repair_round` in every mode (in plain mode it alternates with
+`rebuild_congruence` to a joint fixpoint). A pair whose `inv(x)` node was never built
+is not seen. This default closure is not full closure under all
 of `=_T`. For AC/ACI operators, this chapter's stronger
 claim is conditional: when opt-in eager completion reports
 `CompletionOutcome::Converged`, the paper correspondence argues closure of the
 materialized ground AC/ACI consequences of the equations present in the
 e-graph, under its stated hypotheses. It does not imply that all user rules have
-been saturated. `Disabled`, `GoalMet`, and `AbortedGrowthLimit` do not report
+been saturated. `Disabled`, `GoalMet`, `AbortedGrowthLimit`, and `AbortedOverflow` do not report
 that completion fixpoint. Lazy completion may derive its installed goal and
 restore without constructing a full closure.
 
 Completeness is stated over *materialized* terms because the engine decides
 equalities, it does not enumerate the (infinite) term universe. The boundary case,
 an equality that requires a term no node represents, is the subject of §3.3 and
-[Ch 9](09-pattern-matching.md); it is the AC-matching gap, not a congruence-closure
+[§7.5](07-rules-and-pattern-matching.md#75-matching-a-ac-aci-and-c-operators); it is the AC-matching gap, not a congruence-closure
 gap.
 
 The two properties are independent, and they are not equally important. The
@@ -68,7 +70,7 @@ soundness invariant argued below is state-local: it does not depend on reaching
 a fixpoint or on completion running. It is not yet a machine-checked e-graph
 theorem (§4). Completeness is a fixpoint property and, for AC operators, the
 stronger claim depends on a converged completion pass of the
-[AC congruence completeness chapter](ac-congruence-completeness.md).
+[AC congruence completeness chapter](06-ac-congruence-closure.md).
 
 ### 1.1 The trustworthy polarity
 
@@ -115,22 +117,25 @@ pub struct LitOpDesc<V> {
     pub name: &'static str,
     pub arg_sorts: &'static [&'static str],
     pub ret_sort: &'static str,
-    pub eval: fn(&[&V]) -> V,
+    pub eval: fn(&[&V]) -> Option<V>,   // None: outside the operation's domain
 }
 ```
 
-`eval` is called during RHS application (Chapter 12) on the interned values of
-the argument nodes, and its result is interned to a `LitValId`. Primitive
+`eval` is called during RHS application (§7.7), in LHS predicate guards, and in RHS
+multiplicity expressions, on the interned values of the argument nodes. A `Some`
+result is interned to a `LitValId`. Primitive
 applications are evaluated directly rather than materialized as ordinary
 e-nodes. Semantically, a successful evaluation uses the equation
 `g(v_1, ..., v_k) = eval_g(v_1, ..., v_k)`.
 
 This is sound under these conditions on the model and value type:
 
-1. Whenever `eval_g` returns, its result is an extensional, deterministic
+1. Whenever `eval_g` returns `Some`, its result is an extensional, deterministic
    function of the argument values, with no outcome-changing external state.
-2. The value type's `Eq` and `Hash` implementations agree, so interning maps
-   equal values to one `LitValId` and does not conflate unequal values.
+2. The value type's canonical key (`LitVal::key`) identifies exactly the equal values,
+   so interning maps equal values to one `LitValId` and does not conflate unequal
+   values. The store interns by that key, not by the value's own `Eq` and `Hash`; the
+   shipped models meet this condition through the canonical-key table of Chapter 10.
 3. `sort_of`, parsing, primitive signatures, and `is_truthy` agree with the
    intended external literal semantics.
 
@@ -149,10 +154,14 @@ literal.
 The overflow variants (`checked`, `wrapping`, `saturating` arithmetic in
 `MachineModel`) are distinct primitive operations with distinct `eval`
 functions. Wrapping and saturating operations return for their declared input
-sorts. Checked arithmetic, division by zero, invalid powers, and some string
-index arithmetic can panic; the trait does not encode totality. A successful
-call is deterministic under the model obligations above, but progress for every
-well-sorted input is not guaranteed. `is_truthy`, used by `:when` guards to read
+sorts. The trait encodes partiality: `eval` returns `None` outside the operation's
+domain (checked overflow, division or remainder by zero, an exponent outside the
+primitive's exponent type). The engine turns `None` into an `EvalError`, asserts no
+equality from it, and stops the run; the interpreter prints the error and exits
+nonzero. The string operations are total: `substr` and `at` yield the empty string for
+an invalid range. A sort mismatch is not reported through `None`: sortcheck rules it
+out, and the `eval` arm panics. A successful call is deterministic under the model
+obligations above. `is_truthy`, used by `:when` guards to read
 a literal as a boolean, is another external model function covered by those
 obligations.
 
@@ -163,7 +172,7 @@ when `find(a_i) = find(b_i)` for all `i`. This is the congruence inference rule,
 which is sound in equational logic: if each argument pair is already `=_T`, the
 applications are `=_T`. Recanonicalization performs exactly this: it replaces each
 child by its representative and merges nodes that become syntactically identical
-(Chapter 5). No equality is asserted that is not a congruence consequence of merges
+(Chapter 4). No equality is asserted that is not a congruence consequence of merges
 already performed, so by induction the union-find stays within `=_T`.
 
 ### 2.3 Canonicalization for C, A, AC, ACI
@@ -193,7 +202,7 @@ rejected before an `OpKind` is registered.
   (sorted with multiplicities). Two AC-nodes with the same multiset are equal by
   associativity and commutativity. Flattening on the class summand-form, not the
   union-find representative, is required for this to be a function of the e-graph
-  state; see [AC chapter §6c](ac-congruence-completeness.md).
+  state; see [AC chapter §6c](06-ac-congruence-closure.md).
 - **ACI**: as AC, with multiplicities collapsed to presence (a set), sound by the
   additional idempotence axiom `f(x,x) = x`.
 
@@ -204,7 +213,7 @@ pair reaches the same canonical form) is a completeness statement, treated in §
 ### 2.4 AC completion
 
 The completion pass for AC operators (superposition and collapse, see the
-[AC chapter §6](ac-congruence-completeness.md)) asserts additional equalities
+[AC chapter §6](06-ac-congruence-closure.md)) asserts additional equalities
 beyond direct congruence. Each is sound:
 
 - A superposition merges the two reducts of a critical pair `+AB`. Both reducts
@@ -225,7 +234,7 @@ beyond direct congruence. Each is sound:
   equal to the unit in `=_T`.
 
 The soundness invariant is stated and argued abstractly in
-[AC chapter §12](ac-congruence-completeness.md): every rule and every merge
+[AC chapter §12](06-ac-congruence-closure.md): every rule and every merge
 satisfies `=_T`, preserved by each operation, with no appeal to termination or to
 reaching a fixpoint. The argument therefore does not depend on whether completion
 is enabled or converges. Focused fixtures and invariant checks provide finite
@@ -243,9 +252,10 @@ and a `*`-node), each with its own minimum. One slot cannot hold both minima, so
 one.
 
 The engine therefore stores the per-class minima as a per-op POOL row: one column per
-completion operator (MSet and Set alike, in registration order), merge-folded
-element-wise, behind the `min_mono(op, class)` accessor (see
-`ac-algebraic-properties.md`, the storage chapter). A `+`-rule can only ever read the
+completion operator, merge-folded element-wise: MSet columns first in registration
+order, then Set columns in registration order, behind the `min_monomial(class, column)`
+accessor, with the column from `completion_column(op)` (see
+§5.3). A `+`-rule can only ever read the
 `+` column, so the conflation hazard is structurally unrepresentable. The completion
 algorithm itself needs nothing further for multiple symbols: it already runs per-op
 (superposition and normalization filter on the rule's op), and the union-find handles
@@ -260,8 +270,8 @@ just one e-class holding both nodes, with the same `find`, no fresh constant nee
 For literals, the relevant completeness statement is that two successfully
 evaluated ground primitive applications returning equal model values intern the
 same `LitValId`, so their literal nodes are identical and share a class.
-Completeness here is relative to evaluation returning and to the external
-`Eq`/`Hash` contract. The engine does not decide equalities that hold in the
+Completeness here is relative to evaluation returning `Some` and to the
+canonical-key contract of §2.1. The engine does not decide equalities that hold in the
 model only under quantified laws the model does not expose as evaluation (for
 example `x + 0 = x` as a law over symbolic `x`); those require user rewrite
 rules.
@@ -270,7 +280,7 @@ rules.
 
 Plain congruence closure is complete for the ground word problem generated by
 the currently asserted ground equations. The argument
-([AC chapter §1](ac-congruence-completeness.md)) rests on the materialization
+([AC chapter §1](06-ac-congruence-closure.md)) rests on the materialization
 invariant: the input is finitely many equations over finitely many terms, the term
 universe is closed under subterms, and every subterm is a materialized node. The
 congruence rule therefore never needs a term that does not already exist, so
@@ -283,18 +293,26 @@ Flattening an AC application into a multiset node erases the intermediate sub-su
 subterms. The flattened term universe is no longer closed under subterms (the
 sub-sums of `+{a,b,c}` under associativity include `+{a,b}`, `+{b,c}`, `+{a,c}`,
 none of which is materialized), so the materialization invariant fails and plain
-recanonicalization misses AC consequences. The [AC chapter §2–§5](ac-congruence-completeness.md)
+recanonicalization misses AC consequences. The [AC chapter §2–§5](06-ac-congruence-closure.md)
 develops this in full: recanonicalization propagates equalities on the *atoms* of a
 multiset but not on its *sub-multisets*, and the missed equalities are exactly those
 that require substituting a known sub-sum.
 
-The same boundary appears on the matching side ([AC chapter §5b](ac-congruence-completeness.md),
-[Ch 9](09-pattern-matching.md)): a scalar pattern variable that must bind a sub-sum
+The same boundary appears on the matching side ([AC chapter §5b](06-ac-congruence-closure.md),
+[§7.5](07-rules-and-pattern-matching.md#75-matching-a-ac-aci-and-c-operators)): a scalar pattern variable that must bind a sub-sum
 with no node of its own is outside the e-matching relation. That residual case
 requires materializing a sub-sum no equation justifies and is not claimed; it is the
 open term-valued AC-matching extension (AC chapter §11), separate from
 congruence completeness. Classical AC unification is a broader problem; the
 implemented operation is matching a pattern against a ground e-graph subject.
+
+Nesting is a separate, closed gap on the matching side. A node whose child class
+holds a node of the same AC (or A, or ACI) operator represents a flat content that no
+stored node spells, and an untagged pattern does not match it. A rule tagged
+`:flatten` matches every flattened view of the node, computed at match time and
+canonized by the one normalization (`nary_canon::normalize`), so for those rules
+matching is complete over nesting within the view and work bounds of §7.5; a
+node over a bound is skipped and counted, not matched partially.
 
 ### 3.4 Conditional completion claims by operator family
 
@@ -312,7 +330,7 @@ parents that spliced different spellings cannot see through congruence. Under
 either completion mode the A-only inter-reduction round targets this observed
 merged-spellings loss mode, rewriting contiguous occurrences of the larger
 spelling to the shortlex-least one
-([AC chapter §14](ac-congruence-completeness.md)). Focused tests cover that
+([AC chapter §14](06-ac-congruence-closure.md)). Focused tests cover that
 case; they do not prove it is the only loss mode. The word problem for finitely
 presented monoids is undecidable, so no algorithm can both terminate on every
 arbitrary A-only presentation and decide every equality. The implemented round
@@ -352,18 +370,18 @@ completion running and converging. The argument is on paper, adapting Kapur, and
 yet discharged in a proof assistant; the verification plan is in
 [Future Work](A3-future-work.md), and the engine-level invariant checks that
 confirm the rule set is reduced at a fixpoint are in the
-[AC completion spec](ac-completion-spec.md).
+[AC completion spec](06-ac-congruence-closure.md#part-iii-min_monomial-a-matcher-invariant-and-implementation-correspondence).
 
 ## 4. What is proved, argued, and assumed
 
 - **Assumed (model obligation).** Successful `eval` and `is_truthy` calls are
   extensional and deterministic, sort classification is coherent, and the
-  literal value's `Eq`/`Hash` implementations agree (§2.1). Totality is not
-  guaranteed by the trait. These are conditions on the externally-supplied
+  literal value's canonical key identifies exactly the equal values (§2.1). An `eval`
+  outside its domain returns `None` and stops the run. These are conditions on the externally-supplied
   `LitModel` and value type, outside the e-graph.
 - **Argued, intended for mechanical proof.** Congruence and canonicalization
   soundness (§2.2, §2.3) and AC completion soundness (§2.4) follow the invariant of
-  [AC chapter §12](ac-congruence-completeness.md). Soundness is the first target of
+  [AC chapter §12](06-ac-congruence-closure.md). Soundness is the first target of
   the Verus verification plan.
 - **Argued on paper, open mechanically.** AC/ACI completeness (§3.4) adapts Kapur
   and rests on the critical-pair lemma, Dickson's lemma, and Newman's lemma. It
@@ -377,4 +395,4 @@ confirm the rule set is reduced at a fixpoint are in the
   finitely presented monoid word problem (§3.4).
 
 ---
-[Ch 13: Literal Model](13-literal-model.md) · [Table of Contents](00-table-of-contents.md) · [Ch 15: Proof Logging](15-proof-logging.md)
+[← Ch 12: Anti-Unification](12-anti-unification.md) · [Table of Contents](00-table-of-contents.md) · [Ch 14: Proof Logging →](14-proof-logging.md)

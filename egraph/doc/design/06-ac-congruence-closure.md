@@ -1,4 +1,6 @@
-# AC Congruence Completeness
+# Chapter 6 — AC Congruence Closure
+
+[← Ch 5: Algebraic Operators](05-algebraic-operators.md) · [Table of Contents](00-table-of-contents.md) · [Ch 7: Rules and Pattern Matching →](07-rules-and-pattern-matching.md)
 
 This chapter is a self-contained account of the engine's opt-in attempt to close
 equalities over associative-commutative operators. It develops three ideas in order: (1) why
@@ -15,15 +17,51 @@ This is the single design reference for the AC completeness story. Part I derive
 problem from first principles (§0 is the short framing); Part II gives the algorithm and the
 argument for why it works. For where we stand and what remains, see
 [Future Work](A3-future-work.md); for the engine-specific invariants, the matcher details,
-and the implementation correspondence with Kapur, see the companion
-[AC Completion spec](ac-completion-spec.md). For the cost of AC matching (a separate,
-matching-side concern), see [Ch 9](09-pattern-matching.md).
+and the implementation correspondence with Kapur, see
+[Part III](#part-iii-min_monomial-a-matcher-invariant-and-implementation-correspondence). For the cost of AC matching (a separate,
+matching-side concern), see [§7.5](07-rules-and-pattern-matching.md#75-matching-a-ac-aci-and-c-operators).
 
 ---
 
-# Part I, the problem
+## Overview
 
-## 0. The core problem
+Flattened multisets lose equalities. `a+b = p` implies `a+b+c = p+c` for every `c`. Adding
+`a+b+c = q` then forces `p+c = q`, which nobody stated and canonical forms alone never
+derive.
+
+The fix reads the e-graph as a ground AC rewrite system. Each AC node `+M = c` is a rule
+`+M → c`, and the union-find supplies the rules between constants. Completion runs three
+operations to a fixpoint:
+- **Inter-reduction** substitutes a known sub-sum into a node that contains it.
+- **Superposition** builds the joint term where two nodes overlap, so `p+c` and `q`
+  become one class.
+- **Collapse** retires a rule whose left side another rule already covers
+  (`FLAG_AC_COLLAPSED`). Without collapse the procedure diverges.
+
+Overlap partners are found through the child-containment index, since only nodes that
+share a child can interact.
+
+At convergence the system is confluent and terminating, so every term has a unique normal
+form, and two terms are equal exactly when their normal forms agree (Newman's lemma).
+That is the completeness claim. It is a conditional paper argument with open proof
+obligations, not a verified theorem. Only a `Converged` outcome claims it; a budget exit
+is explicitly incomplete.
+
+Completion is off by default:
+- `--derive-ac-eqs` runs it eagerly;
+- `--lazy-ac-eqs` runs it only for an equality plain congruence cannot decide.
+
+Completion derives equalities; it does not broaden matching, which is the job of §7.5.
+
+Details: Part I for the problem, Part II for the algorithm, §10 for the conditional
+argument and its obligations; [Part III](#part-iii-min_monomial-a-matcher-invariant-and-implementation-correspondence)
+for the engine invariants; the
+book chapter [Three congruence
+closures](../../../doc/book/src/11-three-congruence-closures.md).
+
+## Part I, the problem
+
+### 0. The core problem
 
 Two AC facts force *infinitely* many equalities. `a+b = p` already entails `a+b+c =
 p+c`, `a+b+d = p+d`, and so on for every multiset with `{a,b}` inside it, with the same
@@ -35,7 +73,7 @@ So the AC-congruence-closure problem is **not** "store the equalities"; there ar
 infinitely many. The abstract completion construction maintains a finite set of
 find-and-replace rules that can regenerate those equalities on demand, keeping that set
 reduced (no rule's left side contained in another's). Finite does not mean small:
-ground AC completion has severe worst cases, and the production pass has an explicit
+ground AC completion has severe worst cases, and the algorithm we implemented has an explicit
 growth-budget exit. At a converged canonical system, deciding `g₁ = g₂` is "rewrite
 both with the rules until they stop; equal iff they land in the same place."
 
@@ -52,14 +90,15 @@ Collision without reduction explodes the rule set: collisions breed redundant ru
 breed more (the divergence we actually hit, §6b). Reduction without collision never
 derives the cross-fact equalities (incompleteness, §4). **AC congruence closure is the
 discipline of running both, in the right order, to a fixpoint, so the surviving rules
-are the intended reduced canonical basis**. Whether the production representation
+are the intended reduced canonical basis**. Whether the representation we implemented
 satisfies every hypothesis of that statement is the open proof obligation in §10. The
-rest of this chapter maps the construction into an e-graph, where "a rule" is just an
-AC node and "delete a rule" cannot mean delete a node.
+rest of this chapter maps the construction into an e-graph, where a rule is an AC node,
+and deleting a rule means flagging its node `FLAG_AC_COLLAPSED`: the node stays in the
+graph and leaves the rule set (§6b).
 
 §5d works this through one concrete example before the formal treatment.
 
-## 0a. Glossary
+### 0a. Glossary
 
 The chapter uses a fixed vocabulary. Each concept has one word.
 
@@ -84,7 +123,7 @@ The chapter uses a fixed vocabulary. Each concept has one word.
 - **reduced canonical basis**: the stronger abstract target: an inter-reduced,
   terminating, confluent system. An antichain alone does not establish those properties.
 
-## 0a-bis. Naming convention: representation vs. completion vs. theory
+### 0a-bis. Naming convention: representation vs. completion vs. theory
 
 The code uses "AC" in three unrelated senses; conflating them in identifiers caused real
 confusion, so the names are split along three axes and "AC" is reserved for exactly one of
@@ -103,10 +142,10 @@ them. When reading or extending the code, classify a name by which axis it belon
    names the algorithm and the theory below; and "ACI" baked the idempotent *clamp* into the
    representation name. The clamp is a separate axis: idempotent is the one `Set` case
    (dedup IS its clamp), while nilpotent lives in `MSet` (dedup would destroy the run-lengths
-   the mod-n clamp needs: see `ac-algebraic-properties.md`, "nilpotent must be MSet"). The
+   the mod-n clamp needs: see §5.3, "nilpotent must be MSet"). The
    representation axis is `{MSet,
    Set}`; the clamp is separate.
-   See `doc/design/ac-algebraic-properties.md`, "three independent axes".)
+   See §5.3, "three independent axes".)
 
 2. **Completion procedure (`cc`).** The congruence-closure *completion* this chapter adds
    (superposition + inter-reduction). It is not tied to one representation: it runs over
@@ -127,7 +166,7 @@ them. When reading or extending the code, classify a name by which axis it belon
 The one-line test: layout → `mset`/`set`; the completion procedure → `cc`; the property/theory
 or AC matching → `AC`.
 
-## 0b. The e-graph state is a set of rewrite rules
+### 0b. The e-graph state is a set of rewrite rules
 
 This frames what §6 onward operates on; the mechanics are §5d, §7, and §9a.
 
@@ -157,10 +196,10 @@ its rule set need not be confluent (§3, §4). The implemented opt-in completion
 pass adds the superposition and collapse steps of §6 and drives toward that
 target. `CompletionOutcome::Converged` reports only that a full implementation
 round made no change; it is not a certificate that the abstract reduced-basis
-conditions hold. Default-off, goal-directed, and budget-aborted returns retain
-the plain-completeness boundary.
+conditions hold. Default-off, goal-directed, budget-aborted, and overflow-aborted
+(`AbortedOverflow`) returns retain the plain-completeness boundary.
 
-## 1. Why ordinary congruence closure is complete
+### 1. Why ordinary congruence closure is complete
 
 Congruence closure (CC) decides the ground word problem: it computes the least
 equivalence closed under the congruence rule,
@@ -187,7 +226,7 @@ CC completeness  =  (term universe closed under subterms)
 
 Flattening AC nodes breaks the first condition.
 
-## 2. The problem with set and multiset flattening
+### 2. The problem with set and multiset flattening
 
 Take `a + b + c` with `+` associative-commutative. In a plain binary DAG it is some
 bracketing, say `a + (b + c)`:
@@ -228,7 +267,7 @@ does `(a+b)` nor `(a+c)`. The multiset `{a,b,c}` virtually contains those sub-su
 materialized as nodes. This preserves soundness (we will not infer incorrect
 equalities), but it breaks completeness of congruence closure.
 
-## 3. The root cause of completeness loss
+### 3. The root cause of completeness loss
 
 What does `rebuild` actually do to a multiset node? Recanonicalization of
 `+{x₁, …, xₙ}` replaces each element by its union-find representative, then re-sorts
@@ -272,9 +311,9 @@ all its sub-sums `+{a,b}`, `+{b,c}`, `+{a,c}`, and we materialized none. The fir
 precondition that made plain CC complete fails; the second still holds; completeness
 is lost.
 
-## 4. A concrete trace of the miss
+### 4. A concrete trace of the miss
 
-### 4a. Containment: a known sub-sum inside a larger node
+#### 4a. Containment: a known sub-sum inside a larger node
 
 This is the §3 root cause directly. Assert:
 
@@ -300,7 +339,7 @@ if `+(c, d)` exists from elsewhere, nothing links it to `e`. This is the absent
 sub-sum substitution of §3: the sub-sum `+{a,b}` is virtually contained in n₂, but
 `c` is never substituted in for it.
 
-### 4b. Overlap: the sub-sum is in no existing node
+#### 4b. Overlap: the sub-sum is in no existing node
 
 The harder case is when the two known sums overlap but neither contains the other.
 
@@ -332,11 +371,11 @@ super-multiset of both n₁ and n₂. A fix that only substitutes into contained
 sub-sums (§4a) handles 4a but misses 4b. The fix must also build the superposition
 of two overlapping sums and substitute into it both ways (§6).
 
-## 5. Why `rest`-variable matching does not restore completeness
+### 5. Why `rest`-variable matching does not restore completeness
 
 It is tempting to think our `rest` machinery already covers sub-sums. When a
 user-rule pattern `(+ ?x ..rest)` matches `+{a,b,c}`, `DecomposeAC`
-([Ch 9](09-pattern-matching.md)) does enumerate sub-multisets (`?x=a, rest={b,c}`,
+([§7.5](07-rules-and-pattern-matching.md#75-matching-a-ac-aci-and-c-operators)) does enumerate sub-multisets (`?x=a, rest={b,c}`,
 then `?x=b, rest={a,c}`, and so on), so the matcher does encounter the sub-sum
 `{b,c}`. But it encounters it only as a transient value bound to `rest` in the
 matcher's environment, not as a node in the e-graph. The distinction is what makes
@@ -349,11 +388,11 @@ rule's RHS explicitly constructs `+{b,c}`, no such node is created.
 
 This is how the intended maximum-partition e-matching relation and the
 congruence boundary differ. Focused tests support matcher soundness, while
-completeness for that relation remains open ([Ch 9](09-pattern-matching.md)).
+completeness for that relation remains open ([§7.5](07-rules-and-pattern-matching.md#75-matching-a-ac-aci-and-c-operators)).
 Rest bindings can represent residual multisets transiently; they do not keep
 sub-sums as nodes that can trigger later congruence merges.
 
-## 5b. The same gap, seen from the matching side
+### 5b. The same gap, seen from the matching side
 
 If a term virtually exists (it is an AC sub-sum of a real node but has no node of
 its own), does our matcher fail to match it? The answer splits in two.
@@ -420,9 +459,9 @@ claim it (§11). General AC unification is broader still.
 
 ---
 
-# Part II, the fix
+## Part II, the fix
 
-## 5c. The fix as rewrite-system completion
+### 5c. The fix as rewrite-system completion
 
 Our union-find and AC nodes form a ground AC rewrite system: each AC node `+M = c` is a rule
 `+M → c`, and the union-find is the constant-rule layer (`c → ĉ`). Atom-level
@@ -432,7 +471,7 @@ non-confluent, so two rule orders can drive the same term to two different norma
 (superposition and collapse) make every such divergence joinable, and a standard rewriting
 result then applies: a confluent, terminating system has unique normal forms and therefore
 decides its equational theory. This is the abstract conditional argument; §10 lists
-the obligations still needed to transfer it to production.
+the obligations still needed to transfer it to the algorithm we implemented.
 
 So "restore AC congruence completeness" is "complete the rewrite system to
 convergence," and that splits into two separate procedures:
@@ -447,7 +486,7 @@ convergence," and that splits into two separate procedures:
 before convergence it may return different normal forms for different rule orders.
 Making it a function is the content of the completeness argument (§10).
 
-## 5d. A worked example
+### 5d. A worked example
 
 `+` flattens to a multiset (order doesn't matter, no nesting; `a+b+c` is just the
 multiset `{a,b,c}`). This example uses distinct children, so every multiset is also a set;
@@ -544,7 +583,7 @@ operations, §6b why Chore A (collapse) is required by the abstract termination 
 how "retire a rule" is realized without deleting a node, §7–9 the implementation,
 and §10 the conditional termination/completeness argument and open obligations.
 
-## 6. The fix, derived directly from the root cause
+### 6. The fix, derived directly from the root cause
 
 The root cause says to re-materialize the erased intermediate terms, but only the
 ones that can matter. Not all sub-multisets (up to `2^d` for `d` distinct
@@ -553,14 +592,14 @@ equality, since those are the only ones a substitution can apply to. That is a
 finite, demand-driven set, and it corresponds to Kapur's AC completion (FSCD 2021).
 Two operations, matching the two cases of §4:
 
-### (A) Inter-reduction: substitute into a contained known sub-sum (the §4a case)
+#### (A) Inter-reduction: substitute into a contained known sub-sum (the §4a case)
 
 For an AC node `+M = d` and a known AC node `+A = a` with `A ⊆ M`, the sub-sum `+A`
 is virtually contained in `+M` and equals `a`. Substitute `a` in for `A`,
 materializing `+((M − A) ⊎ {a})`, and merge it with `d`. This is the missing sub-sum
 substitution of §3, performed explicitly.
 
-### (B) Superposition / critical pairs: build the joint term (the §4b case)
+#### (B) Superposition / critical pairs: build the joint term (the §4b case)
 
 Sometimes the term that exposes the equality is in no existing node; it is the
 superposition of two overlapping known sums. For `+A = a` and `+B = b` sharing
@@ -578,11 +617,12 @@ in for `B`):
 ```
 
 Both denote `+AB`, so merge them. Disjoint `A, B` need nothing (their critical pair
-is trivial, per Kapur), which keeps the work bounded. For §4b, with `A={a,b}, a=c`
+is trivial, per Kapur), which keeps the work bounded. This holds for plain AC. For a
+cancelative operator the code also superposes disjoint rule pairs (Kapur §5.3). For §4b, with `A={a,b}, a=c`
 and `B={b,d}, b=e`, we get `AB={a,b,d}`, reducts `+{c,d}` and `+{a,e}`, and the
 merge yields the missing equality.
 
-## 6b. Collapse is required: (A) and (B) alone diverge
+### 6b. Collapse is required: (A) and (B) alone diverge
 
 (A) and (B) without collapse are not the completion algorithm whose termination
 argument is cited here. The no-collapse form diverges on committed reproducers by
@@ -591,7 +631,7 @@ ratios and out-of-memory points are machine- and revision-specific diagnostics, 
 current complexity evidence. Collapse is therefore a required algorithmic operation,
 not an optional optimization.
 
-### The missing operation: Collapse / inter-reduction
+#### The missing operation: Collapse / inter-reduction
 
 Reading each AC node `+M = d` as a rule `+M → d`, the active rule set must be kept
 **reduced**: no rule's left multiset is a sub-multiset of another's. This is Kapur's
@@ -630,10 +670,10 @@ for all states. The collapsed node remains a legal *child* of other live nodes,
 keeps its class membership, and stays matchable; it simply stops being enumerated as a
 completion rule LHS.
 
-### Retirement = `FLAG_AC_COLLAPSED`: tombstone two roles, keep two
+#### Retirement = `FLAG_AC_COLLAPSED`: tombstone two roles, keep two
 
-"Retire a rule" cannot mean "delete a node" here. A node plays **four** roles, and
-collapse retires only two of them; getting the split, and its *ordering*, right is the
+Retiring a rule means flagging its node and keeping it. A node plays **four** roles, and
+collapse retires two of them; getting the split, and its *ordering*, right is the
 whole correctness story. The trigger for collapsing a node is precise: **a node is
 collapsed when its children can be rewritten by *some other* node.** `+{a,b,c}` with
 `+{a,b}=p` known has its sub-multiset `{a,b}` reduce to `p`, so it is collapsed. (Note
@@ -697,10 +737,11 @@ Chore B.** Two ways to get it wrong:
   case depends on the reduced node existing before matching proceeds.)
 - **Eager within the round.** The flag must gate Chore B *in the same round* the node
   becomes reducible. If this round's superposition pass still sees it, it breeds anyway.
-  (Our round structure rebuilds the active set each round and skips `FLAG_AC_COLLAPSED`,
-  which gives this.)
+  (The flag takes effect only when the next round rebuilds the active set, so within the
+  round a separate `reducible` vector gives this: a rule whose left side contains another
+  same-op rule's is never a superposition source or partner, `egraph.rs` `cc_round`.)
 
-### Why omitting collapse diverges (and why hash-consing does not save it)
+#### Why omitting collapse diverges (and why hash-consing does not save it)
 
 Drop collapse and the "antichain" stops being one. The reduct `(AB − A) ⊎ {a}`
 injects the rule's right-hand class `a`, which need not lie in `AB` (§10). So a reduct can be a **proper superset** of an existing rule's
@@ -723,7 +764,7 @@ never be superposition sources (the *prime superposition* criterion,
 Kapur–Musser–Narendran 1988: a superposition whose overlap term is reducible
 elsewhere is *composite*, and its critical pair is redundant).
 
-### Superposition is bounded; substituting a class-as-atom is what explodes
+#### Superposition is bounded; substituting a class-as-atom is what explodes
 
 It looks paradoxical that the algorithm superposes rule left-hand sides (which are,
 by orientation, the *larger* (non-minimal) monomials) yet does not blow up. If the
@@ -747,7 +788,7 @@ superposition bounded, and locate the real explosion elsewhere.
    every round, and *that* is the runaway: not the superposition, the fresh atom.
    The abstract fix orients the critical pair as a rule between **two monomials** over the
    *existing* constants (`larger → smaller`, never `→ κ`), and substitutes a class by
-   its degree-lex-minimal monomial, never by a class-as-atom. Production uses the
+   its degree-lex-minimal monomial, never by a class-as-atom. The implementation uses the
    maintained class-member candidate only when the read-time orientation guard
    makes a decreasing rule; exact minimality is the §9b proof gap. Then, in the
    abstract example, `+{b,c,d} → +{a,b,e} → +{c,e}` (via `+{a,b}→c`) joins the other
@@ -764,13 +805,13 @@ superposition bounded, and locate the real explosion elsewhere.
 In the abstract construction, a rule's left side is the non-minimal side and the
 class minimum is its normal form, so that minimum is not a superposition source.
 The two essential choices are to orient critical pairs between monomials over
-existing constants and to collapse reducible sources. Production approximates
+existing constants and to collapse reducible sources. The implementation approximates
 the minimum as described above. Under the abstract invariants, the plain pair
 scan is `O(|active|²)` per round over a finite
 antichain; get the RHS wrong (substitute the class id as an atom) and known
 reproducers grow without reaching the intended fixpoint.
 
-### Worked example: two rules, hand-checkable
+#### Worked example: two rules, hand-checkable
 
 `+` AC, atoms `a, b, c`, right-hand classes `s, t`. Input:
 
@@ -812,21 +853,24 @@ The abstract correct run *decides* `{a,b,s} = {s,t}` by normalising (`{a,b,s} �
 same as the other side, both over existing constants) and stores neither: collapse
 plus normalization against the oriented rule set is the step that cannot be skipped.
 
-### What this requires of the implementation
+#### What this requires of the implementation
 
 1. **Maintain an `active` set of irreducible AC nodes** per op (those with no
    containment partner), concretely the AC nodes carrying neither `FLAG_AC_COLLAPSED`
    nor `FLAG_SUBSUMED`. Superpose (B) only over `active`.
-2. **On adding `+A → a`**, find its containment supersets via `by_contains`; for each
-   active `+M` with `A ⊊ M`, reduce (A), merge, and **mark `+M` `FLAG_AC_COLLAPSED`** (the
-   non-deletable form of "retire"; the node, its class, and its matchability persist).
-3. **Normalize every reduct against *all* current rules** (including those minted this
-   round) to a fixpoint before comparing (see the `normalize_ms` requirement in §9).
-   If the two reducts land in one class, add nothing.
+2. **Each round, normalize every active `+M`** against the round's other rules (the (A′)
+   pass). When a rule `+A → a` with `A ⊊ M` reduces it, merge, and **mark `+M`
+   `FLAG_AC_COLLAPSED`** (the non-deletable form of "retire"; the node, its class, and its
+   matchability persist). There is no separate superset search when a rule is added: the
+   next round's pass finds the supersets.
+3. **Normalize every reduct against *all* the round's rules** to a fixpoint before
+   comparing (see the `normalize_ms` requirement in §9). The rule table is snapshotted when
+   the round starts; rules minted while applying it join in the next round. If the two
+   normal forms coincide as multisets, add nothing; otherwise materialize both and merge.
 4. **Orient rules and avoid synthetic class-as-atom RHSs.** The abstract algorithm picks a total
    admissible monomial order `≫_f` (degree-lex: size, then lex from the **largest**
    class id downward: see "the tie-break direction is load-bearing" below) and uses
-   the class minimum. Production instead reads a class-member candidate and emits a
+   the class minimum. The implementation instead reads a class-member candidate and emits a
    rule only when it is decreasing; proving that this weaker representation preserves
    the abstract termination/completeness argument is open (§9b). It never invents a
    fresh class id solely as a synthetic RHS summand.
@@ -835,7 +879,7 @@ Diagnostic traces can compare `|active|`, total AC nodes, generated critical pai
 and the reported completion outcome. Such traces are reproducers, not evidence that
 the active set generally plateaus near the input size.
 
-### Flattening (`WF_flat`) and the matcher-crash gate
+#### Flattening (`WF_flat`) and the matcher-crash gate
 
 The engine requires **AC terms to be flattened** (`WF_flat`): an `f`-node never has a
 **non-`atomic`** `f`-class child. The qualifier is not a detail and was missing from an
@@ -851,7 +895,7 @@ materialization invariant of §1 needs every summand to be a real summand, and a
 the implementation argument that recanonicalization-time flattening is vacuous, and
 explains why keying the flatten on the union-find representative is the wrong choice.
 
-### 6c. Continuous flattening: what to flatten, and the representative trap
+#### 6c. Continuous flattening: what to flatten, and the representative trap
 
 The naive build-time flatten ("splice a child whose representative is an `f`-node") is
 **wrong**, for a reason that is the heart of the difficulty. During recanonicalization of
@@ -882,7 +926,7 @@ Three cases, not two, and the second argument matters:
 2. **Non-atomic with `f`-monomials**: the class's maintained `min_monomial` candidate for
    `f`'s pool column is re-canonicalized and spliced. Other members remain in the class and
    can contribute oriented completion rules. The candidate is a deterministic field of the
-   implementation state, but §9b explains why production has not proved that it is always
+   implementation state, but §9b explains why the implementation has not proved that it is always
    the globally least same-op member or that the resulting system has a unique normal form.
 3. **Non-atomic with only other-op monomials** (a `*`-sum used inside a `+`-sum): the `f`
    column is empty, the class id is kept opaque: Kapur's purification, the class id playing
@@ -975,9 +1019,12 @@ children, not an operation on `c`.
 **Where flattening runs: build only, with a stated sufficiency argument.** A child is spliced exactly
 when it is non-atomic, i.e. a pure `+`-sum that contains no non-AC node and is referenced
 by no node (§9a). Flattening therefore needs to run only at the one place a non-atomic
-class can appear as a candidate child: `add`. Before the AC arm sorts and coalesces,
-`flatten_ac_children` replaces each child by its `summand_form` (`{c}` if atomic, else
-`min_monomial(c)`) and splices the non-atomic ones, to a fixpoint.
+class can appear as a candidate child: construction. Before the node is sorted and
+coalesced, `flatten_mset_children` (the AC path, from `add_mset`) or `flatten_ac_children`
+(the ACI path, from `add`) replaces each child by its `summand_form` (`{c}` if atomic,
+else `min_monomial(c)`) and splices the non-atomic ones, to a fixpoint. On the AC path the
+spliced counts multiply with a checked product, and a product past the multiplicity width
+is the reported error `MultOverflow`.
 
 The implementation argument says recanonicalization does **not** need a
 flattening pass. The following lemma and proof are on paper, not machine checked.
@@ -1097,7 +1144,63 @@ Conchon leaves open (a rule needing a variable to bind an un-materialized sub-su
 genuinely separate AC-matching problem (§11) and does **not** include §5b, whose sub-sum
 `c` *is* materialized and *is* atomic.
 
-## 7. Implementing the substitution from existing machinery
+### 6c. Congruent duplicate members, and `FLAG_CONGRUENT_DUP`
+
+Two nodes can come to hold the same canonical content without either being redundant
+when it was built. A rule builds `Not(x)` while `x`'s class is still distinct from
+`y`'s, so its hash-cons key differs from an existing `Not(y)` and a new node is
+correct. A later merge joins the two child classes, rebuild recanonicalizes the newer
+node onto `Not(y)`'s content, the hash-cons collision merges their classes, and
+congruence has done its job. What remains is the *loser*: the store never removes a
+node, so both stay members of the merged class with identical content.
+
+Removing one is not available here, and deliberately so: node ids are allocated
+monotonically, and the union-find, the use lists, the class ring and the proof
+justifications all still reference the loser. The well-formedness theorems about those
+structures would have to be restated to admit holes. Instead the loser is marked
+`FLAG_CONGRUENT_DUP` (`node_types.rs`), a flag with its own semantics — "an unflagged
+member of this class holds the same canonical content" — so that every consumer which
+enumerates a class's members as *distinct alternatives* may skip it: the dump, the
+content colouring, and both extractors. Nothing is deleted, and no theorem changes.
+
+**The matcher is not such a consumer, and this is a soundness requirement.** The
+semi-naive delta index is built from the round's touched log, which receives the node
+that recanonicalized onto its twin's content and not the twin. In the delta, the flagged
+copy is therefore the only witness of that content, and an index that skipped it would
+make semi-naive miss matches naive finds. The matcher keeps the copies; see
+§9.2, "A soundness requirement on every index filter", for the
+general rule and the tests that pin it.
+
+Correctness does not depend on where the flag is set, which is why it is a flag of its
+own rather than a reuse of `FLAG_SUBSUMED`. A consumer's rule is "skip it", justified by
+the invariant alone; `FLAG_SUBSUMED` would have made that conditional on knowing whether
+the bit meant user intent (which must still be dumped and counted) or a copy (which must
+vanish). The invariant — every content group keeps at least one unflagged member — is
+maintained by one rule at the single setting site in `caches.rs`: a flagged node never
+has a hash-cons hint pushed for it, so a collision probe only ever returns an unflagged
+node, and a chain of copies cannot flag its own last member.
+`EGraph::debug_check_congruent_dup_invariant` asserts it; without it, a wholly flagged
+class presents no content and extraction reports infeasible rather than degrading.
+
+**A defect found with it.** Recanonicalization rebuilt the node with
+`FixedArityNode::new`, whose flags start at zero, so it cleared the node's flags. A
+`(subsume t)` was therefore undone by the next merge that recanonicalized `t`, and `t`
+became matchable again. The flags describe the node, not its children, so canonization
+must carry them over; `tests/flag_preservation.rs` forces the path, which needs the
+child's class to lose a merge.
+
+**Why it is not cosmetic.** How many copies survive depends on the order matches are
+applied in, so a naive and a semi-naive round leave different numbers of them: the
+naive driver applies every rule's matches against the whole snapshot before one rebuild,
+so more terms are built over classes that the same round is about to join. Before this
+flag, that made the two strategies report different node counts and different extraction
+search spaces on the same inputs (measured: 103 of the 1,172 MLTL specifications of
+[JR26](11-extraction.md#references), naive higher on all
+but one) while the e-graphs were equal up to congruence. Skipping the copies cannot move
+the optimum, since a skipped node has an identical twin of identical cost, so the memory
+figures are unchanged and only the counters shrink.
+
+### 7. Implementing the substitution from existing machinery
 
 The fix is a new rebuild pass over pairs of existing AC nodes. It reuses two
 mechanisms we already have, and it is worth being precise about what each does,
@@ -1140,14 +1243,14 @@ asking "is `+rest` a known node?" That direction forces enumerating sub-multiset
 `M` (up to `2^|M|` splits) and probing each, the blowup we are trying to avoid. We
 invert it. Since every AC node `+A` is already such a rule by construction, no
 probing is needed to discover the rules; we only need to find, for each rule `+A`,
-the nodes it applies to, and that is a `by_contains` query.
+the nodes it applies to, and that is a walk of its children's use-lists.
 
-`by_contains` is keyed by a single child class (`by_contains[x]` is every variadic
-node containing child `x`), so candidate-finding, per node `+M = d`, is:
+A class's use-list holds every node that has it as a child, so candidate-finding, per
+node `+M = d`, is:
 
 ```
-# by_contains/by_op range over ACTIVE AC nodes only: no FLAG_AC_COLLAPSED, no FLAG_SUBSUMED (§6b).
-partners = ⋃_{x ∈ distinct(M)} by_contains[x]  ∩  by_op[+]   # active AC nodes sharing ≥1 element with M
+# The walk keeps ACTIVE AC nodes of op + only: no FLAG_AC_COLLAPSED, no FLAG_SUBSUMED (§6b).
+partners = ⋃_{x ∈ distinct(M)} uses[x]  ∩  op +   # active AC nodes sharing ≥1 element with M
 for each partner +A = a in partners:
     if A ⊊ M:        # (A) inter-reduction:  A properly contained in M
         substitute a in for A, merge, and mark +M FLAG_AC_COLLAPSED  # collapse (§6b)
@@ -1156,15 +1259,18 @@ for each partner +A = a in partners:
 ```
 
 We never look up a multiset, only individual shared elements; disjoint pairs (no
-shared element) are skipped, since their critical pair is trivial (§6). The collapse
+shared element) are skipped, since their critical pair is trivial (§6). That holds for
+plain AC; a cancelative operator also superposes disjoint pairs, through its own all-pairs
+loop (§9). The collapse
 on `A ⊊ M` (marking `+M` `FLAG_AC_COLLAPSED`) and the normalize-before-merge in (B) are
 the non-optional steps §6b derives; without them this loop diverges.
 
 The `rest` machinery is the arithmetic, not the search. Once a (target `+M`, rule
 `+A`) pair is chosen, the substitution itself (remove the sub-multiset `A`, keep
 `M − A`, drop in `a`) is the same multiset-subtract-and-rebind that `DecomposeAC`
-performs when it binds a `rest` variable. We reuse that primitive to compute
-`(M − A) ⊎ {a}`. We do not run user-rule pattern matching here, and we do not probe
+performs when it binds a `rest` variable. The operation is the same; the code is not
+shared: `(M − A) ⊎ {a}` is computed with the `multiset.rs` primitives
+(`multiset_subtract_into`, `multiset_union`). We do not run user-rule pattern matching here, and we do not probe
 `rest` bindings during matching: matching enumerates sub-sums transiently for user
 rules, whereas this pass pairs existing nodes and keeps the result.
 
@@ -1181,11 +1287,11 @@ There is no separate "mark for congruence" flag: materializing `+M'` as a real n
 is what lets ordinary recanonicalization and matching reach it from then on, which
 restores the missing congruence subterm of §3.
 
-The two reused pieces, at a different time than today:
+The two related pieces, at a different time than today:
 
 | Mechanism | Today (user-rule matching) | This rebuild pass |
 |---|---|---|
-| `by_contains` index | narrow candidates for a pattern with a bound child | pair an AC node with the nodes that share an element (substitution / superposition partners) |
+| containment lookup | `by_contains` narrows candidates for a pattern with a bound child | the class use-lists pair an AC node with the nodes that share an element (substitution / superposition partners); `cc_round` does not read the matcher's index, which is built per matching round |
 | `DecomposeAC`'s multiset-subtract + `rest` | enumerate sub-sums transiently, then discard | compute `(M − A) ⊎ {a}` for a chosen pair, normalize, materialize, merge, and on `A ⊊ M` mark `+M` `FLAG_AC_COLLAPSED` (collapse, §6b) |
 | per-node flag + skip in the active-set scan | `FLAG_SUBSUMED` hides a node from the matcher (user `(subsume …)`) | `FLAG_AC_COLLAPSED` retires a reducible rule from completion without deleting it or hiding it from the matcher (§6b) |
 
@@ -1196,7 +1302,7 @@ ground AC congruence closure over the stated model. No linear or polynomial
 whole-procedure bound follows: pair generation, normalization, repeated rounds,
 and basis growth can dominate.
 
-## 8. Correspondence with Kapur's ground AC-CC algorithm
+### 8. Correspondence with Kapur's ground AC-CC algorithm
 
 The data structures have the following intended mapping to Kapur's ground AC-CC
 framework (FSCD 2021),
@@ -1224,32 +1330,32 @@ superposition (B), and step 4 is the two halves of inter-reduction, substituting
 `FLAG_AC_COLLAPSED`). Step 4 being *two* things is the essential subtlety: the collapse
 half is what makes the rule set a Dickson antichain and is what the abstract
 termination argument rests on (§6b, §10). This table is not itself a refinement
-proof; `ac-completion-spec.md` records the partial rows and finite diagnostics.
+proof; Part III records the partial rows and finite diagnostics.
 
 The table above maps the **plain-AC** framework. The semantic-property
 extensions of the LMCS 2023 journal version add pair generators beyond step 3: the per-rule
 AXIOM critical pairs (§4: idempotent, nilpotent order n), the cancelative closure (§5.1–5.3:
 rule cancel-close, cancelative disjoint superposition, the per-constant closure), and
 inverse-pair cancellation. Their code↔paper correspondence lives in the normative table of
-`ac-completion-spec.md` §3.1.
+§S3.1.
 
-## 9. Implementation
+### 9. Implementation
 
 ```rust
 // In rebuild(), per AC op f, to fixpoint, alongside recanonize_node.
 // Each ACTIVE AC e-node can yield a ground rule f(M) -> f(rhs(class(M))).
-// Production reads a class-member candidate and keeps the rule only when the
+// The implementation reads a class-member candidate and keeps the rule only when the
 // degree-lex guard proves M > rhs. Exact global minimality is not assumed here.
 // EXCEPTION: a class that IS the op's identity has the EMPTY monomial as RHS
 // (Kapur's f({}) = e) — the atom form {e} would leak unit summands into reducts that
-// normalization (no f(x,e)=x law) can never remove. See ac-completion-spec.md §1.
+// normalization (no f(x,e)=x law) can never remove. See §S1.
 // TARGET INVARIANT: `active` holds only irreducible rules (no LHS strictly
-// contains another LHS). The production correspondence is an open obligation.
+// contains another LHS). Its correspondence with the abstract algorithm is an open obligation.
 
 // (B) Superposition critical pairs (Kapur Def. 4), over ACTIVE rules only.
-// Overlap candidates share >= 1 child class: the union of by_contains.
+// Overlap candidates share >= 1 child class: the union of their use-lists.
 for x in M.distinct() {
-    for partner in active.by_contains[x] ∩ active.by_op[f] {
+    for partner in active.uses[x] ∩ active.op[f] {
         let (a1, ra) = (partner.multiset(), partner.rhs_monomial());  // f(A1) -> f(ra)
         let rm = M.rhs_monomial();                             // f(M)  -> f(rm)
         if multiset_disjoint(&M, &a1) { continue; }            // disjoint => trivial
@@ -1261,8 +1367,9 @@ for x in M.distinct() {
 }
 
 // (A)+Collapse: the destructive step that keeps `active` an antichain (§6b).
-// When rule f(A1) -> f(ra) is added, retire every active rule it makes reducible.
-for parent in active.by_contains-supersets(A1) {              // f(M) -> d with A1 ⊆ M
+// Each round's (A′) pass normalizes every active rule by the others, so a rule
+// f(A1) -> f(ra) retires every active rule it makes reducible on the next round.
+for parent in active where A1 ⊆ parent.multiset() {           // f(M) -> d with A1 ⊆ M
     if proper_subset(&A1, &parent.multiset()) {
         let red = normalize_ms(f, substitute(parent.multiset(), A1 => ra));  // (A)
         merge(red, parent.class());
@@ -1279,11 +1386,12 @@ for parent in active.by_contains-supersets(A1) {              // f(M) -> d with 
 // the next round; the final unchanged full round is the operational stopping test.
 ```
 
-**Round structure.** Production uses batch rounds. Each round first drains ordinary
+**Round structure.** The implementation uses batch rounds. Each round first drains ordinary
 congruence, snapshots active rules into owned `rules` and `targets` vectors, generates
 an owned `crit` vector, applies inter-reduction and critical-pair closures, then repeats.
 Round 0 and a final confirmation round inspect all eligible pairs; intermediate rounds
-restrict ordinary superposition to pairs with at least one touched endpoint. A full
+restrict ordinary and cancelative superposition to pairs with at least one touched
+endpoint, and generate axiom pairs and rule cancel-closes only for touched rules. A full
 unchanged confirmation round is the condition for
 `CompletionOutcome::Converged`. This incremental-pair optimization has regressions and
 a prose coverage argument; it is not yet a proved fairness theorem.
@@ -1306,7 +1414,7 @@ needs and what keeps `active` a finite antichain. Two distinct roles:
   orientation/reduction properties the Dickson argument does not apply; known
   reproducers exhibit explosive growth.
 
-### The tie-break direction is load-bearing
+#### The tie-break direction is load-bearing
 
 The tie-break must compare monomials **from the largest class id downward**, Kapur's
 degree-lex: at equal size, the side owning the largest constant of the symmetric
@@ -1317,16 +1425,16 @@ exhaust the defensive guard. Guard exhaustion panics in every build rather than
 returning a partial "normal form"; debug builds additionally assert strict decrease
 after every step. In either case the termination/uniqueness arguments (Kapur
 Thm 3.4 / 3.6) do not apply to a mis-oriented table. `monomial_cmp`
-implements the descending comparison (see `ac-completion-spec.md` §3), with
+implements the descending comparison (see §S3), with
 randomized admissibility tests.
 
 So we still drop the *machinery* Kapur needs for a unique reduced canonical
 presentation across AC symbols (we do not need canonical signatures to derive
 equalities), but we cannot drop the monomial order itself: it is what orients collapse.
 
-## 9a. Data structures and the batch-round architecture
+### 9a. Data structures and the batch-round architecture
 
-Production implements the batch model shown in §9. `rebuild` alternates ordinary
+The implementation follows the batch model shown in §9. `rebuild` alternates ordinary
 worklist congruence with `cc_round`; each completion round takes an owned projection of
 the current rule state and applies the buffered work before the next round. It is not a
 single completion worklist and it is not allocation-free.
@@ -1373,7 +1481,9 @@ actual node, so that writing `c` inside a monomial denotes something real. Equiv
 situations:
 
 - the class holds a **non-AC node** (a leaf constant, a `Plain`/`Lit` node, or a node of
-  another operator); then `c` directly denotes that term, so `{c}` is a real one-element
+  another non-completion operator such as an A-only sequence or a `:comm` pair; a node of
+  another MSet or Set operator does not count, since it seeds its own pool column
+  instead); then `c` directly denotes that term, so `{c}` is a real one-element
   monomial; or
 - the class is **referenced as a child of some node**; then `c` already occurs as an
   element inside some existing monomial `+{… c …}`, so using `c` as a summand denotes the
@@ -1411,9 +1521,10 @@ rhs(class) = if atomic(class) { {classid} }      // size-1 atom, atomic-usable
              else             { monomial_of(min_monomial(class)) }
 ```
 
-`atomic` is set when the class gains a non-AC node and on every `add_use` (any child
-reference grounds `{classid}`), OR-combined on merge
-(`survivor.atomic |= absorbed.atomic`), and rolls back with the slot via the existing token.
+`atomic` is set when the class gains a non-AC node (`register_if_fresh`) and on every
+`add_use` (any child reference grounds `{classid}`), OR-combined on merge
+(`survivor.atomic |= absorbed.atomic`), and rolls back with the slot under the group
+`History`.
 So the class data contains `{ use_list, min_row, atomic, ... }`; `atomic` and the pool
 ride the class-layer token machinery. Selecting the slot is O(1), while reconstructing
 its current monomial is linear in that node's distinct child entries.
@@ -1437,11 +1548,12 @@ the single-symbol loop run independently per op, sharing only constants, and the
 union-find already dissolves his one cross-symbol case: a constant with two normal forms is
 simply one e-class holding a `+`-node and a `*`-node, both with the same `find` as their RHS;
 no fresh constant needed), so the only thing a single slot gives up is *storage
-generality*. The shipped design is the vectorized form: `min_monomial` is an offset into a
-flat `pool` of `nb_completion`-wide rows (one structure, backtracked whole; merge does an
-element-wise candidate selection from two rows), retaining one per-(class, op) candidate
-without a per-class heap allocation, behind one `min_mono(op, class)` accessor (see
-`ac-algebraic-properties.md`, the storage chapter).
+generality*. The shipped design is the vectorized form: `ClassData::min_row` is an offset
+into a flat `min_pool` of `nb_completion`-wide rows (one structure, backtracked whole; merge
+does an element-wise candidate selection from two rows), retaining one per-(class, op)
+candidate without a per-class heap allocation, behind one accessor,
+`EClasses::min_monomial(class, column)`, with `completion_column` mapping the op (see
+§5.3).
 
 **Scratch reuse is local, not a zero-allocation contract.** Destination-passing
 multiset operations reuse `ab_buf`, `sub_buf`, normalization ping-pong buffers, and the
@@ -1452,20 +1564,21 @@ benchmarks at the revision under test.
 
 **Nested rounds with a delta optimization.** Round 0 and a would-be-convergence
 confirmation round inspect the full eligible pair set. Intermediate rounds restrict
-ordinary superposition to pairs with at least one endpoint in the touched-node delta;
-inter-reduction and reducibility checks remain full scans. Convergence is reported only
+ordinary and cancelative superposition to pairs with at least one endpoint in the
+touched-node delta, and generate axiom pairs and rule cancel-closes only for rules in the
+delta; inter-reduction and reducibility checks remain full scans. Convergence is reported only
 after an unchanged full round. Focused regressions exercise missed-delta cases, but the
 fairness/refinement argument for this optimization is not machine-checked.
 
-## 9b. Design alternatives (recorded so we do not re-derive them)
+### 9b. Design alternatives (recorded so we do not re-derive them)
 
 Two **orthogonal** axes came up while designing the `min_monomial` storage. They are
 independent: pick one option from each. This subsection records all of them, with why,
 so the choice is not re-litigated later.
 
-### Axis 1: how the per-(class, op) candidate monomial is stored
+#### Axis 1: how the per-(class, op) candidate monomial is stored
 
-The abstract rule RHS is a class's `≫_f`-least monomial. Production reads one maintained
+The abstract rule RHS is a class's `≫_f`-least monomial. The implementation reads one maintained
 candidate from a constant-time slot and checks orientation; exact leastness is Axis 2.
 The candidate is per *(class, op)* because a class can hold monomials of several AC
 symbols (`a+b = a*b`).
@@ -1484,10 +1597,10 @@ axis is purely *storage*: 1 and 3 differ only in whether the slot holds one op's
 or a row of per-op candidates; 2 trades all storage for a scan. Distributivity (`*` over `+`) is a
 user rewrite rule (Kapur §6, Gröbner), **not** AC-CC, and is out of scope for all three.
 
-### Axis 2: how minimal the stored RHS is guaranteed to be
+#### Axis 2: how minimal the stored RHS is guaranteed to be
 
 `monomial_cmp` depends on `find()` of a node's children, which are mid-flight during a
-merge cascade, so an O(1)-on-merge `min_monomial` can be momentarily **non-minimal**. What that
+merge cascade, so a merge-maintained `min_monomial` can be momentarily **non-minimal**. What that
 does, precisely (a rule is `+M → R` with `R = min_monomial`):
 
 - A selected `R` is a monomial of the same e-class, so using it as a reduct has the
@@ -1498,7 +1611,8 @@ does, precisely (a rule is `+M → R` with `R = min_monomial`):
   does not establish convergence by itself.
 - The one genuine hazard is **mis-orientation**: if the stored `R` is *bigger* than `M`
   (`M ≺ R`), the rule points the growing way and normalization loops. This is prevented
-  by a **mandatory O(1) read-time orientation guard**: emit `+M → R` only if `M ≫ R`
+  by a **mandatory read-time orientation guard** (one `monomial_cmp`, linear in the two
+  monomials' entries): emit `+M → R` only if `M ≫ R`
   (else `M` is itself the smaller one: it is the normal form, not a rule). The guard runs
   at the read site, where finds are settled, so it is exact regardless of slot staleness.
 
@@ -1509,22 +1623,22 @@ does, precisely (a rule is `+M → R` with `R = min_monomial`):
 
 The orientation guard in (a) is mandatory: without it normalization could apply a
 growing rule. Collapse and duplicate-LHS filtering target an LHS antichain, while the
-guard targets per-step decrease. The companion (`ac-completion-spec.md` §1, §3)
+guard targets per-step decrease. The companion (§S1, §3)
 records finite diagnostics for global RHS minimality and LHS reducedness; those
 diagnostics are evidence, not universal proofs.
 
-## 10. Conditional completeness argument and open obligations
+### 10. Conditional completeness argument and open obligations
 
 This section gives the completeness argument for the algorithm of §6–9. It adapts Kapur's
 and follows standard rewriting metatheory. The argument is on paper, not yet discharged in a
 proof assistant: it has not been mechanically checked that our specific construction (e-class
-ids as constants, union-find as the constant-rule layer, `by_contains`-driven pair finding)
+ids as constants, union-find as the constant-rule layer, use-list-driven pair finding)
 satisfies every hypothesis those theorems need, so treat §10 and the §12 completeness bullet
 as a proof plan and conditional paper argument, not a verified guarantee (the verification plan is in
 [Future Work](A3-future-work.md)). Soundness is separate, argued in §12, and does not depend
 on this argument.
 
-The intended argument has three obligations. If all three hold for the production
+The intended argument has three obligations. If all three hold for the implemented
 state relation, Newman's Lemma closes the abstract result.
 
 - **Search coverage.** The required finite combinatorial lemma is that every
@@ -1535,14 +1649,16 @@ state relation, Newman's Lemma closes the abstract result.
   (Kapur §4) are self-pairs needing no partner, and the cancelative disjoint superposition
   (§5.3) pairs same-op rules that may share no child at all: its generator is an explicit
   all-pairs loop over the op's antichain, so the search-completeness claim for those
-  facets is by construction in the abstract loop, not by this index argument.)* For a node
+  facets is by construction in the abstract loop, not by this index argument. In
+  the implementation, intermediate rounds gate these generators on the touched delta too, so their
+  coverage, like that of (B), also rests on the final full confirmation round.)* For a node
   `+M`, the only AC nodes that can rewrite-interact with it are those sharing at
   least one child class, and they all lie in
-  `⋃_{x ∈ distinct(M)} by_contains[x] ∩ by_op[+]` (§7). Containment partners
+  `⋃_{x ∈ distinct(M)} uses[x] ∩ op +` (§7). Containment partners
   (`A ⊆ M`) and overlap partners (`A ∩ M ≠ ∅`) are both inside this union; disjoint
   partners (`A ∩ M = ∅`) are correctly skipped because non-overlapping rules
   commute, so their critical pair is trivially joinable (firing them in either order
-  reaches the same term). So the pass enumerates, via `by_contains`, a candidate set
+  reaches the same term). So the pass enumerates, via the use-lists, a candidate set
   intended to be a superset of the pairs yielding non-trivial critical pairs.
   The implementation obligation also includes duplicate-LHS filtering, touched-delta
   rounds, use-list coverage after merges, and the final full confirmation round. Tests
@@ -1558,16 +1674,19 @@ state relation, Newman's Lemma closes the abstract result.
   every supported count domain and that budget/goal exits are excluded.
 - **Termination of the unbudgeted completion relation.** There are two
   terminations, with different measures. Normalization (`nf_R` reducing a query to a
-  normal form) terminates because every step `+M → +((M−A)⊎{a})` replaces a
-  sub-multiset `A` (with `|A| ≥ 1`) by a single class `a`, strictly down in the
-  Dickson order (sub-multiset is componentwise `≤`); a total admissible monomial
-  order refines that partial order so every emitted rule is decreasing. Kapur's
+  normal form) terminates because every step `+M → +((M−A)⊎B)` replaces a
+  sub-multiset `A` (with `|A| ≥ 1`) by a right side `B` that is `{}`, a single class
+  `{a}`, or the class's stored candidate monomial, and the read-time guard emits the rule
+  only when `A ≫ B`; the total admissible monomial order is well-founded, so every step
+  strictly descends. The implementation also caps the loop at `GUARD_MAX_REWRITES`
+  (1,000,000 rule applications, `multiset.rs`), a backstop that panics, not a proved
+  bound. Kapur's
   completion theorem uses inter-reduction and Dickson's Lemma over a fixed finite
-  signature. A production proof must additionally establish that the live rule
+  signature. A proof for the implementation must additionally establish that the live rule
   projection remains the required reduced set across duplicate nodes, class merges,
   best-effort RHS selection, semantic-property generators, and incremental rounds.
   Merely observing that one round's surviving LHSs form a finite antichain does not
-  prove that the sequence of production rounds terminates.
+  prove that the sequence of implemented rounds terminates.
 
   One subtlety the measure must respect: new left-sides are **not** bounded by
   "sub-multisets of lcms of input left-sides." A reduct `(AB−A)⊎{a}` adds the rule's
@@ -1597,21 +1716,21 @@ state relation, Newman's Lemma closes the abstract result.
 
 Conditionally, search coverage plus local confluence plus termination gives
 confluence (Newman's Lemma), unique normal forms, and the desired equivalence
-`g₁ =_{ACCC(S)} g₂ ⟺ nf_R(g₁) = nf_R(g₂)`. The production code and tests do not
+`g₁ =_{ACCC(S)} g₂ ⟺ nf_R(g₁) = nf_R(g₂)`. The implementation and its tests do not
 yet establish those premises universally. `CompletionOutcome::Converged` means an
 unchanged full implementation round, not a formally verified decision-procedure
 certificate. This question is separate from completeness of the larger
 term-valued AC-matching relation of §11.
 
-## 11. How the literature handles the §4b example
+### 11. How the literature handles the §4b example
 
 | Source | Mechanism on `+(a,b)=c, +(b,d)=e` | Where it lives |
 |---|---|---|
-| Kapur, FSCD 2021 | Def. 4 superposition `AB={a,b,d}`, pair `(+(c,d),+(a,e))`, merge. Terminates by Dickson (Thm 6). | abstract AC-CC algorithm; production correspondence is §8/§10 |
-| Conchon et al., LMCS 2012 (AC(X)) | `headCP(R)`: shared `aᵘ={b}`, residuals `{a},{d}`, identical pair. For pure AC it is Kapur, plus a Shostak theory X. §8 separately notes the (open) matching gap. | ground AC-completion; production correspondence remains to prove |
+| Kapur, FSCD 2021 | Def. 4 superposition `AB={a,b,d}`, pair `(+(c,d),+(a,e))`, merge. Terminates by Dickson (Thm 6). | abstract AC-CC algorithm; correspondence with our implementation is §8/§10 |
+| Conchon et al., LMCS 2012 (AC(X)) | `headCP(R)`: shared `aᵘ={b}`, residuals `{a},{d}`, identical pair. For pure AC it is Kapur, plus a Shostak theory X. §8 separately notes the (open) matching gap. | ground AC-completion; correspondence with our implementation remains to prove |
 | Schifferer/Ullrich/Hack (KBC) | Offline Knuth-Bendix derives a shortcut rule; "use KBC during saturation" is their future work. | precompute, outside rebuild |
 
-The sources converge on the same critical pair. Production implements the mapped
+The sources converge on the same critical pair. The implementation provides the mapped
 mechanisms in §6–9; equivalence to Kapur's full procedure is the §10 obligation.
 
 None of them integrates term-valued AC matching into this e-matcher. Binding a scalar
@@ -1625,7 +1744,7 @@ to `2^d` sub-multisets for `d` distinct summands, or more generally
 Two clarifications keep this from being overstated:
 
 - It is the boundary of e-matching, not incompleteness within it; see the precise
-  relation in [Ch 9](09-pattern-matching.md).
+  relation in [§7.5](07-rules-and-pattern-matching.md#75-matching-a-ac-aci-and-c-operators).
 - Many cases that look like they need it do not: if the sub-sum equals a known class
   (as `a+b = c` does whenever `neg(a+b)` was built), the inter-reduction of §6
   substitutes that class in, materializes the node, and the ordinary matcher reaches
@@ -1635,7 +1754,7 @@ Two clarifications keep this from being overstated:
 Our `rest` variable already reaches the multiset-valued part of the larger relation
 (it binds `{a,b}` as a multiset); a scalar variable does not.
 
-## 12. A proof sketch (abstract model)
+### 12. A proof sketch (abstract model)
 
 Model state `(P, R)`: `P` a partition of a finite set `C` of constants (the
 union-find), `R` a finite set of AC rules `f(M) → c` with `M : Multiset C` (the AC
@@ -1651,7 +1770,7 @@ reflexive/symmetric/transitive, and closed under
   merge preserves it, since both reducts equal `f(AB)` (Kapur Lemma 5) and so are
   `ACCC(S)`-equal. This is a local paper argument and focused tests reconstruct
   representative proof paths; no Verus theorem currently establishes it for every
-  production transition.
+  transition of the implementation.
 - **Conditional completeness.** If the three §10 obligations hold, Kapur's
   critical-pair lemma and Newman's Lemma yield confluence and unique normal forms.
   Neither an unchanged full round nor the finite basis diagnostics by themselves
@@ -1660,15 +1779,16 @@ reflexive/symmetric/transitive, and closed under
 The verification plan (which proof in Verus, which in Lean, and the staging) is in
 [Future Work](A3-future-work.md), since it concerns what remains to be done.
 
-## 13. Lazy completion: on-demand search paid per query
+### 13. Lazy completion: on-demand search paid per query
 
 Three ways to run an AC workload, selected on the CLI:
 
 - **plain** (default): canonization and plain congruence; the Part I
   completeness gap stands.
 - **eager** (`--derive-ac-eqs`): every rebuild attempts completion. It returns
-  `Converged` after an unchanged full round or `AbortedGrowthLimit` after the
-  configured growth backstop. Interleaving saturation rules grows the term/class
+  `Converged` after an unchanged full round, `AbortedGrowthLimit` after the
+  configured growth backstop, or `AbortedOverflow` when a multiplicity exceeds the
+  configured width. Interleaving saturation rules grows the term/class
   pool, so neither the abstract fixed-signature argument nor the implementation
   currently proves termination or completeness of the combined loop.
 - **lazy** (`--lazy-ac-eqs`): saturation runs plain; an equality check that
@@ -1682,20 +1802,21 @@ Three ways to run an AC workload, selected on the CLI:
 The lazy search has two phases. Phase 1 is one completion rebuild on the
 frozen graph (no user-rule rounds interleave, matching the fixed-input scope of
 the §10 proof target). Phase 2, when
-the pair is still apart and the program has rules, hands the pair to the
+the pair is still apart, phase 1 did not hit the growth budget, and the program has
+ordinary rules, hands the pair to the
 saturation driver as an `:until` goal with completion enabled: rounds alternate
 rule matching with completion fixpoints and stop the moment the pair joins,
 bounded by an alternation budget (default 32 rounds) and the completion
 node-growth budget. A budget stop is reported as inconclusive. An unchanged
 operational joint round means the selected ruleset and implemented completion
 passes found no more work; it is not, without the §10 theorem, a proof of
-non-derivability in the abstract AC theory. Phase 2 runs the default ruleset
-only.
+non-derivability in the abstract AC theory. Phase 2 runs the ordinary rules of the
+default ruleset only; sequence rules do not run in it.
 
 Three properties of the lazy mode:
 
 - **One transaction across consecutive checks.** The mark is taken at the
-  first failing check and the restore happens at the first non-equality-check
+  first equality check that plain congruence cannot decide, and the restore happens at the first non-equality-check
   command (or program end), so a run of checks accumulates completion and
   alternation state instead of each re-deriving from scratch. A bare
   `(check t)` closes the transaction too: it materializes its term
@@ -1722,10 +1843,10 @@ mode and reports the same, larger, anti-unifier it reports in plain mode. Only
 eager completion changes the relation the solver reasons over. The measurement,
 the reason a goal-directed search cannot be adapted to a solver with one OR node
 per reachable class pair, and the pinned regression are in
-[`19-anti-unification.md`](19-anti-unification.md) §2.8 and
+[Chapter 12](12-anti-unification.md) §2.8 and
 `tests/au_ac_completion_modes.rs`.
 
-## 14. The A-only transfer: inter-reduction for sequences, and where it must stop
+### 14. The A-only transfer: inter-reduction for sequences, and where it must stop
 
 An analogous erased-reference gap exists for associativity-only (`Seq`) operators:
 build-time flattening splices a pure-`op`-sequence child into its parents, so
@@ -1737,9 +1858,11 @@ tests establish this case; they do not prove it is the only possible loss mode.
 
 The repair (`a_round`, run inside the completion loop, so only when
 completion is enabled; plain mode is untouched):
-orient each such equation shortlex (longer to shorter, ties by element ids)
-and rewrite contiguous occurrences of the larger spelling inside other
-`op`-sequences, adding the rewritten sequence and merging with its source
+orient each such equation shortlex toward the class's shortlex-least spelling
+(longer to shorter, ties by element ids) and rewrite the first contiguous occurrence
+of the larger spelling inside each other `op`-sequence, at most once per sequence per
+round (sequences added in a round are visited in the next), adding the rewritten
+sequence and merging with its source
 (justification `ACInterReduction`, the same substitute-for-class shape).
 Each generated rewrite is checked/oriented shortlex-decreasing; the paper
 termination argument for one finite round follows that measure. Rounds run
@@ -1758,14 +1881,14 @@ algorithm decides all A-entailed equalities, and a critical-pair chase can
 run forever without a bound to point to. So `a_round` deliberately closes the
 single-substitution gap above and does not chase critical pairs. Its merges have
 the intended equality-substitution justification and focused proof-log tests;
-there is no machine-checked soundness theorem for every production transition.
+there is no machine-checked soundness theorem for every transition of the implementation.
 A complete solver for arbitrary finitely presented monoids is not attainable in
 general, and the contrast (ground AC decidability versus the monoid word problem)
 is a property of the theories, not of this implementation.
 
 ---
 
-## References
+### References
 
 - Kapur, "A Modular Associative Commutative (AC) Congruence Closure Algorithm,"
   FSCD 2021, LIPIcs 195, 15:1–15:21. Def. 3 (AC rewrite), Def. 4 (superposition and
@@ -1793,7 +1916,7 @@ is a property of the theories, not of this implementation.
   confluence).
 - Contejean, "A Certified AC Matching Algorithm," RTA 2004, LNCS 3091, pp. 70–84.
   Defines the AC matching problem `pσ =_AC s` independently of any algorithm (the
-  external relation [Ch 9](09-pattern-matching.md) states soundness against), gives
+  external relation [§7.5](07-rules-and-pattern-matching.md#75-matching-a-ac-aci-and-c-operators) states soundness against), gives
   inference rules proven sound, complete, and terminating in the Coq proof assistant
   (the algorithm is implemented in CiME), and proves AC equality decidable via
   flatten+sort. The Coq precedent for the §12 metatheory.
@@ -1801,7 +1924,254 @@ is a property of the theories, not of this implementation.
   flatten+sort canonizer and AC matching problem.
 - Benanav, Kapur, Narendran, "Complexity of Matching Problems," J. Symbolic
   Computation 3(1/2), 1987, pp. 203–216. AC matching is NP-complete (so a complete
-  matcher's output is worst-case exponential; [Ch 9](09-pattern-matching.md)).
+  matcher's output is worst-case exponential; [§7.5](07-rules-and-pattern-matching.md#75-matching-a-ac-aci-and-c-operators)).
+
+## Part III, `min_monomial`, a matcher invariant, and implementation correspondence
+
+This part is a focused companion to Parts I and II (the
+full specification: e-graph as a rule set §0b, the fix §6, collapse §6b, per-class data §9a,
+proof sketch §12). It does not restate them. It adds three things they leave
+implicit, and fact-checks them against Kapur 2023 (the LMCS journal version of the FSCD'21
+algorithm; Def, Lemma, and Thm numbers below are Kapur's, as are the § numbers in the
+Kapur column of §S3.1):
+
+1. the intended `min_monomial` invariants and the finite diagnostics that check
+   them (§9a defines `min_monomial`) (§S1);
+2. the binding-restore invariant the `(f (add x ..r1) (add y ..r2))` matcher join must
+   maintain, over concrete nodes (§S2);
+3. a clause-by-clause implementation correspondence with Kapur's algorithm,
+   together with the boundary between tests and an unproved theorem (§S3).
+
+Read every e-graph fact as a rewrite rule (§0b, Kapur §2.2): an AC node with
+operator `+` and child multiset `M` in class `c` is the rule `+M → r(c)`; the union-find is
+the constant-rule layer, where a class merge is a constant rule `d → e` rewriting one class
+representative to the other. "Classes `c`, `d` are equal" means `find(c) = find(d)`: one
+rewrites to the other under those constant rules.
 
 ---
-[Table of Contents](00-table-of-contents.md) · [Future Work: status and plan](A3-future-work.md) · [Ch 9: matching cost](09-pattern-matching.md)
+
+### S1. `min_monomial`: the properties the engine must keep
+
+§9a defines the per-class data: a class carries `find(c)` (the union-find tag,
+not necessarily an AC monomial) and `min_monomial(c)` (the `≫_f`-least `+`-monomial of the
+class, the rule RHS; `≫_f` is the admissible monomial order for op `f`: degree-lex,
+total size, then lexicographic from the largest class id down, Kapur's deglex), and the rule RHS is: the **empty monomial** if `c` is the op's identity
+(unit) class: Kapur's `f({}) = e`; rewriting with the atom `{e}` instead would leak unit
+summands into reducts that normalization (which has no `f(x,e) = x` law) can never remove;
+else `{c}` if `atomic(c)`, else `monomial_of(min_monomial(c))`. This
+section does not re-derive that. It states four intended `min_monomial`
+properties and identifies how each is supported. The finite diagnostics in §S3
+directly check (P2); the emission guard enforces (P3); (P1) and (P4) follow from
+the storage construction and have focused regression coverage. They are not
+collectively machine-checked invariants or a universal theorem. The section
+also identifies the one place maintenance is weaker than Kapur's "reduced".
+
+#### S1.1 Properties (`c` has a `+`-node; `mono(g)` is `g`'s canonical child multiset)
+
+- **(P1) Membership.** `min_monomial(c)` is a real AC node `g` with `find(g)=find(c)`, never a
+  synthetic monomial.
+- **(P2) Leximin (quality, checked property).** At a reported completion
+  fixpoint, the intended property is
+  `mono(min_monomial(c)) = min_{≫_f}{ mono(g) : g a +-node in c }`. Because rewriting strictly
+  decreases `≫_f` and a canonical system gives every class member one shared normal form,
+  that normal form should be the `≫_f`-minimum. `cc_min_used_nonminimal`
+  checks this on the current finite state, for the active rules of classes that are not
+  atomic (an atomic class's RHS is `{c}`); it is not a universal theorem.
+- **(P3) Orientation safety.** Completion emits `+M → r` only when the
+  read-time `monomial_cmp(M,r)` guard returns `Greater`. Thus every rule the
+  implementation actually emits is decreasing. This is weaker than claiming
+  that a stored best-effort minimum is globally minimal at every intermediate
+  state.
+- **(P4) Existing-constant closure.** `mono(min_monomial(c))` is a multiset over existing class
+  ids, never a fresh constant, so reading it as a RHS cannot grow the constant pool. Its
+  violation (class-as-atom) is the one unbounded divergence (§6b).
+
+#### S1.2 Maintenance, and the gap from Kapur's "reduced"
+
+`min_monomial` is updated on merge by scanning every completion-op column. Empty/equal
+columns are constant-time; when both classes have distinct candidates in a column,
+`fold_min_monomial` reads and compares both monomials. Thus a merge costs
+`O(number of completion columns + total elements read from compared monomials)`, using
+reusable buffers but not O(1) time. This is **best-effort on (P2) only**:
+`monomial_cmp` reads `find` of children, which is mid-cascade during a merge, so the stored
+min can be a non-minimal but valid sum until a later merge refreshes it. (P1), (P3), (P4)
+are the intended storage properties, while the read-time **orientation
+guard** (emit `+M → r` only if `monomial_cmp(M,r)=Greater`) is the executable
+protection against a stale ordering decision.
+
+This is precisely where we are weaker than Kapur. Kapur's **reduced** system (§3) requires
+that **neither the left nor the right side** of any rule be reducible by the others; his
+SingleACCompletion step 4(ii) fully normalizes each RHS. Our option (a) targets the LHS
+half (the antichain used by the termination argument) and enforces orientation of the RHS,
+but the RHS need not be the global minimum. Named fixtures and the finite diagnostics
+exercise LHS collapse; universal preservation of the antichain remains unproved. The
+implementation therefore aims for an LHS antichain and keeps a best-effort RHS. The claim
+that this realizes the same decision procedure as Kapur is the paper correspondence
+argument, not a theorem established by the diagnostics.
+
+---
+
+### S2. The `(f (add x ..r1) (add y ..r2))` matcher invariant, over concrete nodes
+
+Pattern: `(rewrite (f (add x ..r1) (add y ..r2)) (g x))`. The scalar/rest vars may repeat or
+differ; the invariant is about node-var binding, not var identity. Regression inputs:
+`ac_two_same_op_atoms.egg` (completion off), `ac_complete_nested_match.egg` (completion on).
+This is our own e-matching machinery, not from the papers.
+
+#### S2.1 The nodes and the plan
+
+`(let t1 (f (add (a) (b)) (add (b) (c))))` builds (class ids bracketed):
+
+```
+a,b,c   leaves           add1 = +{a,b} [A1]   add2 = +{b,c} [A2]   f1 = f(add1, add2) [F]
+```
+
+`add1`, `add2` are both `add` (same AC op) and both children of one `f`. The planner
+schedules `f` first; because its two children are unbound it emits `ExtractChild` steps that
+**bind the `add` node-vars** `n1`, `n2`, *before* the two `add` atoms are processed. So each
+`add` atom finds its node-var already bound and emits a bound-node **re-join**
+`ByRepr{nX} ∩ ByOp{add}` carrying an `atom_id` (keeping the semi-naive variant machinery,
+which lives only on `Step::Join`), then a `DecomposeAC`:
+
+```
+1 Join nf <- ByOp f             2 ExtractChild n1=child(nf,0)   3 ExtractChild n2=child(nf,1)
+4 Join n1 <- ByRepr{n1}∩ByOp{add}   5 DecomposeAC n1,[x],r1
+6 Join n2 <- ByRepr{n2}∩ByOp{add}   7 DecomposeAC n2,[y],r2     8 end
+```
+
+Steps 2–3 bind `n1`, `n2` in enclosing frames; those bindings must live until subtree 4–8 is
+fully enumerated.
+
+#### S2.2 The hazard and the invariant
+
+A `leapfrog_join` that does `env.set(target, key)` per key and an unconditional
+`env.clear(target)` on exit is wrong here. Step 5 enumerates sibling splits of `+{a,b}` (`x=a`, then
+`x=b`), calling `run_step(6)` each time. On the first split, step 6's re-join on `n2` runs,
+then clears `n2` on exit (the bug: `n2` was bound upstream by step 3, not by this join). On
+the second split, step 6 reads `env.get(n2)` → `Match::get` → `unwrap()` on `None` → panic.
+`n1`'s premature clear at step 4 is harmless (nothing re-reads it before step 1 re-extracts
+it), which is why it takes *two* same-op AC atoms under one parent to surface; AC completion
+exposes it by minting enough `add` nodes for the planner to choose this schedule.
+
+The invariant (`leapfrog_join`): save and restore the prior binding instead of clearing.
+
+```rust
+let prev = env.get_opt(target);   // Some(add2) for the re-join; None for a plain join
+while join.is_valid() { env.set(target, join.key()); run_step(/* +1 */); join.next(); }
+env.set_opt(target, prev);        // restore, not clear
+```
+
+Plain join: `prev == None`, equivalent to set/clear. Re-join: the upstream binding
+survives. A matcher-soundness invariant, independent of completion (regression
+fixtures `ac_two_same_op_atoms.egg`, `ac_complete_nested_match.egg`).
+
+---
+
+### S3. Compliance with Kapur's algorithm
+
+#### S3.1 Correspondence table (our code ↔ Kapur 2023)
+
+The table is a code-to-paper mapping. A check mark means that the named
+mechanism and focused regressions exist; it does not mean a proof assistant has
+established the row or that all rows compose into a correctness/completeness
+theorem.
+
+| Our code | Kapur 2023 | Match |
+|---|---|---|
+| AC node `+M` in class `c` = rule `+M → r(c)` | f-monomial rule `f(A₁) → f(A₂)` (§3) | ✓ |
+| `monomial_cmp` (degree-lex: size, then lex from the LARGEST class id down), orientation guard | admissible ordering `≫_f`, orient `f(A₁) ≫ f(A₂)` (§3) | ✓ |
+| `ab = multiset_lcm(m,a)`; reducts `(ab−m)⊎rhs_m`, `(ab−a)⊎rhs_a` | `AB = (A₁∪B₁)−(A₁∩B₁)`; critical pair `(f((AB−A₁)∪A₂), f((AB−B₁)∪B₂))` (Def 3.2) | ✓ (lcm = componentwise max = his `AB`) |
+| disjoint partners skipped | "if A₁,B₁ disjoint, their critical pair is trivial" (§3) | ✓ |
+| trivial-pair filter (normal forms equal ⟹ skip) | "nontrivial iff normal forms ... not the same" (§3) | ✓ |
+| close pair = merge both normalized reducts | Lemma 3.3 (joinable critical pairs ⟺ locally confluent) | ✓ |
+| `FLAG_AC_COLLAPSED` on LHS reducible by another rule | step 4(i): remove `l→r` whose LHS is reduced by new rule | ✓ (flag, not delete; equality preserved via the merged reduct) |
+| dedup reducer/superposition set by (op, LHS) | step 2: "if equal, discard the equation" (keep one) | ✓ (duplicate *nodes* stay in `targets`, so their merges are not lost) |
+| incremental (B): superpose only pairs with at least one delta rule | step 3 + fn 3: CPs of the new rule vs existing, "incrementally ... instead of all critical pairs" | ✓ |
+| LHS collapse plus a separate growth budget | Thm 3.4 (Dickson's Lemma on noncomparable LHSs) | partial evidence: collapse is tested; the budget is a resource exit, not Kapur's termination theorem |
+| per-rule axiom critical pairs: idempotent `(f(N⊎{a}), f(N))`, nilpotent `(f(N⊎{a:n−m}), f(M−{a:m}))` | Lemma 4.1(ii); Lemma 4.2(ii)/4.5 (superpose each rule with the op's own axiom) | ✓ (checker `cc_axiom_cps_nonjoinable` under `CHECK_AC_BASIS`) |
+| identity-class rule RHS = the empty monomial; unit-drop at build AND recanonize (`CanonMode`) | `f({}) = e` (§2.4); Lemma 4.3's standing normalization `f(x,e) → x` | ✓ |
+| (C1) rule cancel-close + (C2) cancelative disjoint superposition + §5.2(iii)(b) per-constant closure over the summand pool | §5.1–§5.3: CancelClose, cancelative disjoint superposition (SC2 / Example 4 fixtures) | ✓ for the named static fixtures; late constants are covered by an implemented full-round net whose focused interleaving regression remains open |
+| `:inverse` ⟹ cancelative; inverse-pair cancellation at build, in the round (hash-cons probe), and after merges in every mode (`canon_repair_round`, `Justification::InverseCancel`) | §5.4's group law at pair level (`x ∘ inv(x) = e`) | partial by design: full §5.4 (Gaussian elimination) is unsupported; pairs whose `inv(x)` node was never built are not seen |
+| `min_monomial` best-effort RHS | step 4(ii) fully normalizes RHS (reduced) | **partial: §S1.2 gap** |
+
+#### S3.2 Finite reduced-basis diagnostics
+
+Kapur's output is the *unique reduced* canonical system (Thm 3.6): no rule's LHS or RHS is
+reducible by the others. The diagnostic checkers in `ac_invariants.rs` inspect
+one finite executable state:
+
+- `cc_min_used_nonminimal`: per (class, op), the true `monomial_cmp`-least same-op monomial,
+  compared to the RHS completion actually uses.
+- `cc_not_kapur_reduced`: rules whose LHS / RHS is reducible by the *others*
+  in the operator's MSet, Set, or nilpotent count domain.
+- `cc_axiom_cps_nonjoinable`: per-rule semantic-axiom pairs that do not join
+  in the current state.
+
+`cc_basis_report` computes the active rule set and its direct-containment reducible pairs.
+`cc_basis_dump` prints that report with the `cc_min_used_nonminimal` and
+`cc_not_kapur_reduced` counts at the start of each round. It does not run
+`cc_axiom_cps_nonjoinable`, which the egg harness calls directly. The checks brute-force superlinearly, so they run only when the per-rebuild **basis-checks switch**
+is on: `EGraph::set_basis_checks(true)` (or the `AC_BASIS_DUMP` env var, which seeds it at
+construction). Default off; never on the default path.
+
+The three features have matching control surfaces at each layer:
+
+| feature | CLI flag | `.egg` directive |
+|---|---|---|
+| eval algorithm | `--use-semi-naive` / `--use-naive` (default naive) | `;; EVAL: naive\|semi\|both` (default both) |
+| derive AC consequences | `--derive-ac-eqs` (eager) / `--lazy-ac-eqs` (lazy, §13) | `;; DERIVE_AC_EQS: on` / `;; LAZY_AC_EQS: on` |
+| check basis properties | `--check-ac-basis` | `;; CHECK_AC_BASIS: on` |
+
+`--derive-ac-eqs` off leaves sub-multiset enumeration in leapfrog matching intact but
+skips completion. `--check-ac-basis` needs derive on to have anything to check; in
+the egg harness `;; CHECK_AC_BASIS: on` asserts zero nonminimal used RHSs,
+zero reducible LHSs, and zero nonjoinable semantic-axiom pairs. It currently
+computes but does not assert the RHS-reducibility count, so it must not be
+described as a universal or even fixture-level "fully reduced" gate.
+`;; EVAL: both` runs the file under naive and semi-naive and asserts the same
+outcome.
+
+**Best-effort RHS.** `min_monomial` is maintained on merge, so a rule is
+oriented by the read-time guard but global RHS minimality is not established by
+construction. `cc_min_used_nonminimal` has returned zero on the maintained
+`CHECK_AC_BASIS` fixtures. That is finite evidence only; it does not justify
+the former universal claim that merge-only maintenance always computes the
+exact minimum.
+
+**Duplicate LHSs.** Congruent nodes can expose the same `(op,LHS)` rule more
+than once. The reducer/superposition set deduplicates that key while retaining
+the original nodes as collapse/merge targets, so differing RHS equalities are
+not lost. Focused fixtures exercise the resulting LHS checks. The remaining
+rows in §S3.1 are an argued and tested correspondence, not an exactness theorem.
+
+#### S3.3 Stress and fixpoint evidence
+
+Three ignored diagnostics remain useful reproducers:
+
+- `completion_divergence_reproducer` exercises a growth-heavy seed and the
+  completion backstop;
+- `completion_convergence_matrix` samples other generated instances; and
+- `completion_reduced_basis_smoke` prints the finite basis diagnostics on one
+  converging instance.
+
+They are diagnostic runs, not release gates, a frequency study, or Criterion
+benchmarks. Historical node counts, round ratios, and wall times from these
+runs must not be presented as current performance or as evidence that growth is
+rare. The active `.egg` fixtures with `CHECK_AC_BASIS` are the executable gate:
+on those named finite states they assert used-RHS minimality, LHS
+irreducibility, and semantic-axiom pair joinability. The harness does not
+currently assert RHS irreducibility.
+
+**Conclusion.** The implementation has a detailed, tested correspondence with
+Kapur's construction, including explicit partial support for the group facet.
+The composition of those rows into soundness, termination, and AC/ACI
+completeness remains a paper argument. Only
+`CompletionOutcome::Converged` claims the implementation reached its joint
+fixpoint; budget and goal exits are intentionally incomplete. `AbortedOverflow` is
+incomplete too, and it records a width error that ends the run. Plain mode is the
+default, eager completion and basis checks are opt-in, and lazy completion is
+the on-demand scoped mode. The proof and validation work remains tracked in
+the future-work documents.
+
+---
+[← Ch 5: Algebraic Operators](05-algebraic-operators.md) · [Table of Contents](00-table-of-contents.md) · [Ch 7: Rules and Pattern Matching →](07-rules-and-pattern-matching.md)
