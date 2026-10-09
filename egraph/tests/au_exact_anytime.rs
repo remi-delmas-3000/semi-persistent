@@ -212,10 +212,10 @@ fn exact_deadline_returns_anytime_incumbent() {
         .unwrap()
     };
     assert_eq!(certified.completion, Completion::Exact);
-    let certified_quality = certified.pool.quality(certified.term_id);
+    let proven_quality = certified.pool.quality(certified.term_id);
     assert!(
-        certified_quality <= anytime_quality,
-        "certified optimum {certified_quality:?} must not be worse than the anytime incumbent \
+        proven_quality <= anytime_quality,
+        "certified optimum {proven_quality:?} must not be worse than the anytime incumbent \
          {anytime_quality:?}"
     );
     assert_valid_projections(&mut eg, &mut certified, left, right, "certified optimum");

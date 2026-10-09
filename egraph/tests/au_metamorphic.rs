@@ -650,7 +650,7 @@ fn run_case_guarded(seed: u64, playouts: u64, timeout: Duration) -> PairOutcome 
 struct GapStats {
     cases: usize,
     zero: usize,
-    certified: usize,
+    proven: usize,
     sum: u64,
     max: u32,
     max_seed: u64,
@@ -664,7 +664,7 @@ impl GapStats {
             self.zero += 1;
         }
         if outcome.mcgs_certified {
-            self.certified += 1;
+            self.proven += 1;
         }
         self.sum += u64::from(gap);
         if gap > self.max {
@@ -681,7 +681,7 @@ impl GapStats {
             self.zero,
             self.cases,
             100.0 * self.zero as f64 / self.cases as f64,
-            self.certified,
+            self.proven,
             self.cases,
             self.sum as f64 / self.cases as f64,
             self.max,

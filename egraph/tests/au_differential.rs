@@ -1054,8 +1054,8 @@ fn dominant_pruned_mcgs_is_sound() {
     let mut moved = 0usize;
     let mut better = 0usize;
     let mut worse = 0usize;
-    let mut certified_earlier = 0usize;
-    let mut certified_lost = 0usize;
+    let mut proven_earlier = 0usize;
+    let mut proven_lost = 0usize;
     for spec in full_specs() {
         let id = spec.id();
         let inst = spec.build();
@@ -1119,9 +1119,9 @@ fn dominant_pruned_mcgs_is_sound() {
                 } else if quality > golden_quality {
                     worse += 1;
                 } else if certified && !golden_certified {
-                    certified_earlier += 1;
+                    proven_earlier += 1;
                 } else {
-                    certified_lost += 1;
+                    proven_lost += 1;
                 }
             }
             checked += 1;
@@ -1129,8 +1129,8 @@ fn dominant_pruned_mcgs_is_sound() {
     }
     println!(
         "dominant_pruned_mcgs_is_sound: {checked} mcgs lines checked, {moved} moved vs the \
-         flag-off fixture: {better} better, {worse} worse, {certified_earlier} certified \
-         earlier, {certified_lost} certified lost"
+         flag-off fixture: {better} better, {worse} worse, {proven_earlier} certified \
+         earlier, {proven_lost} certified lost"
     );
 }
 
@@ -1164,7 +1164,7 @@ fn closed_bit_mcgs_is_sound() {
 
     let mut checked = 0usize;
     let mut better = 0usize;
-    let mut certified_earlier = 0usize;
+    let mut proven_earlier = 0usize;
     for spec in full_specs() {
         let id = spec.id();
         let inst = spec.build();
@@ -1226,14 +1226,14 @@ fn closed_bit_mcgs_is_sound() {
                 better += 1;
             }
             if certified && !golden_certified {
-                certified_earlier += 1;
+                proven_earlier += 1;
             }
             checked += 1;
         }
     }
     println!(
         "closed_bit_mcgs_is_sound: {checked} mcgs lines checked against the flag-off fixture, \
-         {better} better, {certified_earlier} certified earlier"
+         {better} better, {proven_earlier} certified earlier"
     );
 }
 
@@ -1266,7 +1266,7 @@ fn hybrid_exact_mcgs_is_sound() {
 
     let mut checked = 0usize;
     let mut better = 0usize;
-    let mut certified_earlier = 0usize;
+    let mut proven_earlier = 0usize;
     let mut fired = 0usize;
     for spec in full_specs() {
         let id = spec.id();
@@ -1342,7 +1342,7 @@ fn hybrid_exact_mcgs_is_sound() {
                     better += 1;
                 }
                 if certified && !golden_certified {
-                    certified_earlier += 1;
+                    proven_earlier += 1;
                 }
                 checked += 1;
             }
@@ -1351,7 +1351,7 @@ fn hybrid_exact_mcgs_is_sound() {
     assert!(fired > 0, "the hybrid trigger never fired on the corpus");
     println!(
         "hybrid_exact_mcgs_is_sound: {checked} mcgs lines checked against the flag-off fixture, \
-         {fired} with the trigger firing, {better} better, {certified_earlier} certified earlier"
+         {fired} with the trigger firing, {better} better, {proven_earlier} certified earlier"
     );
 }
 
@@ -1398,7 +1398,7 @@ fn live_incumbent_pruning_is_sound() {
 
     let mut checked = 0usize;
     let mut better = 0usize;
-    let mut certified_earlier = 0usize;
+    let mut proven_earlier = 0usize;
     for spec in full_specs() {
         let id = spec.id();
         let inst = spec.build();
@@ -1462,14 +1462,14 @@ fn live_incumbent_pruning_is_sound() {
                 better += 1;
             }
             if certified && !golden_certified {
-                certified_earlier += 1;
+                proven_earlier += 1;
             }
             checked += 1;
         }
     }
     println!(
         "live_incumbent_pruning_is_sound: {checked} mcgs lines checked against the flag-off \
-         fixture, {better} better, {certified_earlier} certified earlier"
+         fixture, {better} better, {proven_earlier} certified earlier"
     );
 }
 
@@ -1502,7 +1502,7 @@ fn rollout_hybrid_mcgs_is_sound() {
 
     let mut checked = 0usize;
     let mut better = 0usize;
-    let mut certified_earlier = 0usize;
+    let mut proven_earlier = 0usize;
     let mut fired = 0usize;
     for spec in full_specs() {
         let id = spec.id();
@@ -1579,7 +1579,7 @@ fn rollout_hybrid_mcgs_is_sound() {
                     better += 1;
                 }
                 if certified && !golden_certified {
-                    certified_earlier += 1;
+                    proven_earlier += 1;
                 }
                 checked += 1;
             }
@@ -1588,7 +1588,7 @@ fn rollout_hybrid_mcgs_is_sound() {
     assert!(fired > 0, "the hybrid trigger never fired on the corpus");
     println!(
         "rollout_hybrid_mcgs_is_sound: {checked} mcgs lines checked against the flag-off fixture, \
-         {fired} with the trigger firing, {better} better, {certified_earlier} certified earlier"
+         {fired} with the trigger firing, {better} better, {proven_earlier} certified earlier"
     );
 }
 
@@ -1621,7 +1621,7 @@ fn persistent_memo_exact_is_sound() {
 
     let mut checked = 0usize;
     let mut better = 0usize;
-    let mut certified_earlier = 0usize;
+    let mut proven_earlier = 0usize;
     let mut fired = 0usize;
     for spec in full_specs() {
         let id = spec.id();
@@ -1699,7 +1699,7 @@ fn persistent_memo_exact_is_sound() {
                     better += 1;
                 }
                 if certified && !golden_certified {
-                    certified_earlier += 1;
+                    proven_earlier += 1;
                 }
                 checked += 1;
             }
@@ -1708,7 +1708,7 @@ fn persistent_memo_exact_is_sound() {
     assert!(fired > 0, "the hybrid trigger never fired on the corpus");
     println!(
         "persistent_memo_exact_is_sound: {checked} mcgs lines checked against the flag-off fixture, \
-         {fired} with the trigger firing, {better} better, {certified_earlier} certified earlier"
+         {fired} with the trigger firing, {better} better, {proven_earlier} certified earlier"
     );
 }
 
@@ -1821,7 +1821,7 @@ fn interval_bounds_mcgs_is_sound() {
 
     let mut checked = 0usize;
     let mut better = 0usize;
-    let mut certified_earlier = 0usize;
+    let mut proven_earlier = 0usize;
     for spec in full_specs() {
         let id = spec.id();
         let inst = spec.build();
@@ -1886,13 +1886,13 @@ fn interval_bounds_mcgs_is_sound() {
                 better += 1;
             }
             if certified && !golden_certified {
-                certified_earlier += 1;
+                proven_earlier += 1;
             }
             checked += 1;
         }
     }
     println!(
         "interval_bounds_mcgs_is_sound: {checked} mcgs lines checked against the flag-off \
-         fixture, {better} better, {certified_earlier} certified earlier"
+         fixture, {better} better, {proven_earlier} certified earlier"
     );
 }
