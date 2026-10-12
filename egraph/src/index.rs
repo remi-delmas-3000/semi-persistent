@@ -524,8 +524,7 @@ where
             // Node-level relevancy shield (`FLAG_UNMATCHABLE`), honoured only
             // while the client has the shield on. Qualifies under the
             // requirement above: it is a property of this node's own content.
-            if eg.matching_shield()
-                && eg.node_flags(gid) & crate::node_types::FLAG_UNMATCHABLE != 0
+            if eg.matching_shield() && eg.node_flags(gid) & crate::node_types::FLAG_UNMATCHABLE != 0
             {
                 continue;
             }

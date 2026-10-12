@@ -2271,8 +2271,18 @@ mod tests {
             let lhs = parse_pattern("(f x y)");
             let rhs = parse_rhs("(f y x)");
             let rule = compile_rewrite(
-                "test", "", "", &lhs, &rhs, &[], false, eg.ops(), eg.sorts(), &mut rules,
-                &model, &ctx,
+                "test",
+                "",
+                "",
+                &lhs,
+                &rhs,
+                &[],
+                false,
+                eg.ops(),
+                eg.sorts(),
+                &mut rules,
+                &model,
+                &ctx,
             )
             .unwrap();
             assert!(eg.is_node_matchable(fab));
@@ -2297,9 +2307,19 @@ mod tests {
             .unwrap()
         };
         assert!(run(true, false, false) > 0, "an unflagged node matches");
-        assert_eq!(run(true, true, false), 0, "a flagged node is hidden while the shield is on");
-        assert!(run(false, true, false) > 0, "the shield off ignores the flag");
-        assert!(run(true, true, true) > 0, "clearing the flag restores the match");
+        assert_eq!(
+            run(true, true, false),
+            0,
+            "a flagged node is hidden while the shield is on"
+        );
+        assert!(
+            run(false, true, false) > 0,
+            "the shield off ignores the flag"
+        );
+        assert!(
+            run(true, true, true) > 0,
+            "clearing the flag restores the match"
+        );
     }
 
     #[test]

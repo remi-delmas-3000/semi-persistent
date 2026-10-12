@@ -3690,7 +3690,12 @@ where
     /// Limitation: re-adding an identical term whose child is not a root
     /// misses the earlier node (history is not indexed by content) and adds
     /// another duplicate merged into the same class: correct, redundant.
-    fn add_with_creation_evidence(&mut self, op: Cfg::O, given: &[Cfg::G], node_flags: u8) -> Cfg::G {
+    fn add_with_creation_evidence(
+        &mut self,
+        op: Cfg::O,
+        given: &[Cfg::G],
+        node_flags: u8,
+    ) -> Cfg::G {
         let canonical: Vec<Cfg::G> = self.g_buf.clone();
         let all_roots = given.iter().zip(canonical.iter()).all(|(g, c)| g == c);
         if !all_roots {
@@ -3711,7 +3716,9 @@ where
         let result = self.nodes.add(op, &canonical, &self.ops, node_flags);
         match result {
             Added::Existing(n) if self.node_has_history(n) => {
-                let dup = self.nodes.add_congruent_dup(op, given, &self.ops, node_flags);
+                let dup = self
+                    .nodes
+                    .add_congruent_dup(op, given, &self.ops, node_flags);
                 let id = self.register_if_fresh(Added::Fresh(dup), op);
                 for &child in &canonical {
                     if let Some(repr) = self.classes.repr_id(child) {
@@ -3745,7 +3752,10 @@ where
             let m = self.merge_in_classes(
                 a,
                 b,
-                Some(Justification::Congruence { node_a: a, node_b: b }),
+                Some(Justification::Congruence {
+                    node_a: a,
+                    node_b: b,
+                }),
             );
             if let Some(m) = m {
                 self.fold_min_monomial(m.survivor, m.absorbed_min_row, m.absorbed_atomic);

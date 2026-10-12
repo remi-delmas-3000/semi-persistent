@@ -52,7 +52,7 @@ mod test {
         let g = eg.register_op2("g", int, int, int);
         let x = eg.add(x_op, &[]);
         let y = eg.add(y_op, &[]);
-        eg.merge_justified(x, y, Justification::Assumption { lit: 7u32.into() });
+        eg.merge_justified(x, y, Justification::Assumption { lit: 7u32 });
         eg.rebuild();
         // Both orders of root / non-root child.
         let fx = eg.add(f, &[x]);
@@ -65,14 +65,22 @@ mod test {
             .steps
             .iter()
             .any(|(_, _, j)| matches!(j, Justification::Assumption { .. }));
-        assert!(cites, "the explanation of f(x) = f(y) must cite x = y: {:?}", buf.steps);
+        assert!(
+            cites,
+            "the explanation of f(x) = f(y) must cite x = y: {:?}",
+            buf.steps
+        );
         // A binary term, children non-root in one position only.
         let gxy = eg.add(g, &[x, x]);
         let gyy = eg.add(g, &[y, y]);
         assert_ne!(gxy, gyy);
         let mut buf = ProofBuf::new();
         assert!(eg.explain_deep(gxy, gyy, &mut buf));
-        assert!(buf.steps.iter().any(|(_, _, j)| matches!(j, Justification::Assumption { .. })));
+        assert!(
+            buf.steps
+                .iter()
+                .any(|(_, _, j)| matches!(j, Justification::Assumption { .. }))
+        );
         // The identical term again lands in the same class. It is not the same
         // node when its child is not a root: history is not indexed by
         // content, so the lookup by the given children misses and a further
