@@ -230,7 +230,8 @@ steps down:
 {{#include ../examples/cost-models/28-band.out}}
 ```
 
-The terms come in the order found, each with its cost. Standard error carries
+The terms come by increasing cost, then by their text, each with its cost; the
+order the solver finds them in depends on its version and platform. Standard error carries
 `warning: rung splits estimated above the budget; extracting at selection`. With
 the optimum proved, a band gives equivalent terms at a known gap above it:
 benchmarks with known answers, variants for differential testing, and pairs of

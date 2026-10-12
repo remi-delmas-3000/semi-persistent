@@ -7,6 +7,7 @@
 //! - The MLTL memory cost as a script and as the registered Rust cost extract the
 //!   same cost at every rung.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Command;
 
 /// Whether `program` runs. A test that needs an external solver returns early, saying
@@ -275,9 +276,204 @@ fn a_proof_is_kept_and_verifies() {
     assert!(!ok && stderr.contains(":proof needs"), "{stderr}");
 }
 
+/// A `;` line with the solve and cycle-exclusion counts of `; cost .. (n solves,
+/// m cycle exclusions)` replaced by placeholders, and a term line replaced by
+/// `<term>`: the counts, and which of several terms of equal cost is printed,
+/// follow the SAT solver's search, which differs between CaDiCaL versions and
+/// platforms.
+fn skeleton(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            if !line.starts_with(';') {
+                return "<term>".to_string();
+            }
+            match line.rfind(" (") {
+                Some(i)
+                    if line.ends_with(" cycle exclusions)") && line[i..].contains(" solves, ") =>
+                {
+                    format!("{} (N solves, M cycle exclusions)", &line[..i])
+                }
+                _ => line.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A printed term: its operator, its inlined integer and string literals in
+/// printed order, and its children with their `:k` counts.
+struct Printed {
+    op: String,
+    ints: Vec<String>,
+    strings: Vec<String>,
+    kids: Vec<(Printed, usize)>,
+}
+
+fn parse_printed(s: &mut &str) -> Printed {
+    *s = s.trim_start();
+    assert!(s.starts_with('('), "a term starts with '(': {s}");
+    *s = &s[1..];
+    let end = s.find(|c: char| c.is_whitespace() || c == ')').unwrap();
+    let mut t = Printed {
+        op: s[..end].to_string(),
+        ints: vec![],
+        strings: vec![],
+        kids: vec![],
+    };
+    *s = &s[end..];
+    loop {
+        *s = s.trim_start();
+        if let Some(rest) = s.strip_prefix(')') {
+            *s = rest;
+            return t;
+        }
+        if s.starts_with('(') {
+            let kid = parse_printed(s);
+            let mut count = 1;
+            if let Some(rest) = s.strip_prefix(':') {
+                let n = rest
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len());
+                count = rest[..n].parse().unwrap();
+                *s = &rest[n..];
+            }
+            t.kids.push((kid, count));
+        } else if let Some(rest) = s.strip_prefix('"') {
+            let n = rest.find('"').unwrap();
+            t.strings.push(rest[..n].to_string());
+            *s = &rest[n + 1..];
+        } else {
+            // A bare atom: an integer, or a string as plain extraction prints it.
+            let n = s.find(|c: char| c.is_whitespace() || c == ')').unwrap();
+            if s[..n].parse::<i128>().is_ok() {
+                t.ints.push(s[..n].to_string());
+            } else {
+                t.strings.push(s[..n].to_string());
+            }
+            *s = &s[n..];
+        }
+    }
+}
+
+/// A script's `(function name (args) sort ...)` declarations: argument sorts,
+/// result sort, and whether the function is AC (printed with any number of operands).
+type Sigs = HashMap<String, (Vec<String>, String, bool)>;
+
+fn signatures(src: &str) -> Sigs {
+    let mut sigs = HashMap::new();
+    for line in src.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix("(function ") else {
+            continue;
+        };
+        let (name, rest) = rest.split_once(' ').unwrap();
+        let (open, close) = (rest.find('(').unwrap(), rest.find(')').unwrap());
+        let args = rest[open + 1..close]
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        let after = rest[close + 1..].trim();
+        let sort = after
+            .split(|c: char| c.is_whitespace() || c == ')')
+            .next()
+            .unwrap()
+            .to_string();
+        sigs.insert(
+            name.to_string(),
+            (args, sort, after.contains(":assoc-comm")),
+        );
+    }
+    sigs
+}
+
+/// The value sorts of `to_graph`: the least set of sorts all of whose functions
+/// take only literals or value sorts.
+fn value_sorts(sigs: &Sigs) -> HashSet<String> {
+    let literal = |s: &str| matches!(s, "i64" | "String" | "bool");
+    let mut value = HashSet::new();
+    loop {
+        let before = value.len();
+        let sorts: HashSet<&String> = sigs.values().map(|v| &v.1).collect();
+        for sort in sorts {
+            if sigs
+                .values()
+                .filter(|v| &v.1 == sort)
+                .all(|v| v.0.iter().all(|a| literal(a) || value.contains(a)))
+            {
+                value.insert(sort.clone());
+            }
+        }
+        if value.len() == before {
+            return value;
+        }
+    }
+}
+
+/// The script syntax of a printed node, consuming its literals and children in
+/// declaration order. A child of a value sort (such as `Interval`) is printed
+/// inlined as its literals and is rebuilt from them.
+fn build(
+    op: &str,
+    lits: &mut (VecDeque<String>, VecDeque<String>),
+    kids: &mut VecDeque<String>,
+    sigs: &Sigs,
+    value: &HashSet<String>,
+) -> String {
+    let (args, _, ac) = sigs
+        .get(op)
+        .unwrap_or_else(|| panic!("no declaration of {op}"));
+    let mut parts = vec![op.to_string()];
+    if *ac {
+        parts.extend(kids.drain(..));
+    } else {
+        for a in args {
+            parts.push(match a.as_str() {
+                "i64" => lits.0.pop_front().expect("an integer literal"),
+                "String" => format!("\"{}\"", lits.1.pop_front().expect("a string literal")),
+                "bool" => lits.1.pop_front().expect("a bool literal"),
+                s if value.contains(s) => {
+                    let ctors: Vec<&String> = sigs
+                        .iter()
+                        .filter(|(_, v)| v.1 == s)
+                        .map(|(k, _)| k)
+                        .collect();
+                    assert_eq!(ctors.len(), 1, "value sort {s} with several functions");
+                    build(ctors[0], lits, &mut VecDeque::new(), sigs, value)
+                }
+                _ => kids.pop_front().expect("a child"),
+            });
+        }
+    }
+    format!("({})", parts.join(" "))
+}
+
+/// The script syntax of a printed term: inlined value-sort children rebuilt; an
+/// AC operand printed once as `x:k` keeps its count, which the script also reads.
+fn to_script(t: &Printed, sigs: &Sigs, value: &HashSet<String>) -> String {
+    let mut kids = VecDeque::new();
+    for (k, n) in &t.kids {
+        let k = to_script(k, sigs, value);
+        kids.push_back(if *n == 1 { k } else { format!("{k}:{n}") });
+    }
+    let mut lits = (
+        t.ints.iter().cloned().collect(),
+        t.strings.iter().cloned().collect(),
+    );
+    let out = build(&t.op, &mut lits, &mut kids, sigs, value);
+    assert!(
+        lits.0.is_empty() && lits.1.is_empty() && kids.is_empty(),
+        "{} has more arguments than its declaration",
+        t.op
+    );
+    out
+}
+
 /// The book's cost-model examples (`doc/book/examples/cost-models/`), run from
-/// their own directory so their script paths resolve: each prints exactly its
-/// `.out` file, or, marked `;; EXPECT: sort-error`, is rejected naming its script.
+/// their own directory so their script paths resolve. Each prints the costs of
+/// its `.out` file, and each term it prints is in the class of the name it was
+/// extracted from: `(check (= name term))` over the same script passes. Which of
+/// several terms of equal cost is printed, and the solve counts, are not
+/// compared ([`skeleton`]). An example marked `;; EXPECT: sort-error` is rejected
+/// naming its script.
 #[test]
 fn book_cost_model_examples() {
     let dir = std::path::Path::new(concat!(
@@ -316,7 +512,75 @@ fn book_cost_model_examples() {
         } else {
             assert!(out.status.success(), "{}: {stderr}", p.display());
             let want = std::fs::read_to_string(p.with_extension("out")).unwrap();
-            assert_eq!(stdout, want, "{}", p.display());
+            assert_eq!(skeleton(&stdout), skeleton(&want), "{}", p.display());
+            // The script's extractions in order, each with whether it has a cost
+            // model. One with a cost model prints a cost line or a band header,
+            // then its terms, each after a `; cost` line; one without prints a
+            // single term and no cost line.
+            let extracts: Vec<(&str, bool)> = src
+                .lines()
+                .filter(|l| !l.trim_start().starts_with(';'))
+                .flat_map(|l| l.match_indices("(extract ").map(move |(i, _)| &l[i + 9..]))
+                .map(|r| {
+                    let name = r.split(|c: char| c.is_whitespace() || c == ')');
+                    (name.clone().next().unwrap(), r.contains(":cost"))
+                })
+                .collect();
+            let sigs = signatures(&src);
+            let value = value_sorts(&sigs);
+            let (mut next, mut current, mut costed) = (0, "", false);
+            let mut checks = String::new();
+            for line in stdout.lines() {
+                let header = (line.starts_with("; cost ")
+                    && line.contains(" at rung ")
+                    && !line.contains(" in band "))
+                    || (line.starts_with("; ") && line.contains(" terms with cost in ["));
+                if header {
+                    assert!(extracts[next].1, "{}: {line}", p.display());
+                    (current, next) = (extracts[next].0, next + 1);
+                }
+                if line.starts_with("; cost ") {
+                    costed = true;
+                } else if !line.starts_with(';') && !line.is_empty() {
+                    let name = if costed {
+                        current
+                    } else {
+                        assert!(!extracts[next].1, "{}: {line}", p.display());
+                        next += 1;
+                        extracts[next - 1].0
+                    };
+                    costed = false;
+                    let term = to_script(&parse_printed(&mut &line[..]), &sigs, &value);
+                    checks.push_str(&format!("(check (= {name} {term}))\n"));
+                }
+            }
+            assert_eq!(
+                next,
+                extracts.len(),
+                "{}: unmatched extractions",
+                p.display()
+            );
+            if !checks.is_empty() {
+                let check = std::env::temp_dir().join(format!(
+                    "semper_book_check_{}_{}.egg",
+                    std::process::id(),
+                    p.file_stem().unwrap().to_string_lossy()
+                ));
+                std::fs::write(&check, format!("{src}\n{checks}")).unwrap();
+                let out = Command::new(env!("CARGO_BIN_EXE_semi-persistent"))
+                    .current_dir(dir)
+                    .arg(&check)
+                    .args(["--types", "machine"])
+                    .output()
+                    .unwrap();
+                let _ = std::fs::remove_file(&check);
+                assert!(
+                    out.status.success(),
+                    "{}: a printed term is not in its class:\n{checks}{}",
+                    p.display(),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
         }
         n += 1;
     }

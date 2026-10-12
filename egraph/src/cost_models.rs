@@ -531,9 +531,19 @@ where
             "; {} terms with cost in [{lo}, {hi}] at rung {rung}",
             found.len()
         );
-        for (i, (cost, term)) in found.iter().enumerate() {
+        // By increasing cost, then by the printed term: the order the
+        // solver finds them in depends on its version and platform.
+        let mut found: Vec<(Cost, _, String)> = found
+            .into_iter()
+            .map(|(cost, term)| {
+                let text = render(&g, &term, g.root, None);
+                (cost, term, text)
+            })
+            .collect();
+        found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+        for (i, (cost, term, text)) in found.iter().enumerate() {
             println!("; cost {cost} in band at rung {rung}");
-            println!("{}", render(&g, term, g.root, None));
+            println!("{text}");
             if let Some(f) = file {
                 let json = term
                     .to_json(&g)
