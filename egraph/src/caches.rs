@@ -480,6 +480,17 @@ impl<
         self.insert_fp(fp, global_id, op, children)
     }
 
+    /// Insert a node without a hash-cons hint: a congruent duplicate of an
+    /// existing node (the caller flags it `FLAG_CONGRUENT_DUP` and merges it
+    /// with the original), which the hint rule requires to stay out of the
+    /// probe index so every probe keeps returning the unflagged survivor.
+    pub fn insert_no_hint(&mut self, global_id: G, op: O, children: [G; K]) -> L {
+        let node = FixedArityNode::new(global_id, op, children);
+        let lid = self.nodes.len();
+        self.nodes.try_push(node).expect("push: within index word");
+        lid
+    }
+
     /// `insert` with the fingerprint already computed (see `probe_or_insert`).
     pub fn insert_fp(&mut self, fp: Fingerprint, global_id: G, op: O, children: [G; K]) -> L {
         let node = FixedArityNode::new(global_id, op, children);
@@ -881,6 +892,20 @@ impl<
             b.dedup();
         }
         self.spill[ix].push(id);
+    }
+
+    /// Insert a node without a hash-cons hint (see the fixed-arity
+    /// `insert_no_hint`).
+    pub fn insert_no_hint(&mut self, global_id: G, op: O, elems: &[C]) -> L {
+        let start = self.children.len();
+        for &e in elems {
+            self.children.try_push(e).expect("push: within index word");
+        }
+        let end = self.children.len();
+        let node = VariableArityNode::make(global_id, op, start, end);
+        let lid = self.nodes.len();
+        self.nodes.try_push(node).expect("push: within index word");
+        lid
     }
 
     pub fn insert(&mut self, global_id: G, op: O, elems: &[C]) -> L {

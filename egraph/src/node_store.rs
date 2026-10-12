@@ -174,6 +174,57 @@ where
         }
     }
 
+    /// Insert a congruent duplicate of an existing node: a fresh global id
+    /// with the given children and `flags | FLAG_CONGRUENT_DUP`, no hash-cons
+    /// hint (so probes keep returning the unflagged original). Plain and
+    /// commutative operators only; the caller merges the duplicate with the
+    /// original. Used by proof-mode `EGraph::add` to give a client's term its
+    /// own node when it differs from the existing node's original children.
+    pub fn add_congruent_dup<S: crate::DenseId>(
+        &mut self,
+        op: O,
+        children: &[G],
+        ops: &OpRegistry<O, S, TRACK>,
+        flags: u8,
+    ) -> G {
+        let flags = flags | crate::node_types::FLAG_CONGRUENT_DUP;
+        let fresh = self.routing.reserve();
+        macro_rules! fixed {
+            ($store:expr, $variant:ident, $arr:expr) => {{
+                let lid = $store.insert_no_hint(fresh, op, $arr);
+                let mut n = $store.get(lid);
+                n.flags |= flags;
+                $store.set(lid, n);
+                self.routing.finalize(fresh, NodeRef::$variant(lid));
+            }};
+        }
+        match ops.info(op).kind {
+            OpKind::Normal { .. } => match children.len() {
+                1 => fixed!(self.plain1, Plain1, [children[0]]),
+                2 => fixed!(self.plain2, Plain2, [children[0], children[1]]),
+                3 => fixed!(self.plain3, Plain3, [children[0], children[1], children[2]]),
+                n if n > 3 => {
+                    let lid = self.plain_n.insert_no_hint(fresh, op, children);
+                    let mut node = self.plain_n.get(lid);
+                    node.flags |= flags;
+                    self.plain_n.set(lid, node);
+                    self.routing.finalize(fresh, NodeRef::PlainN(lid));
+                }
+                _ => panic!("add_congruent_dup: a constant has no congruent duplicate"),
+            },
+            OpKind::Commutative { .. } => {
+                let pair = if children[0].to_usize() <= children[1].to_usize() {
+                    [children[0], children[1]]
+                } else {
+                    [children[1], children[0]]
+                };
+                fixed!(self.spair, SPair, pair)
+            }
+            _ => panic!("add_congruent_dup: plain and commutative operators only"),
+        }
+        fresh
+    }
+
     // -----------------------------------------------------------------------
     // Per-kind insertion
     // -----------------------------------------------------------------------

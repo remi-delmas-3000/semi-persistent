@@ -188,6 +188,10 @@ pub struct EGraph<
     /// nodes in `touched` (see `merge_in_classes`). Only semi-naive saturation
     /// consumes it; off everywhere else so merges pay no ring walk.
     track_merge_members: bool,
+    /// Whether the index build honours `FLAG_UNMATCHABLE` (see
+    /// [`set_matching_shield`](Self::set_matching_shield)). Runtime switch, not
+    /// semi-persistent: a relevancy client toggles it per matching round.
+    matching_shield: bool,
     /// Survivor policy for class merges (see [`UnionBy`]).
     union_by: UnionBy,
     /// Set by a completion round that met a multiplicity past the configured width;
@@ -400,6 +404,7 @@ where
             pair_buf: Vec::new(),
             touched: Vec::new(),
             track_merge_members: false,
+            matching_shield: false,
             union_by: UnionBy::Rank,
             cc_overflow: false,
             width_error: None,
@@ -1109,6 +1114,11 @@ where
                     }
                 }
             }
+            OpKind::Normal { .. } | OpKind::Commutative { .. }
+                if PROOFS && !children.is_empty() =>
+            {
+                return self.add_with_creation_evidence(op, children, node_flags);
+            }
             _ => self.nodes.add(op, &self.g_buf, &self.ops, node_flags),
         };
 
@@ -1671,6 +1681,49 @@ where
         std::mem::take(&mut self.merged_log)
     }
 
+    /// The merges captured since the last [`take_merged_log`](Self::take_merged_log),
+    /// without clearing them: lets a second consumer (a relevancy client)
+    /// read the log with its own cursor while the Nelson-Oppen export still
+    /// drains it. Cleared by `restore` like the log itself.
+    pub fn merged_log(&self) -> &[(Cfg::G, Cfg::G)] {
+        &self.merged_log
+    }
+
+    /// The member nodes of `id`'s e-class (the class ring, in ring order).
+    pub fn class_members(&self, id: Cfg::G) -> impl Iterator<Item = Cfg::G> + '_ {
+        self.classes.iter_class(self.classes.find_const(id))
+    }
+
+    /// Turn the node-level e-matching shield on or off: while on, the index
+    /// build skips nodes carrying `FLAG_UNMATCHABLE`; while off, they are
+    /// indexed as usual. Off by default, so a client that never shields
+    /// anything sees no change.
+    pub fn set_matching_shield(&mut self, on: bool) {
+        self.matching_shield = on;
+    }
+
+    /// Whether the node-level e-matching shield is on.
+    pub fn matching_shield(&self) -> bool {
+        self.matching_shield
+    }
+
+    /// Shield (`false`) or un-shield (`true`) the single node `id` from
+    /// e-matching (`FLAG_UNMATCHABLE`). Reversible and semi-persistent: the
+    /// write goes through the node store, so it rolls back on `restore`.
+    /// Shielding only removes matches, so it is soundness-free.
+    pub fn set_node_matchable(&mut self, id: Cfg::G, matchable: bool) {
+        if matchable {
+            self.clear_node_flag(id, crate::node_types::FLAG_UNMATCHABLE);
+        } else {
+            self.set_node_flag(id, crate::node_types::FLAG_UNMATCHABLE);
+        }
+    }
+
+    /// Whether `id`'s node is free of `FLAG_UNMATCHABLE`.
+    pub fn is_node_matchable(&self, id: Cfg::G) -> bool {
+        self.node_flags(id) & crate::node_types::FLAG_UNMATCHABLE == 0
+    }
+
     pub fn merge_justified(
         &mut self,
         a: Cfg::G,
@@ -2019,6 +2072,16 @@ where
             }
             k += 2;
         }
+    }
+
+    /// The children `explain_deep` takes as a congruence step's premises for
+    /// `id`: the saved original children when the node has history, else
+    /// its stored children. For clients auditing explanations.
+    pub fn original_children(&self, id: Cfg::G) -> Vec<Cfg::G> {
+        let mut out = Vec::new();
+        let mut scratch = Vec::new();
+        self.collect_original_children(id, &mut out, &mut scratch);
+        out
     }
 
     fn collect_original_children(
@@ -3600,6 +3663,129 @@ where
         self.repair_state = None;
     }
 
+    /// Proof-mode `add` for plain and commutative operators: keep the evidence
+    /// that relates the client's term to the node it is stored as, so that
+    /// `explain_deep` alone gives complete explanations about client terms.
+    ///
+    /// Without it, `add` stores each child's class root and records nothing,
+    /// and a later congruence step through the node takes its premises from
+    /// those roots: the equality between the child the client gave and that
+    /// root is used but never cited (measured in sundance: up to 513 of 1278
+    /// conflict explanations on a Verus file failed a congruence-closure check
+    /// of the antecedent set, 64 of them not valid even with every level-0
+    /// fact assumed). Three cases:
+    ///
+    /// 1. A given child is not its class root: insert the node with the given
+    ///    children (fresh, since stored nodes have root children), then
+    ///    recanonicalize it at once. Recanonicalization writes the given
+    ///    children to history (the congruence premises `explain_deep` reads)
+    ///    and reports a hash-cons collision with an existing congruent node,
+    ///    merged here with a `Congruence` justification, as `rebuild` does.
+    /// 2. The children are roots and hit a node that has history: that node's
+    ///    original children differ from the client's, so the client's term
+    ///    gets its own flagged duplicate, merged with a `Congruence`
+    ///    justification whose expansion explains the child differences.
+    /// 3. A hit on a node without history is the same term.
+    ///
+    /// Limitation: re-adding an identical term whose child is not a root
+    /// misses the earlier node (history is not indexed by content) and adds
+    /// another duplicate merged into the same class: correct, redundant.
+    fn add_with_creation_evidence(&mut self, op: Cfg::O, given: &[Cfg::G], node_flags: u8) -> Cfg::G {
+        let canonical: Vec<Cfg::G> = self.g_buf.clone();
+        let all_roots = given.iter().zip(canonical.iter()).all(|(g, c)| g == c);
+        if !all_roots {
+            let result = self.nodes.add(op, given, &self.ops, node_flags);
+            let id = self.register_if_fresh(result, op);
+            if result.is_fresh() {
+                for &child in &canonical {
+                    if let Some(repr) = self.classes.repr_id(child) {
+                        self.classes.add_use(repr, id);
+                    }
+                }
+                self.collisions.clear();
+                self.recanonize_parent(id);
+                self.merge_creation_collisions();
+            }
+            return id;
+        }
+        let result = self.nodes.add(op, &canonical, &self.ops, node_flags);
+        match result {
+            Added::Existing(n) if self.node_has_history(n) => {
+                let dup = self.nodes.add_congruent_dup(op, given, &self.ops, node_flags);
+                let id = self.register_if_fresh(Added::Fresh(dup), op);
+                for &child in &canonical {
+                    if let Some(repr) = self.classes.repr_id(child) {
+                        self.classes.add_use(repr, id);
+                    }
+                }
+                self.collisions.clear();
+                self.collisions.push((id, n));
+                self.merge_creation_collisions();
+                id
+            }
+            _ => {
+                let id = self.register_if_fresh(result, op);
+                if result.is_fresh() {
+                    for &child in &canonical {
+                        if let Some(repr) = self.classes.repr_id(child) {
+                            self.classes.add_use(repr, id);
+                        }
+                    }
+                }
+                id
+            }
+        }
+    }
+
+    /// Merge the collisions `add_with_creation_evidence` recorded, each with a
+    /// `Congruence` justification, as `rebuild_congruence` merges its own.
+    fn merge_creation_collisions(&mut self) {
+        let pairs = std::mem::take(&mut self.collisions);
+        for &(a, b) in &pairs {
+            let m = self.merge_in_classes(
+                a,
+                b,
+                Some(Justification::Congruence { node_a: a, node_b: b }),
+            );
+            if let Some(m) = m {
+                self.fold_min_monomial(m.survivor, m.absorbed_min_row, m.absorbed_atomic);
+                self.worklist.push((m.absorbed_uses, m.survivor));
+            }
+        }
+        self.collisions = pairs;
+        self.collisions.clear();
+        // A creation merge can change a class root, leaving congruent parents
+        // stored under the old root until the next rebuild; a term registered
+        // right after would then miss its congruent twin (measured:
+        // `conformance::differential_basic_against_semper`, seed 579). Close
+        // congruence now, so `add` returns with the graph congruence-closed,
+        // as a client registering terms expects.
+        if !self.worklist.is_empty() {
+            self.rebuild_congruence();
+        }
+    }
+
+    /// Test support: [`node_has_history`](Self::node_has_history).
+    #[doc(hidden)]
+    pub fn node_has_history_pub(&self, id: Cfg::G) -> bool {
+        self.node_has_history(id)
+    }
+
+    /// Whether `id`'s node has saved its original children (the history bit).
+    fn node_has_history(&self, id: Cfg::G) -> bool {
+        match self.node_ref(id) {
+            NodeRef::Plain0(_) | NodeRef::Lit(_) => false,
+            NodeRef::Plain1(l) => self.nodes.plain1.get(l).has_history(),
+            NodeRef::Plain2(l) => self.nodes.plain2.get(l).has_history(),
+            NodeRef::Plain3(l) => self.nodes.plain3.get(l).has_history(),
+            NodeRef::SPair(l) => self.nodes.spair.get(l).has_history(),
+            NodeRef::PlainN(l) => self.nodes.plain_n.get(l).has_history(),
+            NodeRef::Seq(l) => self.nodes.seq.get(l).has_history(),
+            NodeRef::MSet(l) => self.nodes.mset.get(l).has_history(),
+            NodeRef::Set(l) => self.nodes.set.get(l).has_history(),
+        }
+    }
+
     fn register_if_fresh(&mut self, result: Added<Cfg::G>, op: Cfg::O) -> Cfg::G {
         if result.is_fresh() {
             let id = result.id();
@@ -3770,6 +3956,36 @@ where
             NodeRef::MSet(l) => flag!(self.nodes.mset, l),
             NodeRef::Set(l) => flag!(self.nodes.set, l),
             NodeRef::Lit(l) => flag!(self.nodes.lit, l),
+        }
+    }
+
+    /// Clear one per-node control flag on `id`'s node. Only the reversible
+    /// flags may be cleared (`FLAG_UNMATCHABLE`); `FLAG_SUBSUMED` is monotone.
+    fn clear_node_flag(&mut self, id: Cfg::G, flag: u8) {
+        debug_assert!(
+            flag & crate::node_types::FLAG_SUBSUMED == 0,
+            "FLAG_SUBSUMED is monotone"
+        );
+        macro_rules! unflag {
+            ($store:expr, $l:expr) => {{
+                let mut n = $store.get($l);
+                if n.flags & flag != 0 {
+                    n.flags &= !flag;
+                    $store.set($l, n);
+                }
+            }};
+        }
+        match self.node_ref(id) {
+            NodeRef::Plain0(l) => unflag!(self.nodes.plain0, l),
+            NodeRef::Plain1(l) => unflag!(self.nodes.plain1, l),
+            NodeRef::Plain2(l) => unflag!(self.nodes.plain2, l),
+            NodeRef::Plain3(l) => unflag!(self.nodes.plain3, l),
+            NodeRef::SPair(l) => unflag!(self.nodes.spair, l),
+            NodeRef::PlainN(l) => unflag!(self.nodes.plain_n, l),
+            NodeRef::Seq(l) => unflag!(self.nodes.seq, l),
+            NodeRef::MSet(l) => unflag!(self.nodes.mset, l),
+            NodeRef::Set(l) => unflag!(self.nodes.set, l),
+            NodeRef::Lit(l) => unflag!(self.nodes.lit, l),
         }
     }
 
@@ -4821,6 +5037,35 @@ mod tests {
             Some(false),
             "atomicity must roll back with the e-graph token"
         );
+    }
+
+    #[test]
+    fn node_matchable_flag_rolls_back_and_class_members_listed() {
+        // `FLAG_UNMATCHABLE` is written through the semi-persistent node store:
+        // a flag change after a mark is undone by the restore, in both
+        // directions. `class_members` lists every node of the class.
+        let (ref mut eg, th) = eg::<true, false>();
+        let x = eg.add(th.x, &[]);
+        let y = eg.add(th.y, &[]);
+        let fx = eg.add(th.f, &[x]);
+        assert!(eg.is_node_matchable(fx));
+        eg.set_node_matchable(fx, false);
+        let token = eg.mark(ShrinkPolicy::Never);
+        eg.set_node_matchable(fx, true);
+        assert!(eg.is_node_matchable(fx));
+        eg.restore(token);
+        assert!(!eg.is_node_matchable(fx), "restore must re-shield the node");
+        let token = eg.mark(ShrinkPolicy::Never);
+        eg.set_node_matchable(x, false);
+        eg.restore(token);
+        assert!(eg.is_node_matchable(x), "restore must un-shield the node");
+        eg.merge(x, y);
+        eg.rebuild();
+        let mut m: Vec<_> = eg.class_members(x).collect();
+        m.sort();
+        let mut want = vec![x, y];
+        want.sort();
+        assert_eq!(m, want);
     }
 
     #[test]
