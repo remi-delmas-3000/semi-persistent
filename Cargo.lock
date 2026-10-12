@@ -155,9 +155,9 @@ dependencies = [
 [[package]]
 name = "cadical-sys"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34260b83096786a9020701130a6b800398186ac7b2d7c4604954225f6ccecd35"
+source = "git+https://github.com/leeabarnett/cadical-sys.git?branch=cadical-3.0.1#a93337ad17ea39b0c40196b65467899db451f63f"
 dependencies = [
+ "cc",
  "cxx",
  "cxx-build",
 ]

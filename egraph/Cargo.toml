@@ -54,7 +54,12 @@ winnow.workspace = true
 # internal descent, rustsat for the dynamic polynomial watchdog, Roto for cost scripts,
 # serde_json for the solvers' JSON. `cadical-sys` builds CaDiCaL, so a C++ compiler is a
 # build requirement.
-cadical-sys = "0.7.0"
+# The CaDiCaL 3.0.1 fork Sundance-SMT uses, declared exactly as Sundance-SMT
+# declares it (Cargo treats a branch and a rev as different sources): both crates link the native
+# `cadical`, so a build containing both must take it from one source. A git
+# dependency cannot be published to crates.io; switch back to a registry
+# version once the fork is released there.
+cadical-sys = { git = "https://github.com/leeabarnett/cadical-sys.git", branch = "cadical-3.0.1" }
 rustsat = "0.7"
 roto = "0.12"
 serde_json = "1"
