@@ -37,6 +37,51 @@ mod test {
         assert_eq!(buf.steps.len(), 19);
     }
 
+    /// Creation-time evidence in proof mode (`add_with_creation_evidence`):
+    /// terms built after their children merged keep their own nodes, and the
+    /// explanation of their equality cites the merge of the children. Before,
+    /// `f(x)` and `f(y)` registered after `x = y` hash-consed to one node, so
+    /// a client citing both terms got no antecedent for `x = y`.
+    #[test]
+    fn creation_after_merge_keeps_evidence() {
+        let mut eg = EGraph31::<NiraLitVal, false, true>::new();
+        let int = eg.intern_sort("Int");
+        let x_op = eg.register_op0("x", int);
+        let y_op = eg.register_op0("y", int);
+        let f = eg.register_op1("f", int, int);
+        let g = eg.register_op2("g", int, int, int);
+        let x = eg.add(x_op, &[]);
+        let y = eg.add(y_op, &[]);
+        eg.merge_justified(x, y, Justification::Assumption { lit: 7u32.into() });
+        eg.rebuild();
+        // Both orders of root / non-root child.
+        let fx = eg.add(f, &[x]);
+        let fy = eg.add(f, &[y]);
+        assert_ne!(fx, fy, "a term with a different child keeps its own node");
+        assert_eq!(eg.find(fx), eg.find(fy));
+        let mut buf = ProofBuf::new();
+        assert!(eg.explain_deep(fx, fy, &mut buf));
+        let cites = buf
+            .steps
+            .iter()
+            .any(|(_, _, j)| matches!(j, Justification::Assumption { .. }));
+        assert!(cites, "the explanation of f(x) = f(y) must cite x = y: {:?}", buf.steps);
+        // A binary term, children non-root in one position only.
+        let gxy = eg.add(g, &[x, x]);
+        let gyy = eg.add(g, &[y, y]);
+        assert_ne!(gxy, gyy);
+        let mut buf = ProofBuf::new();
+        assert!(eg.explain_deep(gxy, gyy, &mut buf));
+        assert!(buf.steps.iter().any(|(_, _, j)| matches!(j, Justification::Assumption { .. })));
+        // The identical term again lands in the same class. It is not the same
+        // node when its child is not a root: history is not indexed by
+        // content, so the lookup by the given children misses and a further
+        // duplicate is merged in (correct, redundant; a content index on the
+        // history column would make it a hit).
+        let fx2 = eg.add(f, &[x]);
+        assert_eq!(eg.find(fx2), eg.find(fx));
+    }
+
     /// The deep expansion is memoized (design chapter 14, `explain_deep`).
     /// A nested diamond `g(t, t)` shares every child pair between two
     /// positions, so an unmemoized walk doubles its work per level and, when

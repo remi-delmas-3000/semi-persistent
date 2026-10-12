@@ -11,19 +11,19 @@
 //! equalities, backbone with variables, both substitutions, and both chains
 //! with the from/to terms of every step rendered as s-expressions.
 //!
-//! Key empirical finding, pinned by `certificate_trace_free_operators`: the
-//! pipeline as written in §5 (materialize the projections AFTER the justified
-//! merges) produces only EMPTY chains. `EGraph::add` canonicalizes children
-//! by `find` before hash-consing, and rebuild recanonizes stored children to
-//! representatives, so every node of an instantiated projection interns to an
-//! already-existing node of the same class — inductively the whole instance
-//! interns to the root's node id itself. The §5 step-4 claim "congruence
-//! closure merges the instantiated spine up to the roots" never fires: there
-//! is no fresh spine, and `chain1`/`chain2` are reflexivity. Non-trivial
-//! chains require a two-phase replay: restore to a pre-merge mark, add the
-//! instances there (fresh nodes, since the leaf classes are still distinct),
-//! re-apply the justified merges, rebuild. Phase B below does exactly that
-//! and recovers the chains the certificate needs.
+//! Pinned by `certificate_trace_free_operators`: the pipeline as written in
+//! §5 (materialize the projections AFTER the justified merges) yields
+//! non-trivial chains. With PROOFS, `EGraph::add` registers a node with its
+//! children as given and canonizes it in a second step, recording the
+//! original children (creation evidence), so an instantiated projection is a
+//! fresh spine that congruence closure merges up to the roots, as §5 step 4
+//! says. Before creation evidence, `add` canonicalized children by `find`
+//! before hash-consing, every instance interned onto the root's node, and
+//! both chains were reflexivity; this file pinned that as its key finding.
+//! Phase B (restore to a pre-merge mark, add the instances there, re-apply
+//! the merges) still recovers the same kind of chains. AC operators are not
+//! covered by creation evidence: `ac_equal_projection_explains_to_empty_chain`
+//! still pins an empty chain for them.
 
 use std::collections::HashMap;
 
@@ -422,34 +422,33 @@ fn certificate_trace_free_operators() {
     assert_eq!(eg.find_const(inst_l), eg.find_const(t1));
     assert_eq!(eg.find_const(inst_r), eg.find_const(t2));
 
-    // ... but trivially: add() hash-conses over find-canonical children, so
-    // the instantiation dedupes node-by-node onto existing nodes and the root
-    // instance IS the root node. No fresh spine is created, congruence
-    // closure has nothing to merge, and the §5 chains are reflexivity. This
-    // contradicts the doc's reading that "congruence closure merges the
-    // instantiated spine up to the roots".
-    assert_eq!(
-        eg.len(),
-        len_before_inst,
-        "materializing the projections post-merge minted fresh nodes; \
-         the empty-chain finding no longer holds"
+    // With PROOFS, add() registers a node with its children as given and
+    // canonizes it in a second step (creation evidence, see
+    // `EGraph::add_with_creation_evidence`). Materializing post-merge
+    // therefore mints a fresh spine over the pre-merge leaves, and congruence
+    // closure merges it up to the roots, as the doc's reading of §5 says.
+    // (Before creation evidence, add() hash-consed over find-canonical
+    // children: the instances deduped onto the roots and both chains were
+    // reflexivity, which this test used to pin as a finding.)
+    assert!(
+        eg.len() > len_before_inst,
+        "materializing the projections post-merge minted no fresh node"
     );
-    assert_eq!(inst_l, t1, "left instance deduped onto the left root");
-    assert_eq!(inst_r, t2, "right instance deduped onto the right root");
+    assert_ne!(inst_l, t1, "post-merge left instance must be a fresh node");
+    assert_ne!(inst_r, t2, "post-merge right instance must be a fresh node");
 
     let mut buf = ProofBuf::new();
     assert!(eg.explain_deep(inst_l, t1, &mut buf));
     assert!(
-        buf.steps.is_empty(),
-        "post-merge materialization produced a non-empty chain"
+        has_congruence(&buf),
+        "post-merge chain1 must carry the spine's Congruence steps"
     );
+    assert_axioms_registered(&buf, &registered, "post-merge chain1");
     buf.clear();
     assert!(eg.explain_deep(inst_r, t2, &mut buf));
-    assert!(buf.steps.is_empty());
-    eprintln!(
-        "; phase A: instances deduped onto roots ({inst_l:?} == t1, {inst_r:?} == t2); \
-         both chains empty"
-    );
+    assert!(has_congruence(&buf));
+    assert_axioms_registered(&buf, &registered, "post-merge chain2");
+    eprintln!("; phase A: post-merge instances are fresh nodes with non-trivial chains");
 
     // --- Phase B: replay into the pre-merge state to obtain real chains ---
     eg.restore(token);
