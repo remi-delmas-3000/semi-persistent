@@ -521,6 +521,14 @@ where
             if eg.node_flags(gid) & crate::node_types::FLAG_SUBSUMED != 0 {
                 continue;
             }
+            // Node-level relevancy shield (`FLAG_UNMATCHABLE`), honoured only
+            // while the client has the shield on. Qualifies under the
+            // requirement above: it is a property of this node's own content.
+            if eg.matching_shield()
+                && eg.node_flags(gid) & crate::node_types::FLAG_UNMATCHABLE != 0
+            {
+                continue;
+            }
             // Class-level e-matching shield (the `matchable` bit): skip every node
             // of a shielded class, exactly as `FLAG_SUBSUMED` skips one node, so a
             // shielded class contributes to none of the matcher indexes and the

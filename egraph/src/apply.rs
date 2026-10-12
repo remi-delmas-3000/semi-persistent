@@ -2254,6 +2254,55 @@ mod tests {
     }
 
     #[test]
+    fn node_shield_hides_node_only_while_active() {
+        // The node-level relevancy shield (`FLAG_UNMATCHABLE`): a flagged node
+        // is skipped by the index build only while the matching shield is on;
+        // clearing the flag restores the match (rollback on restore is tested
+        // in `egraph.rs`, whose test e-graph supports marks). Each scenario uses a fresh e-graph because a successful
+        // rewrite adds (f b a) and would change the counts.
+        let model = NiraModel;
+        let ctx = crate::resolve::GlobalCtx::<crate::id::SortId, crate::id::ENodeId>::new();
+        let run = |shield_on: bool, flag: bool, unflag_after: bool| -> usize {
+            let mut eg = make_eg();
+            let mut rules = crate::registry::RuleRegistry::<false>::new();
+            let a = eg.add(eg.ops().id_by_name("a").unwrap(), &[]);
+            let b = eg.add(eg.ops().id_by_name("b").unwrap(), &[]);
+            let fab = eg.add(eg.ops().id_by_name("f").unwrap(), &[a, b]);
+            let lhs = parse_pattern("(f x y)");
+            let rhs = parse_rhs("(f y x)");
+            let rule = compile_rewrite(
+                "test", "", "", &lhs, &rhs, &[], false, eg.ops(), eg.sorts(), &mut rules,
+                &model, &ctx,
+            )
+            .unwrap();
+            assert!(eg.is_node_matchable(fab));
+            if flag {
+                eg.set_node_matchable(fab, false);
+                assert!(!eg.is_node_matchable(fab));
+            }
+            if unflag_after {
+                eg.set_node_matchable(fab, true);
+                assert!(eg.is_node_matchable(fab));
+            }
+            eg.set_matching_shield(shield_on);
+            let index = IndexStore::build(&eg);
+            apply_rule(
+                &rule,
+                &mut eg,
+                &index,
+                &crate::schedule::IndexStats::from_index(&index),
+                &model,
+                &ctx,
+            )
+            .unwrap()
+        };
+        assert!(run(true, false, false) > 0, "an unflagged node matches");
+        assert_eq!(run(true, true, false), 0, "a flagged node is hidden while the shield is on");
+        assert!(run(false, true, false) > 0, "the shield off ignores the flag");
+        assert!(run(true, true, true) > 0, "clearing the flag restores the match");
+    }
+
+    #[test]
     fn rewrite_nested() {
         let mut eg = make_eg();
         let mut rules = crate::registry::RuleRegistry::<false>::new();

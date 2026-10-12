@@ -68,6 +68,18 @@ pub const FLAG_SUBSUMED: u8 = 1 << 0;
 pub const FLAG_CONSTRUCTOR: u8 = 1 << 1;
 pub const FLAG_AC_COLLAPSED: u8 = 1 << 2;
 pub const FLAG_CONGRUENT_DUP: u8 = 1 << 3;
+/// Node-level e-matching shield for a relevancy client: a node carrying this
+/// flag is skipped by the index build while the egraph's matching shield is
+/// active ([`EGraph::set_matching_shield`](crate::egraph::EGraph::set_matching_shield)),
+/// and indexed normally while it is inactive (a client's complete-model round
+/// must see every match). Unlike `FLAG_SUBSUMED` it is reversible
+/// ([`EGraph::set_node_matchable`](crate::egraph::EGraph::set_node_matchable)):
+/// a relevancy client shields a node at registration and clears the flag when
+/// the node becomes relevant. Stored in the node's flags byte, so it is captured
+/// by the semi-persistent node stores and rolls back on `restore`. It qualifies
+/// under the index filter's soundness requirement (`index.rs`): it makes the
+/// node's own content unmatchable, it does not depend on another node.
+pub const FLAG_UNMATCHABLE: u8 = 1 << 4;
 
 // ---------------------------------------------------------------------------
 // FixedArityNode<G, O, K>
@@ -162,7 +174,12 @@ impl<G: DenseId, O: DenseId, const K: usize> Tagged for FixedArityNode<G, O, K> 
     fn from_repr(stored: &Self) -> Self {
         let mut v = *stored;
         G::clear_tag(&mut v.global_id);
-        O::clear_tag(&mut v.op);
+        // The op's tag is the history bit (`has_history`), not the store's
+        // capture tag (that one lives on `global_id`). Clearing it here made
+        // every node read through the store report no history, so the
+        // "save on first recanonize" guard saved on every recanonize and a
+        // client could not tell a node with saved children from one without.
+        // Comparisons and hashing go through `op()`, which masks the bit.
         v
     }
     #[inline(always)]
@@ -280,7 +297,12 @@ impl<G: DenseId, O: DenseId> Tagged for VariableArityNode<G, O> {
     fn from_repr(stored: &Self) -> Self {
         let mut v = *stored;
         G::clear_tag(&mut v.global_id);
-        O::clear_tag(&mut v.op);
+        // The op's tag is the history bit (`has_history`), not the store's
+        // capture tag (that one lives on `global_id`). Clearing it here made
+        // every node read through the store report no history, so the
+        // "save on first recanonize" guard saved on every recanonize and a
+        // client could not tell a node with saved children from one without.
+        // Comparisons and hashing go through `op()`, which masks the bit.
         v
     }
     #[inline(always)]
@@ -380,7 +402,12 @@ impl<G: DenseId, O: DenseId, V: DenseId> Tagged for LitNode<G, O, V> {
     fn from_repr(stored: &Self) -> Self {
         let mut v = *stored;
         G::clear_tag(&mut v.global_id);
-        O::clear_tag(&mut v.op);
+        // The op's tag is the history bit (`has_history`), not the store's
+        // capture tag (that one lives on `global_id`). Clearing it here made
+        // every node read through the store report no history, so the
+        // "save on first recanonize" guard saved on every recanonize and a
+        // client could not tell a node with saved children from one without.
+        // Comparisons and hashing go through `op()`, which masks the bit.
         v
     }
     #[inline(always)]
@@ -521,10 +548,12 @@ mod tests {
         assert!(stored.has_history()); // op MSB
         assert!(N::tag(&stored)); // global_id MSB
 
-        // from_repr clears capture tag but op tag is also cleared (both use MSB)
-        // The clean node has neither flag — that's correct.
-        // In practice, has_history is only read on raw stored values from VecI::get.
+        // from_repr clears the store's capture tag (global_id MSB) and keeps
+        // the history bit (op MSB): stores return values through from_repr,
+        // so a history bit cleared here could never be read back.
         let clean = N::from_repr(&stored);
+        assert!(clean.has_history());
+        assert!(!N::tag(&clean));
         assert_eq!(clean.op(), OpId::new(3));
         assert_eq!(clean.global_id(), ENodeId::new(10));
         assert_eq!(clean.children, [ENodeId::new(7)]);
