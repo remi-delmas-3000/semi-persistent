@@ -26,14 +26,14 @@ pub enum InterpError {
     DeclError(String),
     /// Rule compilation failed.
     CompileError(crate::resolve::ResolveError),
-    /// `(check ...)` assertion failed.
+    /// `(prove ...)` assertion failed.
     CheckFailed(String),
     /// `(extract ...)` could not produce a term from the named class.
     ExtractFailed(crate::extract::ExtractError),
     /// `(pop)` without matching `(push)`.
     PopWithoutPush,
     /// A rule applied a partial primitive operation outside its domain while a
-    /// `(run …)` or `(check …)` was saturating: division by zero, an overflow
+    /// `(run …)` or `(prove …)` was saturating: division by zero, an overflow
     /// under checked arithmetic, a multiplicity too wide for the configuration.
     ///
     /// Separate from `CompileError` because nothing about the rule is wrong:
@@ -445,7 +445,7 @@ where
             // equality checks (each check continues the accumulated
             // completion/alternation state instead of re-deriving); any other
             // command must see the untouched graph, so the transaction closes
-            // first. `(check t)` closes it too: a bare check materializes its
+            // first. `(prove t)` closes it too: a bare check materializes its
             // term permanently, which an open transaction would discard.
             if !matches!(cmd, CCommand::CheckEq(..) | CCommand::CheckNeq(..)) {
                 self.lazy_txn_close();

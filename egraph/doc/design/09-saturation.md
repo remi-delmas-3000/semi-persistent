@@ -210,7 +210,7 @@ Ruleset names and ids are static: their name table lives for one
 are runtime state, so a rule command interpreted after `(push)` is removed
 by the matching `(pop)`.
 
-`(run [ruleset] N :until (= a b))`, or `(!= a b)`, stops the run as
+`(run [ruleset] N :goal (= a b))`, or `(!= a b)`, stops the run as
 soon as the goal holds. The goal's terms are ground, so they are built
 once, before the run; only their classes move afterwards, and the check
 is two `find`s. Every observation follows rebuild, then occurs before rule
@@ -221,9 +221,9 @@ distinguishes stopping on the goal from reaching a fixpoint: the goal can be
 met with rules still firing.
 
 Building the goal's terms adds those nodes to the e-graph, which is
-observable: the same nodes a `(check …)` of the goal would add.
+observable: the same nodes a `(prove …)` of the goal would add.
 
-For `:until (!= a b)`, "holds" means the two current representatives differ.
+For `:goal (!= a b)`, "holds" means the two current representatives differ.
 It is not a maintained semantic disequality, and it commonly succeeds at
 iteration zero when the rebuilt terms begin apart.
 

@@ -19,7 +19,7 @@ use crate::literal::LitVal;
 pub struct RunGoal<G> {
     pub left: G,
     pub right: G,
-    /// `true` for `:until (= a b)`, `false` for `:until (!= a b)`.
+    /// `true` for `:goal (= a b)`, `false` for `:goal (!= a b)`.
     pub equal: bool,
 }
 

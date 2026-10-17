@@ -1179,7 +1179,7 @@ fn pattern_as_rhs(p: &SurfacePattern) -> ModalResult<RhsTerm> {
     }
 }
 
-/// `:until (= a b)` / `:until (!= a b)` — two ground terms and the relation that stops the run.
+/// `:goal (= a b)` / `:goal (!= a b)` — two ground terms and the relation that stops the run.
 fn parse_run_goal(input: &mut &str, base: usize) -> ModalResult<RunGoal> {
     cut_char(input, '(')?;
     ws(input)?;
@@ -2049,10 +2049,10 @@ mod alg_tag_tests {
         };
         assert_eq!(one("(run 12)"), (None, 12, None));
         assert_eq!(one("(run fast 3)"), (Some("fast".to_string()), 3, None));
-        let (rs, limit, until) = one("(run fast 3 :until (!= a b))");
+        let (rs, limit, until) = one("(run fast 3 :goal (!= a b))");
         assert_eq!((rs, limit), (Some("fast".to_string()), 3));
         assert!(!until.expect("goal").equal);
-        assert!(one("(run 5 :until (= a b))").2.expect("goal").equal);
+        assert!(one("(run 5 :goal (= a b))").2.expect("goal").equal);
         // `:goal` reads the same ground goal (doc/goal-egglog-check.md).
         assert!(one("(run 5 :goal (= a b))").2.expect("goal").equal);
         assert!(!one("(run 5 :goal (!= a b))").2.expect("goal").equal);

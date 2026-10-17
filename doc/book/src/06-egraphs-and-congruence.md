@@ -90,7 +90,7 @@ that it is distinct from `left`. It then merges only the leaf classes:
 
 After `(union (a) (b))`, both parent nodes have the canonical key
 `f(Cab, Cab)`. Rebuild detects that collision and merges the parent classes, so
-`(check (= left right))` passes without a rewrite rule.
+`(prove (= left right))` passes without a rewrite rule.
 
 The final `print-size` reports:
 
@@ -136,7 +136,7 @@ specifies the rebuild worklist and use-list algorithm.
 
 ## What an equality check asks
 
-`(check (= t1 t2))` builds both ground terms, rebuilds the e-graph, and asks
+`(prove (= t1 t2))` builds both ground terms, rebuilds the e-graph, and asks
 whether their e-nodes have the same union-find representative. It does not
 compare two extracted syntax trees.
 
@@ -146,7 +146,7 @@ check means the terms remain in different classes in the graph as currently
 computed. It is not a proof that the terms are unequal in every model of the
 declared laws.
 
-Likewise, `(check (!= t1 t2))` accepts when the two current representatives are
+Likewise, `(prove (!= t1 t2))` accepts when the two current representatives are
 different. Chapter 11 explains how plain, eager, and lazy congruence modes
 change the work performed before that decision.
 

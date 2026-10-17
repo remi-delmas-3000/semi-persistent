@@ -71,8 +71,8 @@ rest variables, comprehensions, modifiers, and action ordering.
 | --- | --- |
 | `(run n)` | Run the untagged default ruleset for at most `n` iterations. |
 | `(run r n)` | Run only declared ruleset `r` for at most `n` iterations. |
-| `(run n :until (= a b))` | Stop early when `a` and `b` join. A named run may use the same goal. |
-| `(run n :until (!= a b))` | Stop early when the two terms are in different classes. This does not assert a persistent disequality. |
+| `(run n :goal (= a b))` | Stop early when `a` and `b` join. A named run may use the same goal. |
+| `(run n :goal (!= a b))` | Stop early when the two terms are in different classes. This does not assert a persistent disequality. |
 | `(push)` | Record a semi-persistent scope. |
 | `(push :shrink)` | Reclaim sufficiently overallocated storage, then record a scope. |
 | `(pop)` | Restore the most recent scope, including e-graph, installed-rule, and runtime-name state. |
@@ -85,9 +85,9 @@ defines scope lifetime and `:shrink`.
 
 | Command | Effect |
 | --- | --- |
-| `(check term)` | Build `term`. This form has no additional truth or equality test. |
-| `(check (= a b))` | Rebuild and require `a` and `b` to belong to the same e-class. |
-| `(check (!= a b))` | Rebuild and require the terms to belong to different e-classes under the selected completion mode. |
+| `(prove term)` | Build `term`. This form has no additional truth or equality test. |
+| `(prove (= a b))` | Rebuild and require `a` and `b` to belong to the same e-class. |
+| `(prove (!= a b))` | Rebuild and require the terms to belong to different e-classes under the selected completion mode. |
 | `(extract term)` | Rebuild and print a lowest-cost extractable representative. |
 | `(cost-model name :script "file.roto")` | Compile a cost script when the program is checked ([Part V](24-extraction-under-cost-models.md)). |
 | `(cost-model name :rust "id")` | Name a cost registered in Rust ([Part V](24-extraction-under-cost-models.md)). |
