@@ -135,5 +135,13 @@ pub enum SurfaceCommand {
         cond: CheckCond,
         print: Option<u64>,
     },
+    /// `(run [ruleset] N :until fact ...)`: stop the run once the facts have a match,
+    /// as `check` would find one.
+    RunUntil {
+        ruleset: Option<String>,
+        limit: u64,
+        facts: Vec<SurfacePattern>,
+        text: String,
+    },
     Pass(Command),
 }

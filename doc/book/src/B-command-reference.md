@@ -71,7 +71,8 @@ rest variables, comprehensions, modifiers, and action ordering.
 | --- | --- |
 | `(run n)` | Run the untagged default ruleset for at most `n` iterations. |
 | `(run r n)` | Run only declared ruleset `r` for at most `n` iterations. |
-| `(run n :goal (= a b))` | Stop early when `a` and `b` join. A named run may use the same goal. |
+| `(run n :until fact ...)` | Stop early, before a round, once the facts have a match, as `check` would find one. In lazy AC mode the goal is evaluated without completion, so completion can only delay the stop. |
+| `(run n :goal (= a b))` | Build `a` and `b` once, then stop early when they join. A named run may use the same goal. |
 | `(run n :goal (!= a b))` | Stop early when the two terms are in different classes. This does not assert a persistent disequality. |
 | `(push)` | Record a semi-persistent scope. |
 | `(push :shrink)` | Reclaim sufficiently overallocated storage, then record a scope. |

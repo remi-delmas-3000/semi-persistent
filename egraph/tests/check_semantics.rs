@@ -19,6 +19,16 @@ fn run(src: &str) -> Result<Interp, String> {
     run_in(src, AcMode::Off)
 }
 
+fn run_with(src: &str, strategy: semi_persistent_egraph::saturate::SaturationStrategy) -> Interp {
+    let surface = parse_program_v2(src).unwrap();
+    let mut interp = Interp::new(BignumModel);
+    interp.set_strategy(strategy);
+    let mut globals = GlobalCtx::new();
+    let checked = sortcheck_program(surface, &mut interp.eg, &interp.model, &mut globals).unwrap();
+    interp.run_checked(&checked).unwrap();
+    interp
+}
+
 fn run_in(src: &str, mode: AcMode) -> Result<Interp, String> {
     let surface = parse_program_v2(src).map_err(|e| e.to_string())?;
     let mut interp = Interp::new(BignumModel);
@@ -74,15 +84,45 @@ const UNBOUNDED: &str = "
 ";
 
 #[test]
-fn goal_stops_the_run_as_until_does() {
-    let until = run(&format!(
-        "{UNBOUNDED}(run 100 :until (= start (s (s (z)))))"
+fn until_with_facts_stops_the_run_as_goal_does() {
+    // `:goal` builds `(s (s (z)))` and waits for it to join `start`; `:until` waits for a
+    // match of the same equality, which needs the term to exist and join. One rewrite
+    // round gives both.
+    for strategy in [
+        semi_persistent_egraph::saturate::SaturationStrategy::Naive,
+        semi_persistent_egraph::saturate::SaturationStrategy::SemiNaive,
+    ] {
+        let until = run_with(
+            &format!("{UNBOUNDED}(run 100 :until (= start (s (s (z)))))"),
+            strategy,
+        );
+        let goal = run_with(
+            &format!("{UNBOUNDED}(run 100 :goal (= start (s (s (z)))))"),
+            strategy,
+        );
+        let (u, g) = (until.last_sat().unwrap(), goal.last_sat().unwrap());
+        assert!(u.goal_met && g.goal_met, "{strategy:?}");
+        assert_eq!(u.iterations, g.iterations, "{strategy:?}");
+        assert!(u.iterations < 100, "{strategy:?}");
+    }
+}
+
+#[test]
+fn until_with_variables_stops_at_the_first_match() {
+    let i = run(&format!(
+        "{UNBOUNDED}(run 100 :until (= start (s (s (s (s x))))))"
     ))
     .unwrap();
-    let goal = run(&format!("{UNBOUNDED}(run 100 :goal (= start (s (s (z)))))")).unwrap();
-    let (u, g) = (until.last_sat().unwrap(), goal.last_sat().unwrap());
-    assert!(u.goal_met && g.goal_met);
-    assert_eq!(u.iterations, g.iterations);
+    let sat = i.last_sat().unwrap();
+    assert!(sat.goal_met && sat.iterations < 100, "{sat:?}");
+    // A goal that never holds: the run ends at its fixpoint or its budget, and reports
+    // the goal unmet.
+    let i = run(&format!("{UNBOUNDED}(run 5 :until (= start (z)))")).unwrap();
+    let sat = i.last_sat().unwrap();
+    assert!(
+        !sat.goal_met && (sat.saturated || sat.iterations == 5),
+        "{sat:?}"
+    );
 }
 
 // ── `check`: egglog's query ─────────────────────────────────────────────────

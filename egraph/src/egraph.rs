@@ -866,16 +866,17 @@ where
         spec: &crate::saturate::RunSpec<Cfg::G>,
         globals: &crate::resolve::GlobalCtx<S, Cfg::G>,
         scratch: &mut crate::index::IndexScratch<Cfg>,
+        stop: Option<&crate::saturate::StopGoal<'_, Cfg, L, TRACK, PROOFS>>,
     ) -> Result<crate::saturate::SatResult, crate::saturate::SatError> {
         match strategy {
-            crate::saturate::SaturationStrategy::Naive => {
-                crate::saturate::saturate_rules_naive(rules, self, model, spec, globals, scratch)
-            }
+            crate::saturate::SaturationStrategy::Naive => crate::saturate::saturate_rules_naive(
+                rules, self, model, spec, globals, scratch, stop,
+            ),
             crate::saturate::SaturationStrategy::SemiNaive => {
                 // As in `saturate_semi_spec_in`: semi-naive reads the merge-membership delta.
                 self.track_merge_members = true;
                 let r = crate::saturate::saturate_rules_semi(
-                    rules, self, model, spec, globals, scratch,
+                    rules, self, model, spec, globals, scratch, stop,
                 );
                 self.track_merge_members = false;
                 r

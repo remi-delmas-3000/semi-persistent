@@ -87,6 +87,12 @@ pub enum CCommand<O, S, L> {
     /// `(check fact ...)`: egglog's check, a query over the current e-graph that
     /// succeeds when it has a match. It builds nothing.
     CheckQuery(Box<CheckQuery<O, S, L>>),
+    /// `(run N :until fact ...)`: the run stops before a round once `goal` holds.
+    RunUntil {
+        ruleset: Option<crate::apply::RulesetId>,
+        limit: u64,
+        goal: Box<CheckQuery<O, S, L>>,
+    },
     Extract(CTerm<O, S, L>),
     /// `(extract t :cost NAME …)`, with the model compiled at check time.
     ExtractWith {
@@ -1052,6 +1058,28 @@ where
 {
     match cmd {
         SurfaceCommand::Pass(c) => sortcheck_pass(c, eg, model, globals, rulesets),
+        SurfaceCommand::RunUntil {
+            ruleset,
+            limit,
+            facts,
+            text,
+        } => {
+            let rid = rulesets.resolve(&ruleset)?;
+            let check = SurfaceCommand::Check {
+                facts,
+                text,
+                cond: crate::surface_ast::CheckCond::Exists,
+                print: None,
+            };
+            match sortcheck_one(check, eg, model, globals, rulesets)? {
+                CCommand::CheckQuery(goal) => Ok(CCommand::RunUntil {
+                    ruleset: rid,
+                    limit,
+                    goal,
+                }),
+                _ => unreachable!("a check lowers to CheckQuery"),
+            }
+        }
         SurfaceCommand::Check {
             facts,
             text,

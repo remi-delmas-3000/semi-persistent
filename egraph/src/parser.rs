@@ -1192,7 +1192,7 @@ fn parse_run_goal(input: &mut &str, base: usize) -> ModalResult<RunGoal> {
     } else {
         let mut e = ContextError::new();
         e.push(StrContext::Expected(StrContextValue::Description(
-            ":until goal must be (= a b) or (!= a b)",
+            ":goal must be (= a b) or (!= a b)",
         )));
         return Err(ErrMode::Cut(e));
     };
@@ -1423,24 +1423,45 @@ fn parse_command(
             };
             let limit = number(input)?;
             ws(input)?;
-            // `:goal` is the name the ground goal keeps once `:until` takes a query
-            // (doc/goal-egglog-check.md); both read the same ground goal for now.
-            let until = if input.starts_with(":until") || input.starts_with(":goal") {
-                let key = if input.starts_with(":until") {
-                    ":until"
-                } else {
-                    ":goal"
-                };
-                *input = &input[key.len()..];
-                Some(parse_run_goal(input, base)?)
+            // `:until fact ...` is egglog's query goal; `:goal (= a b)` / `:goal (!= a b)`
+            // is the ground goal, which builds its terms once.
+            if input.starts_with(":until") {
+                *input = &input[":until".len()..];
+                ws(input)?;
+                let start = *input;
+                let mut facts = Vec::new();
+                loop {
+                    ws(input)?;
+                    if input.starts_with(')') {
+                        break;
+                    }
+                    facts.push(parse_pattern(input, base)?);
+                }
+                if facts.is_empty() {
+                    let mut e = ContextError::new();
+                    e.push(StrContext::Label(":until needs at least one fact"));
+                    return Err(ErrMode::Cut(e));
+                }
+                let text = start[..start.len() - input.len()].trim().to_owned();
+                SurfaceCommand::RunUntil {
+                    ruleset,
+                    limit,
+                    facts,
+                    text,
+                }
             } else {
-                None
-            };
-            SurfaceCommand::Pass(Command::Run {
-                ruleset,
-                limit,
-                until,
-            })
+                let until = if input.starts_with(":goal") {
+                    *input = &input[":goal".len()..];
+                    Some(parse_run_goal(input, base)?)
+                } else {
+                    None
+                };
+                SurfaceCommand::Pass(Command::Run {
+                    ruleset,
+                    limit,
+                    until,
+                })
+            }
         }
         "print-size" => {
             ws(input)?;

@@ -183,6 +183,76 @@ pub struct Interpreter<
     warnings: Vec<String>,
 }
 
+/// The matches of `query` over `eg`, rebuilt: one naive pass, as a rule's first round
+/// matches (`saturate::run_rule_variant`), with no actions.
+fn query_pool<Cfg, L, const TRACK: bool, const PROOFS: bool>(
+    eg: &EGraph<Cfg, L, TRACK, PROOFS>,
+    globals: &crate::resolve::GlobalCtx<Cfg::S, Cfg::G>,
+    query: &crate::resolve::ResolvedQuery<Cfg::O, Cfg::S, L>,
+) -> Result<crate::ematch::MatchPool<Cfg>, InterpError>
+where
+    Cfg: EGraphConfig,
+    L: LitVal,
+    Cfg::O: std::hash::Hash,
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+{
+    let full = crate::index::IndexStore::build(eg);
+    let stats = crate::schedule::IndexStats::from_index(&full);
+    let vindex = crate::index::VariantIndex::naive(&full);
+    let sampler = crate::index::IndexSampler::new(eg, vindex);
+    let plan = crate::schedule::schedule_with_stats_sampled(query, &stats, &sampler);
+    let mut pool = crate::ematch::MatchPool::new();
+    crate::ematch::run_query_scheduled_into(query, &plan, eg, &vindex, globals, &mut pool);
+    // A guard undefined on some assignment dropped it: the surviving matches answer a
+    // query the engine could not fully evaluate, so the command reports the fault.
+    if let Some(fault) = pool.guard_fault() {
+        return Err(InterpError::EvalFailed(fault.clone()));
+    }
+    Ok(pool)
+}
+
+/// A check's distinct assignments of its named variables over `eg`, as canonical
+/// classes. Empty when a global fact fails; one empty assignment when the facts hold and
+/// name no variable.
+fn query_assignments<Cfg, L, const TRACK: bool, const PROOFS: bool>(
+    eg: &EGraph<Cfg, L, TRACK, PROOFS>,
+    globals: &crate::resolve::GlobalCtx<Cfg::S, Cfg::G>,
+    cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
+) -> Result<Vec<Vec<Option<Cfg::G>>>, InterpError>
+where
+    Cfg: EGraphConfig,
+    L: LitVal,
+    Cfg::O: std::hash::Hash,
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+{
+    let class = |name: &str| globals.get(name).map(|(_, _, id)| eg.find_const(id));
+    for (a, b) in &cq.global_eqs {
+        if class(a) != class(b) {
+            return Ok(Vec::new());
+        }
+    }
+    let Some(q) = &cq.query else {
+        return Ok(vec![Vec::new()]);
+    };
+    let pool = query_pool(eg, globals, q)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for j in 0..pool.len() {
+        let m = pool.clone_match(j);
+        let key: Vec<Option<Cfg::G>> = cq
+            .vars
+            .iter()
+            .map(|v| m.nodes[v.idx()].map(|g| eg.find_const(g)))
+            .collect();
+        if seen.insert(key.clone()) {
+            out.push(key);
+        }
+    }
+    Ok(out)
+}
+
 impl<Cfg: EGraphConfig, L: LitVal, M: LitModel<Value = L>, const TRACK: bool, const PROOFS: bool>
     Interpreter<Cfg, L, M, TRACK, PROOFS>
 where
@@ -384,6 +454,7 @@ where
                     &spec,
                     &self.globals,
                     &mut self.index_scratch,
+                    None,
                 )
                 .map_err(crate::saturate::SatError::into_eval);
             // The completion goal is cleared on the fault path too: it is state
@@ -403,32 +474,11 @@ where
         Ok((equal, inconclusive))
     }
 
-    /// The matches of `query` over the current, rebuilt e-graph: one naive pass, as a
-    /// rule's first round matches (`saturate::run_rule_variant`), with no actions.
     fn query_matches(
         &self,
         query: &crate::resolve::ResolvedQuery<Cfg::O, Cfg::S, L>,
     ) -> Result<crate::ematch::MatchPool<Cfg>, InterpError> {
-        let full = crate::index::IndexStore::build(&self.eg);
-        let stats = crate::schedule::IndexStats::from_index(&full);
-        let vindex = crate::index::VariantIndex::naive(&full);
-        let sampler = crate::index::IndexSampler::new(&self.eg, vindex);
-        let plan = crate::schedule::schedule_with_stats_sampled(query, &stats, &sampler);
-        let mut pool = crate::ematch::MatchPool::new();
-        crate::ematch::run_query_scheduled_into(
-            query,
-            &plan,
-            &self.eg,
-            &vindex,
-            &self.globals,
-            &mut pool,
-        );
-        // A guard undefined on some assignment dropped it: the surviving matches answer
-        // a query the engine could not fully evaluate, so the check reports the fault.
-        if let Some(fault) = pool.guard_fault() {
-            return Err(InterpError::EvalFailed(fault.clone()));
-        }
-        Ok(pool)
+        query_pool(&self.eg, &self.globals, query)
     }
 
     /// The class of one side of a ground `(= p q)`, when that term exists.
@@ -453,36 +503,11 @@ where
             .map(|(_, _, id)| self.eg.find_const(id))
     }
 
-    /// The check's distinct assignments of its named variables on the current graph,
-    /// as canonical classes. Empty when a global fact fails; one empty assignment when
-    /// the facts hold and name no variable.
     fn check_assignments(
         &self,
         cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
     ) -> Result<Vec<Vec<Option<Cfg::G>>>, InterpError> {
-        for (a, b) in &cq.global_eqs {
-            if self.global_class(a) != self.global_class(b) {
-                return Ok(Vec::new());
-            }
-        }
-        let Some(q) = &cq.query else {
-            return Ok(vec![Vec::new()]);
-        };
-        let pool = self.query_matches(q)?;
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for j in 0..pool.len() {
-            let m = pool.clone_match(j);
-            let key: Vec<Option<Cfg::G>> = cq
-                .vars
-                .iter()
-                .map(|v| m.nodes[v.idx()].map(|g| self.eg.find_const(g)))
-                .collect();
-            if seen.insert(key.clone()) {
-                out.push(key);
-            }
-        }
-        Ok(out)
+        query_assignments(&self.eg, &self.globals, cq)
     }
 
     /// The check's matches, counted as distinct assignments of its named variables.
@@ -668,6 +693,7 @@ where
                     &spec,
                     &self.globals,
                     &mut self.index_scratch,
+                    None,
                 )
                 .map_err(crate::saturate::SatError::into_eval)?;
             self.eg.rebuild();
@@ -1065,11 +1091,71 @@ where
                     &spec,
                     &self.globals,
                     &mut self.index_scratch,
+                    None,
                 );
                 // The elapsed time is recorded before the fault is propagated:
                 // the run did take that long, and `(print-stats)` after a caught
                 // error should not read a stale duration from an earlier run.
                 self.last_run_time = Some(t0.elapsed());
+                let r = result.map_err(|e| match e {
+                    crate::saturate::SatError::Eval(e) => InterpError::EvalFailed(e),
+                    crate::saturate::SatError::Sequence(m) => InterpError::DeclError(m),
+                })?;
+                r.sequence.warn();
+                let skipped = self.eg.take_no_value();
+                if skipped > 0 {
+                    self.warn(format!(
+                        "{skipped} rule action(s) not applied: the right-hand side was an \
+                         application with no children of an operator without :identity, \
+                         which has no meaning"
+                    ));
+                }
+                self.last_sat = Some(r);
+            }
+            CCommand::RunUntil {
+                ruleset,
+                limit,
+                goal,
+            } => {
+                for w in &goal.warnings {
+                    self.warn(w.clone());
+                }
+                let spec = crate::saturate::RunSpec {
+                    limit: usize::try_from(*limit).unwrap_or(usize::MAX),
+                    ruleset: *ruleset,
+                    until: None,
+                };
+                // The goal is evaluated on the graph the driver hands it, rebuilt, before
+                // every round and after the last. A guard fault inside it is kept and
+                // reported once the run returns. In lazy AC mode the goal sees the graph
+                // without completion, as `:goal` does: completing and rolling back inside
+                // the run would clear the semi-naive delta. Completion changes only how
+                // early the run stops, never its result.
+                let fault: std::cell::RefCell<Option<InterpError>> = Default::default();
+                let globals = &self.globals;
+                let stop =
+                    |eg: &EGraph<Cfg, L, TRACK, PROOFS>| match query_assignments(eg, globals, goal)
+                    {
+                        Ok(rows) => !rows.is_empty(),
+                        Err(e) => {
+                            fault.borrow_mut().get_or_insert(e);
+                            true
+                        }
+                    };
+                let t0 = std::time::Instant::now();
+                let result = self.eg.saturate_rules_in(
+                    self.strategy,
+                    &self.rules,
+                    &self.model,
+                    &spec,
+                    &self.globals,
+                    &mut self.index_scratch,
+                    Some(&stop),
+                );
+                self.last_run_time = Some(t0.elapsed());
+                if let Some(e) = fault.into_inner() {
+                    return Err(e);
+                }
                 let r = result.map_err(|e| match e {
                     crate::saturate::SatError::Eval(e) => InterpError::EvalFailed(e),
                     crate::saturate::SatError::Sequence(m) => InterpError::DeclError(m),
