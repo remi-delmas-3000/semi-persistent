@@ -592,3 +592,26 @@ an answer key from sampled and enumerated models. Their first results, over
 Once the analysis exists in the e-graph, the same benchmarks run through it
 and give a differential check against the harness, which is the way to
 settle the open budget question of §7 and the term synthesis of §13.3.
+
+### 13.7 Coexistence with lattice functions
+
+§12 orders the two features; they also compose. The class analysis answers
+one question, the set of concrete values a term of an interpreted sort can
+take, and answers it with verified transfers in both directions. A lattice
+function answers any monotone question about any tuple of arguments: a
+shortest path between two classes, a points-to set, a type, a cost. Neither
+replaces the other, and three connections make them work together:
+
+- a rule body can test a class fact (§6, tier 3) and write a lattice table,
+  so a table can be seeded from the analysis;
+- a lattice function whose value sort is a verified domain uses that
+  domain's join or meet as its `:merge`, the restriction
+  [lattice-functions.md](lattice-functions.md) already requires, so a table
+  over a domain is sound by the same proofs;
+- both share the semi-persistent value pools and the touched-log entry for
+  value-only changes (§12), so a value change in either reaches the next
+  semi-naive round.
+
+What stays distinct: only the class analysis derives equalities back into
+the e-graph (§8), and only lattice functions are keyed by tuples rather than
+by one class.
