@@ -85,9 +85,10 @@ defines scope lifetime and `:shrink`.
 
 | Command | Effect |
 | --- | --- |
+| `(check fact ...)` | Rebuild and require the conjunctive query to have a match. The facts are those of a rule body: a pattern, or `(= p q)`. The check builds nothing: a term that was never built has no match. A name that is a global refers to it; any other name is a variable of this one check. |
 | `(prove term)` | Build `term`. This form has no additional truth or equality test. |
-| `(prove (= a b))` | Rebuild and require `a` and `b` to belong to the same e-class. |
-| `(prove (!= a b))` | Rebuild and require the terms to belong to different e-classes under the selected completion mode. |
+| `(prove (= a b))` | Build both terms, rebuild, and require them to belong to the same e-class. |
+| `(prove (!= a b))` | Build both terms, rebuild, and require them to belong to different e-classes under the selected completion mode. |
 | `(extract term)` | Rebuild and print a lowest-cost extractable representative. |
 | `(cost-model name :script "file.roto")` | Compile a cost script when the program is checked ([Part V](24-extraction-under-cost-models.md)). |
 | `(cost-model name :rust "id")` | Name a cost registered in Rust ([Part V](24-extraction-under-cost-models.md)). |

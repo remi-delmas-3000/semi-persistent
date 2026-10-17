@@ -403,6 +403,182 @@ where
         Ok((equal, inconclusive))
     }
 
+    /// The matches of `query` over the current, rebuilt e-graph: one naive pass, as a
+    /// rule's first round matches (`saturate::run_rule_variant`), with no actions.
+    fn query_matches(
+        &self,
+        query: &crate::resolve::ResolvedQuery<Cfg::O, Cfg::S, L>,
+    ) -> Result<crate::ematch::MatchPool<Cfg>, InterpError> {
+        let full = crate::index::IndexStore::build(&self.eg);
+        let stats = crate::schedule::IndexStats::from_index(&full);
+        let vindex = crate::index::VariantIndex::naive(&full);
+        let sampler = crate::index::IndexSampler::new(&self.eg, vindex);
+        let plan = crate::schedule::schedule_with_stats_sampled(query, &stats, &sampler);
+        let mut pool = crate::ematch::MatchPool::new();
+        crate::ematch::run_query_scheduled_into(
+            query,
+            &plan,
+            &self.eg,
+            &vindex,
+            &self.globals,
+            &mut pool,
+        );
+        // A guard undefined on some assignment dropped it: the surviving matches answer
+        // a query the engine could not fully evaluate, so the check reports the fault.
+        if let Some(fault) = pool.guard_fault() {
+            return Err(InterpError::EvalFailed(fault.clone()));
+        }
+        Ok(pool)
+    }
+
+    /// The class of one side of a ground `(= p q)`, when that term exists.
+    fn side_class(
+        &self,
+        side: &crate::sortcheck::PairSide<Cfg::O, Cfg::S, L>,
+    ) -> Result<Option<Cfg::G>, InterpError> {
+        match side {
+            crate::sortcheck::PairSide::Global(name) => Ok(self.global_class(name)),
+            crate::sortcheck::PairSide::Term(query, var) => {
+                let pool = self.query_matches(query)?;
+                Ok((!pool.is_empty())
+                    .then(|| pool.clone_match(0).nodes[var.idx()])
+                    .flatten())
+            }
+        }
+    }
+
+    fn global_class(&self, name: &str) -> Option<Cfg::G> {
+        self.globals
+            .get(name)
+            .map(|(_, _, id)| self.eg.find_const(id))
+    }
+
+    /// Whether the check's facts hold on the current graph.
+    fn check_holds(
+        &self,
+        cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
+    ) -> Result<bool, InterpError> {
+        for (a, b) in &cq.global_eqs {
+            if self.global_class(a) != self.global_class(b) {
+                return Ok(false);
+            }
+        }
+        match &cq.query {
+            Some(q) => Ok(!self.query_matches(q)?.is_empty()),
+            None => Ok(true),
+        }
+    }
+
+    /// `(check fact ...)`: egglog's check. Rebuild, then require a match; build nothing.
+    ///
+    /// In lazy AC mode completion runs wherever the answer depends on it
+    /// (doc/goal-egglog-check.md), inside the shared check transaction, so everything
+    /// the decision derives is discarded with it:
+    /// 1. the rebuild runs completion to its fixpoint or its growth budget;
+    /// 2. a single fact `(= p q)` over two built ground terms is then decided as
+    ///    `prove` decides it, with the pair as the completion goal;
+    /// 3. any other query without a match runs the ordinary rules interleaved with
+    ///    completion, one round at a time, for at most `lazy_ac_rounds` rounds, and
+    ///    is re-evaluated after each.
+    fn exec_check_query(
+        &mut self,
+        cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
+    ) -> Result<(), InterpError> {
+        for w in &cq.warnings {
+            self.warn(w.clone());
+        }
+        let lazy = self.ac_mode == AcMode::Lazy;
+        if lazy {
+            self.lazy_txn_open();
+        }
+        self.eg.rebuild();
+        if self.check_holds(cq)? {
+            return Ok(());
+        }
+        if lazy {
+            let decided = match &cq.pair {
+                Some([a, b]) => match (self.side_class(a)?, self.side_class(b)?) {
+                    (Some(a), Some(b)) => Some(self.lazy_ac_decide(a, b)?),
+                    _ => None,
+                },
+                None => Some(self.lazy_query_decide(cq)?),
+            };
+            match decided {
+                Some((true, _)) => return Ok(()),
+                Some((false, true)) => {
+                    return Err(InterpError::CheckFailed(format!(
+                        "no match for {} (lazy AC completion hit its budget before \
+                         deciding; inconclusive)",
+                        cq.text
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Err(InterpError::CheckFailed(format!(
+            "no match for {}",
+            cq.text
+        )))
+    }
+
+    /// Step 3 of a lazy check (`exec_check_query`): rounds of the ordinary rules, each
+    /// followed by a completion rebuild, until the query matches, the rules reach their
+    /// fixpoint, or a budget stops them. Returns `(matched, inconclusive)`.
+    fn lazy_query_decide(
+        &mut self,
+        cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
+    ) -> Result<(bool, bool), InterpError> {
+        let aborted = |eg: &EGraph<Cfg, L, TRACK, PROOFS>| {
+            matches!(
+                eg.completion_outcome(),
+                Some(crate::egraph::CompletionOutcome::AbortedGrowthLimit { .. })
+            )
+        };
+        if aborted(&self.eg) {
+            return Ok((false, true));
+        }
+        let ordinary: Vec<&PreparedRule<Cfg::O, Cfg::S, L>> = self
+            .rules
+            .iter()
+            .filter_map(|r| match r {
+                crate::saturate::Rule::Ordinary(r) => Some(r),
+                crate::saturate::Rule::Sequence(_) => None,
+            })
+            .collect();
+        if ordinary.is_empty() {
+            return Ok((false, false));
+        }
+        let spec = crate::saturate::RunSpec {
+            limit: 1,
+            ruleset: None,
+            until: None,
+        };
+        for _ in 0..self.lazy_ac_rounds {
+            let result = self
+                .eg
+                .saturate_rules_in(
+                    self.strategy,
+                    &ordinary,
+                    &self.model,
+                    &spec,
+                    &self.globals,
+                    &mut self.index_scratch,
+                )
+                .map_err(crate::saturate::SatError::into_eval)?;
+            self.eg.rebuild();
+            if self.check_holds(cq)? {
+                return Ok((true, false));
+            }
+            if aborted(&self.eg) {
+                return Ok((false, true));
+            }
+            if result.saturated {
+                return Ok((false, false));
+            }
+        }
+        Ok((false, true))
+    }
+
     /// Enable/disable the runtime reduced-basis invariant checks (default off; see
     /// `EGraph::set_basis_checks`). Diagnostic only: superlinear brute-force checks.
     pub fn set_basis_checks(&mut self, enabled: bool) {
@@ -447,7 +623,10 @@ where
             // command must see the untouched graph, so the transaction closes
             // first. `(prove t)` closes it too: a bare check materializes its
             // term permanently, which an open transaction would discard.
-            if !matches!(cmd, CCommand::CheckEq(..) | CCommand::CheckNeq(..)) {
+            if !matches!(
+                cmd,
+                CCommand::CheckEq(..) | CCommand::CheckNeq(..) | CCommand::CheckQuery(..)
+            ) {
                 self.lazy_txn_close();
             }
             let r = self.exec_checked(cmd);
@@ -546,6 +725,7 @@ where
             CCommand::Check(ct) => {
                 self.build_cterm(ct)?;
             }
+            CCommand::CheckQuery(cq) => self.exec_check_query(cq)?,
             CCommand::CheckEq(a, b) => {
                 let (a_id, _) = self.build_cterm(a)?;
                 let (b_id, _) = self.build_cterm(b)?;

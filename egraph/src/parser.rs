@@ -1463,10 +1463,27 @@ fn parse_command(
             };
             SurfaceCommand::Pass(Command::PrintStats(file))
         }
-        // `prove` is the name today's build-and-compare check keeps once `check` takes
-        // egglog's query semantics (doc/goal-egglog-check.md); both parse the same forms
-        // for now.
-        "check" | "prove" => {
+        "check" => {
+            ws(input)?;
+            let start = *input;
+            let mut facts = Vec::new();
+            loop {
+                ws(input)?;
+                if input.starts_with(')') {
+                    break;
+                }
+                facts.push(parse_pattern(input, base)?);
+            }
+            if facts.is_empty() {
+                let mut e = ContextError::new();
+                e.push(StrContext::Label("check needs at least one fact"));
+                return Err(ErrMode::Cut(e));
+            }
+            let text = start[..start.len() - input.len()].trim().to_owned();
+            SurfaceCommand::Check { facts, text }
+        }
+        // `prove`: build the terms, rebuild, and compare classes.
+        "prove" => {
             ws(input)?;
             let cmd = if input.starts_with("(!=") || input.starts_with("( !=") {
                 cut_char(input, '(')?;

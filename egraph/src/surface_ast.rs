@@ -91,5 +91,11 @@ pub enum SurfaceCommand {
     /// A rewrite whose left-hand side has a collection pattern `(each name pat)`;
     /// see [`crate::collection`].
     CollectionRewrite(crate::collection::SurfaceRule),
+    /// `(check fact ...)`: egglog's check, a conjunctive query over the current e-graph in
+    /// the language of rule bodies. `text` is the facts as written, for the failure message.
+    Check {
+        facts: Vec<SurfacePattern>,
+        text: String,
+    },
     Pass(Command),
 }
