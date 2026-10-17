@@ -123,4 +123,4 @@ def check(verbose=False):
 
 
 if __name__ == "__main__":
-    sys.exit(prove("-v" in sys.argv[1:]))
+    sys.exit(check("-v" in sys.argv[1:]))

@@ -14,12 +14,15 @@ rewrites every program text in the repository so that it keeps its meaning:
   as "(check 2)" alone;
 - `:until` followed by `(`, in every file.
 
-`(checkau` and `(check-` are other commands and stay. Not rewritten:
+`(checkau` and `(check-` are other commands and stay, and so does `(check` right after
+an identifier, a call such as `exit(check(...))`. Not rewritten:
 `scripts/egglog-compare/`, whose programs are egglog's and move to the new `check`;
 `egraph/tests/check_semantics.rs`, which tests both forms; this script.
 
-Idempotent: a second run changes nothing. Prints each changed file with its counts, and
-every `(check` it left unchanged outside the excluded paths, for review.
+A one-time migration: it was run once, before `check` took egglog's semantics, and a
+second run then changed nothing. Since then `(check` in the tree is egglog's check, so
+the script must not be run again. It prints each changed file with its counts, and every
+`(check` it left unchanged outside the excluded paths, for review.
 
 Usage: migrate-check.py [--dry-run]
 """
@@ -33,7 +36,11 @@ EXCLUDE_FILES = {"egraph/tests/check_semantics.rs", "scripts/migrate-check.py"}
 EXTS = (".egg", ".rs", ".md", ".py")
 
 EGG_CHECK = re.compile(r"\(check(?=[\s(])")
-TEXT_CHECK = re.compile(r"\(check(?=\s*[({]|\s*(?:\.\.\.|…)\)| +[A-Za-z_][A-Za-z0-9_-]*\))")
+# Not after an identifier character: `f(check(x))` is a call. `\n(check` in a Rust or
+# Python string is a program line, so a backslash escape counts as a boundary.
+TEXT_CHECK = re.compile(
+    r"(?:(?<![A-Za-z0-9_.])|(?<=\\n))\(check(?=\s*[({]|\s*(?:\.\.\.|…)\)| +[A-Za-z_][A-Za-z0-9_-]*\))"
+)
 UNTIL = re.compile(r":until(?=\s*\()")
 ANY_CHECK = re.compile(r"\(check(?![\w-])")
 
