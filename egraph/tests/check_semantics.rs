@@ -411,3 +411,48 @@ fn query_prints_matches_in_content_order() {
     );
     assert!(out.contains("x = (c)") || out.contains("x = (a)"), "{out}");
 }
+
+// ── egglog conformance ──────────────────────────────────────────────────────
+//
+// egglog's tests that check with query variables, ported. egglog's function tables
+// become unions with a constant class, and `(fail (check q))` becomes `(check q :none)`.
+
+#[test]
+fn egglog_fail_wrong_assertion() {
+    // egglog tests/fail_wrong_assertion.egg, second half: `(set (g 1 2) 3)` and
+    // `(set (g 2 3) 3)` put both terms in the class of 3.
+    let src = "
+(sort E)
+(function g (IBig IBig) E)
+(function three () E)
+(union (g 1 2) (three))
+(union (g 2 3) (three))
+(check (= (g 1 2) (g 2 3)))
+(check (!= (g 1 2) (g 2 3)) :none)
+(check (= (g 0 2) (g 2 3)) :none)
+(check (= x (g 1 2)))
+(check (= x (g 1 3)) :none)
+(check (= x (g 1 2)) (= y (g 2 3)) (= x y))
+(check (= x (g 0 0)) (= y (g 1 1)) (= x y) :none)
+";
+    run(src).unwrap();
+}
+
+#[test]
+fn egglog_repro_small_rebuild_fail_term_encoding() {
+    // egglog tests/repro-small-rebuild-fail-term-encoding.egg: the variable `l` binds
+    // the location under `Prog` in the class the union made.
+    let src = "
+(sort Loc)
+(sort Exp)
+(sort Stmt)
+(function L (IBig) Loc)
+(function Const (IBig) Exp)
+(function Prog (Loc) Stmt)
+(function Ass (IBig Exp) Stmt)
+(union (Prog (L 0)) (Ass 120 (Const 10)))
+(check (= (Prog l) (Ass 120 (Const 10))))
+(check (= (Prog l) (Ass 121 (Const 10))) :none)
+";
+    run(src).unwrap();
+}

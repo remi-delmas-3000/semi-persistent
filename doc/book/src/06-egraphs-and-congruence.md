@@ -150,6 +150,17 @@ Likewise, `(prove (!= t1 t2))` accepts when the two current representatives are
 different. Chapter 11 explains how plain, eager, and lazy congruence modes
 change the work performed before that decision.
 
+`(check fact ...)` asks a different question, egglog's: does the e-graph already
+contain a match for these facts? A check builds nothing. `(check (= t1 t2))`
+succeeds only if both terms exist and share a class, so it fails on a term that
+no command built, where `prove` would build it and possibly join it by
+congruence. Names that are not globals are variables of the one check:
+`(check (= e (f x)))` asks whether some class contains an `f` node, and
+`(check (= e (f x)) (= x (a)))` whether one has the class of `(a)` as its child.
+`(!= p q)` requires different classes, and `:count k`, `:min k` and `:none`
+count the matches. Equivalence is proved with `prove`; `check` tests what the
+graph holds.
+
 The storage structures are specified in the design chapters for
 [nodes](https://github.com/yaspar-org/semi-persistent/blob/main/egraph/doc/design/01-node-storage.md),
 [e-classes](https://github.com/yaspar-org/semi-persistent/blob/main/egraph/doc/design/02-classes-and-union-find.md),
