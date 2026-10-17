@@ -170,9 +170,13 @@ pub struct CheckQuery<O, S, L> {
     pub pair: Option<[PairSide<O, S, L>; 2]>,
     /// What the check requires of its matches.
     pub cond: crate::surface_ast::CheckCond,
-    /// The check's named variables in `query`: matches are counted as distinct
-    /// assignments of these, so the variables flattening introduces do not count.
+    /// The check's named variables in `query`, with their names: matches are counted
+    /// as distinct assignments of these, so the variables flattening introduces do not
+    /// count.
     pub vars: Vec<VarId>,
+    pub var_names: Vec<String>,
+    /// `(query ...)`: print up to this many matches instead of requiring `cond`.
+    pub print: Option<u64>,
 }
 
 /// One side of a ground `(= p q)` check.
@@ -1048,7 +1052,12 @@ where
 {
     match cmd {
         SurfaceCommand::Pass(c) => sortcheck_pass(c, eg, model, globals, rulesets),
-        SurfaceCommand::Check { facts, text, cond } => {
+        SurfaceCommand::Check {
+            facts,
+            text,
+            cond,
+            print,
+        } => {
             let span = facts.first().map_or(Span::Dummy, |p| p.span());
             // Names resolve as in rule bodies: a global is the global, and any other
             // name is a variable of this one query. egglog rejects a variable named
@@ -1162,17 +1171,19 @@ where
                 _ => None,
             };
             let mut vars = Vec::new();
+            let mut var_names = Vec::new();
             if let Some(q) = &query {
                 for (name, _, _) in &free {
                     if let Some(v) = q.shape.find_var(name)
                         && !vars.contains(&v)
                     {
                         vars.push(v);
+                        var_names.push(name.clone());
                     }
                 }
             }
             // The single-pair decision answers existence only.
-            let pair = if cond == crate::surface_ast::CheckCond::Exists {
+            let pair = if cond == crate::surface_ast::CheckCond::Exists && print.is_none() {
                 pair
             } else {
                 None
@@ -1181,10 +1192,17 @@ where
                 query,
                 global_eqs,
                 text,
-                warnings,
+                // A query prints its variables; one used once is the point, not a slip.
+                warnings: if print.is_some() {
+                    Vec::new()
+                } else {
+                    warnings
+                },
                 pair,
                 cond,
                 vars,
+                var_names,
+                print,
             })))
         }
         SurfaceCommand::CollectionRewrite(r) => {

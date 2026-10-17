@@ -319,3 +319,55 @@ fn lazy_counts_wait_for_the_fixpoint() {
     .err()
     .expect("completion joins them");
 }
+
+// ── `query` ─────────────────────────────────────────────────────────────────
+
+fn binary_stdout(name: &str, src: &str, args: &[&str]) -> String {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, src).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_semi-persistent"))
+        .arg(&path)
+        .args(args)
+        .output()
+        .expect("run the binary");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn query_prints_matches_in_content_order() {
+    let src = format!(
+        "{DECLS}(let u (f (c)))\n(let t (f (a)))\n(query (= e (f x)))\n(query (f x) :limit 1)\n\
+         (query (= e (f (c))) (= e (f (a))))"
+    );
+    let out = binary_stdout("query_order.egg", &src, &[]);
+    // Two classes of `f` nodes; the order is by content colour, so it is the same for
+    // any order of the lets.
+    let swapped = src.replace(
+        "(let u (f (c)))\n(let t (f (a)))",
+        "(let t (f (a)))\n(let u (f (c)))",
+    );
+    let out2 = binary_stdout("query_order_swapped.egg", &swapped, &[]);
+    let lines = |o: &str| -> Vec<String> {
+        o.lines()
+            .filter(|l| l.starts_with("query") || l.starts_with("  "))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(lines(&out), lines(&out2), "{out}\n---\n{out2}");
+    assert!(out.contains("query (= e (f x)): 2 matches"), "{out}");
+    assert!(
+        out.contains("query (f x) :limit 1: 2 matches") || out.contains("query (f x): 2 matches"),
+        "{out}"
+    );
+    assert!(out.contains("  ... 1 more"), "{out}");
+    assert!(
+        out.contains("query (= e (f (c))) (= e (f (a))): 0 matches"),
+        "{out}"
+    );
+    assert!(out.contains("x = (c)") || out.contains("x = (a)"), "{out}");
+}

@@ -126,10 +126,14 @@ pub enum SurfaceCommand {
     CollectionRewrite(crate::collection::SurfaceRule),
     /// `(check fact ...)`: egglog's check, a conjunctive query over the current e-graph in
     /// the language of rule bodies. `text` is the facts as written, for the failure message.
+    ///
+    /// `(query fact ... :limit n)` is the same query with `print = Some(n)`: it prints
+    /// up to `n` matches instead of requiring a condition.
     Check {
         facts: Vec<SurfacePattern>,
         text: String,
         cond: CheckCond,
+        print: Option<u64>,
     },
     Pass(Command),
 }

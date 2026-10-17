@@ -1463,7 +1463,8 @@ fn parse_command(
             };
             SurfaceCommand::Pass(Command::PrintStats(file))
         }
-        "check" => {
+        "check" | "query" => {
+            let printing = kw == "query";
             ws(input)?;
             let start = *input;
             let mut facts = Vec::new();
@@ -1480,7 +1481,22 @@ fn parse_command(
                 return Err(ErrMode::Cut(e));
             }
             let text = start[..start.len() - input.len()].trim().to_owned();
-            let cond = if input.starts_with(":count") || input.starts_with(":min") {
+            let print = if !printing {
+                None
+            } else if input.starts_with(":limit") {
+                *input = &input[6..];
+                ws(input)?;
+                Some(number(input)?)
+            } else if input.starts_with(':') {
+                let mut e = ContextError::new();
+                e.push(StrContext::Label("a query option is :limit n"));
+                return Err(ErrMode::Cut(e));
+            } else {
+                Some(10)
+            };
+            let cond = if printing {
+                crate::surface_ast::CheckCond::Exists
+            } else if input.starts_with(":count") || input.starts_with(":min") {
                 let count = input.starts_with(":count");
                 *input = &input[if count { 6 } else { 4 }..];
                 ws(input)?;
@@ -1502,7 +1518,12 @@ fn parse_command(
             } else {
                 crate::surface_ast::CheckCond::Exists
             };
-            SurfaceCommand::Check { facts, text, cond }
+            SurfaceCommand::Check {
+                facts,
+                text,
+                cond,
+                print,
+            }
         }
         // `prove`: build the terms, rebuild, and compare classes.
         "prove" => {

@@ -87,6 +87,7 @@ defines scope lifetime and `:shrink`.
 | --- | --- |
 | `(check fact ...)` | Rebuild and require the conjunctive query to have a match. The facts are those of a rule body: a pattern, `(= p q)`, `(!= p q)` (the classes differ), or a guard. The check builds nothing: a term that was never built has no match. A name that is a global refers to it; any other name is a variable of this one check. |
 | `(check fact ... :count k)`, `:min k`, `:none` | Require exactly `k` matches, at least `k`, or none. Matches are counted as distinct assignments of the check's named variables. In lazy AC mode, `:count` and `:none` are decided at the completion fixpoint. |
+| `(query fact ... [:limit n])` | Print the matches of the facts, up to `n` (default 10): each named variable as a term extracted from its class. Matches are ordered by content colour, so the output does not depend on class ids. Nothing is built or required. |
 | `(prove term)` | Build `term`. This form has no additional truth or equality test. |
 | `(prove (= a b))` | Build both terms, rebuild, and require them to belong to the same e-class. |
 | `(prove (!= a b))` | Build both terms, rebuild, and require them to belong to different e-classes under the selected completion mode. |

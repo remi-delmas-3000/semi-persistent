@@ -453,25 +453,24 @@ where
             .map(|(_, _, id)| self.eg.find_const(id))
     }
 
-    /// The check's matches on the current graph, counted as distinct assignments of its
-    /// named variables (one when it has none and its facts hold).
-    fn check_count(
+    /// The check's distinct assignments of its named variables on the current graph,
+    /// as canonical classes. Empty when a global fact fails; one empty assignment when
+    /// the facts hold and name no variable.
+    fn check_assignments(
         &self,
         cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
-    ) -> Result<u64, InterpError> {
+    ) -> Result<Vec<Vec<Option<Cfg::G>>>, InterpError> {
         for (a, b) in &cq.global_eqs {
             if self.global_class(a) != self.global_class(b) {
-                return Ok(0);
+                return Ok(Vec::new());
             }
         }
         let Some(q) = &cq.query else {
-            return Ok(1);
+            return Ok(vec![Vec::new()]);
         };
         let pool = self.query_matches(q)?;
-        if cq.vars.is_empty() {
-            return Ok(u64::from(!pool.is_empty()));
-        }
         let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
         for j in 0..pool.len() {
             let m = pool.clone_match(j);
             let key: Vec<Option<Cfg::G>> = cq
@@ -479,9 +478,76 @@ where
                 .iter()
                 .map(|v| m.nodes[v.idx()].map(|g| self.eg.find_const(g)))
                 .collect();
-            seen.insert(key);
+            if seen.insert(key.clone()) {
+                out.push(key);
+            }
         }
-        Ok(seen.len() as u64)
+        Ok(out)
+    }
+
+    /// The check's matches, counted as distinct assignments of its named variables.
+    fn check_count(
+        &self,
+        cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
+    ) -> Result<u64, InterpError> {
+        Ok(self.check_assignments(cq)?.len() as u64)
+    }
+
+    /// `(query fact ... :limit n)`: print the distinct assignments of the named
+    /// variables, each variable as a term extracted from its class (AST size). Matches
+    /// are ordered by their classes' content colours, the order `dump-egraph` uses, so
+    /// the output does not depend on class ids. In lazy AC mode completion first runs
+    /// to its fixpoint; a budget stop marks the output incomplete.
+    fn exec_query_print(
+        &mut self,
+        cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
+        limit: u64,
+    ) -> Result<(), InterpError> {
+        let lazy = self.ac_mode == AcMode::Lazy;
+        if lazy {
+            self.lazy_txn_open();
+        }
+        self.eg.rebuild();
+        let incomplete = lazy && self.lazy_query_decide(cq, false)?.1;
+        let mut rows = self.check_assignments(cq)?;
+        let colours = self.eg.canon_colours();
+        let colour = |g: &Option<Cfg::G>| {
+            g.and_then(|g| colours.class_of(self.eg.find_const(g)))
+                .map(|ci| colours.class_colour[ci])
+        };
+        let term = |g: &Option<Cfg::G>| match g {
+            Some(g) => match crate::extract::extract_best(&self.eg, *g) {
+                Ok(t) => t.to_string(),
+                Err(_) => "<unextractable>".to_string(),
+            },
+            None => "<unbound>".to_string(),
+        };
+        let mut keyed: Vec<(Vec<_>, Vec<String>)> = rows
+            .drain(..)
+            .map(|r| (r.iter().map(colour).collect(), r.iter().map(term).collect()))
+            .collect();
+        keyed.sort();
+        let n = keyed.len();
+        let suffix = if incomplete {
+            " (lazy AC completion hit its budget; incomplete)"
+        } else {
+            ""
+        };
+        let plural = if n == 1 { "match" } else { "matches" };
+        println!("query {}: {n} {plural}{suffix}", cq.text);
+        for (_, terms) in keyed.iter().take(limit as usize) {
+            let fields: Vec<String> = cq
+                .var_names
+                .iter()
+                .zip(terms)
+                .map(|(v, t)| format!("{v} = {t}"))
+                .collect();
+            println!("  {}", fields.join(", "));
+        }
+        if n as u64 > limit {
+            println!("  ... {} more", n as u64 - limit);
+        }
+        Ok(())
     }
 
     /// `(check fact ...)`: egglog's check. Rebuild, then require the condition on the
@@ -503,6 +569,9 @@ where
     ) -> Result<(), InterpError> {
         for w in &cq.warnings {
             self.warn(w.clone());
+        }
+        if let Some(limit) = cq.print {
+            return self.exec_query_print(cq, limit);
         }
         let lazy = self.ac_mode == AcMode::Lazy;
         if lazy {
@@ -529,7 +598,7 @@ where
                 }
                 inconclusive = aborted;
             } else if cq.pair.is_none() {
-                (n, inconclusive) = self.lazy_query_decide(cq)?;
+                (n, inconclusive) = self.lazy_query_decide(cq, cq.cond.monotone())?;
                 if cq.cond.holds(n) && !(inconclusive && !cq.cond.monotone()) {
                     return Ok(());
                 }
@@ -555,12 +624,13 @@ where
     }
 
     /// Step 3 of a lazy check (`exec_check_query`): rounds of the ordinary rules, each
-    /// followed by a completion rebuild. A monotone condition stops as soon as it holds;
-    /// every condition stops at the rules' fixpoint or when a budget stops them.
+    /// followed by a completion rebuild. With `stop_early`, the run stops as soon as the
+    /// condition holds; it always stops at the rules' fixpoint or when a budget stops it.
     /// Returns the last match count and whether a budget stopped the run.
     fn lazy_query_decide(
         &mut self,
         cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
+        stop_early: bool,
     ) -> Result<(u64, bool), InterpError> {
         let aborted = |eg: &EGraph<Cfg, L, TRACK, PROOFS>| {
             matches!(
@@ -602,7 +672,7 @@ where
                 .map_err(crate::saturate::SatError::into_eval)?;
             self.eg.rebuild();
             n = self.check_count(cq)?;
-            if cq.cond.monotone() && cq.cond.holds(n) {
+            if stop_early && cq.cond.holds(n) {
                 return Ok((n, false));
             }
             if aborted(&self.eg) {
