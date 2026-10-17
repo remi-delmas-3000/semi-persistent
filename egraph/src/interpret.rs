@@ -629,16 +629,20 @@ where
                 }
             }
         }
+        let n = match n {
+            1 => "1 match".to_string(),
+            n => format!("{n} matches"),
+        };
         let found = match cq.cond {
             crate::surface_ast::CheckCond::Exists => format!("no match for {}", cq.text),
             crate::surface_ast::CheckCond::None => {
-                format!("{n} matches for {}, expected none", cq.text)
+                format!("{n} for {}, expected none", cq.text)
             }
             crate::surface_ast::CheckCond::Count(k) => {
-                format!("{n} matches for {}, expected {k}", cq.text)
+                format!("{n} for {}, expected {k}", cq.text)
             }
             crate::surface_ast::CheckCond::Min(k) => {
-                format!("{n} matches for {}, expected at least {k}", cq.text)
+                format!("{n} for {}, expected at least {k}", cq.text)
             }
         };
         Err(InterpError::CheckFailed(if inconclusive {

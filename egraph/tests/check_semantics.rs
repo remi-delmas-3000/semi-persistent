@@ -456,3 +456,57 @@ fn egglog_repro_small_rebuild_fail_term_encoding() {
 ";
     run(src).unwrap();
 }
+
+#[test]
+fn query_output_is_restored_by_pop() {
+    let base = format!("{DECLS}(let t (f (a)))\n(let u (f (c)))\n");
+    let out = binary_stdout(
+        "query_pop.egg",
+        &format!(
+            "{base}(query (= e (f x)))\n(push)\n(let v (f (f (c))))\n(query (= e (f x)))\n(pop)\n(query (= e (f x)))"
+        ),
+        &[],
+    );
+    let blocks: Vec<&str> = out.split("query (= e (f x)): ").skip(1).collect();
+    assert_eq!(blocks.len(), 3, "{out}");
+    assert!(blocks[1].starts_with("3 matches"), "{out}");
+    let first: Vec<&str> = blocks[0].lines().collect();
+    let last: Vec<&str> = blocks[2].lines().take(first.len()).collect();
+    assert_eq!(first, last, "{out}");
+}
+
+#[test]
+fn a_lazy_check_stopped_by_a_budget_is_inconclusive() {
+    // A lazy check alternates rule rounds with completion until its condition is decided.
+    // `:none` holds before any round, but the rule would add a `g` node, so the answer is
+    // only known at the fixpoint. With no rounds allowed, the check reports that it could
+    // not decide rather than passing or failing; with the default it fails outright.
+    let src = "
+(sort E)
+(function f (E) E)
+(function g (E) E)
+(function a () E)
+(let t (f (a)))
+(rewrite (f x) (g x))
+(check (g x) :none)
+";
+    let decide = |rounds: Option<usize>| -> Result<(), String> {
+        let surface = parse_program_v2(src).unwrap();
+        let mut interp = Interp::new(BignumModel);
+        interp.set_ac_mode(AcMode::Lazy);
+        if let Some(r) = rounds {
+            interp.set_lazy_ac_rounds(r);
+        }
+        let mut globals = GlobalCtx::new();
+        let checked =
+            sortcheck_program(surface, &mut interp.eg, &interp.model, &mut globals).unwrap();
+        interp.run_checked(&checked).map_err(|e| e.to_string())
+    };
+    let e = decide(Some(0)).expect_err("no round to decide in");
+    assert!(e.contains("inconclusive"), "{e}");
+    let e = decide(None).expect_err("the rule adds a match");
+    assert!(
+        e.contains("1 match for (g x)") && !e.contains("inconclusive"),
+        "{e}"
+    );
+}
