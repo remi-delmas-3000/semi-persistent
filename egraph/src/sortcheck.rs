@@ -506,6 +506,8 @@ use crate::surface_ast::{SurfaceCommand, SurfacePatChild, SurfacePattern};
 /// Reserved rather than looked up: a declaration named `=` would otherwise shadow the
 /// form and silently change what every existing `(= …)` in a rule body means.
 pub const EQ_FORM: &str = "=";
+/// The disequality form of rule bodies and checks, `(!= p q)`.
+pub const NEQ_FORM: &str = "!=";
 
 /// Flatten surface patterns directly to `FlatQuery`, skipping `Pattern`.
 pub fn flatten_surface<O, S, const TRACK: bool>(
@@ -555,6 +557,29 @@ where
     /// guard, which is a constraint rather than a subterm and so has no meaningful
     /// nested reading.
     fn flatten_root(&mut self, pat: &SurfacePattern) -> Result<String, String> {
+        // `(!= p q)` with an e-class pattern on a side is a class disequality, not a
+        // guard: a guard reads literal values, and `p` names a class. So are two bare
+        // variables when no literal sort declares a primitive `!=`; when one does, they
+        // are decided at resolve time, once their sorts are known.
+        if let SurfacePattern::App { op, children, .. } = pat
+            && op == NEQ_FORM
+            && let [SurfacePatChild::Elem(a), SurfacePatChild::Elem(b)] = children.as_slice()
+            && ([a, b].iter().any(|p| match p {
+                SurfacePattern::App { op, .. } => self
+                    .ops
+                    .id_by_name(op)
+                    .is_none_or(|id| !self.ops.is_prim_op(id)),
+                _ => false,
+            }) || self
+                .ops
+                .id_by_name(NEQ_FORM)
+                .is_none_or(|id| !self.ops.is_prim_op(id)))
+        {
+            let ra = self.flatten_child(a)?;
+            let rb = self.flatten_child(b)?;
+            self.atoms.push(Atom::Neq(ra, rb));
+            return Ok(self.fresh("neq"));
+        }
         if let SurfacePattern::App { op, .. } = pat
             && op != EQ_FORM
             && let Some(op_id) = self.ops.id_by_name(op)

@@ -85,7 +85,7 @@ defines scope lifetime and `:shrink`.
 
 | Command | Effect |
 | --- | --- |
-| `(check fact ...)` | Rebuild and require the conjunctive query to have a match. The facts are those of a rule body: a pattern, or `(= p q)`. The check builds nothing: a term that was never built has no match. A name that is a global refers to it; any other name is a variable of this one check. |
+| `(check fact ...)` | Rebuild and require the conjunctive query to have a match. The facts are those of a rule body: a pattern, `(= p q)`, `(!= p q)` (the classes differ), or a guard. The check builds nothing: a term that was never built has no match. A name that is a global refers to it; any other name is a variable of this one check. |
 | `(prove term)` | Build `term`. This form has no additional truth or equality test. |
 | `(prove (= a b))` | Build both terms, rebuild, and require them to belong to the same e-class. |
 | `(prove (!= a b))` | Build both terms, rebuild, and require them to belong to different e-classes under the selected completion mode. |

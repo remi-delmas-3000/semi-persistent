@@ -522,7 +522,7 @@ pub(crate) fn atom_op<O: Copy, S, V>(atom: &RAtom<O, S, V>) -> Option<O> {
         | RAtom::Lit { op, .. }
         | RAtom::LitBind { op, .. }
         | RAtom::Collect { op, .. } => Some(*op),
-        RAtom::Eq(..) | RAtom::EqGlobal(..) | RAtom::Pred { .. } => None,
+        RAtom::Eq(..) | RAtom::EqGlobal(..) | RAtom::Neq(..) | RAtom::Pred { .. } => None,
     }
 }
 
@@ -554,7 +554,7 @@ pub(crate) fn atom_node<O, S, V>(atom: &RAtom<O, S, V>) -> Option<crate::ast::Va
         | RAtom::ACISub { node, .. }
         | RAtom::LitBind { node, .. }
         | RAtom::Collect { node, .. } => Some(*node),
-        RAtom::Eq(..) | RAtom::EqGlobal(..) | RAtom::Pred { .. } => None,
+        RAtom::Eq(..) | RAtom::EqGlobal(..) | RAtom::Neq(..) | RAtom::Pred { .. } => None,
     }
 }
 
@@ -652,6 +652,7 @@ fn pattern_refs_global<O, S, V>(a: &RAtom<O, S, V>) -> bool {
         | RAtom::Collect { .. }
         | RAtom::Eq(..)
         | RAtom::EqGlobal(..)
+        | RAtom::Neq(..)
         | RAtom::Pred { .. } => false,
     }
 }

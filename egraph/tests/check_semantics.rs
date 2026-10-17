@@ -204,3 +204,72 @@ fn a_lazy_check_leaves_the_graph_as_it_was() {
     let plain = run_in(&format!("{LAZY}(print-size)"), AcMode::Lazy).unwrap();
     assert_eq!(i.eg.node_count(), plain.eg.node_count());
 }
+
+// ── `(!= p q)` on e-class sorts ─────────────────────────────────────────────
+
+#[test]
+fn neq_compares_classes_in_checks() {
+    let base = format!("{DECLS}(let t (f (a)))\n(let u (f (c)))\n");
+    run(&format!("{base}(check (!= t u))")).unwrap();
+    run(&format!("{base}(check (!= (f (a)) (f (c))))")).unwrap();
+    let e = run(&format!("{base}(check (!= (a) (b)))"))
+        .err()
+        .expect("joined");
+    assert!(e.contains("no match"), "{e}");
+    // Two variables bound by patterns: some pair of `f` nodes in different classes.
+    run(&format!("{base}(check (= x (f p)) (= y (f q)) (!= x y))")).unwrap();
+    let e = run(&format!(
+        "{DECLS}(let t (f (a)))\n(check (= x (f p)) (= y (f q)) (!= x y))"
+    ))
+    .err()
+    .expect("only one f class");
+    assert!(e.contains("no match"), "{e}");
+}
+
+#[test]
+fn neq_in_a_rule_body_filters_matches() {
+    // The rule marks pairs of distinct `f` classes; with `(a)` and `(b)` joined, only
+    // the pair over `(a)` and `(c)` qualifies.
+    let src = format!(
+        "{DECLS}(function g (E E) E)\n(let t (f (a)))\n(let t2 (f (b)))\n(let u (f (c)))\n\
+         (rule ((= x (f p)) (= y (f q)) (!= x y)) ((g x y)))\n(run 1)\n\
+         (prove (= (g t u) (g t u)))\n(check (g t u))\n(check (g u t))"
+    );
+    run(&src).unwrap();
+    let e = run(&format!(
+        "{DECLS}(function g (E E) E)\n(let t (f (a)))\n(let t2 (f (b)))\n\
+         (rule ((= x (f p)) (= y (f q)) (!= x y)) ((g x y)))\n(run 1)\n(check (g t t2))"
+    ))
+    .err()
+    .expect("t and t2 are one class");
+    assert!(e.contains("no match"), "{e}");
+}
+
+#[test]
+fn bare_neq_is_class_disequality_beside_literal_guards() {
+    // `IBig::!=` compares literal values; the bare `!=` compares classes.
+    let src = "
+(sort E)
+(function n (IBig) E)
+(let one (n 1))
+(let two (n 2))
+(union (n 3) one)
+";
+    run(&format!("{src}(check (= x (n v)) (= y (n w)) (!= x y))")).unwrap();
+    run(&format!(
+        "{src}(check (= x (n v)) (= y (n w)) (IBig::!= v w) (!= x y))"
+    ))
+    .unwrap();
+    // `(n 1)` and `(n 3)` hold different values in one class: the guard keeps the pair,
+    // the class disequality drops it.
+    run(&format!(
+        "{src}(check (= one (n v)) (= one (n w)) (IBig::!= v w))"
+    ))
+    .unwrap();
+    let e = run(&format!(
+        "{src}(check (= one (n v)) (= one (n w)) (IBig::!= v w) (!= v w))"
+    ))
+    .err()
+    .expect("v and w are literal values here");
+    assert!(e.contains("literal value variable"), "{e}");
+}
