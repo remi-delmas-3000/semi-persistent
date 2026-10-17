@@ -66,6 +66,39 @@ impl SurfacePattern {
     }
 }
 
+/// What a `check` requires of its matches, counted as distinct assignments of the
+/// check's named variables.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckCond {
+    /// At least one match (the default).
+    Exists,
+    /// `:count k`: exactly `k`.
+    Count(u64),
+    /// `:min k`: at least `k`.
+    Min(u64),
+    /// `:none`: no match.
+    None,
+}
+
+impl CheckCond {
+    /// Whether `n` matches satisfy the condition.
+    pub fn holds(self, n: u64) -> bool {
+        match self {
+            CheckCond::Exists => n > 0,
+            CheckCond::Count(k) => n == k,
+            CheckCond::Min(k) => n >= k,
+            CheckCond::None => n == 0,
+        }
+    }
+
+    /// Whether a match found stays a match as the graph grows: completion and rules
+    /// only add nodes and merge classes, so `Exists` and `Min` can stop early. `Count`
+    /// and `None` are only final at a fixpoint, and merges can collapse two assignments.
+    pub fn monotone(self) -> bool {
+        matches!(self, CheckCond::Exists | CheckCond::Min(_))
+    }
+}
+
 /// Surface command — pattern-bearing commands use `SurfacePattern`,
 /// everything else passes through as `Command`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,6 +129,7 @@ pub enum SurfaceCommand {
     Check {
         facts: Vec<SurfacePattern>,
         text: String,
+        cond: CheckCond,
     },
     Pass(Command),
 }

@@ -1469,7 +1469,7 @@ fn parse_command(
             let mut facts = Vec::new();
             loop {
                 ws(input)?;
-                if input.starts_with(')') {
+                if input.starts_with(')') || input.starts_with(':') {
                     break;
                 }
                 facts.push(parse_pattern(input, base)?);
@@ -1480,7 +1480,29 @@ fn parse_command(
                 return Err(ErrMode::Cut(e));
             }
             let text = start[..start.len() - input.len()].trim().to_owned();
-            SurfaceCommand::Check { facts, text }
+            let cond = if input.starts_with(":count") || input.starts_with(":min") {
+                let count = input.starts_with(":count");
+                *input = &input[if count { 6 } else { 4 }..];
+                ws(input)?;
+                let k = number(input)?;
+                if count {
+                    crate::surface_ast::CheckCond::Count(k)
+                } else {
+                    crate::surface_ast::CheckCond::Min(k)
+                }
+            } else if input.starts_with(":none") {
+                *input = &input[5..];
+                crate::surface_ast::CheckCond::None
+            } else if input.starts_with(':') {
+                let mut e = ContextError::new();
+                e.push(StrContext::Label(
+                    "a check option is :count k, :min k, or :none",
+                ));
+                return Err(ErrMode::Cut(e));
+            } else {
+                crate::surface_ast::CheckCond::Exists
+            };
+            SurfaceCommand::Check { facts, text, cond }
         }
         // `prove`: build the terms, rebuild, and compare classes.
         "prove" => {

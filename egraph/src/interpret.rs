@@ -453,23 +453,39 @@ where
             .map(|(_, _, id)| self.eg.find_const(id))
     }
 
-    /// Whether the check's facts hold on the current graph.
-    fn check_holds(
+    /// The check's matches on the current graph, counted as distinct assignments of its
+    /// named variables (one when it has none and its facts hold).
+    fn check_count(
         &self,
         cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
-    ) -> Result<bool, InterpError> {
+    ) -> Result<u64, InterpError> {
         for (a, b) in &cq.global_eqs {
             if self.global_class(a) != self.global_class(b) {
-                return Ok(false);
+                return Ok(0);
             }
         }
-        match &cq.query {
-            Some(q) => Ok(!self.query_matches(q)?.is_empty()),
-            None => Ok(true),
+        let Some(q) = &cq.query else {
+            return Ok(1);
+        };
+        let pool = self.query_matches(q)?;
+        if cq.vars.is_empty() {
+            return Ok(u64::from(!pool.is_empty()));
         }
+        let mut seen = std::collections::HashSet::new();
+        for j in 0..pool.len() {
+            let m = pool.clone_match(j);
+            let key: Vec<Option<Cfg::G>> = cq
+                .vars
+                .iter()
+                .map(|v| m.nodes[v.idx()].map(|g| self.eg.find_const(g)))
+                .collect();
+            seen.insert(key);
+        }
+        Ok(seen.len() as u64)
     }
 
-    /// `(check fact ...)`: egglog's check. Rebuild, then require a match; build nothing.
+    /// `(check fact ...)`: egglog's check. Rebuild, then require the condition on the
+    /// matches (`:count`, `:min`, `:none`; a match by default); build nothing.
     ///
     /// In lazy AC mode completion runs wherever the answer depends on it
     /// (doc/goal-egglog-check.md), inside the shared check transaction, so everything
@@ -477,9 +493,10 @@ where
     /// 1. the rebuild runs completion to its fixpoint or its growth budget;
     /// 2. a single fact `(= p q)` over two built ground terms is then decided as
     ///    `prove` decides it, with the pair as the completion goal;
-    /// 3. any other query without a match runs the ordinary rules interleaved with
-    ///    completion, one round at a time, for at most `lazy_ac_rounds` rounds, and
-    ///    is re-evaluated after each.
+    /// 3. otherwise the ordinary rules run interleaved with completion, one round at a
+    ///    time, for at most `lazy_ac_rounds` rounds. Existence and `:min` stop as soon
+    ///    as they hold; `:count` and `:none` wait for the fixpoint, since a later round
+    ///    can still add a match or merge two.
     fn exec_check_query(
         &mut self,
         cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
@@ -492,50 +509,68 @@ where
             self.lazy_txn_open();
         }
         self.eg.rebuild();
-        if self.check_holds(cq)? {
+        let mut n = self.check_count(cq)?;
+        if cq.cond.holds(n) && (!lazy || cq.cond.monotone()) {
             return Ok(());
         }
+        let mut inconclusive = false;
         if lazy {
-            let decided = match &cq.pair {
+            let pair = match &cq.pair {
                 Some([a, b]) => match (self.side_class(a)?, self.side_class(b)?) {
-                    (Some(a), Some(b)) => Some(self.lazy_ac_decide(a, b)?),
+                    (Some(a), Some(b)) => Some((a, b)),
                     _ => None,
                 },
-                None => Some(self.lazy_query_decide(cq)?),
+                None => None,
             };
-            match decided {
-                Some((true, _)) => return Ok(()),
-                Some((false, true)) => {
-                    return Err(InterpError::CheckFailed(format!(
-                        "no match for {} (lazy AC completion hit its budget before \
-                         deciding; inconclusive)",
-                        cq.text
-                    )));
+            if let Some((a, b)) = pair {
+                let (equal, aborted) = self.lazy_ac_decide(a, b)?;
+                if equal {
+                    return Ok(());
                 }
-                _ => {}
+                inconclusive = aborted;
+            } else if cq.pair.is_none() {
+                (n, inconclusive) = self.lazy_query_decide(cq)?;
+                if cq.cond.holds(n) && !(inconclusive && !cq.cond.monotone()) {
+                    return Ok(());
+                }
             }
         }
-        Err(InterpError::CheckFailed(format!(
-            "no match for {}",
-            cq.text
-        )))
+        let found = match cq.cond {
+            crate::surface_ast::CheckCond::Exists => format!("no match for {}", cq.text),
+            crate::surface_ast::CheckCond::None => {
+                format!("{n} matches for {}, expected none", cq.text)
+            }
+            crate::surface_ast::CheckCond::Count(k) => {
+                format!("{n} matches for {}, expected {k}", cq.text)
+            }
+            crate::surface_ast::CheckCond::Min(k) => {
+                format!("{n} matches for {}, expected at least {k}", cq.text)
+            }
+        };
+        Err(InterpError::CheckFailed(if inconclusive {
+            format!("{found} (lazy AC completion hit its budget before deciding; inconclusive)")
+        } else {
+            found
+        }))
     }
 
     /// Step 3 of a lazy check (`exec_check_query`): rounds of the ordinary rules, each
-    /// followed by a completion rebuild, until the query matches, the rules reach their
-    /// fixpoint, or a budget stops them. Returns `(matched, inconclusive)`.
+    /// followed by a completion rebuild. A monotone condition stops as soon as it holds;
+    /// every condition stops at the rules' fixpoint or when a budget stops them.
+    /// Returns the last match count and whether a budget stopped the run.
     fn lazy_query_decide(
         &mut self,
         cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
-    ) -> Result<(bool, bool), InterpError> {
+    ) -> Result<(u64, bool), InterpError> {
         let aborted = |eg: &EGraph<Cfg, L, TRACK, PROOFS>| {
             matches!(
                 eg.completion_outcome(),
                 Some(crate::egraph::CompletionOutcome::AbortedGrowthLimit { .. })
             )
         };
+        let mut n = self.check_count(cq)?;
         if aborted(&self.eg) {
-            return Ok((false, true));
+            return Ok((n, true));
         }
         let ordinary: Vec<&PreparedRule<Cfg::O, Cfg::S, L>> = self
             .rules
@@ -546,7 +581,7 @@ where
             })
             .collect();
         if ordinary.is_empty() {
-            return Ok((false, false));
+            return Ok((n, false));
         }
         let spec = crate::saturate::RunSpec {
             limit: 1,
@@ -566,17 +601,18 @@ where
                 )
                 .map_err(crate::saturate::SatError::into_eval)?;
             self.eg.rebuild();
-            if self.check_holds(cq)? {
-                return Ok((true, false));
+            n = self.check_count(cq)?;
+            if cq.cond.monotone() && cq.cond.holds(n) {
+                return Ok((n, false));
             }
             if aborted(&self.eg) {
-                return Ok((false, true));
+                return Ok((n, true));
             }
             if result.saturated {
-                return Ok((false, false));
+                return Ok((n, false));
             }
         }
-        Ok((false, true))
+        Ok((n, true))
     }
 
     /// Enable/disable the runtime reduced-basis invariant checks (default off; see

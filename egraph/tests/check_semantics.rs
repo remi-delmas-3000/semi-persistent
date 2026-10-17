@@ -273,3 +273,49 @@ fn bare_neq_is_class_disequality_beside_literal_guards() {
     .expect("v and w are literal values here");
     assert!(e.contains("literal value variable"), "{e}");
 }
+
+// ── `:count`, `:min`, `:none` ───────────────────────────────────────────────
+
+#[test]
+fn counts_are_distinct_assignments_of_named_variables() {
+    // `(f (a))` and `(f (b))` are one class (congruence); `(f (c))` another.
+    let base = format!("{DECLS}(let t (f (a)))\n(let t2 (f (b)))\n(let u (f (c)))\n");
+    run(&format!("{base}(check (= e (f x)) :count 2)")).unwrap();
+    // `x` is (a)=(b) or (c): two assignments of `x`, though three `f` nodes.
+    run(&format!("{base}(check (f x) :count 2)")).unwrap();
+    run(&format!("{base}(check (f x) :min 1)")).unwrap();
+    run(&format!("{base}(check (= e (f (c))) (= e (f (a))) :none)")).unwrap();
+    let e = run(&format!("{base}(check (= e (f x)) :count 3)"))
+        .err()
+        .expect("two");
+    assert!(e.contains("2 matches for (= e (f x)), expected 3"), "{e}");
+    let e = run(&format!("{base}(check (f x) :none)"))
+        .err()
+        .expect("some");
+    assert!(e.contains("expected none"), "{e}");
+    let e = run(&format!("{base}(check (f x) :min 3)"))
+        .err()
+        .expect("two");
+    assert!(e.contains("expected at least 3"), "{e}");
+}
+
+#[test]
+fn lazy_counts_wait_for_the_fixpoint() {
+    // Completion joins `n` and `t`: one class, so `:count 1` holds only after it.
+    run_in(
+        &format!("{LAZY}(check (= y (add (c) (d))) (= y (n)) :count 1)"),
+        AcMode::Lazy,
+    )
+    .unwrap();
+    run_in(
+        &format!("{LAZY}(check (= y (add (c) (d))) (= y (n)) :none)"),
+        AcMode::Off,
+    )
+    .unwrap();
+    run_in(
+        &format!("{LAZY}(check (= y (add (c) (d))) (= y (n)) :none)"),
+        AcMode::Lazy,
+    )
+    .err()
+    .expect("completion joins them");
+}

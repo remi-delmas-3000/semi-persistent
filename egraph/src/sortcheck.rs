@@ -168,6 +168,11 @@ pub struct CheckQuery<O, S, L> {
     /// For a check of one fact `(= p q)` over ground terms or globals: each side's class.
     /// Lazy AC mode decides the pair as `prove` does, with the pair as the completion goal.
     pub pair: Option<[PairSide<O, S, L>; 2]>,
+    /// What the check requires of its matches.
+    pub cond: crate::surface_ast::CheckCond,
+    /// The check's named variables in `query`: matches are counted as distinct
+    /// assignments of these, so the variables flattening introduces do not count.
+    pub vars: Vec<VarId>,
 }
 
 /// One side of a ground `(= p q)` check.
@@ -1043,7 +1048,7 @@ where
 {
     match cmd {
         SurfaceCommand::Pass(c) => sortcheck_pass(c, eg, model, globals, rulesets),
-        SurfaceCommand::Check { facts, text } => {
+        SurfaceCommand::Check { facts, text, cond } => {
             let span = facts.first().map_or(Span::Dummy, |p| p.span());
             // Names resolve as in rule bodies: a global is the global, and any other
             // name is a variable of this one query. egglog rejects a variable named
@@ -1156,12 +1161,30 @@ where
                 }
                 _ => None,
             };
+            let mut vars = Vec::new();
+            if let Some(q) = &query {
+                for (name, _, _) in &free {
+                    if let Some(v) = q.shape.find_var(name)
+                        && !vars.contains(&v)
+                    {
+                        vars.push(v);
+                    }
+                }
+            }
+            // The single-pair decision answers existence only.
+            let pair = if cond == crate::surface_ast::CheckCond::Exists {
+                pair
+            } else {
+                None
+            };
             Ok(CCommand::CheckQuery(Box::new(CheckQuery {
                 query,
                 global_eqs,
                 text,
                 warnings,
                 pair,
+                cond,
+                vars,
             })))
         }
         SurfaceCommand::CollectionRewrite(r) => {
