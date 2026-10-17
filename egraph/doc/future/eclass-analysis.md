@@ -593,25 +593,60 @@ Once the analysis exists in the e-graph, the same benchmarks run through it
 and give a differential check against the harness, which is the way to
 settle the open budget question of §7 and the term synthesis of §13.3.
 
-### 13.7 Coexistence with lattice functions
+### 13.7 Class analysis and lattice functions: how they differ, how they coexist
 
-§12 orders the two features; they also compose. The class analysis answers
-one question, the set of concrete values a term of an interpreted sort can
-take, and answers it with verified transfers in both directions. A lattice
-function answers any monotone question about any tuple of arguments: a
-shortest path between two classes, a points-to set, a type, a cost. Neither
-replaces the other, and three connections make them work together:
+§12 orders the two features. This section states how they differ in kind,
+and how a program uses both.
+
+**What each feature is.** A lattice function is egglog's mechanism and the
+subject of [lattice-functions.md](lattice-functions.md): a table from argument
+tuples to values of a declared lattice, whose rows are written by rules and
+whose colliding rows are combined by `:merge`. The class analysis of this
+document attaches one value to each e-class of an interpreted sort, computed
+by verified transfers named in the operators' signatures.
+
+| | Lattice function | Class analysis |
+|---|---|---|
+| Keyed by | any argument tuple: `(path a b)`, `(lo e)` | one e-class |
+| Value | one value of one declared lattice | the reduced product of the sort's domains (§5) |
+| Who writes the transfers | the user, one rule per operator and direction | the library: `:interp` maps an operator to verified forward and backward transfers (§6) |
+| On a class merge | colliding rows are combined by `:merge`, an expression that egglog does not check to be a lattice operation | meet, then reduction between the domains; an empty meet is a conflict (§1) |
+| Several analyses | separate tables (Herbie's `lo` and `hi`), related only by further rules | components of one product, related by verified reduction channels |
+| Equalities back into the e-graph | only through a rule that writes `union` | singletons become constants, decided conditions and `ite` branches merge (§8) |
+| Trust | the rules are trusted, as rewrites are | transfers, meets and reductions are verified; tier 3 facts are trusted (§6) |
+| Covers | any monotone table: costs, shortest paths, points-to sets, types | the set of concrete values a term of an interpreted sort can take |
+
+The difference is one of kind. Abstract interpretation assigns each
+operator a fixed abstract semantics and runs it over the program; the class
+analysis is that, with the e-graph's classes as the program's terms, which
+is why it needs no rules and can be verified once for every program. A
+lattice function is a monotone Datalog table: more general, because its key
+is any tuple and its lattice any lattice, and less specific, because every
+transfer is a rule the user writes and checks.
+
+**Each one alone.** Herbie's analysis (§12) is an interval and a nonzero
+flag on every `Math` term: the class analysis expresses it with no rules,
+and adds backward propagation and verified transfers. A shortest-path
+table `(function path (Node Node) i64 :merge (min old new))` relates two
+classes: the class analysis cannot express it, because its value describes
+one term's concrete value and not a relation between terms.
+
+**Both in one program.** Three connections make the features compose:
 
 - a rule body can test a class fact (§6, tier 3) and write a lattice table,
-  so a table can be seeded from the analysis;
-- a lattice function whose value sort is a verified domain uses that
+  so a table can be seeded from the analysis: a cost table whose entry for a
+  node reads the bit-width that the node's interval implies;
+- a lattice function whose value sort is a verified domain takes that
   domain's join or meet as its `:merge`, the restriction
-  [lattice-functions.md](lattice-functions.md) already requires, so a table
-  over a domain is sound by the same proofs;
-- both share the semi-persistent value pools and the touched-log entry for
-  value-only changes (§12), so a value change in either reaches the next
-  semi-naive round.
+  [lattice-functions.md](lattice-functions.md) already requires, so such a
+  table is sound by the domain's proofs rather than by trust in `:merge`;
+- both store values in the semi-persistent value pools and record a
+  value-only change in the touched log (§12), so a change in either reaches
+  the next semi-naive round and rolls back with `pop`.
 
-What stays distinct: only the class analysis derives equalities back into
-the e-graph (§8), and only lattice functions are keyed by tuples rather than
-by one class.
+**What stays distinct.** Only the class analysis derives equalities back
+into the e-graph (§8), because only its values are verified
+over-approximations of a single term. Only lattice functions are keyed by
+tuples. A program therefore uses the class analysis for facts about values
+of interpreted sorts, and lattice functions for relations over tuples of
+classes and for egglog programs whose tables are not facts about one term.
