@@ -1423,8 +1423,15 @@ fn parse_command(
             };
             let limit = number(input)?;
             ws(input)?;
-            let until = if input.starts_with(":until") {
-                *input = &input[":until".len()..];
+            // `:goal` is the name the ground goal keeps once `:until` takes a query
+            // (doc/goal-egglog-check.md); both read the same ground goal for now.
+            let until = if input.starts_with(":until") || input.starts_with(":goal") {
+                let key = if input.starts_with(":until") {
+                    ":until"
+                } else {
+                    ":goal"
+                };
+                *input = &input[key.len()..];
                 Some(parse_run_goal(input, base)?)
             } else {
                 None
@@ -1456,7 +1463,10 @@ fn parse_command(
             };
             SurfaceCommand::Pass(Command::PrintStats(file))
         }
-        "check" => {
+        // `prove` is the name today's build-and-compare check keeps once `check` takes
+        // egglog's query semantics (doc/goal-egglog-check.md); both parse the same forms
+        // for now.
+        "check" | "prove" => {
             ws(input)?;
             let cmd = if input.starts_with("(!=") || input.starts_with("( !=") {
                 cut_char(input, '(')?;
@@ -2043,6 +2053,9 @@ mod alg_tag_tests {
         assert_eq!((rs, limit), (Some("fast".to_string()), 3));
         assert!(!until.expect("goal").equal);
         assert!(one("(run 5 :until (= a b))").2.expect("goal").equal);
+        // `:goal` reads the same ground goal (doc/goal-egglog-check.md).
+        assert!(one("(run 5 :goal (= a b))").2.expect("goal").equal);
+        assert!(!one("(run 5 :goal (!= a b))").2.expect("goal").equal);
     }
 
     #[test]
