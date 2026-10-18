@@ -131,6 +131,13 @@
   with its statistics pass). The B+ tree paths pay Rust's bounds checks again;
   they remain faster than the unverified implementation.
 
+### Fixed
+
+- In lazy AC mode, a `check` whose facts contain `(!= p q)` now waits for the
+  completion fixpoint before answering. It stopped at the first match, so
+  `(check (!= u t))` could pass where a later merge, after a rule round and AC
+  completion, joins `u` and `t`.
+
 ### Removed
 
 - Every container's own versioning surface. `Vec`, `AppendOnlyVec`, `SpMap`,
