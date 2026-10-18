@@ -604,7 +604,7 @@ where
         }
         self.eg.rebuild();
         let mut n = self.check_count(cq)?;
-        if cq.cond.holds(n) && (!lazy || cq.cond.monotone()) {
+        if cq.cond.holds(n) && (!lazy || cq.monotone) {
             return Ok(());
         }
         let mut inconclusive = false;
@@ -623,8 +623,8 @@ where
                 }
                 inconclusive = aborted;
             } else if cq.pair.is_none() {
-                (n, inconclusive) = self.lazy_query_decide(cq, cq.cond.monotone())?;
-                if cq.cond.holds(n) && !(inconclusive && !cq.cond.monotone()) {
+                (n, inconclusive) = self.lazy_query_decide(cq, cq.monotone)?;
+                if cq.cond.holds(n) && !(inconclusive && !cq.monotone) {
                     return Ok(());
                 }
             }

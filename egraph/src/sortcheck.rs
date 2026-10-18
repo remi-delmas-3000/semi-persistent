@@ -176,6 +176,10 @@ pub struct CheckQuery<O, S, L> {
     pub pair: Option<[PairSide<O, S, L>; 2]>,
     /// What the check requires of its matches.
     pub cond: crate::surface_ast::CheckCond,
+    /// Whether a match, once found, survives the graph growing: the condition is
+    /// monotone and no fact is a class disequality. A merge can turn `(!= p q)` false, so
+    /// a lazy check with one must wait for the completion fixpoint like `:none`.
+    pub monotone: bool,
     /// The check's named variables in `query`, with their names: matches are counted
     /// as distinct assignments of these, so the variables flattening introduces do not
     /// count.
@@ -1216,6 +1220,12 @@ where
             } else {
                 None
             };
+            let monotone = cond.monotone()
+                && !query.as_ref().is_some_and(|q| {
+                    q.atoms
+                        .iter()
+                        .any(|a| matches!(a, crate::resolve::RAtom::Neq(..)))
+                });
             Ok(CCommand::CheckQuery(Box::new(CheckQuery {
                 query,
                 global_eqs,
@@ -1228,6 +1238,7 @@ where
                 },
                 pair,
                 cond,
+                monotone,
                 vars,
                 var_names,
                 print,

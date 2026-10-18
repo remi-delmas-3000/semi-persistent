@@ -510,3 +510,20 @@ fn a_lazy_check_stopped_by_a_budget_is_inconclusive() {
         "{e}"
     );
 }
+
+#[test]
+fn a_lazy_disequality_waits_for_the_fixpoint() {
+    // `u = (g n)` joins `n` only after the rule fires, and `n` joins `t = c + d` only
+    // through AC completion. Before any round, `u` and `t` are apart, so a lazy check
+    // that stopped at its first match would accept `(!= u t)`. A merge can falsify a
+    // disequality, so the check waits for the fixpoint, where the two are one class,
+    // and fails, as `prove (!= u t)` does.
+    let src = format!("{LAZY}(function g (E) E)\n(let u (g n))\n(rewrite (g x) x)\n");
+    run_in(&format!("{src}(prove (= u t))"), AcMode::Lazy).expect("u = t at the fixpoint");
+    let e = run_in(&format!("{src}(check (!= u t))"), AcMode::Lazy)
+        .err()
+        .expect("the disequality is false at the fixpoint");
+    assert!(e.contains("no match for (!= u t)"), "{e}");
+    // Plain mode answers on the graph as it is: no rule has run, so the classes differ.
+    run_in(&format!("{src}(check (!= u t))"), AcMode::Off).expect("apart in plain mode");
+}
