@@ -552,3 +552,71 @@ fn check_eq_takes_several_terms() {
         .expect("one term");
     assert!(e.contains("check-eq takes two or more terms"), "{e}");
 }
+
+// ── completion settings in the program ──────────────────────────────────────
+
+#[test]
+fn set_option_check_completion_makes_checks_lazy() {
+    // `n` and `t` join only through AC completion (see `LAZY`).
+    run_in(&format!("{LAZY}(check-eq n t)"), AcMode::Off)
+        .err()
+        .expect("plain");
+    run_in(
+        &format!("{LAZY}(set-option :check-completion on)\n(check-eq n t)"),
+        AcMode::Off,
+    )
+    .expect("lazy by the program");
+    // The program wins over the mode the interpreter starts in.
+    run_in(
+        &format!("{LAZY}(set-option :check-completion off)\n(check-eq n t)"),
+        AcMode::Lazy,
+    )
+    .err()
+    .expect("plain by the program");
+}
+
+#[test]
+fn set_option_completion_completes_the_graph_and_keeps_it() {
+    // Eager from this command on: the rebuild derives `n = t` and keeps it, so a plain
+    // check after graph completion is turned off again still sees it.
+    let src = format!(
+        "{LAZY}(set-option :completion eager)\n(set-option :completion off)\n(check-eq n t)"
+    );
+    run_in(&src, AcMode::Off).expect("derived while eager, kept after");
+    // A lazy check's derivation is discarded with its transaction: the same check after
+    // check completion is turned off fails again.
+    let src = format!(
+        "{LAZY}(set-option :check-completion on)\n(check-eq n t)\n\
+         (set-option :check-completion off)\n(check-eq n t)"
+    );
+    run_in(&src, AcMode::Off)
+        .err()
+        .expect("nothing a lazy check derives is kept");
+}
+
+#[test]
+fn complete_flags_override_the_setting_for_one_command() {
+    run_in(&format!("{LAZY}(check-eq n t :complete)"), AcMode::Off).expect("this one lazy");
+    run_in(&format!("{LAZY}(check (= (n) t) :complete)"), AcMode::Off).expect("this one lazy");
+    run_in(&format!("{LAZY}(check-eq n t :no-complete)"), AcMode::Lazy)
+        .err()
+        .expect("this one plain");
+    run_in(
+        &format!("{LAZY}(check (= (n) t) :no-complete)"),
+        AcMode::Lazy,
+    )
+    .err()
+    .expect("this one plain");
+}
+
+#[test]
+fn set_option_rejects_unknown_settings() {
+    let e = run(&format!("{DECLS}(set-option :completion lazy)"))
+        .err()
+        .expect("bad value");
+    assert!(e.contains("set-option takes :completion off|eager"), "{e}");
+    let e = run(&format!("{DECLS}(set-option :extraction on)"))
+        .err()
+        .expect("bad key");
+    assert!(e.contains("set-option takes"), "{e}");
+}

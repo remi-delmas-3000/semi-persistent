@@ -1,7 +1,7 @@
 ;; Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 ;; SPDX-License-Identifier: Apache-2.0
 ;; EXPECT: ok
-;; DERIVE_AC_EQS: on
+(set-option :completion eager)
 ;; CHECK_AC_BASIS: on
 ;; Idempotent per-rule axiom critical pairs (Kapur Lemma 4.1(ii)):
 ;; superposing a rule f(M)→f(N) with x∘x = x gives, per a ∈ M, the pair (f(M), f(N∪{a})).

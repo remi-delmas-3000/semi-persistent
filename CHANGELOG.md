@@ -59,6 +59,14 @@
 
 ### Changed
 
+- The AC completion mode is part of the program: `(set-option :completion
+  off|eager)` sets graph completion and `(set-option :check-completion on|off)`
+  check completion, from that command on; `:complete` and `:no-complete` override
+  check completion for one command. `--derive-ac-eqs` and `--lazy-ac-eqs` set the
+  starting values, which a program's `set-option` overrides. The test fixtures'
+  `;; DERIVE_AC_EQS:` and `;; LAZY_AC_EQS:` directives are replaced by `set-option`
+  lines (55 fixtures), and the harness rejects the old directives.
+
 - `prove` is renamed to `check-eq` and `check-neq`: `(prove (= a b))` is
   `(check-eq a b)`, `(prove (!= a b))` is `(check-neq a b)`, and a build-only
   `(prove t)` is the bare term `t`. `check-eq` takes two or more terms and requires

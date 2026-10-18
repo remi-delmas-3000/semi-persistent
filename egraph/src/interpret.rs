@@ -153,7 +153,12 @@ pub struct Interpreter<
     marks: Vec<Mark<Cfg, Cfg::O>>,
     shrink_policy: ShrinkPolicy,
     strategy: crate::saturate::SaturationStrategy,
+    /// Derived from the two completion settings: `Eager` when graph completion is on,
+    /// `Lazy` when only check completion is, `Off` otherwise.
     ac_mode: AcMode,
+    /// `:check-completion`: whether checks complete temporarily when graph completion is
+    /// off. Kept while graph completion is on, so turning that off restores lazy checks.
+    check_completion: bool,
     /// Alternation budget for a lazy check's second phase (rule rounds
     /// interleaved with completion fixpoints inside the transaction).
     lazy_ac_rounds: usize,
@@ -271,6 +276,7 @@ where
             shrink_policy: ShrinkPolicy::Never,
             strategy: crate::saturate::SaturationStrategy::default(),
             ac_mode: AcMode::Off,
+            check_completion: false,
             lazy_ac_rounds: 32,
             cost_bits: Default::default(),
             lazy_txn: None,
@@ -297,6 +303,7 @@ where
             shrink_policy: ShrinkPolicy::Never,
             strategy: crate::saturate::SaturationStrategy::default(),
             ac_mode: AcMode::Off,
+            check_completion: false,
             lazy_ac_rounds: 32,
             cost_bits: Default::default(),
             lazy_txn: None,
@@ -349,7 +356,40 @@ where
     /// inside the transaction a lazy check opens.
     pub fn set_ac_mode(&mut self, mode: AcMode) {
         self.ac_mode = mode;
+        self.check_completion = mode == AcMode::Lazy;
         self.eg.set_cc(mode == AcMode::Eager);
+    }
+
+    /// `(set-option ...)`: change one completion setting from this command on. Turning
+    /// graph completion on rebuilds at once, so the classes it derives are there for the
+    /// next command; turning it off keeps what it derived.
+    fn set_completion_option(&mut self, opt: crate::ast::CompletionOption) {
+        use crate::ast::CompletionOption::*;
+        let graph = match opt {
+            Completion(on) => on,
+            CheckCompletion(on) => {
+                self.check_completion = on;
+                self.ac_mode == AcMode::Eager
+            }
+        };
+        let was_eager = self.ac_mode == AcMode::Eager;
+        self.ac_mode = if graph {
+            AcMode::Eager
+        } else if self.check_completion {
+            AcMode::Lazy
+        } else {
+            AcMode::Off
+        };
+        self.eg.set_cc(graph);
+        if graph && !was_eager {
+            self.eg.rebuild();
+        }
+    }
+
+    /// Whether a check answers lazily: graph completion is off, and check completion is
+    /// on, by the setting or by the command's own `:complete` override.
+    fn lazy_for(&self, complete: Option<bool>) -> bool {
+        self.ac_mode != AcMode::Eager && complete.unwrap_or(self.ac_mode == AcMode::Lazy)
     }
 
     /// Alternation budget for a lazy check's second phase (default 32 rounds).
@@ -528,7 +568,7 @@ where
         cq: &crate::sortcheck::CheckQuery<Cfg::O, Cfg::S, L>,
         limit: u64,
     ) -> Result<(), InterpError> {
-        let lazy = self.ac_mode == AcMode::Lazy;
+        let lazy = self.lazy_for(cq.complete);
         if lazy {
             self.lazy_txn_open();
         }
@@ -598,7 +638,7 @@ where
         if let Some(limit) = cq.print {
             return self.exec_query_print(cq, limit);
         }
-        let lazy = self.ac_mode == AcMode::Lazy;
+        let lazy = self.lazy_for(cq.complete);
         if lazy {
             self.lazy_txn_open();
         }
@@ -859,13 +899,15 @@ where
                 self.eg.rebuild();
             }
             CCommand::CheckQuery(cq) => self.exec_check_query(cq)?,
-            CCommand::CheckEq(a, b) => {
+            CCommand::SetOption(opt) => self.set_completion_option(*opt),
+            CCommand::CheckEq(a, b, complete) => {
+                let lazy = self.lazy_for(*complete);
                 let (a_id, _) = self.build_cterm(a)?;
                 let (b_id, _) = self.build_cterm(b)?;
                 // Install the goal before any rebuild: with the shared
                 // transaction open, the term-build rebuild runs completion,
                 // and the goal keeps it from running past the answer.
-                if self.ac_mode == AcMode::Lazy {
+                if lazy {
                     self.eg.set_cc_goal(Some((a_id, b_id)));
                 }
                 // A budget-limited run can leave congruence work pending even
@@ -874,7 +916,7 @@ where
                 // reason to decide whether to rebuild.
                 self.eg.rebuild();
                 if self.eg.find(a_id) != self.eg.find(b_id) {
-                    if self.ac_mode == AcMode::Lazy {
+                    if lazy {
                         match self.lazy_ac_decide(a_id, b_id)? {
                             (true, _) => return Ok(()),
                             (false, aborted) => {
@@ -894,10 +936,11 @@ where
                 }
                 self.eg.set_cc_goal(None);
             }
-            CCommand::CheckNeq(a, b) => {
+            CCommand::CheckNeq(a, b, complete) => {
+                let lazy = self.lazy_for(*complete);
                 let (a_id, _) = self.build_cterm(a)?;
                 let (b_id, _) = self.build_cterm(b)?;
-                if self.ac_mode == AcMode::Lazy {
+                if lazy {
                     self.eg.set_cc_goal(Some((a_id, b_id)));
                 }
                 self.eg.rebuild();
@@ -909,7 +952,7 @@ where
                 // distinct classes may still join through completion. Reaching the
                 // implemented operational fixpoint without a join is the command's
                 // acceptance criterion, not a semantic non-disequality theorem.
-                if self.ac_mode == AcMode::Lazy {
+                if lazy {
                     match self.lazy_ac_decide(a_id, b_id)? {
                         (true, _) => {
                             return Err(InterpError::CheckFailed(

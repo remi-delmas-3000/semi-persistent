@@ -2,7 +2,7 @@
 ;; SPDX-License-Identifier: Apache-2.0
 ;; EXPECT: check-failed
 ;; TYPES: machine
-;; DERIVE_AC_EQS: off
+(set-option :completion off)
 ;; The control for seq_flatten.egg: without `:flatten` the rule reads the stored
 ;; children {g1, cc}, which hold one `Global`, so the factoring does not fire and the
 ;; check fails.

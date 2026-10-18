@@ -89,6 +89,9 @@ defines scope lifetime and `:shrink`.
 | `(check fact ...)` | Rebuild and require the conjunctive query to have a match. The facts are those of a rule body: a pattern, `(= p q)`, `(!= p q)` (the classes differ), or a guard. Literal values are compared by the typed guard, such as `(IBig::!= n m)`, where egglog writes `(!= n m)`. The check builds nothing: a term that was never built has no match. A name that is a global refers to it; any other name is a variable of this one check. |
 | `(check fact ... :count k)`, `:min k`, `:none` | Require exactly `k` matches, at least `k`, or none. Matches are counted as distinct assignments of the check's named variables. In lazy AC mode, `:count` and `:none` are decided at the completion fixpoint. |
 | `(query fact ... [:limit n])` | Print the matches of the facts, up to `n` (default 10): each named variable as a term extracted from its class. Matches are ordered by content colour, so the output does not depend on class ids. Nothing is built or required. |
+| `(set-option :completion off\|eager)` | From this command on, rebuild does (`eager`) or does not run AC completion; turning it on rebuilds at once. Overrides `--derive-ac-eqs` ([Chapter 11](11-three-congruence-closures.md)). |
+| `(set-option :check-completion on\|off)` | From this command on, checks complete temporarily to answer while `:completion` is `off` (lazy mode). Overrides `--lazy-ac-eqs`. |
+| `... :complete`, `... :no-complete` | After the arguments of `check`, `query`, `check-eq` or `check-neq`: turn check completion on or off for that one command. |
 | `(check-eq a b ...)` | Build every term, rebuild, and require them all to belong to one e-class. |
 | `(check-neq a b)` | Build both terms, rebuild, and require them to belong to different e-classes under the selected completion mode. |
 | `(extract term)` | Rebuild and print a lowest-cost extractable representative. |

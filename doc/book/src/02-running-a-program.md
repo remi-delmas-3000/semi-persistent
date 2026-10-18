@@ -114,7 +114,7 @@ cargo test -p semi-persistent-egraph --test egg_tests book_examples
 
 The `book_examples` test scans every `.egg` file at the top level of the
 directory. The first eight lines of a file, the two header lines and six more,
-may contain directives such as `;; EXPECT: ok` or `;; DERIVE_AC_EQS: on`.
+may contain directives such as `;; EXPECT: ok` or `;; TYPES: machine`.
 These lines are comments to the engine binary; the test
 harness reads them to select settings and the expected outcome.
 

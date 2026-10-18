@@ -1,7 +1,7 @@
 ;; Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 ;; SPDX-License-Identifier: Apache-2.0
 ;; EXPECT: ok
-;; DERIVE_AC_EQS: on
+(set-option :completion eager)
 ;; Composable basic tags `:assoc :comm` must behave exactly like the `:assoc-comm` alias:
 ;; the §4b superposition equality still derives.
 (sort E)

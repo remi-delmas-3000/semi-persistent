@@ -2119,7 +2119,7 @@ The three features have matching control surfaces at each layer:
 | feature | CLI flag | `.egg` directive |
 |---|---|---|
 | eval algorithm | `--use-semi-naive` / `--use-naive` (default naive) | `;; EVAL: naive\|semi\|both` (default both) |
-| derive AC consequences | `--derive-ac-eqs` (eager) / `--lazy-ac-eqs` (lazy, §13) | `;; DERIVE_AC_EQS: on` / `;; LAZY_AC_EQS: on` |
+| derive AC consequences | `--derive-ac-eqs` (eager) / `--lazy-ac-eqs` (lazy, §13) | in the program: `(set-option :completion eager)` / `(set-option :check-completion on)` |
 | check basis properties | `--check-ac-basis` | `;; CHECK_AC_BASIS: on` |
 
 `--derive-ac-eqs` off leaves sub-multiset enumeration in leapfrog matching intact but

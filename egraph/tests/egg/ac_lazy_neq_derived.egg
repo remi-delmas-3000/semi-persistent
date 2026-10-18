@@ -2,7 +2,7 @@
 ;; SPDX-License-Identifier: Apache-2.0
 ;; EXPECT: check-failed
 ;; TYPES: machine
-;; LAZY_AC_EQS: on
+(set-option :check-completion on)
 ;; Lazy mode makes `!=` stronger, not weaker: the two terms sit in distinct
 ;; classes under plain congruence, but completion derives their equality, so
 ;; the disequality check must fail.

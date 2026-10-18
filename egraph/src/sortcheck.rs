@@ -81,8 +81,10 @@ pub enum CCommand<O, S, L> {
     Let(String, CTerm<O, S, L>),
     Union(CTerm<O, S, L>, CTerm<O, S, L>),
     Insert(CTerm<O, S, L>),
-    CheckEq(CTerm<O, S, L>, CTerm<O, S, L>),
-    CheckNeq(CTerm<O, S, L>, CTerm<O, S, L>),
+    /// The flag is the command's check-completion override.
+    CheckEq(CTerm<O, S, L>, CTerm<O, S, L>, Option<bool>),
+    CheckNeq(CTerm<O, S, L>, CTerm<O, S, L>, Option<bool>),
+    SetOption(CompletionOption),
     /// `(check fact ...)`: egglog's check, a query over the current e-graph that
     /// succeeds when it has a match. It builds nothing.
     CheckQuery(Box<CheckQuery<O, S, L>>),
@@ -186,6 +188,8 @@ pub struct CheckQuery<O, S, L> {
     pub var_names: Vec<String>,
     /// `(query ...)`: print up to this many matches instead of requiring `cond`.
     pub print: Option<u64>,
+    /// `:complete` / `:no-complete`: an override of check completion.
+    pub complete: Option<bool>,
 }
 
 /// One side of a ground `(= p q)` check.
@@ -1073,6 +1077,7 @@ where
                 text,
                 cond: crate::surface_ast::CheckCond::Exists,
                 print: None,
+                complete: None,
             };
             match sortcheck_one(check, eg, model, globals, rulesets)? {
                 CCommand::CheckQuery(goal) => Ok(CCommand::RunUntil {
@@ -1088,6 +1093,7 @@ where
             text,
             cond,
             print,
+            complete,
         } => {
             let span = facts.first().map_or(Span::Dummy, |p| p.span());
             // Names resolve as in rule bodies: a global is the global, and any other
@@ -1241,6 +1247,7 @@ where
                 vars,
                 var_names,
                 print,
+                complete,
             })))
         }
         SurfaceCommand::CollectionRewrite(r) => {
@@ -1376,16 +1383,17 @@ where
             let ct = check_term(&term, None, eg.ops(), eg.sorts(), model, globals)?;
             Ok(CCommand::Insert(ct))
         }
-        Command::CheckEq(a, b) => {
+        Command::CheckEq(a, b, complete) => {
             let ca = check_term(&a, None, eg.ops(), eg.sorts(), model, globals)?;
             let cb = check_term(&b, None, eg.ops(), eg.sorts(), model, globals)?;
-            Ok(CCommand::CheckEq(ca, cb))
+            Ok(CCommand::CheckEq(ca, cb, complete))
         }
-        Command::CheckNeq(a, b) => {
+        Command::CheckNeq(a, b, complete) => {
             let ca = check_term(&a, None, eg.ops(), eg.sorts(), model, globals)?;
             let cb = check_term(&b, None, eg.ops(), eg.sorts(), model, globals)?;
-            Ok(CCommand::CheckNeq(ca, cb))
+            Ok(CCommand::CheckNeq(ca, cb, complete))
         }
+        Command::SetOption(o) => Ok(CCommand::SetOption(o)),
         Command::Extract(t) => {
             let ct = check_term(&t, None, eg.ops(), eg.sorts(), model, globals)?;
             Ok(CCommand::Extract(ct))

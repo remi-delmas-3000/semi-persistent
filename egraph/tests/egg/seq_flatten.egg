@@ -2,7 +2,7 @@
 ;; SPDX-License-Identifier: Apache-2.0
 ;; EXPECT: ok
 ;; TYPES: machine
-;; DERIVE_AC_EQS: off
+(set-option :completion off)
 ;; Edge cases 5 (doc/sequence-patterns.md) under `:flatten`: `cc` gains the conjunction
 ;; And{g2, g3} after And{g1, cc} was built, so that node stores two children and holds
 ;; three `Global` operands through its view {g1, g2, g3}. The factoring rule, tagged,

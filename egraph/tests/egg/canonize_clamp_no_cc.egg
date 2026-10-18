@@ -1,7 +1,7 @@
 ;; Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 ;; SPDX-License-Identifier: Apache-2.0
 ;; EXPECT: ok
-;; DERIVE_AC_EQS: off
+(set-option :completion off)
 ;; The count clamp, identity unit-drop, and degenerate-arity collapse are CANONIZATION facts, not
 ;; completion facts: they must hold with AC completion OFF (they establish the op's stored normal
 ;; form at build and on recanonize). This guards against regressing them back into the completion

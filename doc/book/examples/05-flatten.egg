@@ -2,7 +2,7 @@
 ;; SPDX-License-Identifier: Apache-2.0
 ;; EXPECT: ok
 ;; TYPES: machine
-;; DERIVE_AC_EQS: off
+(set-option :completion off)
 ;; ANCHOR: flatten
 (sort IntervalSort)
 (function Interval (i64 i64) IntervalSort)

@@ -1,7 +1,7 @@
 ;; Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 ;; SPDX-License-Identifier: Apache-2.0
 ;; EXPECT: ok
-;; LAZY_AC_EQS: on
+(set-option :check-completion on)
 ;; ANCHOR: completion-example
 (sort E)
 (function add (E) E :assoc :comm)

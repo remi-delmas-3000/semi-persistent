@@ -1179,6 +1179,21 @@ fn pattern_as_rhs(p: &SurfacePattern) -> ModalResult<RhsTerm> {
     }
 }
 
+/// An optional `:complete` or `:no-complete` after a check's arguments: an override of
+/// check completion for that one command.
+fn parse_complete_flag(input: &mut &str) -> ModalResult<Option<bool>> {
+    ws(input)?;
+    if input.starts_with(":no-complete") {
+        *input = &input[":no-complete".len()..];
+        Ok(Some(false))
+    } else if input.starts_with(":complete") {
+        *input = &input[":complete".len()..];
+        Ok(Some(true))
+    } else {
+        Ok(None)
+    }
+}
+
 /// `:goal (= a b)` / `:goal (!= a b)` — two ground terms and the relation that stops the run.
 fn parse_run_goal(input: &mut &str, base: usize) -> ModalResult<RunGoal> {
     cut_char(input, '(')?;
@@ -1502,6 +1517,7 @@ fn parse_command(
                 return Err(ErrMode::Cut(e));
             }
             let text = start[..start.len() - input.len()].trim().to_owned();
+            let mut complete = parse_complete_flag(input)?;
             let print = if !printing {
                 None
             } else if input.starts_with(":limit") {
@@ -1539,11 +1555,15 @@ fn parse_command(
             } else {
                 crate::surface_ast::CheckCond::Exists
             };
+            if complete.is_none() {
+                complete = parse_complete_flag(input)?;
+            }
             SurfaceCommand::Check {
                 facts,
                 text,
                 cond,
                 print,
+                complete,
             }
         }
         // `(check-eq t1 t2 ...)` and `(check-neq t1 t2)`: build the ground terms, rebuild,
@@ -1554,11 +1574,12 @@ fn parse_command(
             let mut terms = Vec::new();
             loop {
                 ws(input)?;
-                if input.starts_with(')') {
+                if input.starts_with(')') || input.starts_with(':') {
                     break;
                 }
                 terms.push(parse_term_inner(input, base)?);
             }
+            let complete = parse_complete_flag(input)?;
             if terms.len() < 2 || (!eq && terms.len() > 2) {
                 let mut e = ContextError::new();
                 e.push(StrContext::Label(if eq {
@@ -1572,12 +1593,16 @@ fn parse_command(
             let mut rest = terms.into_iter();
             let second = rest.next().expect("at least two terms");
             for t in rest {
-                desugared.push(SurfaceCommand::Pass(Command::CheckEq(first.clone(), t)));
+                desugared.push(SurfaceCommand::Pass(Command::CheckEq(
+                    first.clone(),
+                    t,
+                    complete,
+                )));
             }
             SurfaceCommand::Pass(if eq {
-                Command::CheckEq(first, second)
+                Command::CheckEq(first, second, complete)
             } else {
-                Command::CheckNeq(first, second)
+                Command::CheckNeq(first, second, complete)
             })
         }
         "prove" => {
@@ -1587,6 +1612,37 @@ fn parse_command(
                  `check-neq a b`, and `prove t` is the bare term `t`",
             ));
             return Err(ErrMode::Cut(e));
+        }
+        "set-option" => {
+            ws(input)?;
+            let key = if input.starts_with(":check-completion") {
+                ":check-completion"
+            } else if input.starts_with(":completion") {
+                ":completion"
+            } else {
+                let mut e = ContextError::new();
+                e.push(StrContext::Label(
+                    "set-option takes :completion off|eager or :check-completion on|off",
+                ));
+                return Err(ErrMode::Cut(e));
+            };
+            *input = &input[key.len()..];
+            ws(input)?;
+            let value = ident(input)?;
+            let opt = match (key, value) {
+                (":completion", "eager") => CompletionOption::Completion(true),
+                (":completion", "off") => CompletionOption::Completion(false),
+                (":check-completion", "on") => CompletionOption::CheckCompletion(true),
+                (":check-completion", "off") => CompletionOption::CheckCompletion(false),
+                _ => {
+                    let mut e = ContextError::new();
+                    e.push(StrContext::Label(
+                        "set-option takes :completion off|eager or :check-completion on|off",
+                    ));
+                    return Err(ErrMode::Cut(e));
+                }
+            };
+            SurfaceCommand::Pass(Command::SetOption(opt))
         }
         "push" => {
             ws.parse_next(input).ok();

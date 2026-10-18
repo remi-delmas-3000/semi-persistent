@@ -1,7 +1,7 @@
 ;; Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 ;; SPDX-License-Identifier: Apache-2.0
 ;; EXPECT: ok
-;; DERIVE_AC_EQS: off
+(set-option :completion off)
 ;; Identity unit-drop on the RECANONIZE path (Kapur LMCS 2023, Lemma 4.3's standing
 ;; assumption f(x,e) → x): a summand whose class merges into the unit's class AFTER the
 ;; node is built must drop, with completion OFF — it is a canonization fact, like

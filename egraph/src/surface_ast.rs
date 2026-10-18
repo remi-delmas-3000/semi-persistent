@@ -134,6 +134,8 @@ pub enum SurfaceCommand {
         text: String,
         cond: CheckCond,
         print: Option<u64>,
+        /// `:complete` / `:no-complete`: an override of check completion.
+        complete: Option<bool>,
     },
     /// `(run [ruleset] N :until fact ...)`: stop the run once the facts have a match,
     /// as `check` would find one.
