@@ -593,7 +593,6 @@ pub enum Command {
     /// `(print-stats)` — the last run's counters on stdout — or `(print-stats :file "p.json")`,
     /// the same numbers as JSON in a file.
     PrintStats(Option<String>),
-    Check(Term),
     CheckEq(Term, Term),
     CheckNeq(Term, Term),
     Extract(Term),

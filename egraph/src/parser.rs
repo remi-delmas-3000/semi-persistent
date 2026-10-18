@@ -1546,35 +1546,47 @@ fn parse_command(
                 print,
             }
         }
-        // `prove`: build the terms, rebuild, and compare classes.
-        "prove" => {
-            ws(input)?;
-            let cmd = if input.starts_with("(!=") || input.starts_with("( !=") {
-                cut_char(input, '(')?;
+        // `(check-eq t1 t2 ...)` and `(check-neq t1 t2)`: build the ground terms, rebuild,
+        // and compare classes. `(check-eq t1 t2 t3)` checks every term against the first,
+        // as consecutive commands, so they share one lazy-check transaction.
+        "check-eq" | "check-neq" => {
+            let eq = kw == "check-eq";
+            let mut terms = Vec::new();
+            loop {
                 ws(input)?;
-                *input = &input[2..];
-                let a = parse_term_inner(input, base)?;
-                let b = parse_term_inner(input, base)?;
-                cut_char(input, ')')?;
-                Command::CheckNeq(a, b)
-            } else if input.starts_with("(=") || input.starts_with("( =") {
-                cut_char(input, '(')?;
-                ws(input)?;
-                if !input.starts_with('=') {
-                    let mut e = ContextError::new();
-                    e.push(StrContext::Expected(StrContextValue::CharLiteral('=')));
-                    return Err(ErrMode::Cut(e));
+                if input.starts_with(')') {
+                    break;
                 }
-                *input = &input[1..];
-                let a = parse_term_inner(input, base)?;
-                let b = parse_term_inner(input, base)?;
-                cut_char(input, ')')?;
-                Command::CheckEq(a, b)
+                terms.push(parse_term_inner(input, base)?);
+            }
+            if terms.len() < 2 || (!eq && terms.len() > 2) {
+                let mut e = ContextError::new();
+                e.push(StrContext::Label(if eq {
+                    "check-eq takes two or more terms"
+                } else {
+                    "check-neq takes exactly two terms"
+                }));
+                return Err(ErrMode::Cut(e));
+            }
+            let first = terms.remove(0);
+            let mut rest = terms.into_iter();
+            let second = rest.next().expect("at least two terms");
+            for t in rest {
+                desugared.push(SurfaceCommand::Pass(Command::CheckEq(first.clone(), t)));
+            }
+            SurfaceCommand::Pass(if eq {
+                Command::CheckEq(first, second)
             } else {
-                let t = parse_term_inner(input, base)?;
-                Command::Check(t)
-            };
-            SurfaceCommand::Pass(cmd)
+                Command::CheckNeq(first, second)
+            })
+        }
+        "prove" => {
+            let mut e = ContextError::new();
+            e.push(StrContext::Label(
+                "`prove` was renamed: `prove (= a b)` is `check-eq a b`, `prove (!= a b)` is \
+                 `check-neq a b`, and `prove t` is the bare term `t`",
+            ));
+            return Err(ErrMode::Cut(e));
         }
         "push" => {
             ws.parse_next(input).ok();

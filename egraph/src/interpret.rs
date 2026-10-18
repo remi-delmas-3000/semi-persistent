@@ -26,14 +26,14 @@ pub enum InterpError {
     DeclError(String),
     /// Rule compilation failed.
     CompileError(crate::resolve::ResolveError),
-    /// `(prove ...)` assertion failed.
+    /// `(check-eq ...)` assertion failed.
     CheckFailed(String),
     /// `(extract ...)` could not produce a term from the named class.
     ExtractFailed(crate::extract::ExtractError),
     /// `(pop)` without matching `(push)`.
     PopWithoutPush,
     /// A rule applied a partial primitive operation outside its domain while a
-    /// `(run …)` or `(prove …)` was saturating: division by zero, an overflow
+    /// `(run …)` or `(check-eq …)` was saturating: division by zero, an overflow
     /// under checked arithmetic, a multiplicity too wide for the configuration.
     ///
     /// Separate from `CompileError` because nothing about the rule is wrong:
@@ -583,7 +583,7 @@ where
     /// the decision derives is discarded with it:
     /// 1. the rebuild runs completion to its fixpoint or its growth budget;
     /// 2. a single fact `(= p q)` over two built ground terms is then decided as
-    ///    `prove` decides it, with the pair as the completion goal;
+    ///    `check-eq` decides it, with the pair as the completion goal;
     /// 3. otherwise the ordinary rules run interleaved with completion, one round at a
     ///    time, for at most `lazy_ac_rounds` rounds. Existence and `:min` stop as soon
     ///    as they hold; `:count` and `:none` wait for the fixpoint, since a later round
@@ -757,7 +757,7 @@ where
             // equality checks (each check continues the accumulated
             // completion/alternation state instead of re-deriving); any other
             // command must see the untouched graph, so the transaction closes
-            // first. `(prove t)` closes it too: a bare check materializes its
+            // first. A bare term closes it too: it materializes its
             // term permanently, which an open transaction would discard.
             if !matches!(
                 cmd,
@@ -857,9 +857,6 @@ where
                     self.eg.merge(a_id, b_id);
                 }
                 self.eg.rebuild();
-            }
-            CCommand::Check(ct) => {
-                self.build_cterm(ct)?;
             }
             CCommand::CheckQuery(cq) => self.exec_check_query(cq)?,
             CCommand::CheckEq(a, b) => {

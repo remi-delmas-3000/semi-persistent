@@ -1,8 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! `check` and `prove` (doc/goal-egglog-check.md).
+//! `check`, `check-eq` and `check-neq` (doc/goal-egglog-check.md).
 //!
-//! `prove` is the build-and-compare check: it builds its terms, rebuilds, and compares
+//! `check-eq` and `check-neq` are the build-and-compare checks: they build their terms, rebuild, and compare
 //! classes. `check` is egglog's: a conjunctive query over the current e-graph that
 //! succeeds when it has a match, and builds nothing.
 
@@ -50,29 +50,36 @@ const DECLS: &str = "
 ";
 
 #[test]
-fn prove_builds_terms_and_closes_under_congruence() {
-    // Neither `(f (a))` nor `(f (b))` exists before the command; `prove` builds both, and
+fn check_eq_builds_terms_and_closes_under_congruence() {
+    // Neither `(f (a))` nor `(f (b))` exists before the command; `check-eq` builds both, and
     // congruence joins them because `(a)` and `(b)` are one class.
-    run(&format!("{DECLS}(prove (= (f (a)) (f (b))))")).expect("equal by congruence");
-    run(&format!("{DECLS}(prove (!= (f (a)) (f (c))))")).expect("distinct");
+    run(&format!("{DECLS}(check-eq (f (a)) (f (b)))")).expect("equal by congruence");
+    run(&format!("{DECLS}(check-neq (f (a)) (f (c)))")).expect("distinct");
 }
 
 #[test]
-fn prove_fails_on_the_wrong_relation() {
-    let e = run(&format!("{DECLS}(prove (= (f (a)) (f (c))))"))
+fn check_eq_fails_on_the_wrong_relation() {
+    let e = run(&format!("{DECLS}(check-eq (f (a)) (f (c)))"))
         .err()
         .expect("not equal");
     assert!(e.contains("terms are not equal"), "{e}");
-    let e = run(&format!("{DECLS}(prove (!= (a) (b)))"))
+    let e = run(&format!("{DECLS}(check-neq (a) (b))"))
         .err()
         .expect("equal");
     assert!(e.contains("terms are equal"), "{e}");
 }
 
 #[test]
-fn prove_of_one_term_builds_it() {
-    let interp = run(&format!("{DECLS}(prove (f (c)))")).expect("builds");
+fn a_bare_term_builds_it_and_prove_names_its_replacement() {
+    let interp = run(&format!("{DECLS}(f (c))")).expect("builds");
     assert!(interp.eg.node_count() >= 4, "the term was built");
+    let e = run(&format!("{DECLS}(prove (= (a) (b)))"))
+        .err()
+        .expect("renamed");
+    assert!(
+        e.contains("`prove` was renamed") && e.contains("check-eq a b"),
+        "{e}"
+    );
 }
 
 const UNBOUNDED: &str = "
@@ -147,9 +154,9 @@ fn check_compares_terms_that_exist() {
 
 #[test]
 fn check_does_not_build_its_terms() {
-    // `prove` builds `(f (a))` and `(f (b))` and joins them by congruence; `check` looks
+    // `check-eq` builds `(f (a))` and `(f (b))` and joins them by congruence; `check` looks
     // them up, finds neither, and fails, as egglog's does.
-    run(&format!("{DECLS}(prove (= (f (a)) (f (b))))")).unwrap();
+    run(&format!("{DECLS}(check-eq (f (a)) (f (b)))")).unwrap();
     let e = run(&format!("{DECLS}(check (= (f (a)) (f (b))))"))
         .err()
         .expect("not built");
@@ -225,7 +232,7 @@ fn lazy_ac_completes_where_a_check_needs_it() {
     // `(add c d)` and `n` join only through AC completion: `a + b = c` rewrites
     // `a + b + d`, the class of `n`, to `c + d`. Lazy mode keeps the stored graph
     // uncompleted, so each check below has to run completion to see it.
-    run_in(&format!("{LAZY}(prove (= n t))"), AcMode::Lazy).unwrap();
+    run_in(&format!("{LAZY}(check-eq n t)"), AcMode::Lazy).unwrap();
     run_in(&format!("{LAZY}(check (= (n) t))"), AcMode::Lazy).unwrap();
     run_in(&format!("{LAZY}(check (= (n) (add (c) x)))"), AcMode::Lazy).unwrap();
     // Without completion the classes stay apart.
@@ -273,7 +280,7 @@ fn neq_in_a_rule_body_filters_matches() {
     let src = format!(
         "{DECLS}(function g (E E) E)\n(let t (f (a)))\n(let t2 (f (b)))\n(let u (f (c)))\n\
          (rule ((= x (f p)) (= y (f q)) (!= x y)) ((g x y)))\n(run 1)\n\
-         (prove (= (g t u) (g t u)))\n(check (g t u))\n(check (g u t))"
+         (check-eq (g t u) (g t u))\n(check (g t u))\n(check (g u t))"
     );
     run(&src).unwrap();
     let e = run(&format!(
@@ -517,13 +524,31 @@ fn a_lazy_disequality_waits_for_the_fixpoint() {
     // through AC completion. Before any round, `u` and `t` are apart, so a lazy check
     // that stopped at its first match would accept `(!= u t)`. A merge can falsify a
     // disequality, so the check waits for the fixpoint, where the two are one class,
-    // and fails, as `prove (!= u t)` does.
+    // and fails, as `check-neq u t` does.
     let src = format!("{LAZY}(function g (E) E)\n(let u (g n))\n(rewrite (g x) x)\n");
-    run_in(&format!("{src}(prove (= u t))"), AcMode::Lazy).expect("u = t at the fixpoint");
+    run_in(&format!("{src}(check-eq u t)"), AcMode::Lazy).expect("u = t at the fixpoint");
     let e = run_in(&format!("{src}(check (!= u t))"), AcMode::Lazy)
         .err()
         .expect("the disequality is false at the fixpoint");
     assert!(e.contains("no match for (!= u t)"), "{e}");
     // Plain mode answers on the graph as it is: no rule has run, so the classes differ.
     run_in(&format!("{src}(check (!= u t))"), AcMode::Off).expect("apart in plain mode");
+}
+
+#[test]
+fn check_eq_takes_several_terms() {
+    let base = format!("{DECLS}(union (a) (c))\n");
+    run(&format!("{base}(check-eq (f (a)) (f (b)) (f (c)))")).unwrap();
+    let e = run(&format!("{DECLS}(check-eq (f (a)) (f (b)) (f (c)))"))
+        .err()
+        .expect("(c) is apart");
+    assert!(e.contains("terms are not equal"), "{e}");
+    let e = run(&format!("{DECLS}(check-neq (a) (b) (c))"))
+        .err()
+        .expect("two terms");
+    assert!(e.contains("check-neq takes exactly two terms"), "{e}");
+    let e = run(&format!("{DECLS}(check-eq (a))"))
+        .err()
+        .expect("one term");
+    assert!(e.contains("check-eq takes two or more terms"), "{e}");
 }

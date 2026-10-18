@@ -81,7 +81,6 @@ pub enum CCommand<O, S, L> {
     Let(String, CTerm<O, S, L>),
     Union(CTerm<O, S, L>, CTerm<O, S, L>),
     Insert(CTerm<O, S, L>),
-    Check(CTerm<O, S, L>),
     CheckEq(CTerm<O, S, L>, CTerm<O, S, L>),
     CheckNeq(CTerm<O, S, L>, CTerm<O, S, L>),
     /// `(check fact ...)`: egglog's check, a query over the current e-graph that
@@ -172,7 +171,7 @@ pub struct CheckQuery<O, S, L> {
     /// Questionable names found by the sort check, printed when the command runs.
     pub warnings: Vec<String>,
     /// For a check of one fact `(= p q)` over ground terms or globals: each side's class.
-    /// Lazy AC mode decides the pair as `prove` does, with the pair as the completion goal.
+    /// Lazy AC mode decides the pair as `check-eq` does, with the pair as the completion goal.
     pub pair: Option<[PairSide<O, S, L>; 2]>,
     /// What the check requires of its matches.
     pub cond: crate::surface_ast::CheckCond,
@@ -1376,10 +1375,6 @@ where
         Command::Insert(term) => {
             let ct = check_term(&term, None, eg.ops(), eg.sorts(), model, globals)?;
             Ok(CCommand::Insert(ct))
-        }
-        Command::Check(t) => {
-            let ct = check_term(&t, None, eg.ops(), eg.sorts(), model, globals)?;
-            Ok(CCommand::Check(ct))
         }
         Command::CheckEq(a, b) => {
             let ca = check_term(&a, None, eg.ops(), eg.sorts(), model, globals)?;
