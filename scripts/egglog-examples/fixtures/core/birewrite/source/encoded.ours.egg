@@ -16,5 +16,5 @@
 (let ex2 (Add d (Add e f)))
 
 (run 10)
-(prove (= ex1 (Add a (Add b c))))
-(prove (= ex2 (Add (Add d e) f)))
+(check-eq ex1 (Add a (Add b c)))
+(check-eq ex2 (Add (Add d e) f))

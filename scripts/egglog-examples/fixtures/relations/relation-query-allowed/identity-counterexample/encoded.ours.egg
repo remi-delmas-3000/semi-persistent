@@ -10,5 +10,5 @@
 (rule ((= (myrel 1) (AuditPresent)) (= (myrel 1) (AuditPresent)) (= (myrel 1) (myrel 1))) ((union (shouldappear) (AuditPresent))))
 (rule ((= (myrel 1) (AuditPresent)) (= (myrel 2) (AuditPresent)) (= (myrel 1) (myrel 2))) ((union (shouldnotappear) (AuditPresent))))
 (run 1)
-(prove (= (shouldappear) (AuditPresent)))
-(prove (!= (shouldnotappear) (AuditPresent)))
+(check-eq (shouldappear) (AuditPresent))
+(check-neq (shouldnotappear) (AuditPresent))

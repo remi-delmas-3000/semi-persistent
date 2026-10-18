@@ -21,4 +21,4 @@
 (union x_bc (e))
 
 (run 5)
-(prove (= (a) (c)))
+(check-eq (a) (c))

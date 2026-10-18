@@ -90,7 +90,7 @@ that it is distinct from `left`. It then merges only the leaf classes:
 
 After `(union (a) (b))`, both parent nodes have the canonical key
 `f(Cab, Cab)`. Rebuild detects that collision and merges the parent classes, so
-`(prove (= left right))` passes without a rewrite rule.
+`(check-eq left right)` passes without a rewrite rule.
 
 The final `print-size` reports:
 
@@ -136,7 +136,7 @@ specifies the rebuild worklist and use-list algorithm.
 
 ## What an equality check asks
 
-`(prove (= t1 t2))` builds both ground terms, rebuilds the e-graph, and asks
+`(check-eq t1 t2)` builds both ground terms, rebuilds the e-graph, and asks
 whether their e-nodes have the same union-find representative. It does not
 compare two extracted syntax trees.
 
@@ -146,19 +146,19 @@ check means the terms remain in different classes in the graph as currently
 computed. It is not a proof that the terms are unequal in every model of the
 declared laws.
 
-Likewise, `(prove (!= t1 t2))` accepts when the two current representatives are
+Likewise, `(check-neq t1 t2)` accepts when the two current representatives are
 different. Chapter 11 explains how plain, eager, and lazy congruence modes
 change the work performed before that decision.
 
 `(check fact ...)` asks a different question, egglog's: does the e-graph already
 contain a match for these facts? A check builds nothing. `(check (= t1 t2))`
 succeeds only if both terms exist and share a class, so it fails on a term that
-no command built, where `prove` would build it and possibly join it by
+no command built, where `check-eq` would build it and possibly join it by
 congruence. Names that are not globals are variables of the one check:
 `(check (= e (f x)))` asks whether some class contains an `f` node, and
 `(check (= e (f x)) (= x (a)))` whether one has the class of `(a)` as its child.
 `(!= p q)` requires different classes, and `:count k`, `:min k` and `:none`
-count the matches. Equivalence is proved with `prove`; `check` tests what the
+count the matches. Equivalence is decided with `check-eq`; `check` tests what the
 graph holds.
 
 The storage structures are specified in the design chapters for

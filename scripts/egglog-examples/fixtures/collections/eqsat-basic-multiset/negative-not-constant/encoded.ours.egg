@@ -51,4 +51,4 @@
 (let global_expr1 (Mul (Num 2) (Add (Var "x") (Num 3))))
 (let global_expr2 (Add (Num 6) (Mul (Num 2) (Var "x"))))
 (run 100)
-(prove (= global_expr1 (Num 6)))
+(check-eq global_expr1 (Num 6))

@@ -16,26 +16,26 @@
 (constructor d () E)
 
 ;; Nested same-op constructions all canonicalize to the same flat node.
-(prove (= (seq (seq (a) (b)) (c)) (seq (a) (b) (c))))
-(prove (= (seq (a) (seq (b) (c))) (seq (a) (b) (c))))
-(prove (= (seq (seq (a) (b)) (seq (c) (d))) (seq (a) (b) (c) (d))))
+(check-eq (seq (seq (a) (b)) (c)) (seq (a) (b) (c)))
+(check-eq (seq (a) (seq (b) (c))) (seq (a) (b) (c)))
+(check-eq (seq (seq (a) (b)) (seq (c) (d))) (seq (a) (b) (c) (d)))
 
 ;; The congruence the defect broke: the two associations of a three-element product
 ;; are one class at add time, with no rule and no run.
-(prove (= (seq (seq (a) (b)) (c)) (seq (a) (seq (b) (c)))))
+(check-eq (seq (seq (a) (b)) (c)) (seq (a) (seq (b) (c))))
 
 ;; Deeper nesting flattens to a fixpoint, from either side.
-(prove (= (seq (seq (seq (a) (b)) (c)) (d)) (seq (a) (b) (c) (d))))
-(prove (= (seq (a) (seq (b) (seq (c) (d)))) (seq (a) (b) (c) (d))))
+(check-eq (seq (seq (seq (a) (b)) (c)) (d)) (seq (a) (b) (c) (d)))
+(check-eq (seq (a) (seq (b) (seq (c) (d)))) (seq (a) (b) (c) (d)))
 
 ;; Repetition is preserved: a sequence is not a multiset, so length matters.
-(prove (= (seq (seq (a) (a)) (b)) (seq (a) (a) (b))))
-(prove (!= (seq (a) (a) (b)) (seq (a) (b))))
+(check-eq (seq (seq (a) (a)) (b)) (seq (a) (a) (b)))
+(check-neq (seq (a) (a) (b)) (seq (a) (b)))
 
 ;; Order is preserved: flattening must not sort. This is the whole difference from
 ;; the AC counterpart (ac_flatten_build.egg), where the two sides ARE equal.
-(prove (!= (seq (a) (b)) (seq (b) (a))))
-(prove (!= (seq (seq (a) (b)) (c)) (seq (c) (b) (a))))
+(check-neq (seq (a) (b)) (seq (b) (a)))
+(check-neq (seq (seq (a) (b)) (c)) (seq (c) (b) (a)))
 
 ;; Negative control: flattening does not conflate distinct flat sequences.
-(prove (!= (seq (a) (b)) (seq (a) (c))))
+(check-neq (seq (a) (b)) (seq (a) (c)))

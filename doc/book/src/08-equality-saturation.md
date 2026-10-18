@@ -46,7 +46,7 @@ the graph.
 This is an operational fixpoint of the selected declared rules and the current
 driver. It is not a completeness result for an unstated theory. A law that was
 neither declared as an algebraic property nor encoded by a rule is absent.
-Likewise, a successful `(prove (!= a b))` says only that `a` and `b` currently
+Likewise, a successful `(check-neq a b)` says only that `a` and `b` currently
 belong to different classes.
 
 If the iteration bound is reached first, the run stops with `saturated: false`.

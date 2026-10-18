@@ -69,9 +69,8 @@ declaration has already been registered before any interpreted `Push`.
 | `Let(name, ct)` | Build CTerm → bind in globals |
 | `Insert(ct)` | Build CTerm |
 | `Union(a, b)` | Build both → merge → rebuild |
-| `Check(ct)` | `(prove t)`: build CTerm |
-| `CheckEq(a, b)` | `(prove (= a b))`: build both → rebuild → check equality; Lazy may run goal-directed completion |
-| `CheckNeq(a, b)` | `(prove (!= a b))`: build both → rebuild → check current non-membership; Lazy searches before accepting |
+| `CheckEq(a, b)` | `(check-eq a b)`: build both → rebuild → check equality; Lazy may run goal-directed completion |
+| `CheckNeq(a, b)` | `(check-neq a b)`: build both → rebuild → check current non-membership; Lazy searches before accepting |
 | `CheckQuery(cq)` | `(check fact ...)`, `(query ...)`: rebuild → one naive match of the query → test the count condition, or print the matches; builds nothing (see Check Queries) |
 | `Extract(ct)` | Build → rebuild → extract_best → print |
 | `ExtractWith { .. }` | Build → rebuild → extract under a cost model (`cost_models::run`) |
@@ -107,7 +106,7 @@ depend on class ids.
 
 In lazy AC mode a check runs inside the shared check transaction, so nothing it
 derives survives it. The rebuild runs completion. A single ground fact `(= p q)`
-is then decided as `prove` decides it, with the pair as the completion goal. Any
+is then decided as `check-eq` decides it, with the pair as the completion goal. Any
 other check whose condition does not yet hold runs the ordinary rules interleaved
 with completion, one round at a time, up to `lazy_ac_rounds`. Existence and
 `:min` stop when they hold; `:count`, `:none` and `query` wait for the fixpoint,
@@ -249,7 +248,7 @@ distinguishes stopping on the goal from reaching a fixpoint: the goal can be
 met with rules still firing.
 
 Building the goal's terms adds those nodes to the e-graph, which is
-observable: the same nodes a `(prove …)` of the goal would add.
+observable: the same nodes a `(check-eq …)` of the goal would add.
 
 `(run [ruleset] N :until fact ...)` is egglog's goal: the facts are lowered as a
 check's are, and the driver evaluates the query on the rebuilt graph at the same

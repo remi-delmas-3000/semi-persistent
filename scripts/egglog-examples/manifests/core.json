@@ -44,7 +44,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/array/source/encoded.ours.egg",
-              "sha256": "18deef502031f8183fcb055344edaf435f66674dd80f791e1cbeaed249de2734",
+              "sha256": "1a98b6f9ad9d4ad1fc45cc256607d45a198fafc15a06aa277258c53d7ad60f1d",
               "expected": "pass"
             }
           ]
@@ -71,7 +71,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/array/positive-guards/encoded.ours.egg",
-              "sha256": "fae751ceb0b46f82ebb3b17403014a1edb540d7c55b16382350ceb01474633c8",
+              "sha256": "605483071a8d0e7ba494f616b947d1befae962ce78a5a2b5273f28a3aca6cdf4",
               "expected": "pass"
             }
           ]
@@ -104,7 +104,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/array/must-fail-missing-read-guard/encoded.ours.egg",
-              "sha256": "caf083a67bae5fc4fb8fc767070edcdf34d8ed01ab1be90985c72dca5498a474",
+              "sha256": "f5cf3bef09e9c925a92202f8799cb9937fb369f9e7227106aaf109e1deb98be2",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -159,7 +159,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/list/source/encoded.ours.egg",
-              "sha256": "25554202fdc50c71e0971094115a72675301ce2106d398e93a1a6528aad0bc61",
+              "sha256": "c275a4d2fb02bb61ffdcce5b3b5189a49f9182da637f81865cadec9e00548824",
               "expected": "pass"
             }
           ]
@@ -186,7 +186,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/list/negative-index-existing-tail/encoded.ours.egg",
-              "sha256": "f3ba2bb786131428a9a73621b70a4c27fe6a57fbf7dfe3489add08bcf6ed4719",
+              "sha256": "05e52c90c77a37dc8e6ce679e431327aca5924be223199fccdf0f0c5b5e53625",
               "expected": "pass"
             }
           ]
@@ -219,7 +219,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/list/zero-index-negative-tail-conflict/encoded.ours.egg",
-              "sha256": "814a84207d24cd4ee9f234a4c10f01f707ff8e9a2eb453b51a375e791d481d1d",
+              "sha256": "1de8bf3c02d9de1ffc0ee56fc4bab07126ca75804bbec5a5ccd61b0dc1cbac85",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -280,7 +280,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/antiunify/source/encoded.ours.egg",
-              "sha256": "e17a81b87426039de2ab96a70210a3d60fe918ff4847bf86fb6bc6d48c8c2f01",
+              "sha256": "9f0de2425541e598093a792fafef895ad298145c0fc90f9a127224c553e20e74",
               "expected": "pass",
               "stdout_contains": [
                 "(Add ",
@@ -318,7 +318,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/antiunify/wrong-generalization/encoded.ours.egg",
-              "sha256": "7d63efef9c6305c512266d61c9511d6ecd6f7de6bdd611f3e7ceda2a9eea2c90",
+              "sha256": "d6d973f2b302493f8c658bc5dd158e226822b1455d020699951a8242f2d9f2c0",
               "expected": "check_failure",
               "stdout_contains": [
                 "(Add ",
@@ -377,7 +377,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/fibonacci/source/encoded.ours.egg",
-              "sha256": "c68e9092a6771128ac75c62c4266a78ed27973b1e043a685194bad4f22766c82",
+              "sha256": "b1d5df516569020f779c6d2f7aa21870802bec2f1e08377b0db91fce2b35c3f6",
               "expected": "pass"
             }
           ]
@@ -404,7 +404,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/fibonacci/rounds-5/encoded.ours.egg",
-              "sha256": "c87c9740ce268fa5343006fb285d911c15a9ac23fe89ca029f837edc7dc1bf30",
+              "sha256": "384b3391a497bbcc3a4eed01272feeb1367b6742b7ff610699fd8ae879d833f8",
               "expected": "pass"
             }
           ]
@@ -437,7 +437,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/fibonacci/wrong-answer/encoded.ours.egg",
-              "sha256": "ea6d63de90ed37010f3002ba58b331fb1a165011a6ac2f6080437567a04d6d95",
+              "sha256": "99d375b43b1d1592a0d0f893e02c0c858643966132737da02f651b9adc705069",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -488,7 +488,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/path-union/source/encoded.ours.egg",
-              "sha256": "8114d581952aa0642b29c144eff70a12d953c2c584c9560dd21853a3f79777cb",
+              "sha256": "900224e91082e28f15b47ff83cb50a98aaa66b702833428bbfad32904ad5be71",
               "expected": "pass"
             }
           ]
@@ -515,7 +515,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/path-union/membership/encoded.ours.egg",
-              "sha256": "30ecc0ec13e50af446640327b2fc0115b0afab20738613e21601e3ead72b9f61",
+              "sha256": "eec8543be8fbc6719ca8d0b61dc3f62a0ff18b3b99c979bc46725bbcf6eb31cd",
               "expected": "pass"
             }
           ]
@@ -548,7 +548,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/path-union/absent-path/encoded.ours.egg",
-              "sha256": "c42573677bfd7665f9deb495d75a725f56e269a43cecd39fb89a9b6684423700",
+              "sha256": "858b16b0bf511b04fadafafacb4a45268783ae317396d5ea7fed98c27a587b52",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -599,7 +599,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/naturals/source/encoded.ours.egg",
-              "sha256": "39eb9a7c299f659237dab6b2174e683ba137ca2d7fbca017adbefcc3a63ba965",
+              "sha256": "abc78c4a79a6fd5f76063172a4d34e2a4db76bb195ad49b7e72292628d61997d",
               "expected": "pass"
             }
           ]
@@ -632,7 +632,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/naturals/unequal-results/encoded.ours.egg",
-              "sha256": "3ca0468bed58ea1ce9f5ebf7dc8846326034ed3e52ccae459ac1070a32c445b3",
+              "sha256": "8929462a7e65b618661ae3d1163c4a87e2e14303ef625729a80a69bad5d9e021",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -681,7 +681,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/birewrite/source/encoded.ours.egg",
-              "sha256": "c0129ab41df0ace29e6f873479518ba46775461bd0520c9d08f7aa5bf33fb38c",
+              "sha256": "e9917087f0ba687a5b94a950a4520c7d75a2ff0bb90e4b46fc42f4293fe66d3f",
               "expected": "pass"
             }
           ]
@@ -714,7 +714,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/birewrite/noncommutative/encoded.ours.egg",
-              "sha256": "cabc40f475293f7a549551698c86f86f9f2ba537e753829ec37e935276d4d8aa",
+              "sha256": "ff9e4cd0ad6efcae1afcdaf58a30ef98887a9fca0c9b30df86102457c50bbef6",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -772,7 +772,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/fibonacci-demand/source/encoded.ours.egg",
-              "sha256": "5f2d08e56322db4483c890af86b19f42c8b849609a1f23487a9bc171d636f42e",
+              "sha256": "7cc12cd0c27bdc4260bb497361e6984e9f72e921903928f37a451f137aabd113",
               "expected": "pass",
               "stdout_contains": [
                 "(Num 13)"
@@ -808,7 +808,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/core/fibonacci-demand/wrong-answer/encoded.ours.egg",
-              "sha256": "73cfa07fd42279c6508a2523b16f6bb29a7b6fcd505b30f184dc2b2534cf6390",
+              "sha256": "6b8b2e95203dc7309a22cb299148be8a94b1e6d12a12fe5170a097e21a216a35",
               "expected": "check_failure",
               "stdout_contains": [
                 "(Num 13)"

@@ -11,4 +11,4 @@
 (rewrite (s x) (s (s x)))
 (let start (s (a)))
 (run 100 :goal (= start (s (s (a)))))
-(prove (= start (s (s (a)))))
+(check-eq start (s (s (a))))

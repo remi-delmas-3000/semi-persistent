@@ -21,8 +21,8 @@
 (let sum (Add a a a b b))
 (run 1)
 
-(prove (= sum (Selected a (Add b b))))
-(prove (= sum (Selected b (Add a a a))))
+(check-eq sum (Selected a (Add b b)))
+(check-eq sum (Selected b (Add a a a)))
 ;; ANCHOR_END: multiset-remainder
 
 ;; ANCHOR: multiplicity-patterns
@@ -32,8 +32,8 @@
 
 (let exact (Mul a a b))
 (run 1)
-(prove (= exact (Twice a)))
-(prove (!= exact (Twice b)))
+(check-eq exact (Twice a))
+(check-neq exact (Twice b))
 
 (function Sum (E) E :assoc-comm)
 (function Balanced () E)
@@ -42,10 +42,10 @@
 (let balanced (Sum c c g g))
 (let unbalanced (Sum c c c g g))
 (run 1)
-(prove (= balanced (Balanced)))
-(prove (!= unbalanced (Balanced)))
+(check-eq balanced (Balanced))
+(check-neq unbalanced (Balanced))
 ;; ANCHOR_END: multiplicity-patterns
 
 ;; Identity removal and multiplicity preservation are independent.
-(prove (!= (Add a a) a))
-(prove (= (Add a zero) a))
+(check-neq (Add a a) a)
+(check-eq (Add a zero) a)

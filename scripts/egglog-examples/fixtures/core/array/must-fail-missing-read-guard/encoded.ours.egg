@@ -31,5 +31,5 @@
 (let g_read (select (store g_mem g_a (Num 5)) g_c))
 (let g_base (select g_mem g_c))
 (run 3)
-(prove (!= (Conflict) (Present)))
-(prove (= g_read g_base))
+(check-neq (Conflict) (Present))
+(check-eq g_read g_base)

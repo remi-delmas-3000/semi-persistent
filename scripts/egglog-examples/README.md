@@ -49,8 +49,8 @@ supporting definitions; consult `adaptations` and `limitations` before
 interpreting a result. Git attributes preserve inherited trailing
 whitespace in these hashed fixtures.
 
-The semi-persistent programs use `prove` for their build-and-compare
-assertions. This preserves the observations encoded before `check`
+The semi-persistent programs use `check-eq` and `check-neq` (formerly
+`prove`) for their build-and-compare assertions. This preserves the observations encoded before `check`
 became a query that only matches existing terms. In particular, some
 absence checks rely on building a witness term before comparing its
 class. Egglog programs retain their original `check` syntax; programs

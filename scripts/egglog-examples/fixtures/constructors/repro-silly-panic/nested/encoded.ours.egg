@@ -13,4 +13,4 @@
 (run 10)
 (let audit_n (par audit_q (par audit_A audit_A)))
 (run 10)
-(prove (= audit_n audit_A))
+(check-eq audit_n audit_A)

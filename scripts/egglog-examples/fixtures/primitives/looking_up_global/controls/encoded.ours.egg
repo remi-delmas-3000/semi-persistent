@@ -7,9 +7,9 @@
 (rule ((= x (N n))) ((union (Known x) (Present))))
 (union (F) (N 0))
 (run 1)
-(prove (= (Known (F)) (Present)))
+(check-eq (Known (F)) (Present))
 (let x (F))
-(prove (!= (Known (G)) (Present)))
+(check-neq (Known (G)) (Present))
 
-(prove (= x (N 0)))
-(prove (!= (G) (N 0)))
+(check-eq x (N 0))
+(check-neq (G) (N 0))

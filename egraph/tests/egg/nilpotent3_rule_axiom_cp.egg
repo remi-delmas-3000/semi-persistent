@@ -19,5 +19,5 @@
 (let t_bbc (x3 (b) (b) (c)))
 
 (run 5)
-(prove (= t_aac (b)))
-(prove (= t_bbc (a)))
+(check-eq t_aac (b))
+(check-eq t_bbc (a))

@@ -36,4 +36,4 @@
  :when ((i64::> k 1)))
 (SL (N 1) 64)
 (run 1000)
-(prove (= (Known (SL (N 1) 64)) (Present)))
+(check-eq (Known (SL (N 1) 64)) (Present))

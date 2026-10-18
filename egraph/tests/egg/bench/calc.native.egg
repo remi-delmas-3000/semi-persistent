@@ -37,7 +37,7 @@
 (push)
 (gmul gA4 gA4)
 (run 10000 :goal (= (gmul gA4 gA4) (gmul (gmul gA2 gA2) (gmul gA2 gA2))))
-(prove (= (gmul gA4 gA4) (gmul (gmul gA2 gA2) (gmul gA2 gA2))))
+(check-eq (gmul gA4 gA4) (gmul (gmul gA2 gA2) (gmul gA2 gA2)))
 (pop)
 
 ;; --- block 2 ---
@@ -45,8 +45,8 @@
 (gmul (gmul gA2 gA2) (gmul gA2 gA2))
 (run 10000 :goal (= (gmul (gmul gA2 gA2) (gmul gA2 gA2))
                      (gmul gA2 (gmul gA2 (gmul gA2 gA2)))))
-(prove (= (gmul (gmul gA2 gA2) (gmul gA2 gA2))
-          (gmul gA2 (gmul gA2 (gmul gA2 gA2)))))
+(check-eq (gmul (gmul gA2 gA2) (gmul gA2 gA2))
+          (gmul gA2 (gmul gA2 (gmul gA2 gA2))))
 (pop)
 
 
@@ -59,14 +59,14 @@
 (push)
 (gmul (gmul gb (gmul (inv ga) ga)) (inv gb))
 (run 100000 :goal (= (gmul (gmul gb (gmul (inv ga) ga)) (inv gb)) (gmul gb (inv gb))))
-(prove (= (gmul (gmul gb (gmul (inv ga) ga)) (inv gb)) (gmul gb (inv gb))))
+(check-eq (gmul (gmul gb (gmul (inv ga) ga)) (inv gb)) (gmul gb (inv gb)))
 (pop)
 
 ;; --- block 4 ---
 (push)
 (gmul gb (inv gb))
 (run 100000 :goal (= (gmul gb (inv gb)) gI))
-(prove (= (gmul gb (inv gb)) gI))
+(check-eq (gmul gb (inv gb)) gI)
 (pop)
 (print-size)
 (print-stats :file "calc.native.stats.json")

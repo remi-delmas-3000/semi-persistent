@@ -25,7 +25,7 @@
 (run 5)
 
 ;; The entailed critical-pair equality.
-(prove (= s_cd s_ae))
+(check-eq s_cd s_ae)
 ;; Asserted equalities still hold.
-(prove (= s_ab (c)))
-(prove (= s_bd (e)))
+(check-eq s_ab (c))
+(check-eq s_bd (e))

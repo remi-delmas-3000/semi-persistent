@@ -18,4 +18,4 @@
 (let s_cd (add (c) (d)))
 (let s_ae (add (a) (e)))
 (run 5)
-(prove (= s_cd s_ae))
+(check-eq s_cd s_ae)

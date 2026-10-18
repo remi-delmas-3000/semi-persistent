@@ -20,5 +20,5 @@
 (union (mk 3) (mk 5))
 
 (run 10)
-(prove (= (Edge (mk 3) (mk 6)) (Present)))
-(prove (= (Path (mk 1) (mk 6)) (Present)))
+(check-eq (Edge (mk 3) (mk 6)) (Present))
+(check-eq (Path (mk 1) (mk 6)) (Present))

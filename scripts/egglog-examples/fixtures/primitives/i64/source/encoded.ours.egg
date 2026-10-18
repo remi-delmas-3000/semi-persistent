@@ -28,4 +28,4 @@
 (rewrite (Digit 9) (Text "9"))
 (Decimal 20)
 (run 200)
-(prove (= (Decimal 20) (Text "20")))
+(check-eq (Decimal 20) (Text "20"))

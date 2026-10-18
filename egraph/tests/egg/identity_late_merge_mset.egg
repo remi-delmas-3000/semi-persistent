@@ -21,8 +21,8 @@
 
 (run 5)
 ;; add(a,b) with b=0 collapses to a (unit-drop + size-1 degeneracy).
-(prove (= s_ab (a)))
+(check-eq s_ab (a))
 ;; add(a,b,c) with b=0 stays a well-formed sum {a,c}.
-(prove (= s_abc (add (a) (c))))
+(check-eq s_abc (add (a) (c)))
 ;; A unit summand with multiplicity > 1 drops wholesale: add(b,b,c) with b=0 is c.
-(prove (= s_bbc (c)))
+(check-eq s_bbc (c))

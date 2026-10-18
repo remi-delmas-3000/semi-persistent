@@ -42,7 +42,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/bitwise/source/encoded.ours.egg",
-              "sha256": "a6b037106b110de83d7fb4769b5b83bf0efc623b17957035b06d574cef0c7033",
+              "sha256": "68237955580c9ef7bc4ed3f46d508e7000752b833dcd1500182665eff0b553e0",
               "expected": "pass"
             }
           ]
@@ -69,7 +69,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/bitwise/controls/encoded.ours.egg",
-              "sha256": "ebc90c397acbfb7be07d5be7a649873602eb22bbfe65689c441b3696b9b9fd53",
+              "sha256": "ba2d6ee7b8c19ef254771c8e724e565f651c0d32b551c736330cff2ab7f5fb3b",
               "expected": "pass"
             }
           ]
@@ -102,7 +102,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/bitwise/undefined-shift-64/encoded.ours.egg",
-              "sha256": "05f0bab78b7675646eeb59847a3daedf4961efd05ac7690a154815d43617309b",
+              "sha256": "1f56577d5f64d8b274dd45ebb067eef5a322a4f7da872ffc9f62640cc6073879",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -153,7 +153,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/bool/source/encoded.ours.egg",
-              "sha256": "6d65ffe69e1b3817168f190fbb339d0f8225425f2ee7a24eb3eeca22e8042345",
+              "sha256": "5fc8fcac295d95c5694dc19fd493c57a7fc2ccb86f59d9b8cf33a0a364f166f8",
               "expected": "pass"
             }
           ]
@@ -180,7 +180,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/bool/controls/encoded.ours.egg",
-              "sha256": "139c140e5b9ff35ce14923ec3df803f585869231604a5fd02c142ba48e131ad8",
+              "sha256": "7a99f42fe4d77d3216c91037ad4a8f91176f686afa20de1a9b4a3fefa85f3a76",
               "expected": "pass"
             }
           ]
@@ -213,7 +213,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/bool/conflicting-table-output/encoded.ours.egg",
-              "sha256": "48e6a53ffd72c763d6a03c276f74ae2b298cecc2558b13dec512a6ba303a6d59",
+              "sha256": "3dcf515710daf6ee1e058ce3dcb5a2f612e69da730585a5bd54e2cf907d0deb9",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -263,7 +263,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/i64/source/encoded.ours.egg",
-              "sha256": "c229955fb02f797a0128bfb7f2123b0b2b609e429de495966b1be237da850916",
+              "sha256": "8ebb30268dfbccabec511bebd4ca373cf4c8f61dc703a33ff38557c0950e3e0a",
               "expected": "pass"
             }
           ]
@@ -290,7 +290,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/i64/controls/encoded.ours.egg",
-              "sha256": "49203fe837a014f3aea6c04e9241e1cfc7a70bee80ac6e77b2a059d2d475dfd7",
+              "sha256": "a8b8b084b9c309aba4cf52f38d9bb6ab856fb5614a314ab97009121d292176e2",
               "expected": "pass"
             }
           ]
@@ -323,7 +323,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/i64/reject/encoded.ours.egg",
-              "sha256": "eed63cde6045500114d91b6c6a5f3dd7b46d734832f1dad2ada0a2ae9803eac6",
+              "sha256": "739e8093b5ef15bf9ed7d695c4641072643f069888e8b272a973e9a5cdf20daa",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -373,7 +373,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/pair/source/encoded.ours.egg",
-              "sha256": "0113866f02a64337737c9f1560c6470be0a8f47e9544da22efa4f08943ef9891",
+              "sha256": "ac353ad23fd4ab925aed098aa6271226ef9602df9a9876844ac6b7be05bf831f",
               "expected": "pass"
             }
           ]
@@ -400,7 +400,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/pair/controls/encoded.ours.egg",
-              "sha256": "840b048f167e356beed26754b96ab9b8dc62b0ffbc9a027a14ee8e637f978806",
+              "sha256": "a57718794d23ae1ed35391dc583039297152f89c064b8bae5d2b64364be6f30b",
               "expected": "pass"
             }
           ]
@@ -433,7 +433,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/pair/reject/encoded.ours.egg",
-              "sha256": "39b529a47476951c061264a814039e4e93cd58ad950215c6ec02e08f2884ac9e",
+              "sha256": "24fcb6e410b37ed639f96403fb4cfa2a7ff1182f5c52b9e9802b81a34dbd2949",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -483,7 +483,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/string/source/encoded.ours.egg",
-              "sha256": "a0a39f0c08c374f0f6cb16d5d5456447321938b673ea1007ba9c84011f256fa5",
+              "sha256": "430cadda642a9692526feb9060041a1981de7eeeae0da117129cf0a31768d172",
               "expected": "pass"
             }
           ]
@@ -510,7 +510,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/string/controls/encoded.ours.egg",
-              "sha256": "946942bab26cac7d952f260ec636da6aea8143155db71a19d645d2615b2077f4",
+              "sha256": "b1e3001d32094d356ab2165ba1298155127b8a5f4a9dcec959717245c0d62bf5",
               "expected": "pass"
             }
           ]
@@ -543,7 +543,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/string/reject/encoded.ours.egg",
-              "sha256": "ed58463aec9e06e2d65544e4186afc4f2ae67922667752142eed8ca698623cb6",
+              "sha256": "fe9be341dc797b2f197e298b93b10ba269f3ca1b004e79e04775e2010b66be01",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -593,7 +593,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/primitives/source/encoded.ours.egg",
-              "sha256": "dceaebbfd7073a90bad6e5ed4187468c3ef9f24b3b038927911e1a024285c3aa",
+              "sha256": "09206b9649dd26864ab36ec6a40f3deeb3b803f234afaa705950fdbf33a5c8bf",
               "expected": "pass"
             }
           ]
@@ -620,7 +620,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/primitives/controls/encoded.ours.egg",
-              "sha256": "dc18250171649c933fa3d568ea444026267de436dd58a2efc1fc0d523fb8d7f0",
+              "sha256": "a9067a68525b9373d1cfe4a5d9b55ce0a1cdf066525c51e38f56832aee888c1d",
               "expected": "pass"
             }
           ]
@@ -653,7 +653,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/primitives/reject-false-predicate/encoded.ours.egg",
-              "sha256": "1db94d5f9fc9051e075359328712d7c1027379df677a9552f24c21f4932adf80",
+              "sha256": "fa00b70503ca6f86e7d2b7ce2b9921d0fe8420aa8dfe4fcf98ddf3ad8ba6e9a9",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -703,7 +703,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/looking_up_global/source/encoded.ours.egg",
-              "sha256": "e2b6761d26cf9c5f6385891fbc00d9bbf3872db2a095105564c613c191f3ce3a",
+              "sha256": "0a8cfb4606266e08ed2341f44bba01158837be2a1948b0bb8d78f0a47f888df2",
               "expected": "pass"
             }
           ]
@@ -730,7 +730,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/looking_up_global/controls/encoded.ours.egg",
-              "sha256": "16fbfdf10c8b688b644d2cb854bf969ee2887d7b04f51f4e1eeba33e9b17b46c",
+              "sha256": "ffb4dab5ec16411c4b1744019743ccb98ea45e5a24e021fce51f73615946c957",
               "expected": "pass"
             }
           ]
@@ -763,7 +763,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/looking_up_global/reject/encoded.ours.egg",
-              "sha256": "c933301771f65f2848ddbc71192e62c93640ac35becf6a5ea872dfaf0b426173",
+              "sha256": "81bf7e514bb4ca404ef6de459d0361599ff571f278f5b6504f5252733d0ad483",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -814,7 +814,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/name-resolution/source/encoded.ours.egg",
-              "sha256": "2277497583ef747d0f563695c4821ea0eb9466d9cb87b2715267596d5a7a4b84",
+              "sha256": "9f6583af71d8172aee31b082c0cec4cc7f7f03276941634f9cbef399264d8b2e",
               "expected": "pass"
             }
           ]
@@ -841,7 +841,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/name-resolution/controls/encoded.ours.egg",
-              "sha256": "4c9f6521ea2dbb2b6b654bafb47f2f8ffaca23fd61a1421110b5cee4b5e8f272",
+              "sha256": "20efa9cdd2dd1458d0b2422af94547ccaed3f14b6b2b97e57f5e3ff16cf3955a",
               "expected": "pass"
             }
           ]
@@ -874,7 +874,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/name-resolution/reject/encoded.ours.egg",
-              "sha256": "7f4a9da5d7da40de85f4028c20fc52860de6ea43990b066f98a6f13fbca5e173",
+              "sha256": "3a721e455b0916be06d7f5cbd1ea225808510dcc47418025a23731179d4995f6",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -967,7 +967,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/use-at-in-string/controls/encoded.ours.egg",
-              "sha256": "0de85c98e2c16e8d28292a8cd1c303b4c6eca318495572e33d29324f12198229",
+              "sha256": "b7603f0a71a10eb56d14b32fe59669f2efeed75a708aec38922c740fc7d49aea",
               "expected": "pass",
               "stdout_contains": [
                 "@hello"
@@ -1003,7 +1003,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/use-at-in-string/reject/encoded.ours.egg",
-              "sha256": "ec904c0d14b3b6932fb6bd5b2185233e5ea3463cd0bf87d5fada98cb7a2e44c3",
+              "sha256": "27910054b923d4511955bcc7bf454cbe726f31249fded01c383421727114bbe4",
               "expected": "check_failure",
               "stdout_contains": [
                 "@hello"
@@ -1084,7 +1084,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/datatypes/controls/encoded.ours.egg",
-              "sha256": "f976dbf4323c3af95aa2c47c7d2e77aa461c65d2a3f2ed29c6f626e5e12aef98",
+              "sha256": "28ea35e9fee1ffd4a7b0f12afebfa7860c658dadcea764a282903e22443e61ee",
               "expected": "pass"
             }
           ]
@@ -1117,7 +1117,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/primitives/datatypes/reject/encoded.ours.egg",
-              "sha256": "4139148e0a641f9800c28c70f6d3b6001e6878e1715ea52dce05906311ca9ce6",
+              "sha256": "cc01de165edc20dd2d0a19a70ffc881d34458a7b661e1c7929a13ba365a18bda",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"

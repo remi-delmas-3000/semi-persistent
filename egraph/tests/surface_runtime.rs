@@ -82,9 +82,9 @@ fn rhs_comprehensions_map_between_element_sorts() {
 (let mset (WrapA (AMset a b b)))
 (run 2)
 
-(prove (= seq (WrapB (BS (F a) (F b) (F b)))))
-(prove (= set (WrapB (BSet (F a) (F b)))))
-(prove (= mset (WrapB (BMset (F a) (F b) (F b)))))
+(check-eq seq (WrapB (BS (F a) (F b) (F b))))
+(check-eq set (WrapB (BSet (F a) (F b))))
+(check-eq mset (WrapB (BMset (F a) (F b) (F b))))
 ");
 }
 
@@ -263,7 +263,7 @@ fn until_disequality_rebuilds_before_observing_a_dirty_graph() {
 
 #[test]
 fn a_named_run_leaves_the_default_ruleset_alone() {
-    // `tests/egg/ruleset_scoping.egg` pins the same scoping through `(prove …)`; this asserts
+    // `tests/egg/ruleset_scoping.egg` pins the same scoping through `(check-eq …)`; this asserts
     // it on the class ids, where "did not fire" is directly visible.
     let mut interp = run("
 (sort E)
@@ -331,7 +331,7 @@ fn pop_reuses_global_ids_for_later_rules() {
 (f (c))
 (rewrite (f live) (hit))
 (run 2)
-(prove (= (f (c)) (hit)))
+(check-eq (f (c)) (hit))
 ");
 }
 
@@ -354,8 +354,8 @@ fn pop_restores_a_shadowed_global_name() {
 (f (b))
 (rewrite (f chosen) (hit))
 (run 2)
-(prove (= (f (a)) (hit)))
-(prove (!= (f (b)) (hit)))
+(check-eq (f (a)) (hit))
+(check-neq (f (b)) (hit))
 ");
 }
 
@@ -375,7 +375,7 @@ fn check_rebuilds_pending_congruence_after_budgeted_run() {
 (seed)
 (rule ((seed)) ((union (a) (b))))
 (run 1)
-(prove (= fa fb))
+(check-eq fa fb)
 ");
 }
 

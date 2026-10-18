@@ -120,7 +120,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/proof-extract-cost/missing-equality/encoded.ours.egg",
-              "sha256": "c22b2ad8599d877d79f8807b5e4480c160a0dbd1fd0c26d43df90204eb5acec8",
+              "sha256": "89fbde2c3e0ea80ec1d8caa64179f6b1ea2c0ac008c761b3e1efa819895de184",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -170,7 +170,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/repro-querybug2/source/encoded.ours.egg",
-              "sha256": "5116bee5f7348d806151e087781d84a6a651ebe33f8d751bc1c186868722f71d",
+              "sha256": "baed610f01001b9f4b6ebafaefcf88727cd9d9f7b6d492b834fc76b0af01c9d6",
               "expected": "pass"
             }
           ]
@@ -197,7 +197,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/repro-querybug2/literal-3/encoded.ours.egg",
-              "sha256": "c73cf48533180e55136f362db9347cb5493c2f6f9260ec1cb6c170215a9b5d13",
+              "sha256": "b60b5a3a587133725546ebe53993832ae834fc8d1ec7fe0e8afbfcba117ff2fa",
               "expected": "pass"
             }
           ]
@@ -230,7 +230,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/repro-querybug2/unjustified-literal/encoded.ours.egg",
-              "sha256": "553248c76d68d2fe07a3318d65d0967b900631fe019e218557a9ec9102943212",
+              "sha256": "3f95478bb6420267dd74f4a51d3f0e6b8de2eb1f6f9daee1395b38e32db3cf47",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -280,7 +280,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/repro-querybug4/source/encoded.ours.egg",
-              "sha256": "e2a3e1bdbc9841cc7883466400bf8b94bda120aee9a34e1b23fec6927bd300b3",
+              "sha256": "109604cd293095c92f34a1c891fb8b56f322e5fa7f97f9d6a7c4e926f2b542c7",
               "expected": "pass"
             }
           ]
@@ -307,7 +307,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/repro-querybug4/literal-3/encoded.ours.egg",
-              "sha256": "fe51ccffbf19fcc11a3f93a7cc1ecc23b8db2ae6ed898a59ec183262597d0df8",
+              "sha256": "98a23f95e181f6cae149536950f8bc8b022ab529a1742f8478648cff2dd8a7ca",
               "expected": "pass"
             }
           ]
@@ -340,7 +340,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/repro-querybug4/unjustified-literal/encoded.ours.egg",
-              "sha256": "b5dd30b399d6bf7cfbead4a97cfc2f8e316515525a09de32a44a270de9aca55a",
+              "sha256": "ee94124da1835abfa02ada8d0486751a4e30e0f5138a61f430f6c9bdf03f0367",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"
@@ -391,7 +391,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/repro-silly-panic/source-with-oracle/encoded.ours.egg",
-              "sha256": "9ebd800594f59336a074a947d8990314925c19f9f832582791bfc2f0cd100ef2",
+              "sha256": "7cda02344a4cf07197a280be09ce4e47b2a20cae1fe5eae4f39a6e6eee3633c0",
               "expected": "pass"
             }
           ]
@@ -418,7 +418,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/repro-silly-panic/nested/encoded.ours.egg",
-              "sha256": "0f4be801261009470ac4081b106b65185f22a53180bf0512e3c8ccdecca7f786",
+              "sha256": "acf6713adf2e384e0648f7b8fc46ff4a6f4ac9b9fd46e6ebe03afed59d8d442c",
               "expected": "pass"
             }
           ]
@@ -451,7 +451,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/constructors/repro-silly-panic/pre-run/encoded.ours.egg",
-              "sha256": "1ef04230127ab7767b7a0597cfaf8f43da45dd0860eb92aa2a74d623d1e332e8",
+              "sha256": "0f22dc6cc75b2876ba4c2ce173c5d8bd3cb6207dac0fb94ec6293d7e632ff517",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed"

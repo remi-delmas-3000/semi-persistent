@@ -13,6 +13,6 @@
 
 (run 100)
 
-(prove (= (OtherNum 2) (Num 2)))
+(check-eq (OtherNum 2) (Num 2))
 
-(prove (= (OtherNum 3) (Num 3)))
+(check-eq (OtherNum 3) (Num 3))

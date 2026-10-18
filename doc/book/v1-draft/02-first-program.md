@@ -87,12 +87,12 @@ proved equal.
 ## Checking
 
 ```lisp
-(prove (= expr (Num 8)))
+(check-eq expr (Num 8))
 ```
 
 Assert that the two terms are in the same e-class. If they are not, the program
 fails with `error: check failed: terms are not equal` and a nonzero exit
-status. `(prove (!= a b))` asserts the opposite, and is weaker than it looks:
+status. `(check-neq a b)` asserts the opposite, and is weaker than it looks:
 it passes when the engine's search did not derive equality, which is not the
 same as a proof that the two terms are unequal. Chapter 12 says more about
 that.

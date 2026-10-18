@@ -10,5 +10,5 @@
 
 ; tests
 (let audit_q (par audit_A audit_A))
-(prove (= audit_q audit_A))
+(check-eq audit_q audit_A)
 (run 10)

@@ -13,4 +13,4 @@
 
 (run 100)
 
-(prove (= (OtherNum 2) (Num 2)))
+(check-eq (OtherNum 2) (Num 2))

@@ -20,13 +20,13 @@
 (union (mk 3) (mk 5))
 
 (run 10)
-(prove (= (Edge (mk 3) (mk 6)) (Present)))
-(prove (= (Path (mk 1) (mk 6)) (Present)))
+(check-eq (Edge (mk 3) (mk 6)) (Present))
+(check-eq (Path (mk 1) (mk 6)) (Present))
 
 ;; Supplemental controls; not present in the upstream workload.
-(prove (!= (Path (mk 6) (mk 1)) (Present)))
+(check-neq (Path (mk 6) (mk 1)) (Present))
 ;; An inserted but unasserted Edge must not cause a path to 7.
 (Edge (mk 6) (mk 7))
 (run 10)
-(prove (!= (Path (mk 1) (mk 7)) (Present)))
-(prove (= (Path (mk 1) (mk 6)) (Present)))
+(check-neq (Path (mk 1) (mk 7)) (Present))
+(check-eq (Path (mk 1) (mk 6)) (Present))

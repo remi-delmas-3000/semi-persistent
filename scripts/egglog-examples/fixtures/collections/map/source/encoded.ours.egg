@@ -15,6 +15,6 @@
 (let global_lhs15 (TextVal "one"))
 (let global_rhs15 (MGet global_my_map1 1))
 (run eval 1000)
-(prove (= global_lhs15 global_rhs15))
+(check-eq global_lhs15 global_rhs15)
 (run eval 1000)
 (extract global_my_map2)

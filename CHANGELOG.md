@@ -59,6 +59,13 @@
 
 ### Changed
 
+- `prove` is renamed to `check-eq` and `check-neq`: `(prove (= a b))` is
+  `(check-eq a b)`, `(prove (!= a b))` is `(check-neq a b)`, and a build-only
+  `(prove t)` is the bare term `t`. `check-eq` takes two or more terms and requires
+  them all in one class. `prove` is a parse error that names its replacement.
+  `scripts/migrate-prove.py` rewrote the repository (3,509 sites); the hash-pinned
+  egglog example manifests were refreshed for the rewritten programs.
+
 - `check` has egglog's semantics: `(check fact ...)` is a conjunctive query over the
   e-graph in the language of rule bodies, it builds nothing, and it succeeds when the
   query has a match. A name that is not a global is a variable of that one check. In

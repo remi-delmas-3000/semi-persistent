@@ -44,7 +44,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/points-to/source/encoded.ours.egg",
-              "sha256": "49cef81cdae5950be68aa64b7791b078c62012d6f9fa246976acdd9b1a29badd",
+              "sha256": "d278c6a13c6cdbf3011a661732ecafef7385023b64e27ac6a0177e08e52bca52",
               "expected": "pass"
             }
           ]
@@ -71,7 +71,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/points-to/updates-scopes/encoded.ours.egg",
-              "sha256": "c4b7611287a8de333e16360e00e557dcd0e49813f80d5810066d9ac5ef4a7699",
+              "sha256": "799cb59f8aec698f2d3107f384c79e37e33ee55c58f1d3668885f54fce5e3fc7",
               "expected": "pass"
             }
           ]
@@ -104,7 +104,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/points-to/ignore-load-field/encoded.ours.egg",
-              "sha256": "1091ef4320af06ce81948bbd1c297050e9c67d4265326f01fc5b4b8db76e5357",
+              "sha256": "4d2477c8ae1559d688329f69acf1f530b6e3b6e04a96c9d5684974cd24cf014f",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed: terms are equal"
@@ -156,7 +156,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/schedule-demo/source/encoded.ours.egg",
-              "sha256": "8a28c8f304745f95f47bb707424bce706045093553e95b8ff1f24256bd2901b5",
+              "sha256": "225c9ce2e8fceaede8eae8f07788195560247c6776f9b518fb19993899e7ce1f",
               "expected": "pass"
             }
           ]
@@ -183,7 +183,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/schedule-demo/steps-2/encoded.ours.egg",
-              "sha256": "e7704f3a6cad703f23e809a7e992aec486625d0aadd7b54d41bbe46e88c1c191",
+              "sha256": "a212d4650526e1b01f3dbe631162e9359c3f83855b4fe938c94e4869421ed81d",
               "expected": "pass"
             }
           ]
@@ -210,7 +210,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/schedule-demo/steps-5/encoded.ours.egg",
-              "sha256": "3e5c20a1d091f1596fa2bb60e6e56a27947cabba7dcbe7d0819c51b89525dbaa",
+              "sha256": "ae6c151dbd57ec36f09bf4a8948bc982e7c0cbd665dc0db0dec296ce4948fe60",
               "expected": "pass"
             }
           ]
@@ -259,7 +259,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/relation-query-allowed/source/encoded.ours.egg",
-              "sha256": "7070e8fba58fa05472939f4b328359ad16628e12c6344a14c7b40e918449f5d0",
+              "sha256": "fb1ebf9a14ffaa9570181e791c9315d0d2a32ca0c8d958cf172b50a798dea3fe",
               "expected": "pass"
             }
           ]
@@ -286,7 +286,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/relation-query-allowed/third-row/encoded.ours.egg",
-              "sha256": "0102a712b89938e395852e22b9fc834af197008f56fa0d819ec411114b65c146",
+              "sha256": "a7f59524d0e4a32f6d12cf332e91bcecab64429ec04f08baddd72d20769c1bf9",
               "expected": "pass"
             }
           ]
@@ -309,7 +309,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/relation-query-allowed/identity-counterexample/encoded.ours.egg",
-              "sha256": "4f8a067b15131c4e8eb1e2451dfd50033f57758e054b7cad7e909c6d772098eb",
+              "sha256": "676cb4b63eba6311c429d9d778987a380d057ac9c1e4d9fa52cb8e974ec1a75c",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed: terms are equal"
@@ -361,7 +361,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/test-combined/source/encoded.ours.egg",
-              "sha256": "856990745b541eb16ffeaa941d059656d33aa82d6a45eee8506a7ac4a4931b50",
+              "sha256": "48d55f6b820473a040df5eb9049375bc9954a37d728d25af817602e25e25a30e",
               "expected": "pass"
             }
           ]
@@ -388,7 +388,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/test-combined/late-edge/encoded.ours.egg",
-              "sha256": "f8856dc1b092126749463e98a0052d57fec614e3bd1892bce6451a2abe1362e9",
+              "sha256": "775e1338634bbe15ea250ef228c515d0afe670d15c50b52e7129bfbc6760665d",
               "expected": "pass"
             }
           ]
@@ -437,7 +437,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/test-combined-steps/source/encoded.ours.egg",
-              "sha256": "124db233986e4c06c14abf0c41256c5d781d1deadc435f48bf1190becb433840",
+              "sha256": "4987fe21fb19000e8123bae687b0d64bece28196bd7bf4dd71843924cab7e78d",
               "expected": "pass"
             }
           ]
@@ -464,7 +464,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/test-combined-steps/steps-3/encoded.ours.egg",
-              "sha256": "7d9baf687471a6c8bae8a62929b36d143d14577e444e27237f7dbc2978519854",
+              "sha256": "afe06a975e07fbd1a472cc714e97eeef5499e521770294ac5b573d08f6535d56",
               "expected": "pass"
             }
           ]
@@ -487,7 +487,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/test-combined-steps/snapshot-counterexample/encoded.ours.egg",
-              "sha256": "014f7c62d6723cacbb4c1eb7c875d0f62e879100ffd1476852739e504ee0d251",
+              "sha256": "91f111d492add05a4186c6e01bfe0fac57ab600f3b70cb2c46de52ce958e2ced",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed: terms are equal"
@@ -539,7 +539,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/stratified/source/encoded.ours.egg",
-              "sha256": "97204b82b925ff3116a973585a702d6981d51a251e4ec1e7522ef149581229f8",
+              "sha256": "0a57c192dceadd29d957e6ed83c153a6df736d3fb540f324094ec71216612345",
               "expected": "pass"
             }
           ]
@@ -566,7 +566,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/relations/stratified/phase-boundaries/encoded.ours.egg",
-              "sha256": "8b8c5ce4ad5d32e2544f71993472c9f98ffeb09326424be88e5531350a32dc1c",
+              "sha256": "d6156dd47b4a02cafc03a75c779d35e5fd8844903db3a439c26ff867a83b8f9a",
               "expected": "pass"
             }
           ]

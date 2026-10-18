@@ -13,4 +13,4 @@
 
 (extract (Expensive))
 
-(prove (= (Cheap) (Expensive)))
+(check-eq (Cheap) (Expensive))

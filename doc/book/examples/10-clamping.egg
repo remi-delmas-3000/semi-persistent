@@ -10,47 +10,47 @@
 
 ;; Plain AC retains natural-number multiplicities.
 (function add (E) E :assoc :comm :identity (e))
-(prove (!= (add a a) a))
-(prove (!= (add a a a) (add a a)))
-(prove (= (add a e) a))
-(prove (= (add a e e b) (add a b)))
-(prove (= (add e e) e))
+(check-neq (add a a) a)
+(check-neq (add a a a) (add a a))
+(check-eq (add a e) a)
+(check-eq (add a e e b) (add a b))
+(check-eq (add e e) e)
 
 ;; Idempotence clamps every positive multiplicity to one.
 (function meet (E) E :assoc-comm-idem :identity (e))
-(prove (= (meet a a) a))
-(prove (= (meet a a a b b) (meet a b)))
-(prove (= (meet a e) a))
+(check-eq (meet a a) a)
+(check-eq (meet a a a b b) (meet a b))
+(check-eq (meet a e) a)
 
 ;; Bare :nilpotent has order two. Counts are reduced modulo two.
 (function xor (E) E :assoc :comm :nilpotent :identity (e))
-(prove (= (xor a a) e))
-(prove (= (xor a a a) a))
-(prove (= (xor a a b) b))
-(prove (= (xor a b a b) e))
-(prove (!= (xor a b) e))
+(check-eq (xor a a) e)
+(check-eq (xor a a a) a)
+(check-eq (xor a a b) b)
+(check-eq (xor a b a b) e)
+(check-neq (xor a b) e)
 
 ;; Nilpotence of order three can retain multiplicity two.
 (function tri (E) E :assoc :comm :nilpotent 3 :identity (e))
-(prove (= (tri a a a) e))
-(prove (!= (tri a a) e))
-(prove (!= (tri a a) a))
-(prove (= (tri a a a a) a))
+(check-eq (tri a a a) e)
+(check-neq (tri a a) e)
+(check-neq (tri a a) a)
+(check-eq (tri a a a a) a)
 
 ;; Rebuild applies the same clamps after child classes merge.
 (let x_ab (xor a b))
 (let m_ab (meet a b))
 (let t_ab (tri a b))
 (union a b)
-(prove (= x_ab e))
-(prove (= m_ab a))
-(prove (= t_ab (tri a a)))
+(check-eq x_ab e)
+(check-eq m_ab a)
+(check-eq t_ab (tri a a))
 
 ;; A child that later joins the identity class is removed on rebuild.
 (let s_ce (add c e))
 (let s_c2 (add c c))
-(prove (= s_ce c))
+(check-eq s_ce c)
 (union c e)
-(prove (= s_c2 e))
+(check-eq s_c2 e)
 (print-size)
 ;; ANCHOR_END: clamping

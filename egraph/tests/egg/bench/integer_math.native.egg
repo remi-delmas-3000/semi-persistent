@@ -92,6 +92,6 @@
 
 (run 4)
 
-(prove (= startexpr equivexpr))
+(check-eq startexpr equivexpr)
 (print-size)
 (print-stats :file "integer_math.native.stats.json")

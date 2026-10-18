@@ -17,9 +17,9 @@
 ; check that addition works
 (let four1 (S three))
 (let four2 (Plus two two))
-(prove (!= four1 four2))
+(check-neq four1 four2)
 (run 10000)
-(prove (= four1 four2))
+(check-eq four1 four2)
 
 ; multiplication
 (constructor Times (N N) N)
@@ -29,6 +29,6 @@
 ; check that multiplication works
 (let six1 (Times two three))
 (let six2 (Plus two (Plus two two)))
-(prove (!= six1 six2))
+(check-neq six1 six2)
 (run 10000)
-(prove (= six1 six2))
+(check-eq six1 six2)

@@ -78,17 +78,17 @@ fn initial_term_construction_respects_assoc_direction() {
 (function d () E)
 
 (let lflat (L (a) (b) (c) (d)))
-(prove (= lflat (L (L (L (a) (b)) (c)) (d))))
-(prove (!= lflat (L (a) (L (b) (c)) (d))))
+(check-eq lflat (L (L (L (a) (b)) (c)) (d)))
+(check-neq lflat (L (a) (L (b) (c)) (d)))
 
 (let rflat (R (a) (b) (c) (d)))
-(prove (= rflat (R (a) (R (b) (R (c) (d))))))
-(prove (!= rflat (R (R (a) (b)) (c) (d))))
+(check-eq rflat (R (a) (R (b) (R (c) (d)))))
+(check-neq rflat (R (R (a) (b)) (c) (d)))
 
 (let aflat (A (a) (b) (c) (d)))
-(prove (= aflat (A (A (a) (b)) (c) (d))))
-(prove (= aflat (A (a) (A (b) (c)) (d))))
-(prove (= aflat (A (a) (b) (A (c) (d)))))
+(check-eq aflat (A (A (a) (b)) (c) (d)))
+(check-eq aflat (A (a) (A (b) (c)) (d)))
+(check-eq aflat (A (a) (b) (A (c) (d))))
 "#);
 }
 
@@ -125,12 +125,12 @@ fn rewrite_rhs_construction_respects_assoc_direction() {
 (let ar (EmitAFromRight))
 (run 2)
 
-(prove (= ls (L (a) (b) (c))))
-(prove (!= lg (L (a) (b) (c))))
-(prove (= rs (R (a) (b) (c))))
-(prove (!= rg (R (a) (b) (c))))
-(prove (= al (A (a) (b) (c))))
-(prove (= ar (A (a) (b) (c))))
+(check-eq ls (L (a) (b) (c)))
+(check-neq lg (L (a) (b) (c)))
+(check-eq rs (R (a) (b) (c)))
+(check-neq rg (R (a) (b) (c)))
+(check-eq al (A (a) (b) (c)))
+(check-eq ar (A (a) (b) (c)))
 "#);
 }
 

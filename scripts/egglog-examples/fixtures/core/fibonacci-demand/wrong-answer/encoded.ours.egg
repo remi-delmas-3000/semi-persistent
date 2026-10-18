@@ -16,7 +16,7 @@
 (run 1000)
 ;; print-function Fib 10 omitted: diagnostic table dump only.
 (extract f7)
-(prove (= f7 (Num 13)))
+(check-eq f7 (Num 13))
 
 ;; Supplemental negative control, after the full source workload.
-(prove (= f7 (Num 12)))
+(check-eq f7 (Num 12))

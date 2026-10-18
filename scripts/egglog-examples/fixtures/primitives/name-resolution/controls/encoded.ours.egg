@@ -9,8 +9,8 @@
 (union b c)
 (rule ((= r (Num x)) (= r (Num y)) (i64::!= x y)) ((union (Clean) (Conflict))))
 (run 10)
-(prove (!= (Clean) (Conflict)))
+(check-neq (Clean) (Conflict))
 
-(prove (= a (Num 3)))
-(prove (= b (Num 16)))
-(prove (!= b (Num 9)))
+(check-eq a (Num 3))
+(check-eq b (Num 16))
+(check-neq b (Num 9))

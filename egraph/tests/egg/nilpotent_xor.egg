@@ -23,9 +23,9 @@
 (let x_aab (xor (a) (a) (b)))
 
 (run 5)
-(prove (= x_aa (e)))
-(prove (= x_aaa (a)))
-(prove (= x_aaaa (e)))
-(prove (= x_aab (b)))
+(check-eq x_aa (e))
+(check-eq x_aaa (a))
+(check-eq x_aaaa (e))
+(check-eq x_aab (b))
 ;; and the two even cases coincide
-(prove (= x_aa x_aaaa))
+(check-eq x_aa x_aaaa)

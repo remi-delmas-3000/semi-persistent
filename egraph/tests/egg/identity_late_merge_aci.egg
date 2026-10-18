@@ -17,5 +17,5 @@
 (union (b) (top))
 
 (run 5)
-(prove (= s_ab (a)))
-(prove (= s_abc (And (a) (c))))
+(check-eq s_ab (a))
+(check-eq s_abc (And (a) (c)))

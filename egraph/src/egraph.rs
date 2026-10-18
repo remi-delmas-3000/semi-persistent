@@ -2581,7 +2581,7 @@ where
         // Nothing to re-decide unless a node was created or recanonicalized (`touched` grew)
         // or classes merged (`num_classes` fell) since the last round that found nothing.
         // Both counters are cheap and monotone within a rebuild, so a `rebuild` on an
-        // unchanged graph — the common case for a run of `(prove ...)` commands — costs two
+        // unchanged graph — the common case for a run of `(check-eq ...)` commands — costs two
         // integer reads. `restore` resets the watermark, so a rolled-back graph is rescanned.
         let state = (
             self.touched.len(),

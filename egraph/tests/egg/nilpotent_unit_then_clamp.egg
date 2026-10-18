@@ -15,4 +15,4 @@
 (union (f) (e))
 (union (c) (d))
 (run 5)
-(prove (= s (e)))
+(check-eq s (e))

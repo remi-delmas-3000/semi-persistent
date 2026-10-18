@@ -11,4 +11,4 @@
 (function join (E) E :assoc :comm :idempotent :identity (unit))
 (let s_au (join (a) (unit)))
 (run 3)
-(prove (= s_au (a)))
+(check-eq s_au (a))

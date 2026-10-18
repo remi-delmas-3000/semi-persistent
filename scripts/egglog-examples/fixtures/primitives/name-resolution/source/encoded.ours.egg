@@ -9,4 +9,4 @@
 (union b c)
 (rule ((= r (Num x)) (= r (Num y)) (i64::!= x y)) ((union (Clean) (Conflict))))
 (run 10)
-(prove (!= (Clean) (Conflict)))
+(check-neq (Clean) (Conflict))

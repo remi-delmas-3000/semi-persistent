@@ -52,7 +52,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/map/source/encoded.ours.egg",
-              "sha256": "16fb1c10c6273a3219f2434e85f818f387d57271afd21898de1cf1a91aa5b02f",
+              "sha256": "3676457c892234c0d88bc5ce985bf9e5d5c1714f33aed95507b2a43e581bd4ab",
               "expected": "pass",
               "stdout_contains": [
                 "(MCons 1 one (MCons 2 two (MNil)))"
@@ -90,7 +90,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/map/update-3/encoded.ours.egg",
-              "sha256": "1f68521dced7da494041f044c0e21ba812e2ac88f4db4289e88fc093f2db07eb",
+              "sha256": "ec181134a7660288ea15ef4635b8947663803568aa80bbc4f618af9fa24bc4fa",
               "expected": "pass",
               "stdout_contains": [
                 "(MCons 1 one (MCons 2 two (MNil)))",
@@ -127,7 +127,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/map/negative-wrong-value/encoded.ours.egg",
-              "sha256": "3551ebaa5667a5ff90ddd51add236c5812f1d634369bf9fc6e6ba4c8221bece1",
+              "sha256": "2194fb1c4d73aadd01ab60dbd11a4c041f53cdfe73f3dec44239a98ea57e8080",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed: terms are not equal"
@@ -180,7 +180,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/set/source/encoded.ours.egg",
-              "sha256": "4bf4f7c074bc8decad8ac824a3f577a83b62a711ef910fc42b357e4bd3459a45",
+              "sha256": "77267105664a598ad9c33efdafd4b3db28f08d5b4f5ead6df1c39e7ddbca3881",
               "expected": "pass"
             }
           ]
@@ -207,7 +207,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/set/input-3/encoded.ours.egg",
-              "sha256": "1ae5d13b63085af4e5a36639350a039d877345879bbb7c541ccb60d0e168cd21",
+              "sha256": "8ee42df03cb305fa30b04688676ee28ea3edb73b119c2676f7dfe0fc84301e50",
               "expected": "pass"
             }
           ]
@@ -240,7 +240,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/set/negative-multiplicity/encoded.ours.egg",
-              "sha256": "48418ed4955e610b5469b8ab661118d7314ddaad6a3554b9f68f1c0d8d695f31",
+              "sha256": "5b77b6fcdeaee7129180d28509f2e5f1e095863067ce4f7ca935b214aefa1e85",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed: terms are not equal"
@@ -300,7 +300,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/unstable-fn/source/encoded.ours.egg",
-              "sha256": "61ae07df1621675e1630f188c7f8d5ce53d3bd38e0e67b944fe8e82d1cec0d1e",
+              "sha256": "c20273b2135901571a6b27873bafe94ceb6bfc0324f959df3666fcbc38f905d9",
               "expected": "pass",
               "stdout_contains": [
                 "(SquareFn)"
@@ -336,7 +336,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/unstable-fn/input-3/encoded.ours.egg",
-              "sha256": "275d81ac39c00f9ed6af9cd795b0540c604421d498c2dfed46adbe9e4c2651b8",
+              "sha256": "671efda36aa57e2d4cabe41178716e622fd88a5503aa9e3950e9b7641b7b8616",
               "expected": "pass",
               "stdout_contains": [
                 "(SquareFn)"
@@ -372,7 +372,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/unstable-fn/negative-wrong-result/encoded.ours.egg",
-              "sha256": "b3480f68e522e4785f4240e17d0b42dc4bcbfc752a716dce45b5f422ab44391f",
+              "sha256": "08e223c4405c51865272b5ae6c477247b2d2bfed5a4de5514f490fe76d6de9b0",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed: terms are not equal"
@@ -425,7 +425,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/eqsat-basic-multiset/source/encoded.ours.egg",
-              "sha256": "b5b8363c99348bf05fda55c8a69c28bb6dd15ad3c338f8f08161f67056b6c165",
+              "sha256": "b74ebeb7d4ee5bf8fe7a8366d0c3a515b05cb120b1469679b1c7603de8307241",
               "expected": "pass"
             }
           ]
@@ -452,7 +452,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/eqsat-basic-multiset/input-3/encoded.ours.egg",
-              "sha256": "6de697fd3e77b14602e0ed7553f31b66a838cdcb0bc422636108cd4ccb8d3891",
+              "sha256": "2507f5a1e5d5865e0ecfdd876be712f7de5d64cca92f7ec242d3ddf81e3c891c",
               "expected": "pass"
             }
           ]
@@ -485,7 +485,7 @@
               "engine": "ours",
               "arm": "encoded",
               "path": "fixtures/collections/eqsat-basic-multiset/negative-not-constant/encoded.ours.egg",
-              "sha256": "95529eba503c33054e0bec273cf07c8e64fb00783b334bbc4b4573a38c4afc83",
+              "sha256": "b961ff4c2e5045d4d40a2c0e1773262a99604e03e17692e7937938d1f7d7b2a2",
               "expected": "check_failure",
               "stderr_contains": [
                 "check failed: terms are not equal"

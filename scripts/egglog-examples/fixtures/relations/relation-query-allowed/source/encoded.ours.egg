@@ -16,5 +16,5 @@
 (rule ((= (AuditHolds_myrel (myrel 1)) (AuditPresent)) (= (AuditHolds_myrel (myrel 1)) (AuditPresent)) (= (myrel 1) (myrel 1))) ((union (AuditHolds_shouldappear (shouldappear)) (AuditPresent))))
 (rule ((= (AuditHolds_myrel (myrel 1)) (AuditPresent)) (= (AuditHolds_myrel (myrel 2)) (AuditPresent)) (= (myrel 1) (myrel 2))) ((union (AuditHolds_shouldnotappear (shouldnotappear)) (AuditPresent))))
 (run 1)
-(prove (= (AuditHolds_shouldappear (shouldappear)) (AuditPresent)))
-(prove (!= (AuditHolds_shouldnotappear (shouldnotappear)) (AuditPresent)))
+(check-eq (AuditHolds_shouldappear (shouldappear)) (AuditPresent))
+(check-neq (AuditHolds_shouldnotappear (shouldnotappear)) (AuditPresent))
