@@ -41,6 +41,7 @@ values make sense.
 | `(sort S :interp C :domains ())` | top level | the analysis is off for `S` |
 | `:interp OP` | tag of `function`, `constructor` | `(function lt (Int Int) Bool :interp <)` |
 | `:range (lo hi)` | tag of `function`, `constructor` | `(function hash (BV32) BV32 :range (0 1023))` |
+| `:interp embed` | tag of a unary `function` or `constructor` from a literal sort into a sort with `:interp` | `(constructor Num (IBig) Int :interp embed)` |
 | `(refine t VALUE)` | top level; `t` is a ground term or a global | `(refine (x) (interval 0 9))` |
 | `(refine t VALUE)` | rule action; `t` is a right-hand side | `((refine r (interval 0 99)))` |
 | `(within x lo hi)` | rule body, `:when` | `(within y 0 9)` |
@@ -71,6 +72,43 @@ It tests inclusion, so a guard never holds on a value that is only compatible.
 The guards parse today as ordinary patterns (`SurfacePattern::App`). The
 sortchecker recognises them by head name, so the parser needs no change for
 them. Datatype variants do not accept `:interp` or `:range` in this PR.
+
+### 2.1 Carriers and the literal model
+
+A carrier is the set of concrete values a class of the sort denotes. Every
+carrier corresponds to a literal sort of the `LitModel` where one exists, so one
+table fixes four things: the concrete values, the abstract domains that
+over-approximate them, how a literal enters the analysis, and which primitive
+each `:interp` operator abstracts.
+
+| Carrier `C` | Literal sort | Domains (`abstract-domains`) | A literal `k` enters as | `:interp` operators abstract |
+|---|---|---|---|---|
+| `int` | `IBig` | `interval` (`IntervalZ`), `congruence`, `nonzero` (fields of `FactsZ`) | `[k, k]`, `k mod m`, nonzero iff `k != 0` | the `IBig::` primitives: `+` is `IBig::+`, `<` is `IBig::<` |
+| `(bitvec 64)` | `u64`, and `i64` under the signed operators | `ubounds` (`Interval<u64>`), `sbounds`, `congruence`, `bits` (fields of `Facts<u64>`) | `[k, k]`, the Tnum `(k, 0)` | the `u64::` and `i64::` primitives (`bvadd` is `u64::+`, `bvslt` is `i64::<`) |
+| `(bitvec N)`, N in 8, 16, 32, 128 | none today | the same fields of `Facts<W>` | no literal until a literal sort of width N exists | no primitive; the transfer exists, the concrete operation does not |
+| `(bitvec N)`, any other N | none | top only | no literal | none |
+| `bool` | `bool` | `bool` (`Bool4`) | `True` or `False` | the `bool::` primitives |
+| none | `RBig` | none | not analysed | none |
+
+The analysis attaches values to classes in three ways:
+
+1. **Literal sorts.** A class of a literal sort (`IBig`, `u64`, `bool`) already
+   denotes one concrete value, so it is analysed with no declaration, using the
+   carrier of the row above and its default domains. A literal node `k` starts
+   at its singleton.
+2. **User sorts with `:interp`.** `(sort Int :interp int)` declares that every
+   class of `Int` denotes one integer. Its values come from three sources: seeds
+   (`refine`), the transfers of its `:interp` operators, and embeddings.
+3. **Embeddings.** A constructor tagged `:interp embed` injects a literal sort
+   into a user sort with the matching carrier: the class of `(Num k)` gets the
+   lifted value of `k`. This is how the literals of a wrapping encoding, such as
+   the CBMC corpus's `(Const V N)`, reach the analysis. Sortcheck rejects an
+   embedding whose argument sort is not the literal sort of the result's carrier.
+
+The operator names after `:interp` are the SMT-LIB names (`+`, `<`, `bvadd`,
+`bvslt`, `ite`); the table fixes the primitive each one abstracts, and the
+registry of #148 holds the verified transfer for each. Whether `:interp` also
+accepts the primitive's own name (`:interp IBig::+`) is left to the student (§7).
 
 ## 3. Sortcheck rules and errors
 
@@ -246,6 +284,7 @@ scans no relation, so it takes the arm that `RAtom::Pred` takes there.
 | How a guard fails while values are top | the query still sortchecks, resolves and compiles; the guard test is the step that fails |
 | Where the warning is raised | once per program, visible through `Interpreter::warnings()` |
 | Signed bounds in VALUE | not required; `sbounds` is enabled but has no surface value in this PR |
+| `:interp` with a primitive name | whether `:interp IBig::+` is accepted beside the SMT-LIB name `+`, so each operator is written once, next to the primitive it abstracts (§2.1) |
 
 ## 8. Acceptance criteria
 
