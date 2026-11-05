@@ -254,7 +254,7 @@ source before every Verus run:
 ```
 (cd containers-verus && cargo verus verify)                                  # default, expect "N verified, 0 errors"
 (cd containers-verus && cargo verus verify --features literal-types)
-verus --crate-type lib containers-verus/proofs/top_down/composition.rs       # 80 verified
+verus --crate-type lib containers-verus/proofs/persistence_composition/composition.rs       # 80 verified
 cargo test -p semi-persistent-containers-verus --features 'compat-all,literal-types'
 PROPTEST_CASES=1024 cargo test -p containers-conformance --release --test three_tier_policy_matrix
 cargo test -p containers-conformance --release --test proptest_oracle --test differential --test egraph_reference_differential

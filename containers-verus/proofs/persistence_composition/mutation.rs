@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 //! Provisional primitive contracts for mutation and marking. Logical snapshot
-//! closure comes from model.rs, not from any implementation or trusted wrapper.
+//! closure comes from src/persistence_model.rs, not from any implementation or trusted wrapper.
 
 use super::*;
 

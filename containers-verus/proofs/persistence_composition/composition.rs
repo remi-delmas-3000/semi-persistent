@@ -2,17 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Conditional physical composition. There is no production Runtime adapter:
 //! verification proves implications from these contracts, not runtime closure.
-//! witness.rs checks their consistency using mathematical map storage.
+//! contract_witness.rs checks their consistency using mathematical map storage.
 //! Production code neither imports this target nor trusts these interfaces.
 
 use vstd::prelude::*;
 mod encoding;
+#[path = "../../src/persistence_model.rs"]
 mod model;
 use model::*;
 mod mutation;
 mod policy;
 mod public_sequence;
-mod witness;
+mod contract_witness;
 
 verus! {
 

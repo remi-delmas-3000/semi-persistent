@@ -100,7 +100,7 @@ CircularList, UnionFind, BPlusTreeSet) and group member models/archives
 variants over the documented rayon boundary). `f357cea` checks
 `pending_restore_indices` (exact captured-index set) and adds
 `sequence_witness_checked`, the production instantiation of the sequence
-theorem; the Step 3 dependency map is `proofs/top_down/interface-inventory.md`.
+theorem; the Step 3 dependency map is `proofs/persistence_composition/interface-inventory.md`.
 The following checkpoint exports the `EClasses` component contents (entries,
 reprs, uses, minimum pool: views at the token's frame and archive prefixes)
 through `restore`/`try_restore`, closing the derived-contract audit table.
@@ -326,7 +326,7 @@ postconditions anywhere; decompose instead.
 Derived work includes SparseSet, CircularList, ListArena, UnionFind, BPlusTreeSet,
 EClasses, SpMap, AppendOnlyVec, shared-history/group wrappers, actual parallel
 fan-out, pending-restore consumers, and relevant supporting structures such as
-DenseSpanMap. Review `proofs/top_down/derived-contract-audit.md`; exact component
+DenseSpanMap. Review `proofs/persistence_composition/derived-contract-audit.md`; exact component
 archive/depth contracts and error framing matter, not just primary contents.
 
 Current trust inventory: **37 default + 5 literal external_body** (CI
@@ -366,9 +366,9 @@ All paths below are relative to the repository:
 - `containers-verus/doc/tasks/all-tier-semi-persistence-goal.md`
 - `containers-verus/doc/tasks/three-tier-top-down-proof-engineering.md`
 - `containers-verus/doc/tasks/three-tier-proof-progress.md`
-- `containers-verus/proofs/top_down/proof-classification.md`
-- `containers-verus/proofs/top_down/derived-contract-audit.md`
-- `containers-verus/proofs/top_down/composition.rs`
+- `containers-verus/proofs/persistence_composition/proof-classification.md`
+- `containers-verus/proofs/persistence_composition/derived-contract-audit.md`
+- `containers-verus/proofs/persistence_composition/composition.rs`
 
 The work is making progress, but all four acceptance milestones are not yet
 closed. Preserve that scope and report unresolved obligations candidly.

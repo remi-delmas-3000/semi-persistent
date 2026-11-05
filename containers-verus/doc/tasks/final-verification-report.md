@@ -98,7 +98,7 @@ nothing was served from cache; logs `/tmp/sp-d21-final-*.log`:
 |---|---|---|
 | Full crate, default features | `cargo verus verify` | 2696 verified, 0 errors (at `f676208`; 2676 at `0b1200e`, 2590 at the final checkpoint `f304bc7`) |
 | Full crate, `literal-types` | `cargo verus verify --features literal-types` | 2696 verified, 0 errors |
-| Conditional composition (Step 3 theorem) | `verus --crate-type lib containers-verus/proofs/top_down/composition.rs` | 80 verified, 0 errors |
+| Conditional composition (Step 3 theorem) | `verus --crate-type lib containers-verus/proofs/persistence_composition/composition.rs` | 80 verified, 0 errors |
 | `au-verus` | `cargo verus verify` (in `au-verus/`) | 29 verified, 0 errors |
 | Feature/runtime suite | `cargo test -p semi-persistent-containers-verus --features 'compat-all,literal-types'` | 279 passed, 0 failed, 10 ignored |
 | Release differential policy matrix | `PROPTEST_CASES=1024 cargo test -p containers-conformance --release --test three_tier_policy_matrix` | 4 passed |

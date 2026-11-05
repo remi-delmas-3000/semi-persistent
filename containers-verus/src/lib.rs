@@ -133,7 +133,6 @@ mod trail_select;
 // Shared mathematical model used by the conditional proof and concrete adapters.
 // This adds no fields or maintained history to any runtime container.
 #[allow(dead_code)]
-#[path = "../proofs/top_down/model.rs"]
 pub(crate) mod persistence_model;
 #[macro_use]
 pub mod id_macros;

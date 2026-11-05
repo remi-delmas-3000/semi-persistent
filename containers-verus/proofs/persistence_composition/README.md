@@ -1,12 +1,12 @@
-# Conditional top-down proof target
+# Conditional persistence composition proof
 
 This target implements the workflow in
 [three-tier-top-down-proof-engineering.md](../../doc/tasks/three-tier-top-down-proof-engineering.md).
 The conditional orchestration and witness are **not imported by the production
-crate**. The shared `model.rs` is imported so concrete adapters use the same
+crate**. The shared model, `src/persistence_model.rs`, is imported so concrete adapters use the same
 mathematical definitions. Its `Runtime`, `Mutations`, and
 `Policies` traits have only a mathematical consistency implementation in
-`witness.rs`. Their methods are explicit conditional premises for production,
+`contract_witness.rs`. Their methods are explicit conditional premises for production,
 not trusted production wrappers. No `assume`, `admit`, or
 `external_body` is used here.
 
@@ -15,7 +15,7 @@ not trusted production wrappers. No `assume`, `admit`, or
 The draft composition verifies with the project's pinned Verus:
 
 ```sh
-verus --crate-type lib containers-verus/proofs/top_down/composition.rs
+verus --crate-type lib containers-verus/proofs/persistence_composition/composition.rs
 ```
 
 Result on 2026-09-22: **80 verified, 0 errors**, Verus
@@ -44,13 +44,13 @@ Nothing was pushed. This target's result is separate from that runtime evidence.
 
 | File | Checked result |
 |---|---|
-| `model.rs` | Finite partial-map frame meaning; captured-or-inherited invariant; constructor/set/push/pop/mark/restore closure; arbitrary legal action-sequence closure; mutation after restore; pop/regrowth; frame step; range composition; reconstruction with arbitrary resized filler and saved-length zigzags |
+| `src/persistence_model.rs` | Finite partial-map frame meaning; captured-or-inherited invariant; constructor/set/push/pop/mark/restore closure; arbitrary legal action-sequence closure; mutation after restore; pop/regrowth; frame step; range composition; reconstruction with arbitrary resized filler and saved-length zigzags |
 | `composition.rs` | Conditional resize/preparation, one batch per pair tier, direct Cold-frame suffix, physical/canonical retirement, survivor-tier dispatch, capture finalization, reclamation, valid public restore, unchanged state on invalid restore |
 | `mutation.rs` | Conditional capture/raw-write composition, push/tag repair, capture/pop composition with returned value, mark preparation/opening, constructor, restore–write–restore |
 | `policy.rs` | Plans name exact oldest eligible frame meanings; active ingress excluded; arbitrary legal rollover induction, interleaved policy sequences, staged Trail then Hot composition; mark/token coordinate composition; unchanged state on rejected mark |
 | `encoding.rs` | Explicit local map/validity contracts, duplicate append semantics, exact pooled append/publication, logical prefix relocation, empty/nonempty encoded witnesses |
 | `public_sequence.rs` | Complete conditional public-operation dispatcher and arbitrary legal interleaving theorem |
-| `witness.rs` | Checked mathematical implementation of every provisional method and explicit nontrivial history/promotion/regrowth/policy witnesses; not a production adapter |
+| `contract_witness.rs` | Checked mathematical implementation of every provisional method and explicit nontrivial history/promotion/regrowth/policy witnesses; not a production adapter |
 
 `Model` and `Frame` are mathematical proof values. They add no persistent ghost
 fields and perform no runtime lookup for Trail's first capture. A concrete

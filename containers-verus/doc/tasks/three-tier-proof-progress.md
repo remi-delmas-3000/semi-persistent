@@ -1058,7 +1058,7 @@ Evidence:
 Commands retain the previous milestone's form: `cargo verus verify -p
 semi-persistent-containers-verus -- --time-expanded`, the same command with
 `--features literal-types`, direct `verus --crate-type lib
-containers-verus/proofs/top_down/composition.rs`, and `cargo test -p
+containers-verus/proofs/persistence_composition/composition.rs`, and `cargo test -p
 semi-persistent-containers-verus --features 'compat-all,literal-types'`.
 The differential oracle is unchanged. Consumer/differential suites and performance
 benchmarks were not rerun for this proof-only checkpoint; final revision gates
@@ -1124,7 +1124,7 @@ Evidence on this source revision:
 
 Commands use the previous full-gate sequence: default and literal-types
 `cargo verus verify -p semi-persistent-containers-verus -- --time-expanded`,
-direct `verus --crate-type lib containers-verus/proofs/top_down/composition.rs`,
+direct `verus --crate-type lib containers-verus/proofs/persistence_composition/composition.rs`,
 `cargo test -p semi-persistent-containers-verus --features 'compat-all,literal-types'`,
 `PROPTEST_CASES=1024 cargo test -p containers-conformance --release --test three_tier_policy_matrix`,
 and `cargo test -p semi-persistent-egraph -p semi-persistent-satcore`.
@@ -1967,7 +1967,7 @@ consumers **1267 passed, 45 ignored** (`/tmp/sp-d21-derived-consumers.log`);
 canary **2 passed** (`/tmp/sp-d21-derived-canary.log`); partial-API audit at the
 unchanged baseline (73/33/40/0). Formatting, whitespace and the unchanged-legacy
 check passed; trust remains 53 default + 5 literal. The Step 3 dependency map is
-`proofs/top_down/interface-inventory.md`.
+`proofs/persistence_composition/interface-inventory.md`.
 
 
 ## 2026-09-16 — Checked pending-restore indices and the production sequence witness
@@ -1986,7 +1986,7 @@ the run-range addition.
 public contracts alone it proves that after mark, write, mark, restore, write,
 `apply_tier_policy` and an older restore the live view equals the archived
 snapshot, the depth the token's frame and the archive its prefix. The interface
-inventory (`proofs/top_down/interface-inventory.md`) maps every provisional
+inventory (`proofs/persistence_composition/interface-inventory.md`) maps every provisional
 `Runtime` method to its checked production function, supplier and consumer.
 
 Targeted evidence: `pending_cold_indices_checked` 4, `pending_pair_indices_checked` 3,
@@ -2020,7 +2020,7 @@ archive). The new `pub open(crate)` accessors (`entries_model_view`,
 `pool_view`/`_archive`) only project the components' own verified views; the
 facts come from the component restores' existing contracts, so no proof body
 changed and no runtime code moved. This closes the derived-contract audit
-table (`proofs/top_down/derived-contract-audit.md`).
+table (`proofs/persistence_composition/derived-contract-audit.md`).
 
 Targeted evidence: `eclasses` `*restore*` **3 verified, zero errors**
 (`/tmp/sp-d21-eclasses1.log`). Trust unchanged at **51 default + 5 literal**.

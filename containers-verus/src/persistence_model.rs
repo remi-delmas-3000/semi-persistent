@@ -1,6 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Logical closure for the conditional top-down proof. These are mathematical
+//! Logical closure for the conditional persistence composition proof (proofs/persistence_composition). These are mathematical
 //! values, not fields added to the runtime container or maintained ghost state.
 
 use vstd::prelude::*;
