@@ -18,6 +18,7 @@ use crate::union_find::{Justification, ProofBuf};
 
 #[cfg(debug_assertions)]
 pub mod cc_mirror;
+pub mod cert;
 
 /// How a completion op's monomial counts are bounded during normalization (design "three
 /// independent axes"): unbounded ℕ (MSet plain AC), clamped to {0,1} by dedup (Set idempotent =

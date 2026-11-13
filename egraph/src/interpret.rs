@@ -149,6 +149,14 @@ pub struct Interpreter<
 {
     pub eg: EGraph<Cfg, L, TRACK, PROOFS>,
     pub model: M,
+    /// Each `check-eq` that held, in program order, when `PROOFS` is on: its
+    /// two terms as written and the two nodes built for them, the goals of an
+    /// equality certificate (`EGraph::write_certificate`).
+    pub proved_eqs: Vec<crate::egraph::cert::CertGoal<Cfg::G>>,
+    /// The terms of each `union` as written, by axiom id, when `PROOFS` is on.
+    pub union_terms: Vec<crate::egraph::cert::CertGoal<Cfg::G>>,
+    /// The term each `let` name was bound to, as written, when `PROOFS` is on.
+    let_terms: std::collections::HashMap<String, crate::egraph::cert::ClientTerm<Cfg::G>>,
     /// The rule list `(run)` schedules: ordinary rules and sequence rules, in program
     /// order (`saturate::Rule`).
     rules: Vec<crate::saturate::Rule<Cfg::O, Cfg::S, L>>,
@@ -273,6 +281,9 @@ where
         Self {
             eg,
             model,
+            proved_eqs: Vec::new(),
+            union_terms: Vec::new(),
+            let_terms: std::collections::HashMap::new(),
             rules: Vec::new(),
             globals: crate::resolve::GlobalCtx::new(),
             marks: Vec::new(),
@@ -300,6 +311,9 @@ where
         Self {
             eg,
             model,
+            proved_eqs: Vec::new(),
+            union_terms: Vec::new(),
+            let_terms: std::collections::HashMap::new(),
             rules: Vec::new(),
             globals: crate::resolve::GlobalCtx::new(),
             marks: Vec::new(),
@@ -911,6 +925,12 @@ where
                 // Already registered into egraph during sortcheck. No-op.
             }
             CCommand::Let(name, ct) => {
+                if PROOFS {
+                    match self.client_term(ct) {
+                        Some(t) => self.let_terms.insert(name.clone(), t),
+                        None => self.let_terms.remove(name),
+                    };
+                }
                 let (id, sort) = self.build_cterm(ct)?;
                 self.bind_global(name.clone(), id, sort);
             }
@@ -921,6 +941,12 @@ where
                 let (a_id, _) = self.build_cterm(a)?;
                 let (b_id, _) = self.build_cterm(b)?;
                 if PROOFS {
+                    self.union_terms.push(crate::egraph::cert::CertGoal {
+                        lhs: self.client_term(a),
+                        rhs: self.client_term(b),
+                        a: a_id,
+                        b: b_id,
+                    });
                     let axiom_id = self.alloc_axiom_id(a_id, b_id);
                     self.eg
                         .merge_justified(a_id, b_id, Justification::axiom(axiom_id));
@@ -949,7 +975,18 @@ where
                 if self.eg.find(a_id) != self.eg.find(b_id) {
                     if lazy {
                         match self.lazy_ac_decide(a_id, b_id)? {
-                            (true, _) => return Ok(()),
+                            (true, _) => {
+                                if PROOFS {
+                                    let g = crate::egraph::cert::CertGoal {
+                                        lhs: self.client_term(a),
+                                        rhs: self.client_term(b),
+                                        a: a_id,
+                                        b: b_id,
+                                    };
+                                    self.proved_eqs.push(g);
+                                }
+                                return Ok(());
+                            }
                             (false, aborted) => {
                                 return Err(InterpError::CheckFailed(if aborted {
                                     "terms are not equal (lazy AC completion hit its growth \
@@ -966,6 +1003,15 @@ where
                     return Err(InterpError::CheckFailed("terms are not equal".into()));
                 }
                 self.eg.set_cc_goal(None);
+                if PROOFS {
+                    let g = crate::egraph::cert::CertGoal {
+                        lhs: self.client_term(a),
+                        rhs: self.client_term(b),
+                        a: a_id,
+                        b: b_id,
+                    };
+                    self.proved_eqs.push(g);
+                }
             }
             CCommand::CheckNeq(a, b, complete) => {
                 let lazy = self.lazy_for(*complete);
@@ -1483,7 +1529,16 @@ where
             CTerm::Counted(t, _) => self.build_cterm(t)?,
             CTerm::Global(name, sort) => {
                 let (_, _, id) = self.globals.get(name).expect("global not found at runtime");
-                (self.eg.find(id), *sort)
+                // With proofs on, a name stands for the node its `let` built,
+                // not that node's class root: the client's term is then the
+                // term the name was bound to, as an explanation and a
+                // certificate read it, and the build's creation evidence
+                // relates it to the stored node.
+                if PROOFS {
+                    (id, *sort)
+                } else {
+                    (self.eg.find(id), *sort)
+                }
             }
         })
     }
@@ -1504,6 +1559,43 @@ where
     ///
     /// Recursive, so `(F (F (F a b) c) d)` yields `[a, b, c, d)]` in one pass. See the note in
     /// [`build_cterm`](Self::build_cterm) for why this belongs here and not in `EGraph::add`.
+    /// Term `ct` as written, for a certificate: a name is its `let`'s term, a
+    /// counted child is repeated. `None` past 65,536 repetitions.
+    fn client_term(
+        &self,
+        ct: &CTerm<Cfg::O, Cfg::S, L>,
+    ) -> Option<crate::egraph::cert::ClientTerm<Cfg::G>> {
+        use crate::egraph::cert::ClientTerm;
+        match ct {
+            CTerm::Lit(val, _) => Some(ClientTerm::Lit(val.to_string())),
+            CTerm::App { op, children, .. } => {
+                let mut kids = Vec::with_capacity(children.len());
+                for c in children {
+                    match c {
+                        CTerm::Counted(t, k) => {
+                            let k = usize::try_from(k).ok().filter(|k| *k <= 1 << 16)?;
+                            let t = self.client_term(t)?;
+                            for _ in 0..k {
+                                kids.push(t.clone());
+                            }
+                        }
+                        _ => kids.push(self.client_term(c)?),
+                    }
+                }
+                Some(ClientTerm::App(self.eg.ops().info(*op).name.clone(), kids))
+            }
+            // A name is its `let`'s term as written, as the checker reads it.
+            CTerm::Global(name, _) => match self.let_terms.get(name) {
+                Some(t) => Some(t.clone()),
+                None => self
+                    .globals
+                    .get(name)
+                    .map(|(_, _, id)| ClientTerm::Node(id)),
+            },
+            CTerm::Counted(t, _) => self.client_term(t),
+        }
+    }
+
     fn push_seq_args<'c>(
         &mut self,
         children: &'c [CTerm<Cfg::O, Cfg::S, L>],
