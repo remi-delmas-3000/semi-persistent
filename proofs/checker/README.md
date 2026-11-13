@@ -58,7 +58,13 @@ law or a rule makes some certificates fail to check; it never makes a false
 equality check. A program with `push`, `pop` or `include` is rejected.
 
 The sorts are not modelled: the theorem quantifies over one-sorted models,
-which is a smaller class than the many-sorted models of the program.
+in which every operator is total on one carrier and every rule holds for
+every assignment, including one that mixes sorts. A many-sorted algebra of
+the program does not in general extend to such a model, so the theorem does
+not yet state that a certified `check-eq` holds in the program's many-sorted
+models. An earlier version of this README called the one-sorted models "a
+smaller class than the many-sorted models of the program"; that claim is
+false and retracted. `MANY-SORTED.md` is the plan that closes the gap.
 
 ## Coverage over the fixtures
 
