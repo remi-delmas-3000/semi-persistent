@@ -487,15 +487,15 @@ theorem checkSteps_sound (hwf : wfNodes C.nodes = true) :
   | [], acc, out, hacc, h => by cases h; exact hacc
   | st :: ss, acc, out, hacc, h => by
     simp only [checkSteps] at h
-    split at h
-    · rename_i c hc
-      apply checkSteps_sound hwf ss (acc.push c) out _ h
-      intro s c' hs
-      rw [Array.getElem?_push] at hs
-      split at hs
-      · cases hs; exact checkStep_sound hwf hacc hc
-      · exact hacc s c' hs
-    · cases h
+    apply checkSteps_sound hwf ss _ out _ h
+    intro s c' hs
+    rw [Array.getElem?_push] at hs
+    split at hs
+    · cases hs
+      cases hc : C.checkStep acc st with
+      | some c => simp only [Option.getD_some]; exact checkStep_sound hwf hacc hc
+      | none => intro _; rfl
+    · exact hacc s c' hs
 
 end Ctx
 

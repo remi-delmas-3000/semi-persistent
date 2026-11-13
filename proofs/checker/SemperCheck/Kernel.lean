@@ -224,12 +224,15 @@ def checkStep (acc : Array Concl) : Step → Option Concl
     | some (ps, pos) => if C.congOk f a b ps then some ⟨a, b, pos⟩ else none
     | none => none
 
+/-- The conclusion of a step that does not check: `0 = 0`, which holds, so a
+step citing it concludes only what it would from a reflexivity. A writer's
+mistake then leaves the goals that depend on it unproved instead of
+rejecting the certificate. -/
+def failed : Concl := ⟨0, 0, 0⟩
+
 def checkSteps : List Step → Array Concl → Option (Array Concl)
   | [], acc => some acc
-  | s :: ss, acc =>
-    match C.checkStep acc s with
-    | some c => checkSteps ss (acc.push c)
-    | none => none
+  | s :: ss, acc => checkSteps ss (acc.push ((C.checkStep acc s).getD failed))
 
 /-- Step `s` of the certificate proves `l = r` citing only commands before `o`. -/
 def checkGoal (acc : Array Concl) (goals : List (Nat × Nat)) (o : Nat) (l r : Term) : Bool :=
