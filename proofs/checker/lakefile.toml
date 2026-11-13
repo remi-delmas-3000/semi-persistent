@@ -1,0 +1,9 @@
+name = "SemperCheck"
+defaultTargets = ["SemperCheck", "semper-check"]
+
+[[lean_lib]]
+name = "SemperCheck"
+
+[[lean_exe]]
+name = "semper-check"
+root = "Main"
