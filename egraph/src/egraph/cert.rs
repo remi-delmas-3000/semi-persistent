@@ -24,9 +24,15 @@
 //!   nodes flatten to, each argument rewritten to one member of its class (the
 //!   unit's node for the unit's class).
 //!
-//! An edge the writer cannot express (a rule application, cancellation, an
-//! assumption, a law the kernel does not model) leaves its goal unproved; the
-//! writer counts it by kind.
+//! * `Rewrite`: a `rule` step for the command the rule was written in. The
+//!   writer reads the command as the checker's reader does, recovers the
+//!   variable bindings by matching the rule's sides against the two nodes
+//!   modulo their classes, and joins the instance to the two nodes by `cong`
+//!   steps whose premises are forest paths.
+//!
+//! An edge the writer cannot express (cancellation, an assumption, a law the
+//! kernel does not model) leaves its goal unproved; the writer counts it by
+//! kind.
 
 use super::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -116,6 +122,305 @@ pub fn form_offsets(src: &str, head: &str) -> Vec<usize> {
     out
 }
 
+/// What [`EGraph::write_certificate`] reads besides the e-graph.
+pub struct CertInputs<'a, G> {
+    /// The program text: the certificate cites its commands by byte offset.
+    pub src: &'a str,
+    /// The `check-eq` commands that held, in program order.
+    pub goals: &'a [CertGoal<G>],
+    /// The `union` commands, by axiom id.
+    pub unions: &'a [CertGoal<G>],
+    /// The source offset of each rule's left-hand side, by rule id.
+    pub rule_spans: &'a HashMap<usize, usize>,
+    /// The term each `let` name was bound to, as written.
+    pub globals: &'a HashMap<String, ClientTerm<G>>,
+}
+
+/// An S-expression as the checker's reader (`readTop` in `Parse.lean`) reads it.
+#[derive(Clone, Debug)]
+enum Sx {
+    Atom(String),
+    List(Vec<Sx>),
+}
+
+fn is_ws(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+fn skip_ws(b: &[u8], i: &mut usize) {
+    while *i < b.len() {
+        if b[*i] == b';' {
+            while *i < b.len() && b[*i] != b'\n' {
+                *i += 1;
+            }
+        } else if is_ws(b[*i]) {
+            *i += 1;
+        } else {
+            break;
+        }
+    }
+}
+
+fn read_sx(src: &str, i: &mut usize) -> Option<Sx> {
+    let b = src.as_bytes();
+    skip_ws(b, i);
+    match *b.get(*i)? {
+        b'(' => {
+            *i += 1;
+            let mut v = Vec::new();
+            loop {
+                skip_ws(b, i);
+                if *b.get(*i)? == b')' {
+                    *i += 1;
+                    return Some(Sx::List(v));
+                }
+                v.push(read_sx(src, i)?);
+            }
+        }
+        b')' => None,
+        b'"' => {
+            let start = *i;
+            *i += 1;
+            loop {
+                match *b.get(*i)? {
+                    b'\\' => *i += 2,
+                    b'"' => {
+                        *i += 1;
+                        break;
+                    }
+                    _ => *i += 1,
+                }
+            }
+            Some(Sx::Atom(src.get(start..*i)?.to_string()))
+        }
+        _ => {
+            let start = *i;
+            while *i < b.len() && !is_ws(b[*i]) && !matches!(b[*i], b'(' | b')' | b';') {
+                *i += 1;
+            }
+            Some(Sx::Atom(src.get(start..*i)?.to_string()))
+        }
+    }
+}
+
+/// The top-level forms of `src` with their byte offsets; empty for input the
+/// checker's reader rejects.
+fn read_top(src: &str) -> Vec<(usize, Sx)> {
+    let b = src.as_bytes();
+    let mut i = 0;
+    let mut out = Vec::new();
+    loop {
+        skip_ws(b, &mut i);
+        if i >= b.len() {
+            return out;
+        }
+        let at = i;
+        match read_sx(src, &mut i) {
+            Some(x) => out.push((at, x)),
+            None => return Vec::new(),
+        }
+    }
+}
+
+/// `isLiteral` of `Parse.lean`.
+fn is_literal(a: &str) -> bool {
+    match a.chars().next() {
+        Some(c) => {
+            c.is_ascii_digit()
+                || c == '"'
+                || (c == '-' && a.chars().count() > 1)
+                || a == "true"
+                || a == "false"
+        }
+        None => false,
+    }
+}
+
+/// A rule pattern (`Pat` of `Syntax.lean`). A `let` name stands for its term;
+/// `Opaque` is one whose term the interpreter could not spell, which keeps
+/// the rule's position in the command's rule list but matches nothing.
+#[derive(Clone, Debug)]
+enum CPat<G> {
+    Var(String),
+    Lit(String),
+    App(String, Vec<CPat<G>>),
+    Term(ClientTerm<G>),
+    Opaque,
+}
+
+#[derive(Clone, Debug)]
+struct CRule<G> {
+    lhs: CPat<G>,
+    rhs: CPat<G>,
+    eqs: Vec<(CPat<G>, CPat<G>)>,
+}
+
+impl<G> CPat<G> {
+    fn vars<'p>(&'p self, out: &mut Vec<&'p str>) {
+        match self {
+            CPat::Var(x) => out.push(x),
+            CPat::App(_, ps) => ps.iter().for_each(|p| p.vars(out)),
+            _ => {}
+        }
+    }
+}
+
+/// The names in scope at a command, as the checker's reader has them there.
+struct Scope<'a, G> {
+    ops: HashSet<String>,
+    globals: HashMap<String, Option<&'a ClientTerm<G>>>,
+}
+
+impl<G: Clone> Scope<'_, G> {
+    /// `Env.pat` of `Parse.lean`.
+    fn pat(&self, x: &Sx) -> Option<CPat<G>> {
+        match x {
+            Sx::Atom(a) => {
+                if is_literal(a) {
+                    Some(CPat::Lit(a.clone()))
+                } else if a.starts_with("..") || a.starts_with(':') || a.contains(':') {
+                    None
+                } else if let Some(t) = self.globals.get(a) {
+                    Some(t.map_or(CPat::Opaque, |t| CPat::Term(t.clone())))
+                } else if self.ops.contains(a) {
+                    Some(CPat::App(a.clone(), Vec::new()))
+                } else {
+                    Some(CPat::Var(a.clone()))
+                }
+            }
+            Sx::List(v) => match v.split_first() {
+                Some((Sx::Atom(f), args)) if f != "=" && self.ops.contains(f) => Some(CPat::App(
+                    f.clone(),
+                    args.iter().map(|a| self.pat(a)).collect::<Option<_>>()?,
+                )),
+                _ => None,
+            },
+        }
+    }
+
+    /// `Env.guard` of `Parse.lean`.
+    fn guard(&self, x: &Sx) -> Option<Vec<(CPat<G>, CPat<G>)>> {
+        if let Sx::List(v) = x
+            && let [Sx::Atom(e), p, q] = v.as_slice()
+            && e == "="
+        {
+            return Some(vec![(self.pat(p)?, self.pat(q)?)]);
+        }
+        self.pat(x).map(|_| Vec::new())
+    }
+
+    /// `Env.rewriteRules` of `Parse.lean`.
+    fn rewrite_rules(&self, lhs: &Sx, rhs: &Sx, tags: &[Sx]) -> Vec<CRule<G>> {
+        let (lhs, root) = match lhs {
+            Sx::List(v) => match v.as_slice() {
+                [Sx::Atom(e), Sx::Atom(x), p] if e == "=" => (
+                    p,
+                    self.pat(p)
+                        .map(|pp| vec![(CPat::Var(x.clone()), pp)])
+                        .unwrap_or_default(),
+                ),
+                _ => (lhs, Vec::new()),
+            },
+            _ => (lhs, Vec::new()),
+        };
+        let mut when = None;
+        for k in 0..tags.len() {
+            if matches!(&tags[k], Sx::Atom(a) if a == ":when") && k + 1 < tags.len() {
+                when = Some(&tags[k + 1]);
+                break;
+            }
+        }
+        let guards = match when {
+            Some(Sx::List(gs)) => gs
+                .iter()
+                .map(|g| self.guard(g))
+                .collect::<Option<Vec<_>>>()
+                .map(|v| v.concat()),
+            Some(_) => None,
+            None => Some(Vec::new()),
+        };
+        if tags.iter().any(|t| matches!(t, Sx::Atom(a) if a == ":let")) {
+            return Vec::new();
+        }
+        match (self.pat(lhs), self.pat(rhs), guards) {
+            (Some(l), Some(r), Some(gs)) => {
+                let mut eqs = root;
+                eqs.extend(gs);
+                vec![CRule {
+                    lhs: l,
+                    rhs: r,
+                    eqs,
+                }]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// `Env.ruleRules` of `Parse.lean`.
+    fn rule_rules(&self, body: &[Sx], actions: &[Sx]) -> Vec<CRule<G>> {
+        let Some(eqs) = body
+            .iter()
+            .map(|g| self.guard(g))
+            .collect::<Option<Vec<_>>>()
+            .map(|v| v.concat())
+        else {
+            return Vec::new();
+        };
+        fn subst<G: Clone>(lets: &[(String, CPat<G>)], p: CPat<G>) -> CPat<G> {
+            match p {
+                CPat::Var(x) => lets
+                    .iter()
+                    .find(|(n, _)| *n == x)
+                    .map_or(CPat::Var(x), |(_, q)| q.clone()),
+                CPat::App(f, ps) => CPat::App(f, ps.into_iter().map(|q| subst(lets, q)).collect()),
+                other => other,
+            }
+        }
+        let mut lets: Vec<(String, CPat<G>)> = Vec::new();
+        let mut out = Vec::new();
+        for a in actions {
+            let Sx::List(v) = a else { continue };
+            match v.as_slice() {
+                [Sx::Atom(u), p, q] if u == "union" => {
+                    if let (Some(l), Some(r)) = (self.pat(p), self.pat(q)) {
+                        out.push(CRule {
+                            lhs: subst(&lets, l),
+                            rhs: subst(&lets, r),
+                            eqs: eqs.clone(),
+                        });
+                    }
+                }
+                [Sx::Atom(l), Sx::Atom(x), t] if l == "let" => match self.pat(t) {
+                    Some(p) => {
+                        let p = subst(&lets, p);
+                        lets.insert(0, (x.clone(), p));
+                    }
+                    None => return out,
+                },
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The rules of the command `x` (`step` of `Parse.lean`).
+    fn rules(&self, x: &Sx) -> Vec<CRule<G>> {
+        let Sx::List(v) = x else { return Vec::new() };
+        match v.as_slice() {
+            [Sx::Atom(h), l, r, tags @ ..] if h == "rewrite" => self.rewrite_rules(l, r, tags),
+            [Sx::Atom(h), l, r, tags @ ..] if h == "birewrite" => {
+                let mut rs = self.rewrite_rules(l, r, tags);
+                rs.extend(self.rewrite_rules(r, l, tags));
+                rs
+            }
+            [Sx::Atom(h), Sx::List(body), Sx::List(actions), ..] if h == "rule" => {
+                self.rule_rules(body, actions)
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
 struct Writer<'a, Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
@@ -136,6 +441,11 @@ where
     table: Vec<(Option<String>, Vec<usize>)>,
     kinds: HashMap<String, (LeanKind, Option<usize>)>,
     unsupported: BTreeMap<&'static str, usize>,
+    forms: Vec<(usize, Sx)>,
+    rule_spans: &'a HashMap<usize, usize>,
+    globals: &'a HashMap<String, ClientTerm<Cfg::G>>,
+    /// The rules of the command at each offset, as the checker reads them.
+    rules_at: HashMap<usize, Vec<CRule<Cfg::G>>>,
 }
 
 impl<'a, Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
@@ -322,7 +632,7 @@ where
             | Justification::ACInterReduction { .. }
             | Justification::ACAxiomCP { .. }
             | Justification::InverseCancel { .. } => self.assoc_cong(x, y),
-            Justification::Rewrite { .. } => self.miss("rewrite"),
+            Justification::Rewrite { rule_id, .. } => self.rewrite(x, y, rule_id.to_usize()),
             Justification::Cancellative { .. } => self.miss("cancellative"),
             Justification::Assumption { .. } => self.miss("assumption"),
             Justification::Filler => self.miss("filler"),
@@ -364,6 +674,355 @@ where
             let _ = write!(s, " {p}");
         }
         Some(self.step(s))
+    }
+
+    /// The rules of the command at offset `o`, read in the scope the checker's
+    /// reader has there.
+    fn rules_for(&mut self, o: usize) -> Vec<CRule<Cfg::G>> {
+        if let Some(rs) = self.rules_at.get(&o) {
+            return rs.clone();
+        }
+        let mut scope = Scope {
+            ops: HashSet::new(),
+            globals: HashMap::new(),
+        };
+        let mut cmd = None;
+        for (off, x) in &self.forms {
+            if *off == o {
+                cmd = Some(x);
+                break;
+            }
+            let Sx::List(v) = x else { continue };
+            match v.as_slice() {
+                [Sx::Atom(h), Sx::Atom(f), _, _, ..] if h == "function" || h == "constructor" => {
+                    scope.ops.insert(f.clone());
+                }
+                [Sx::Atom(h), Sx::Atom(f), ..] if h == "relation" => {
+                    scope.ops.insert(f.clone());
+                }
+                [Sx::Atom(h), _, variants @ ..] if h == "datatype" => {
+                    for w in variants {
+                        if let Sx::List(w) = w
+                            && let Some(Sx::Atom(f)) = w.first()
+                        {
+                            scope.ops.insert(f.clone());
+                        }
+                    }
+                }
+                [Sx::Atom(h), Sx::Atom(x), _] if h == "let" => {
+                    scope.globals.insert(x.clone(), self.globals.get(x));
+                }
+                _ => {}
+            }
+        }
+        let rs = cmd.map(|c| scope.rules(c)).unwrap_or_default();
+        self.rules_at.insert(o, rs.clone());
+        rs
+    }
+
+    /// Up to 64 members of `g`'s class, `g` first.
+    fn members(&self, g: Cfg::G) -> Vec<Cfg::G> {
+        let mut v = vec![g];
+        v.extend(self.eg.class_members(g).filter(|&m| m != g).take(63));
+        v
+    }
+
+    /// Whether `p` matches a member of `g`'s class, each variable bound in
+    /// `sig` standing for its class; binds the variables it meets unbound.
+    fn pmatch(
+        &mut self,
+        p: &CPat<Cfg::G>,
+        g: Cfg::G,
+        sig: &mut Vec<(String, Cfg::G)>,
+        fuel: &mut usize,
+    ) -> bool {
+        if *fuel == 0 {
+            return false;
+        }
+        *fuel -= 1;
+        match p {
+            CPat::Var(x) => match sig.iter().find(|(n, _)| n == x) {
+                Some(&(_, b)) => self.eg.find_const(b) == self.eg.find_const(g),
+                None => {
+                    sig.push((x.clone(), g));
+                    true
+                }
+            },
+            CPat::Lit(v) => self.lit_member(v, g).is_some(),
+            CPat::Term(t) => self.term_member(t, g).is_some(),
+            CPat::Opaque => false,
+            CPat::App(f, ps) => {
+                for m in self.members(g) {
+                    if self.eg.get_lit_val(m).is_some() || self.eg.node_op_name(m) != f {
+                        continue;
+                    }
+                    for kids in self.orders(m, ps.len()) {
+                        let save = sig.len();
+                        let mut ok = true;
+                        for (q, &k) in ps.iter().zip(&kids) {
+                            if !self.pmatch(q, k, sig, fuel) {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            return true;
+                        }
+                        sig.truncate(save);
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// The orders in which a pattern of `n` arguments may take `m`'s
+    /// children: as stored, and swapped for a commutative operator, whose
+    /// `cong` step the kernel checks either way.
+    fn orders(&self, m: Cfg::G, n: usize) -> Vec<Vec<Cfg::G>> {
+        let kids = self.children(m);
+        if kids.len() != n {
+            return Vec::new();
+        }
+        let mut out = vec![kids.clone()];
+        if n == 2 && self.kind(self.eg.node_op(m)) == LeanKind::Comm {
+            out.push(vec![kids[1], kids[0]]);
+        }
+        out
+    }
+
+    fn lit_member(&self, v: &str, g: Cfg::G) -> Option<Cfg::G> {
+        self.members(g)
+            .into_iter()
+            .find(|&m| self.eg.get_lit_val(m).is_some_and(|l| l.to_string() == v))
+    }
+
+    fn term_member(&mut self, t: &ClientTerm<Cfg::G>, g: Cfg::G) -> Option<Cfg::G> {
+        let c = self.client_node(t)?;
+        self.members(g).into_iter().find(|&m| self.node(m) == c)
+    }
+
+    /// The certificate node of `p` with each variable read from `sig`.
+    fn inst(&mut self, p: &CPat<Cfg::G>, sig: &[(String, Cfg::G)]) -> Option<usize> {
+        match p {
+            CPat::Var(x) => {
+                let g = sig.iter().find(|(n, _)| n == x)?.1;
+                Some(self.node(g))
+            }
+            CPat::Lit(v) => {
+                Some(self.add_node((format!("#lit {v}"), Vec::new()), format!("l {v}")))
+            }
+            CPat::Term(t) => self.client_node(t),
+            CPat::Opaque => None,
+            CPat::App(f, ps) => {
+                let mut ids = Vec::with_capacity(ps.len());
+                for q in ps {
+                    ids.push(self.inst(q, sig)?);
+                }
+                let mut line = format!("a {f}");
+                for c in &ids {
+                    let _ = write!(line, " {c}");
+                }
+                Some(self.add_node((f.clone(), ids), line))
+            }
+        }
+    }
+
+    /// A step proving `p`'s instance by `sig` equal to `g`'s node (`Some(None)`
+    /// when they are the same node), for a `p` that `pmatch` matched to `g`.
+    fn tie(
+        &mut self,
+        p: &CPat<Cfg::G>,
+        g: Cfg::G,
+        sig: &[(String, Cfg::G)],
+    ) -> Option<Option<usize>> {
+        let (m, s) = match p {
+            CPat::Var(x) => (sig.iter().find(|(n, _)| n == x)?.1, None),
+            CPat::Lit(v) => (self.lit_member(v, g)?, None),
+            CPat::Term(t) => (self.term_member(t, g)?, None),
+            CPat::Opaque => return None,
+            CPat::App(f, ps) => {
+                let mut found = None;
+                for m in self.members(g) {
+                    if self.eg.get_lit_val(m).is_some() || self.eg.node_op_name(m) != f {
+                        continue;
+                    }
+                    for kids in self.orders(m, ps.len()) {
+                        let mut probe = sig.to_vec();
+                        let mut fuel = 10_000;
+                        if ps
+                            .iter()
+                            .zip(&kids)
+                            .all(|(q, &k)| self.pmatch(q, k, &mut probe, &mut fuel))
+                            && probe.len() == sig.len()
+                        {
+                            found = Some((m, kids));
+                            break;
+                        }
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                let (m, kids) = found?;
+                let mut prems = Vec::new();
+                for (q, &k) in ps.iter().zip(&kids) {
+                    if let Some(t) = self.tie(q, k, sig)? {
+                        prems.push(t);
+                    }
+                }
+                let a = self.inst(p, sig)?;
+                let nm = self.node(m);
+                let s = if a == nm && prems.is_empty() {
+                    None
+                } else {
+                    let mut line = format!("cong {f} {a} {nm}");
+                    for t in prems {
+                        let _ = write!(line, " {t}");
+                    }
+                    Some(self.step(line))
+                };
+                (m, s)
+            }
+        };
+        let path = if m == g {
+            None
+        } else {
+            Some(self.prove(m, g)?)
+        };
+        Some(match (s, path) {
+            (None, None) => None,
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (Some(a), Some(b)) => Some(self.step(format!("trans {a} {b}"))),
+        })
+    }
+
+    /// Binds `sig` so that rule `r` sends `l` to `rr`: the left side matched
+    /// to `l`, each equality premise to the class of its bound side, and the
+    /// right side to `rr`. Returns each premise's anchor node.
+    fn bind(
+        &mut self,
+        r: &CRule<Cfg::G>,
+        l: Cfg::G,
+        rr: Cfg::G,
+        sig: &mut Vec<(String, Cfg::G)>,
+    ) -> Option<Vec<Cfg::G>> {
+        let mut fuel = 10_000;
+        if !self.pmatch(&r.lhs, l, sig, &mut fuel) {
+            return None;
+        }
+        let bound = |sig: &[(String, Cfg::G)], p: &CPat<Cfg::G>| match p {
+            CPat::Var(x) => sig.iter().find(|(n, _)| n == x).map(|e| e.1),
+            _ => None,
+        };
+        let mut anchors: Vec<Option<Cfg::G>> = vec![None; r.eqs.len()];
+        // Two passes: a premise whose sides are both unbound after the left
+        // side may be anchored by the right side's bindings.
+        for pass in 0..2 {
+            if pass == 1 && !self.pmatch(&r.rhs, rr, sig, &mut fuel) {
+                return None;
+            }
+            for (i, (p, q)) in r.eqs.iter().enumerate() {
+                if anchors[i].is_some() {
+                    continue;
+                }
+                let a = match (bound(sig, p), bound(sig, q)) {
+                    (Some(a), _) => {
+                        if !self.pmatch(q, a, sig, &mut fuel) {
+                            return None;
+                        }
+                        a
+                    }
+                    (None, Some(a)) => {
+                        if !self.pmatch(p, a, sig, &mut fuel) {
+                            return None;
+                        }
+                        a
+                    }
+                    // The root binding of a `rewrite`: `(= v lhs)`.
+                    (None, None) if matches!(p, CPat::Var(_)) && pass == 0 => {
+                        if !self.pmatch(q, l, sig, &mut fuel) || !self.pmatch(p, l, sig, &mut fuel)
+                        {
+                            return None;
+                        }
+                        l
+                    }
+                    _ => continue,
+                };
+                anchors[i] = Some(a);
+            }
+        }
+        let mut vars = Vec::new();
+        r.lhs.vars(&mut vars);
+        r.rhs.vars(&mut vars);
+        for (p, q) in &r.eqs {
+            p.vars(&mut vars);
+            q.vars(&mut vars);
+        }
+        if vars.iter().any(|v| !sig.iter().any(|(n, _)| n == v)) {
+            return None;
+        }
+        anchors.into_iter().collect()
+    }
+
+    /// `x = y` for a `Rewrite` edge of rule `rule_id`.
+    fn rewrite(&mut self, x: Cfg::G, y: Cfg::G, rule_id: usize) -> Option<usize> {
+        let Some(&span) = self.rule_spans.get(&rule_id) else {
+            return self.miss("rewrite without a source");
+        };
+        let Some(o) = self
+            .forms
+            .iter()
+            .map(|(o, _)| *o)
+            .take_while(|&o| o <= span)
+            .last()
+        else {
+            return self.miss("rewrite without a source");
+        };
+        let rules = self.rules_for(o);
+        if rules.is_empty() {
+            // A rest variable, a multiplicity, a primitive or a `:let`: the
+            // checker's reader reads no rule from the command.
+            return self.miss("rule outside the checker's language");
+        }
+        for (j, r) in rules.iter().enumerate() {
+            for (l, rr, flip) in [(x, y, false), (y, x, true)] {
+                let mut sig = Vec::new();
+                let Some(anchors) = self.bind(r, l, rr, &mut sig) else {
+                    continue;
+                };
+                let tl = self.tie(&r.lhs, l, &sig)?;
+                let tr = self.tie(&r.rhs, rr, &sig)?;
+                let mut prems = Vec::new();
+                for ((p, q), &a) in r.eqs.iter().zip(&anchors) {
+                    let tp = self.tie(p, a, &sig)?;
+                    let tq = self
+                        .tie(q, a, &sig)?
+                        .map(|t| self.step(format!("symm {t}")));
+                    let ip = self.inst(p, &sig)?;
+                    prems.push(self.chain(&[tp, tq], ip));
+                }
+                let (a, b) = (self.inst(&r.lhs, &sig)?, self.inst(&r.rhs, &sig)?);
+                let mut line = format!("rule {o} {j} {a} {b} {}", sig.len());
+                for (n, g) in sig.clone() {
+                    let c = self.node(g);
+                    let _ = write!(line, " {n} {c}");
+                }
+                for p in prems {
+                    let _ = write!(line, " {p}");
+                }
+                let st = self.step(line);
+                let tl = tl.map(|t| self.step(format!("symm {t}")));
+                let nl = self.node(l);
+                let s = self.chain(&[tl, Some(st), tr], nl);
+                return Some(if flip {
+                    self.step(format!("symm {s}"))
+                } else {
+                    s
+                });
+            }
+        }
+        self.miss("rewrite not matched")
     }
 
     /// The arguments `n` flattens to under `op`, and the applications of `op`
@@ -646,15 +1305,14 @@ where
     Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     /// Writes a certificate (`proofs/checker`, format `semper-cert 1`) proving
-    /// `goals[i]` for the `i`-th `check-eq` form of `src`, and the axioms as
-    /// the `union` forms of `src` in order. Requires `PROOFS`.
+    /// `inp.goals[i]` for the `i`-th `check-eq` form of `inp.src`, with the
+    /// axioms as the `union` forms of the source in order. Requires `PROOFS`.
     pub fn write_certificate<W: std::io::Write>(
         &self,
-        src: &str,
-        goals: &[CertGoal<Cfg::G>],
-        unions: &[CertGoal<Cfg::G>],
+        inp: &CertInputs<'_, Cfg::G>,
         mut out: W,
     ) -> std::io::Result<CertStats> {
+        let (src, goals, unions) = (inp.src, inp.goals, inp.unions);
         if !PROOFS {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -677,6 +1335,10 @@ where
             table: Vec::new(),
             kinds: HashMap::new(),
             unsupported: BTreeMap::new(),
+            forms: read_top(src),
+            rule_spans: inp.rule_spans,
+            globals: inp.globals,
+            rules_at: HashMap::new(),
         };
         for i in 0..self.ops.names().count() {
             let op: Cfg::O = crate::id::id_at(i);

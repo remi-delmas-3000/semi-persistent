@@ -64,8 +64,12 @@ which is a smaller class than the many-sorted models of the program.
 
 Over the fixtures of `egraph/tests/egg`, each run with `--proofs --cert`
 (release build, 20 s and 2 GB per run) and then checked: the checker proves
-110 of the 1,594 `check-eq` that hold, and every `check-eq` of 34 of the 235
-fixtures that have one. The checker rejects no step the writer emits.
+152 of the 1,594 `check-eq` that hold, and every `check-eq` of 57 of the 235
+fixtures that have one. No step the writer emits fails to check.
+
+A step that does not check concludes only `0 = 0` (`Ctx.failed` in
+`Kernel.lean`), and the checker reports it: a mistake in the writer costs the
+goals whose derivations cite the step, not the whole certificate.
 
 The writer leaves a goal unproved when an edge on its explanation is one it
 cannot express. Counted by edge (an edge can block several goals, and a goal
@@ -74,12 +78,18 @@ stops at its first such edge):
 | edge | count |
 | --- | --- |
 | a law or completion step whose two sides the writer cannot relate by flattening and by rewriting arguments to class members (nilpotent and inverse laws, inter-reduction) | 722 |
-| a rule application (`Rewrite`): the writer emits no `rule` step yet | 321 |
+| a rule the checker's reader reads no rule from: a primitive operation or guard, a rest variable, a multiplicity, a `:let` | 202 |
 | a lazy `check-eq`, whose transaction discards its nodes before the certificate is written | 173 |
 | cancellation | 73 |
+| a rule application whose pattern the writer cannot match to the two nodes by position (29 in the `flatten` fixtures, where the engine matched modulo associativity; 7 others, such as a premise variable bound only through an equality) | 36 |
+| a sequence rule, which carries no source position | 19 |
 | a law step between two nodes of no associative operator | 13 |
 
+For a rule application, the writer reads the rule's command as the checker
+reads it, matches the rule's sides to the edge's two nodes modulo their
+classes (either child order for a commutative operator) to recover the variable bindings, and joins the instance to the two
+nodes by `cong` steps whose premises are forest paths.
+
 An empty application `(Add)` is the unit in the engine; the semantics does
-not state that law, so the one fixture that checks it stays unproved. Six
-fixtures do not parse: two use `push` and `pop`, four write a count above
-65,536.
+not state that law, so the fixtures that check it stay unproved. Six fixtures
+do not parse: two use `push` and `pop`, four write a count above 65,536.

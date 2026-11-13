@@ -156,7 +156,10 @@ pub struct Interpreter<
     /// The terms of each `union` as written, by axiom id, when `PROOFS` is on.
     pub union_terms: Vec<crate::egraph::cert::CertGoal<Cfg::G>>,
     /// The term each `let` name was bound to, as written, when `PROOFS` is on.
-    let_terms: std::collections::HashMap<String, crate::egraph::cert::ClientTerm<Cfg::G>>,
+    pub let_terms: std::collections::HashMap<String, crate::egraph::cert::ClientTerm<Cfg::G>>,
+    /// The source offset of each rule's left-hand side, by rule id, which
+    /// names the command a `Justification::Rewrite` step applied.
+    pub rule_spans: std::collections::HashMap<usize, usize>,
     /// The rule list `(run)` schedules: ordinary rules and sequence rules, in program
     /// order (`saturate::Rule`).
     rules: Vec<crate::saturate::Rule<Cfg::O, Cfg::S, L>>,
@@ -284,6 +287,7 @@ where
             proved_eqs: Vec::new(),
             union_terms: Vec::new(),
             let_terms: std::collections::HashMap::new(),
+            rule_spans: std::collections::HashMap::new(),
             rules: Vec::new(),
             globals: crate::resolve::GlobalCtx::new(),
             marks: Vec::new(),
@@ -314,6 +318,7 @@ where
             proved_eqs: Vec::new(),
             union_terms: Vec::new(),
             let_terms: std::collections::HashMap::new(),
+            rule_spans: std::collections::HashMap::new(),
             rules: Vec::new(),
             globals: crate::resolve::GlobalCtx::new(),
             marks: Vec::new(),
@@ -1124,6 +1129,9 @@ where
             } => {
                 let name = format!("rewrite_{}", self.eg.rules().len());
                 let rule_id = self.eg.register_rule(&name, "", "");
+                if let crate::ast::Span::Range { start, .. } = span {
+                    self.rule_spans.insert(rule_id.to_usize(), *start as usize);
+                }
                 let compiled_rhs = crate::apply::compile_rhs(rhs);
                 let mut actions = vec![crate::apply::CompiledAction::Union(
                     rule_id,
@@ -1154,6 +1162,9 @@ where
             } => {
                 let name = format!("rule_{}", self.eg.rules().len());
                 let rule_id = self.eg.register_rule(&name, "", "");
+                if let crate::ast::Span::Range { start, .. } = span {
+                    self.rule_spans.insert(rule_id.to_usize(), *start as usize);
+                }
                 let compiled: Vec<_> = actions
                     .iter()
                     .map(|a| crate::apply::compile_action(a, rule_id))

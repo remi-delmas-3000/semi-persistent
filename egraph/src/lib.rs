@@ -76,6 +76,7 @@ pub use egraph::{
 /// (debug builds only).
 #[cfg(debug_assertions)]
 pub use egraph::cc_mirror;
+pub use egraph::cert;
 
 // Flat re-exports from other modules
 pub use classes::EClasses;

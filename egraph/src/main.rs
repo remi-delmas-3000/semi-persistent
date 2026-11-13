@@ -414,10 +414,16 @@ fn run<Cfg, L, M, const PROOFS: bool>(
             }
         };
         let writer = std::io::BufWriter::new(file);
-        match interp
-            .eg
-            .write_certificate(src, &interp.proved_eqs, &interp.union_terms, writer)
-        {
+        match interp.eg.write_certificate(
+            &semi_persistent_egraph::cert::CertInputs {
+                src,
+                goals: &interp.proved_eqs,
+                unions: &interp.union_terms,
+                rule_spans: &interp.rule_spans,
+                globals: &interp.let_terms,
+            },
+            writer,
+        ) {
             Ok(stats) => {
                 eprintln!(
                     "wrote certificate: {} of {} check-eq proved, {} nodes, {} steps to {}",
