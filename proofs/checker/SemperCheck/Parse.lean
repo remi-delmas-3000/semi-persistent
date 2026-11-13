@@ -126,6 +126,7 @@ partial def Env.term (E : Env) : SExp → Except String Term
       | .atom a =>
         if a.startsWith ":" then
           let some k := (a.drop 1).toString.toNat? | throw s!"unsupported child tag {a}"
+          if k > 65536 then throw s!"count {k} above 65536"
           let some last := out.back? | throw s!"count without a child in {f}"
           out := out.pop
           for _ in [0:k] do out := out.push last
@@ -133,6 +134,7 @@ partial def Env.term (E : Env) : SExp → Except String Term
           match a.splitOn ":" with
           | [n, k] =>
             let some k := k.toNat? | throw s!"unsupported child {a}"
+            if k > 65536 then throw s!"count {k} above 65536"
             let t ← E.term (.atom n)
             for _ in [0:k] do out := out.push t
           | _ => throw s!"unsupported child {a}"
@@ -269,8 +271,7 @@ def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Prog
     return ({ E with globals := (x, t) :: E.globals }, P)
   | .list [.atom "union", a, b] => do
     return (E, { P with decls := P.decls ++ [(o, .axiom (← E.term a) (← E.term b))] })
-  | .list [.atom "check-eq", a, b]
-  | .list [.atom "check", .list [.atom "=", a, b]] => do
+  | .list [.atom "check-eq", a, b] => do
     return (E, { P with decls := P.decls ++ [(o, .goal (← E.term a) (← E.term b))] })
   | .list (.atom "rewrite" :: l :: r :: tags) =>
     return (E, { P with decls := P.decls ++ [(o, .rules (E.rewriteRules l r tags))] })
