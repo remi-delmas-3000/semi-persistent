@@ -160,6 +160,10 @@ pub struct Interpreter<
     /// The source offset of each rule's left-hand side, by rule id, which
     /// names the command a `Justification::Rewrite` step applied.
     pub rule_spans: std::collections::HashMap<usize, usize>,
+    /// The equality certificate under construction, when one was asked for
+    /// (`PROOFS` only): a lazy `check-eq` is proved into it before its
+    /// transaction discards the nodes it built.
+    pub cert: Option<crate::egraph::cert::CertState<Cfg::G>>,
     /// The rule list `(run)` schedules: ordinary rules and sequence rules, in program
     /// order (`saturate::Rule`).
     rules: Vec<crate::saturate::Rule<Cfg::O, Cfg::S, L>>,
@@ -288,6 +292,7 @@ where
             union_terms: Vec::new(),
             let_terms: std::collections::HashMap::new(),
             rule_spans: std::collections::HashMap::new(),
+            cert: None,
             rules: Vec::new(),
             globals: crate::resolve::GlobalCtx::new(),
             marks: Vec::new(),
@@ -319,6 +324,7 @@ where
             union_terms: Vec::new(),
             let_terms: std::collections::HashMap::new(),
             rule_spans: std::collections::HashMap::new(),
+            cert: None,
             rules: Vec::new(),
             globals: crate::resolve::GlobalCtx::new(),
             marks: Vec::new(),
@@ -449,7 +455,20 @@ where
         if let Some(token) = self.lazy_txn.take() {
             self.eg.set_cc(false);
             self.eg.set_cc_goal(None);
+            if let Some(st) = &mut self.cert {
+                let inp = crate::egraph::cert::CertInputs {
+                    src: "",
+                    goals: &self.proved_eqs,
+                    unions: &self.union_terms,
+                    rule_spans: &self.rule_spans,
+                    globals: &self.let_terms,
+                };
+                self.eg.cert_prove_goals(st, &inp);
+            }
             self.eg.restore(token);
+            if let Some(st) = &mut self.cert {
+                self.eg.cert_forget(st);
+            }
         }
     }
 
@@ -1578,7 +1597,7 @@ where
     ) -> Option<crate::egraph::cert::ClientTerm<Cfg::G>> {
         use crate::egraph::cert::ClientTerm;
         match ct {
-            CTerm::Lit(val, _) => Some(ClientTerm::Lit(val.to_string())),
+            CTerm::Lit(val, _) => Some(ClientTerm::Lit(crate::egraph::cert::lit_spelling(val))),
             CTerm::App { op, children, .. } => {
                 let mut kids = Vec::with_capacity(children.len());
                 for c in children {

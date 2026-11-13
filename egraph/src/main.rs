@@ -348,6 +348,9 @@ fn run<Cfg, L, M, const PROOFS: bool>(
     interp.set_basis_checks(opts.basis_checks);
     interp.eg.flatten_rhs = opts.flatten_rhs;
     interp.set_cost_bits(opts.cost_bits);
+    if opts.cert.is_some() {
+        interp.cert = Some(semi_persistent_egraph::cert::CertState::new(src));
+    }
     let mut globals = semi_persistent_egraph::resolve::GlobalCtx::new();
     let checked = match semi_persistent_egraph::sortcheck::sortcheck_program(
         surface_cmds.to_vec(),
@@ -414,7 +417,12 @@ fn run<Cfg, L, M, const PROOFS: bool>(
             }
         };
         let writer = std::io::BufWriter::new(file);
-        match interp.eg.write_certificate(
+        let mut st = interp
+            .cert
+            .take()
+            .unwrap_or_else(|| semi_persistent_egraph::cert::CertState::new(src));
+        interp.eg.cert_prove_goals(
+            &mut st,
             &semi_persistent_egraph::cert::CertInputs {
                 src,
                 goals: &interp.proved_eqs,
@@ -422,8 +430,8 @@ fn run<Cfg, L, M, const PROOFS: bool>(
                 rule_spans: &interp.rule_spans,
                 globals: &interp.let_terms,
             },
-            writer,
-        ) {
+        );
+        match st.finish(writer) {
             Ok(stats) => {
                 eprintln!(
                     "wrote certificate: {} of {} check-eq proved, {} nodes, {} steps to {}",

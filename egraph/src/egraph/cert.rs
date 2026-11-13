@@ -68,6 +68,13 @@ pub struct CertStats {
     pub unsupported: BTreeMap<&'static str, usize>,
 }
 
+/// A literal as the program spells it: a string in quotes, any other literal
+/// as it displays.
+pub fn lit_spelling<V: std::fmt::Display + std::fmt::Debug>(v: &V) -> String {
+    let d = format!("{v:?}");
+    if d.starts_with('"') { d } else { v.to_string() }
+}
+
 /// The kernel's reading of an operator's laws (`Kind` in `Syntax.lean`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LeanKind {
@@ -421,31 +428,112 @@ impl<G: Clone> Scope<'_, G> {
     }
 }
 
+/// A certificate under construction. It outlives the e-graph states it is
+/// written from: a lazy `check-eq` is proved before its transaction discards
+/// the nodes it built ([`EGraph::cert_prove_goals`]), and
+/// [`EGraph::cert_forget`] then drops what was keyed by a discarded node id.
+/// The certificate's nodes are terms, and its steps are equalities between
+/// terms, so both stay valid across a restore.
+pub struct CertState<G> {
+    nodes: String,
+    steps: String,
+    lines: String,
+    n_nodes: usize,
+    n_steps: usize,
+    n_goals: usize,
+    n_proved: usize,
+    /// The next `check-eq` (index into the interpreter's list) to prove.
+    next_goal: usize,
+    node_of: HashMap<usize, usize>,
+    key_of: HashMap<(String, Vec<usize>), usize>,
+    proved: HashMap<(usize, usize), Option<usize>>,
+    in_progress: HashSet<(usize, usize)>,
+    axiom_offsets: Vec<usize>,
+    check_offsets: Vec<usize>,
+    /// Each certificate node: its operator (`None` for a literal) and children.
+    table: Vec<(Option<String>, Vec<usize>)>,
+    kinds: HashMap<String, (LeanKind, Option<usize>)>,
+    unsupported: BTreeMap<&'static str, usize>,
+    forms: Vec<(usize, Sx)>,
+    /// The rules of the command at each offset, as the checker reads them.
+    rules_at: HashMap<usize, Vec<CRule<G>>>,
+}
+
+impl<G> CertState<G> {
+    /// An empty certificate for the program `src`.
+    pub fn new(src: &str) -> Self {
+        CertState {
+            nodes: String::new(),
+            steps: String::new(),
+            lines: String::new(),
+            n_nodes: 0,
+            n_steps: 0,
+            n_goals: 0,
+            n_proved: 0,
+            next_goal: 0,
+            node_of: HashMap::new(),
+            key_of: HashMap::new(),
+            proved: HashMap::new(),
+            in_progress: HashSet::new(),
+            axiom_offsets: form_offsets(src, "union"),
+            check_offsets: form_offsets(src, "check-eq"),
+            table: Vec::new(),
+            kinds: HashMap::new(),
+            unsupported: BTreeMap::new(),
+            forms: read_top(src),
+            rules_at: HashMap::new(),
+        }
+    }
+
+    /// Writes the certificate (format `semper-cert 1`).
+    pub fn finish<W: std::io::Write>(self, mut out: W) -> std::io::Result<CertStats> {
+        writeln!(out, "semper-cert 1")?;
+        out.write_all(self.nodes.as_bytes())?;
+        out.write_all(self.steps.as_bytes())?;
+        out.write_all(self.lines.as_bytes())?;
+        Ok(CertStats {
+            goals: self.n_goals,
+            proved: self.n_proved,
+            nodes: self.n_nodes,
+            steps: self.n_steps,
+            unsupported: self.unsupported,
+        })
+    }
+}
+
 struct Writer<'a, Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
     Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     eg: &'a EGraph<Cfg, L, TRACK, PROOFS>,
-    nodes: String,
-    steps: String,
-    n_nodes: usize,
-    n_steps: usize,
-    node_of: HashMap<usize, usize>,
-    key_of: HashMap<(String, Vec<usize>), usize>,
-    proved: HashMap<(usize, usize), Option<usize>>,
-    in_progress: HashSet<(usize, usize)>,
-    axiom_offsets: Vec<usize>,
+    st: &'a mut CertState<Cfg::G>,
     unions: &'a [CertGoal<Cfg::G>],
-    /// Each certificate node: its operator (`None` for a literal) and children.
-    table: Vec<(Option<String>, Vec<usize>)>,
-    kinds: HashMap<String, (LeanKind, Option<usize>)>,
-    unsupported: BTreeMap<&'static str, usize>,
-    forms: Vec<(usize, Sx)>,
     rule_spans: &'a HashMap<usize, usize>,
     globals: &'a HashMap<String, ClientTerm<Cfg::G>>,
-    /// The rules of the command at each offset, as the checker reads them.
-    rules_at: HashMap<usize, Vec<CRule<Cfg::G>>>,
+}
+
+impl<Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool> std::ops::Deref
+    for Writer<'_, Cfg, L, TRACK, PROOFS>
+where
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+{
+    type Target = CertState<Cfg::G>;
+    fn deref(&self) -> &Self::Target {
+        self.st
+    }
+}
+
+impl<Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool> std::ops::DerefMut
+    for Writer<'_, Cfg, L, TRACK, PROOFS>
+where
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.st
+    }
 }
 
 impl<'a, Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
@@ -511,7 +599,7 @@ where
             return k;
         }
         let k = if let Some(v) = self.eg.get_lit_val(id) {
-            let v = v.to_string();
+            let v = lit_spelling(v);
             self.add_node((format!("#lit {v}"), Vec::new()), format!("l {v}"))
         } else {
             let kids: Vec<usize> = self
@@ -794,7 +882,7 @@ where
     fn lit_member(&self, v: &str, g: Cfg::G) -> Option<Cfg::G> {
         self.members(g)
             .into_iter()
-            .find(|&m| self.eg.get_lit_val(m).is_some_and(|l| l.to_string() == v))
+            .find(|&m| self.eg.get_lit_val(m).is_some_and(|l| lit_spelling(l) == v))
     }
 
     fn term_member(&mut self, t: &ClientTerm<Cfg::G>, g: Cfg::G) -> Option<Cfg::G> {
@@ -1304,41 +1392,19 @@ where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
     Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
-    /// Writes a certificate (`proofs/checker`, format `semper-cert 1`) proving
-    /// `inp.goals[i]` for the `i`-th `check-eq` form of `inp.src`, with the
-    /// axioms as the `union` forms of the source in order. Requires `PROOFS`.
-    pub fn write_certificate<W: std::io::Write>(
-        &self,
-        inp: &CertInputs<'_, Cfg::G>,
-        mut out: W,
-    ) -> std::io::Result<CertStats> {
-        let (src, goals, unions) = (inp.src, inp.goals, inp.unions);
+    /// Proves, into `st`, each `check-eq` of `inp.goals` not proved yet. A
+    /// caller about to discard nodes (a lazy check's transaction) calls it
+    /// first, then [`cert_forget`](Self::cert_forget). Requires `PROOFS`.
+    pub fn cert_prove_goals(&self, st: &mut CertState<Cfg::G>, inp: &CertInputs<'_, Cfg::G>) {
         if !PROOFS {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "a certificate requires an EGraph with PROOFS=true",
-            ));
+            return;
         }
-        let check_offsets = form_offsets(src, "check-eq");
         let mut w = Writer {
             eg: self,
-            nodes: String::new(),
-            steps: String::new(),
-            n_nodes: 0,
-            n_steps: 0,
-            node_of: HashMap::new(),
-            key_of: HashMap::new(),
-            proved: HashMap::new(),
-            in_progress: HashSet::new(),
-            axiom_offsets: form_offsets(src, "union"),
-            unions,
-            table: Vec::new(),
-            kinds: HashMap::new(),
-            unsupported: BTreeMap::new(),
-            forms: read_top(src),
+            st,
+            unions: inp.unions,
             rule_spans: inp.rule_spans,
             globals: inp.globals,
-            rules_at: HashMap::new(),
         };
         for i in 0..self.ops.names().count() {
             let op: Cfg::O = crate::id::id_at(i);
@@ -1346,16 +1412,14 @@ where
             let unit = self.unit_node(op).map(|u| w.node(u));
             w.kinds.insert(self.ops.info(op).name.clone(), (kind, unit));
         }
-        let mut lines = String::new();
-        let mut stats = CertStats {
-            goals: goals.len(),
-            ..CertStats::default()
-        };
-        for (i, g) in goals.iter().enumerate() {
-            let Some(&off) = check_offsets.get(i) else {
-                break;
+        while w.next_goal < inp.goals.len() {
+            let i = w.next_goal;
+            w.next_goal += 1;
+            w.n_goals += 1;
+            let g = &inp.goals[i];
+            let Some(&off) = w.check_offsets.get(i) else {
+                continue;
             };
-            // A lazy check's transaction discards the nodes it built.
             if g.a.to_usize() >= self.len() || g.b.to_usize() >= self.len() {
                 *w.unsupported.entry("goal nodes discarded").or_default() += 1;
                 continue;
@@ -1371,16 +1435,37 @@ where
             };
             let lb = lb.map(|s| w.step(format!("symm {s}")));
             let s = w.chain(&[la, Some(s), lb], ca);
-            stats.proved += 1;
-            let _ = writeln!(lines, "g {off} {s}");
+            w.n_proved += 1;
+            let _ = writeln!(w.lines, "g {off} {s}");
         }
-        writeln!(out, "semper-cert 1")?;
-        out.write_all(w.nodes.as_bytes())?;
-        out.write_all(w.steps.as_bytes())?;
-        out.write_all(lines.as_bytes())?;
-        stats.nodes = w.n_nodes;
-        stats.steps = w.n_steps;
-        stats.unsupported = w.unsupported;
-        Ok(stats)
+    }
+
+    /// Drops what `st` keyed by a node id at or above the current length,
+    /// after a restore discarded those nodes (their ids may be reused).
+    pub fn cert_forget(&self, st: &mut CertState<Cfg::G>) {
+        let len = self.len();
+        st.node_of.retain(|&id, _| id < len);
+        st.proved
+            .retain(|&(a, b), r| a < len && b < len && r.is_some());
+        st.in_progress.clear();
+    }
+
+    /// Writes a certificate (`proofs/checker`, format `semper-cert 1`) proving
+    /// `inp.goals[i]` for the `i`-th `check-eq` form of `inp.src`, with the
+    /// axioms as the `union` forms of the source in order. Requires `PROOFS`.
+    pub fn write_certificate<W: std::io::Write>(
+        &self,
+        inp: &CertInputs<'_, Cfg::G>,
+        out: W,
+    ) -> std::io::Result<CertStats> {
+        if !PROOFS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a certificate requires an EGraph with PROOFS=true",
+            ));
+        }
+        let mut st = CertState::new(inp.src);
+        self.cert_prove_goals(&mut st, inp);
+        st.finish(out)
     }
 }
