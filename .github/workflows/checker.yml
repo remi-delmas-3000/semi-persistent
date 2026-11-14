@@ -1,0 +1,74 @@
+name: Proof Certificates
+on:
+  pull_request:
+    paths:
+      - 'proofs/checker/**'
+      - 'egraph/**'
+      - 'doc/book/examples/**'
+      - '.github/workflows/checker.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'proofs/checker/**'
+      - 'egraph/**'
+      - 'doc/book/examples/**'
+      - '.github/workflows/checker.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Builds the Lean checker under proofs/checker (no dependency beyond Lean's
+  # core library, so nothing is downloaded but the toolchain), gates its
+  # soundness theorem on the three standard axioms, then has the engine write
+  # an equality certificate for every regression program that expects `ok`
+  # and checks each with the checker
+  # (proofs/checker/scripts/check-certificates.py, which runs locally the same
+  # way). The job fails on a step that does not check, a rejected
+  # certificate, an engine failure under --proofs, or a program proving fewer
+  # check-eq than proofs/checker/coverage.tsv records.
+  certificates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install elan
+        env:
+          ELAN_VERSION: v4.2.4
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 2 -o /tmp/elan.tar.gz \
+            "https://github.com/leanprover/elan/releases/download/${ELAN_VERSION}/elan-x86_64-unknown-linux-gnu.tar.gz"
+          tar -xzf /tmp/elan.tar.gz -C /tmp
+          /tmp/elan-init -y --no-modify-path --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Build the checker and gate its axioms
+        working-directory: proofs/checker
+        run: |
+          set -euo pipefail
+          lake build 2>&1 | tee /tmp/lake.log
+          if grep -q "declaration uses 'sorry'" /tmp/lake.log; then
+            echo "a declaration uses sorry"; exit 1
+          fi
+          grep -q "'SemperCheck.goal_sound' depends on axioms: \[propext, Classical.choice, Quot.sound\]" /tmp/lake.log
+
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build the engine
+        run: cargo build --release -p semi-persistent-egraph --bin semi-persistent
+
+      - name: Write and check the certificates
+        run: python3 -B proofs/checker/scripts/check-certificates.py --jobs 4

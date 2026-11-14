@@ -84,6 +84,31 @@ ill-sorted, or that applies an `:assoc-left` or `:assoc-right` operator to
 more arguments than its signature takes, is rejected; the latter is a
 limitation of the reader (8 fixtures), not of the semantics.
 
+## Checking every regression program
+
+`scripts/check-certificates.py` has the engine write a certificate for every
+program the regression tests run and expect `ok`, and checks each one: the
+files `egraph/tests/egg_tests.rs` registers, the CBMC and conformance corpora,
+and the book examples. CI runs it (`.github/workflows/checker.yml`). It fails
+on a step that does not check, a rejected certificate, an engine failure
+under `--proofs`, or a program proving fewer `check-eq` than
+`coverage.tsv` records; `--update` rewrites `coverage.tsv` after a change
+that proves more.
+
+Over the 1,684 programs (release build, 60 s and 4 GB per run, 61 s wall
+time with six jobs): 1,441 certificates check with no failed step, 5,697 of
+the 29,807 `check-eq` they cover are proved, and every `check-eq` of 201 of
+the 1,065 programs with one. 125 programs expect an outcome other than `ok`.
+The reader rejects 117 programs: 101 apply an `:assoc-left` or
+`:assoc-right` operator to more arguments than its signature takes (93 of
+them in the `conform-flatten` corpus), 8 use `push` and `pop`, 5 write a
+count above 65,536, and 2 use an unannotated literal where its default sort
+is not the one the position takes. One program, `bench/acgen.rules.egg`,
+exceeds 4 GB under `--proofs`; it runs in 9 s without proofs, and
+`bench/search-dfs-small.rules.egg`, which the regression tests do not
+register, takes over 120 s under `--proofs` against 2 s without, on the
+engine before this branch too.
+
 ## Coverage over the fixtures
 
 Over the fixtures of `egraph/tests/egg`, each run with `--proofs --cert`
