@@ -22,7 +22,11 @@ def main (args : List String) : IO UInt32 := do
     | .ok c => pure c
     | .error e => IO.eprintln s!"certificate: {e}"; return 2
   let some (C, acc) := runCert P cert
-    | IO.eprintln "certificate rejected: a node has a child at or after it"; return 1
+    | if !wfNodes cert.nodes then
+        IO.eprintln "certificate rejected: a node has a child at or after it"
+      else
+        IO.eprintln "certificate rejected: a node is ill-sorted"
+      return 1
   -- A step that does not check concludes `0 = 0` (`Ctx.failed`); report each.
   let mut failures := 0
   let mut seen : Array Concl := #[]

@@ -26,12 +26,19 @@ and the program, by one of six inferences:
 
 A conclusion also records the offset before which every command it cites
 starts, so a `check-eq` can use only the commands before it.
+
+Every node has a sort (`nodeSort`): a literal's is the one it carries, an
+application's is its operator's result sort. The table is well-sorted
+(`wfSorts`): each child has the sort its position takes, and each literal is
+of a literal sort. A step concludes only an equality between two nodes of one
+sort, a rule is instantiated only with nodes of its variables' sorts, and the
+congruence of an associative operator compares only nodes of its sort.
 -/
 
 namespace SemperCheck
 
 inductive Node where
-  | lit (v : String)
+  | lit (s v : String)
   | app (f : String) (cs : List Nat)
   deriving Repr, DecidableEq, Hashable, Inhabited
 
@@ -65,6 +72,36 @@ def wfNodes (nodes : Array Node) : Bool :=
     | some (.app _ cs) => cs.all (· < i)
     | _ => true
 
+/-- The sort of node `i`. -/
+def nodeSort (P : Program) (nodes : Array Node) (i : Nat) : Option String :=
+  match nodes[i]? with
+  | some (.lit s _) => some s
+  | some (.app f _) => (P.opDecl? f).map (·.res)
+  | none => none
+
+/-- Each child is a node of the sort at its position. -/
+def argsOk (P : Program) (nodes : Array Node) : List String → List Nat → Bool
+  | [], [] => true
+  | s :: ss, c :: cs => nodeSort P nodes c == some s && argsOk P nodes ss cs
+  | _, _ => false
+
+/-- Every node is well-sorted: a literal is of a literal sort; an application
+is of a declared operator, with children of its argument sorts, and an
+application of an `assoc`, `ac` or `aci` operator with no children has a
+unit. -/
+def wfSorts (P : Program) (nodes : Array Node) : Bool :=
+  (List.range nodes.size).all fun i =>
+    match nodes[i]? with
+    | some (.lit s _) => P.litSorts.contains s
+    | some (.app f cs) =>
+      match P.opDecl? f with
+      | none => false
+      | some d =>
+        if d.kind.isAssoc then
+          cs.all (fun c => nodeSort P nodes c == some d.res) && (!cs.isEmpty || d.unit.isSome)
+        else argsOk P nodes d.args cs
+    | none => true
+
 structure Ctx where
   P : Program
   nodes : Array Node
@@ -74,6 +111,8 @@ namespace Ctx
 
 variable (C : Ctx)
 
+def sortOf (i : Nat) : Option String := nodeSort C.P C.nodes i
+
 /-- The node `n`, found through the index and confirmed in the table. -/
 def lookup (n : Node) : Option Nat :=
   match C.index[n]? with
@@ -82,13 +121,13 @@ def lookup (n : Node) : Option Nat :=
 
 /-- The node that is term `t`, child for child. -/
 def intern : Term → Option Nat
-  | .lit v => C.lookup (.lit v)
+  | .lit s v => C.lookup (.lit s v)
   | .app f args => (args.mapM intern).bind fun ids => C.lookup (.app f ids)
 
 /-- The node that is pattern `p` with each variable read from `σ`. -/
 def instP (σ : List (String × Nat)) : Pat → Option Nat
   | .var x => σ.lookup x
-  | .lit v => C.lookup (.lit v)
+  | .lit s v => C.lookup (.lit s v)
   | .app f ps => (ps.mapM (instP σ)).bind fun ids => C.lookup (.app f ids)
 
 /-- The arguments node `x` flattens to under `f`: the arguments of each
@@ -166,9 +205,10 @@ def congComm (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
   | _, _ => false
 
 def congAssoc (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
-  match C.side f prems a, C.side f prems b with
-  | some l, some m => sameBy (C.P.kind f) l m
-  | _, _ => false
+  match C.P.opDecl? f, C.side f prems a, C.side f prems b with
+  | some d, some l, some m =>
+    C.sortOf a == some d.res && C.sortOf b == some d.res && sameBy d.kind l m
+  | _, _, _ => false
 
 def congOk (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
   C.congPlain f a b prems ||
@@ -187,6 +227,13 @@ def eqsOk (σ : List (String × Nat)) : List (Pat × Pat) → List (Nat × Nat) 
     C.instP σ p == some x && C.instP σ q == some y && eqsOk σ es ps
   | _, _ => false
 
+/-- Each variable of the rule is bound by `σ` to a node of its sort. -/
+def sortsOk (σ : List (String × Nat)) (r : Rule) : Bool :=
+  r.vars.all fun x =>
+    match σ.lookup x, r.sorts.lookup x with
+    | some n, some s => C.sortOf n == some s
+    | _, _ => false
+
 end Ctx
 
 /-- The premises' equalities and the largest of their offsets. -/
@@ -197,7 +244,7 @@ namespace Ctx
 
 variable (C : Ctx)
 
-def checkStep (acc : Array Concl) : Step → Option Concl
+def inferStep (acc : Array Concl) : Step → Option Concl
   | .refl a => some ⟨a, a, 0⟩
   | .symm s => acc[s]?.map fun c => ⟨c.b, c.a, c.pos⟩
   | .trans s t =>
@@ -213,8 +260,9 @@ def checkStep (acc : Array Concl) : Step → Option Concl
     match C.decl? o with
     | some (.rules rs) =>
       match rs[j]?, premConcls acc prems with
-      | some r, some (ps, pos) =>
-        if C.instP σ r.lhs = some a ∧ C.instP σ r.rhs = some b ∧ C.eqsOk σ r.eqs ps = true then
+      | some (some r), some (ps, pos) =>
+        if C.instP σ r.lhs = some a ∧ C.instP σ r.rhs = some b ∧ C.eqsOk σ r.eqs ps = true ∧
+            C.sortsOk σ r = true then
           some ⟨a, b, max (o + 1) pos⟩
         else none
       | _, _ => none
@@ -229,6 +277,13 @@ step citing it concludes only what it would from a reflexivity. A writer's
 mistake then leaves the goals that depend on it unproved instead of
 rejecting the certificate. -/
 def failed : Concl := ⟨0, 0, 0⟩
+
+/-- A step's conclusion, if the step checks and its two nodes are of one
+sort. -/
+def checkStep (acc : Array Concl) (st : Step) : Option Concl :=
+  match C.inferStep acc st with
+  | some c => if C.sortOf c.a = C.sortOf c.b ∧ (C.sortOf c.a).isSome then some c else none
+  | none => none
 
 def checkSteps : List Step → Array Concl → Option (Array Concl)
   | [], acc => some acc
@@ -251,7 +306,7 @@ def mkCtx (P : Program) (cert : Cert) : Ctx :=
 
 /-- The conclusions of every step, if every step checks. -/
 def runCert (P : Program) (cert : Cert) : Option (Ctx × Array Concl) :=
-  if wfNodes cert.nodes then
+  if wfNodes cert.nodes && wfSorts P cert.nodes then
     let C := mkCtx P cert
     (C.checkSteps cert.steps.toList #[]).map (C, ·)
   else none

@@ -108,20 +108,66 @@ def isLiteral (a : String) : Bool :=
   | c :: _ => c.isDigit || c == '"' || c == '-' && a.length > 1 || a == "true" || a == "false"
   | [] => false
 
-structure Env where
-  globals : List (String × Term) := []
-  ops : List String := []
+/-- The sorts of the engine's literals. -/
+def litSorts : List String :=
+  ["i64", "u64", "f64", "usize", "String", "bool", "IBig", "UBig", "RBig"]
 
-/-- A ground term. Counted children (`t :k`, `t:k`) are expanded. -/
-partial def Env.term (E : Env) : SExp → Except String Term
+/-- The sort of literal `a` at a position of sort `exp`: `exp` itself when a
+literal of that spelling can be of that sort, else none; with no expected
+sort, the engine's default for the spelling (`String`, `bool`, `f64` for a
+spelling with a point, else `i64`). -/
+def litSort (exp : Option String) (a : String) : Option String :=
+  let str := a.startsWith "\""
+  let bool := a == "true" || a == "false"
+  let ok (s : String) : Bool :=
+    if str then s == "String" else if bool then s == "bool"
+    else s != "String" && s != "bool" && litSorts.contains s
+  match exp with
+  | some s => if ok s then some s else none
+  | none =>
+    if str then some "String" else if bool then some "bool"
+    else if a.contains '.' then some "f64" else some "i64"
+
+structure Env where
+  /-- Each `let` name with its term and the term's sort. -/
+  globals : List (String × (Term × String)) := []
+  /-- The operators declared so far, in order. -/
+  ops : List OpDecl := []
+
+def Env.op? (E : Env) (f : String) : Option OpDecl := E.ops.find? (·.name == f)
+
+/-- The sort an argument at position `i` of `d` takes. -/
+def argSort (d : OpDecl) (i : Nat) : Option String :=
+  if d.kind.isAssoc then some d.res else d.args[i]?
+
+def checkSort (exp : Option String) (s : String) : Except String Unit :=
+  match exp with
+  | some e => if e == s then pure () else throw s!"sort {s} where {e} is expected"
+  | none => pure ()
+
+/-- A ground term and its sort, read at a position of sort `exp`. Counted
+children (`t :k`, `t:k`) are expanded. -/
+partial def Env.term (E : Env) (exp : Option String) : SExp → Except String (Term × String)
   | .atom a =>
-    if isLiteral a then .ok (.lit a)
+    if isLiteral a then
+      match litSort exp a with
+      | some s => pure (.lit s a, s)
+      | none => throw s!"literal {a} where {exp.getD ""} is expected"
     else match E.globals.lookup a with
-      | some t => .ok t
-      | none => if E.ops.contains a then .ok (.app a []) else .error s!"unknown name {a}"
+      | some (t, s) => do checkSort exp s; pure (t, s)
+      | none =>
+        match E.op? a with
+        | some d => do
+          unless d.kind.isAssoc || d.args.isEmpty do throw s!"{a} takes arguments"
+          checkSort exp d.res
+          pure (.app a [], d.res)
+        | none => throw s!"unknown name {a}"
   | .list (.atom f :: args) => do
+    let some d := E.op? f | throw s!"unknown operator {f}"
+    checkSort exp d.res
     let mut out : Array Term := #[]
     for x in args do
+      let i := out.size
       match x with
       | .atom a =>
         if a.startsWith ":" then
@@ -135,36 +181,107 @@ partial def Env.term (E : Env) : SExp → Except String Term
           | [n, k] =>
             let some k := k.toNat? | throw s!"unsupported child {a}"
             if k > 65536 then throw s!"count {k} above 65536"
-            let t ← E.term (.atom n)
+            let (t, _) ← E.term (argSort d i) (.atom n)
             for _ in [0:k] do out := out.push t
           | _ => throw s!"unsupported child {a}"
-        else out := out.push (← E.term x)
-      | _ => out := out.push (← E.term x)
-    return .app f out.toList
+        else out := out.push (← E.term (argSort d i) x).1
+      | _ => out := out.push (← E.term (argSort d i) x).1
+    unless d.kind.isAssoc || out.size == d.args.length do
+      throw s!"{f} takes {d.args.length} arguments"
+    return (.app f out.toList, d.res)
   | x => .error s!"not a term: {repr x}"
 
-/-- A pattern, or `none` for a construct the `Pat` type does not express. -/
-partial def Env.pat (E : Env) : SExp → Option Pat
+/-- What reading a rule's patterns has learned: each variable's sort, and the
+pairs of variables an equality between two unsorted variables relates. -/
+structure VarSorts where
+  sorts : List (String × String) := []
+  pending : List (String × String) := []
+
+abbrev PatM := StateT VarSorts Option
+
+def setSort (x s : String) : PatM Unit := do
+  let st ← get
+  match st.sorts.lookup x with
+  | some t => if t == s then pure () else failure
+  | none => set { st with sorts := (x, s) :: st.sorts }
+
+def ofTerm : Term → Pat
+  | .lit s v => .lit s v
+  | .app f args => .app f (args.map ofTerm)
+
+/-- A pattern at a position of sort `exp`, and its sort if known; fails on a
+construct the `Pat` type does not express and on a sort conflict. -/
+partial def Env.pat (E : Env) (exp : Option String) : SExp → PatM (Pat × Option String)
   | .atom a =>
-    if isLiteral a then some (.lit a)
-    else if a.startsWith ".." || a.startsWith ":" || (a.splitOn ":").length > 1 then none
+    if isLiteral a then
+      match litSort exp a with
+      | some s => pure (.lit s a, some s)
+      | none => failure
+    else if a.startsWith ".." || a.startsWith ":" || (a.splitOn ":").length > 1 then failure
     else match E.globals.lookup a with
-      | some t => some (ofTerm t)
-      | none => if E.ops.contains a then some (.app a []) else some (.var a)
-  | .list (.atom f :: args) =>
-    if f == "=" || !E.ops.contains f then none
-    else (args.mapM E.pat).map (.app f)
-  | _ => none
-where
-  ofTerm : Term → Pat
-    | .lit v => .lit v
-    | .app f args => .app f (args.map ofTerm)
+      | some (t, s) => do
+        if exp.isSome && exp != some s then failure
+        pure (ofTerm t, some s)
+      | none =>
+        match E.op? a with
+        | some d => do
+          unless d.kind.isAssoc || d.args.isEmpty do failure
+          if exp.isSome && exp != some d.res then failure
+          pure (.app a [], some d.res)
+        | none => do
+          match exp with
+          | some s => setSort a s; pure (.var a, some s)
+          | none => pure (.var a, (← get).sorts.lookup a)
+  | .list (.atom f :: args) => do
+    if f == "=" then failure
+    let some d := E.op? f | failure
+    if exp.isSome && exp != some d.res then failure
+    unless d.kind.isAssoc || args.length == d.args.length do failure
+    let mut ps : Array Pat := #[]
+    for x in args do
+      let (p, _) ← E.pat (argSort d ps.size) x
+      ps := ps.push p
+    pure (.app f ps.toList, some d.res)
+  | _ => failure
+
+/-- An equality between two patterns: the second is read at the first's
+sort, and a variable on the left takes the right's sort. -/
+def Env.eqn (E : Env) (p q : SExp) : PatM (Pat × Pat) := do
+  let (pp, sp) ← E.pat none p
+  let (qq, sq) ← E.pat sp q
+  match sp, sq, pp, qq with
+  | none, some s, .var x, _ => setSort x s
+  | none, none, .var x, .var y => modify fun st => { st with pending := (x, y) :: st.pending }
+  | _, _, _, _ => pure ()
+  pure (pp, qq)
 
 /-- A body atom or guard: an equality, or a pattern that only asks for a term
 to exist (no constraint in a model, whose operators are total). -/
-def Env.guard (E : Env) : SExp → Option (List (Pat × Pat))
-  | .list [.atom "=", p, q] => do return [(← E.pat p, ← E.pat q)]
-  | x => (E.pat x).map fun _ => []
+def Env.guard (E : Env) : SExp → PatM (List (Pat × Pat))
+  | .list [.atom "=", p, q] => do return [← E.eqn p q]
+  | x => do let _ ← E.pat none x; return []
+
+/-- Gives the pending pairs of variables their sorts, until none changes. -/
+def settle : Nat → PatM Unit
+  | 0 => pure ()
+  | n + 1 => do
+    let st ← get
+    let mut changed := false
+    for (x, y) in st.pending do
+      match (← get).sorts.lookup x, (← get).sorts.lookup y with
+      | some s, none => setSort y s; changed := true
+      | none, some s => setSort x s; changed := true
+      | some s, some t => if s != t then failure
+      | none, none => pure ()
+    if changed then settle n
+
+/-- The rule, when every variable has a sort. -/
+def finish (lhs rhs : Pat) (eqs : List (Pat × Pat)) : PatM Rule := do
+  settle 64
+  let st ← get
+  let r : Rule := { lhs, rhs, eqs, sorts := st.sorts }
+  unless r.vars.all fun x => (st.sorts.lookup x).isSome do failure
+  pure r
 
 def kindOf (tags : List String) : Kind :=
   let a := tags.contains ":assoc" || tags.contains ":assoc-comm" || tags.contains ":assoc-comm-idem"
@@ -193,91 +310,117 @@ def tagArg (k : String) : List SExp → Option SExp
   | _ :: xs => tagArg k xs
   | [] => none
 
-/-- The rules of a `rewrite`: `lhs` (whose root binding `(= v p)` becomes an
+/-- The rule of a `rewrite`: `lhs` (whose root binding `(= v p)` becomes an
 equality premise) to `rhs`, under the `:when` guards. -/
-def Env.rewriteRules (E : Env) (lhs rhs : SExp) (tags : List SExp) : List Rule :=
-  let (lhs, root) : SExp × List (Pat × Pat) :=
-    match lhs with
-    | .list [.atom "=", .atom v, p] =>
-      (p, match E.pat p with
-        | some pp => [(.var v, pp)]
-        | none => [])
-    | _ => (lhs, [])
-  let guards : Option (List (Pat × Pat)) :=
-    match tagArg ":when" tags with
-    | some (.list gs) => (gs.mapM E.guard).map List.flatten
-    | some _ => none
-    | none => some []
-  if tags.any (fun t => match t with | .atom ":let" => true | _ => false) then []
-  else match E.pat lhs, E.pat rhs, guards with
-    | some l, some r, some gs => [{ lhs := l, rhs := r, eqs := root ++ gs }]
-    | _, _, _ => []
+def Env.rewriteRule (E : Env) (lhs rhs : SExp) (tags : List SExp) : Option Rule :=
+  if tags.any (fun t => match t with | .atom ":let" => true | _ => false) then none
+  else (go.run {}).map (·.1)
+where
+  go : PatM Rule := do
+    let (l, root) ← match lhs with
+      | .list [.atom "=", .atom v, p] => do
+        let (pp, sp) ← E.pat none p
+        if let some s := sp then setSort v s
+        pure (pp, [(Pat.var v, pp)])
+      | _ => do pure ((← E.pat none lhs).1, [])
+    let gs ← match tagArg ":when" tags with
+      | some (.list gs) => do
+        let mut out := []
+        for g in gs do out := out ++ (← E.guard g)
+        pure out
+      | some _ => failure
+      | none => pure []
+    let sl := (← E.pat none (match lhs with | .list [.atom "=", _, p] => p | _ => lhs)).2
+    let (r, _) ← E.pat sl rhs
+    finish l r (root ++ gs)
 
 /-- The rules of a `rule`: one per `union` action, under the body's
 equalities, with the action's `let` names expanded. -/
-def Env.ruleRules (E : Env) (body actions : List SExp) : List Rule :=
-  match (body.mapM E.guard).map List.flatten with
-  | none => []
-  | some eqs => go eqs actions []
+def Env.ruleRules (E : Env) (body actions : List SExp) : List (Option Rule) :=
+  let unions := actions.filter fun a => match a with
+    | .list [.atom "union", _, _] => true
+    | _ => false
+  match (go actions [] []).run {} with
+  | some (rs, _) => rs
+  | none => unions.map fun _ => none
 where
-  go (eqs : List (Pat × Pat)) : List SExp → List (String × Pat) → List Rule
-    | .list [.atom "union", p, q] :: rest, lets =>
-      match subst lets (E.pat p), subst lets (E.pat q) with
-      | some l, some r => { lhs := l, rhs := r, eqs } :: go eqs rest lets
-      | _, _ => go eqs rest lets
-    | .list [.atom "let", .atom v, t] :: rest, lets =>
-      match subst lets (E.pat t) with
-      | some p => go eqs rest ((v, p) :: lets)
-      | none => []
-    | _ :: rest, lets => go eqs rest lets
-    | [], _ => []
-  subst (lets : List (String × Pat)) : Option Pat → Option Pat
-    | some p => some (substP lets p)
-    | none => none
-  substP (lets : List (String × Pat)) : Pat → Pat
-    | .var x => (lets.lookup x).getD (.var x)
-    | .lit v => .lit v
-    | .app f ps => .app f (ps.map (substP lets))
+  bodyEqs : PatM (List (Pat × Pat)) := do
+    let mut out := []
+    for g in body do out := out ++ (← E.guard g)
+    pure out
+  /-- One entry per `union` action; a failed action is `none`. -/
+  go : List SExp → List (String × SExp) → List (Option Rule) → PatM (List (Option Rule))
+    | .list [.atom "union", p, q] :: rest, lets, acc => do
+      let st ← get
+      let one : PatM Rule := do
+        let eqs ← bodyEqs
+        let (pp, qq) ← E.eqn (substS lets p) (substS lets q)
+        finish pp qq eqs
+      let r := (one.run st).map (·.1)
+      go rest lets (acc ++ [r])
+    | .list [.atom "let", .atom v, t] :: rest, lets, acc => go rest ((v, substS lets t) :: lets) acc
+    | _ :: rest, lets, acc => go rest lets acc
+    | [], _, acc => pure acc
+  substS (lets : List (String × SExp)) : SExp → SExp
+    | .atom x => (lets.lookup x).getD (.atom x)
+    | .list xs => .list (xs.map (substS lets))
 
 def declTags (xs : List SExp) : List SExp :=
   xs.dropWhile fun x => match x with | .atom a => !a.startsWith ":" | _ => true
 
+/-- An operator declaration: `assoc`, `ac` and `aci` need one argument of the
+result sort, and `comm` two of one sort; otherwise the operator gets no laws. -/
+def Env.decl (E : Env) (f : String) (args : List String) (res : String) (tags : List SExp) :
+    Except String OpDecl := do
+  let k := kindOf (atoms tags)
+  let k := if k.isAssoc && args != [res] then .plain
+    else if k == .comm && !(args.length == 2 && args[0]? == args[1]?) then .plain
+    else k
+  let unit ← match identityOf tags with
+    | some t => if k.isAssoc then some <$> (Prod.fst <$> E.term (some res) t) else pure none
+    | none => pure none
+  pure { name := f, kind := k, args, res, unit }
+
+def sortNames : SExp → List String
+  | .list xs => atoms xs
+  | .atom a => [a]
+
 /-- Reads one command. -/
 def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Program)
-  | .list (.atom "function" :: .atom f :: _ :: _ :: tags)
-  | .list (.atom "constructor" :: .atom f :: _ :: _ :: tags) => do
-    let E := { E with ops := f :: E.ops }
-    let kind := kindOf (atoms tags)
-    let unit ← match identityOf tags with
-      | some t => if kind == .assoc || kind == .ac || kind == .aci then some <$> E.term t else pure none
-      | none => pure none
-    return (E, { P with ops := P.ops ++ [{ name := f, kind, unit }] })
-  | .list (.atom "relation" :: .atom f :: _) => return ({ E with ops := f :: E.ops }, P)
-  | .list (.atom "datatype" :: _ :: variants) => do
+  | .list (.atom "function" :: .atom f :: args :: .atom res :: tags)
+  | .list (.atom "constructor" :: .atom f :: args :: .atom res :: tags) => do
+    let d ← E.decl f (sortNames args) res tags
+    return ({ E with ops := E.ops ++ [d] }, { P with ops := P.ops ++ [d] })
+  | .list (.atom "relation" :: .atom f :: args :: _) => do
+    let d : OpDecl := { name := f, kind := .plain, args := sortNames args, res := "Unit" }
+    return ({ E with ops := E.ops ++ [d] }, { P with ops := P.ops ++ [d] })
+  | .list (.atom "datatype" :: .atom srt :: variants) => do
     let mut E := E
     let mut P := P
     for v in variants do
       if let .list (.atom f :: rest) := v then
-        E := { E with ops := f :: E.ops }
         let tags := declTags rest
-        let kind := kindOf (atoms tags)
-        let unit ← match identityOf tags with
-          | some t => if kind == .assoc || kind == .ac || kind == .aci then some <$> E.term t else pure none
-          | none => pure none
-        P := { P with ops := P.ops ++ [{ name := f, kind, unit }] }
+        let args := atoms (rest.take (rest.length - tags.length))
+        let d ← E.decl f args srt tags
+        E := { E with ops := E.ops ++ [d] }
+        P := { P with ops := P.ops ++ [d] }
     return (E, P)
   | .list [.atom "let", .atom x, t] => do
-    let t ← E.term t
-    return ({ E with globals := (x, t) :: E.globals }, P)
+    let ts ← E.term none t
+    return ({ E with globals := (x, ts) :: E.globals }, P)
   | .list [.atom "union", a, b] => do
-    return (E, { P with decls := P.decls ++ [(o, .axiom (← E.term a) (← E.term b))] })
+    let (ta, sa) ← E.term none a
+    let (tb, _) ← E.term (some sa) b
+    return (E, { P with decls := P.decls ++ [(o, .axiom ta tb)] })
   | .list [.atom "check-eq", a, b] => do
-    return (E, { P with decls := P.decls ++ [(o, .goal (← E.term a) (← E.term b))] })
+    let (ta, sa) ← E.term none a
+    let (tb, _) ← E.term (some sa) b
+    return (E, { P with decls := P.decls ++ [(o, .goal ta tb)] })
   | .list (.atom "rewrite" :: l :: r :: tags) =>
-    return (E, { P with decls := P.decls ++ [(o, .rules (E.rewriteRules l r tags))] })
+    return (E, { P with decls := P.decls ++ [(o, .rules [E.rewriteRule l r tags])] })
   | .list (.atom "birewrite" :: l :: r :: tags) =>
     return (E, { P with decls := P.decls ++
-      [(o, .rules (E.rewriteRules l r tags ++ E.rewriteRules r l tags))] })
+      [(o, .rules [E.rewriteRule l r tags, E.rewriteRule r l tags])] })
   | .list (.atom "rule" :: .list body :: .list actions :: _) =>
     return (E, { P with decls := P.decls ++ [(o, .rules (E.ruleRules body actions))] })
   | .list (.atom "push" :: _) | .list (.atom "pop" :: _) | .list (.atom "include" :: _) =>
@@ -287,7 +430,7 @@ def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Prog
 def parseProgram (src : String) : Except String Program := do
   let forms ← readTop src
   let mut E : Env := {}
-  let mut P : Program := { ops := [], decls := [] }
+  let mut P : Program := { ops := [], litSorts, decls := [] }
   for (o, x) in forms do
     (E, P) ← step E P o x
   return P
@@ -297,7 +440,7 @@ def parseProgram (src : String) : Except String Program := do
 ```
 semper-cert 1
 n <id> a <op> <child>...
-n <id> l <literal>
+n <id> l <sort> <literal>
 s <id> refl <a>
 s <id> symm <s>
 s <id> trans <s> <t>
@@ -325,10 +468,10 @@ def parseCert (src : String) : Except String Cert := do
     | "n" :: i :: "a" :: f :: cs =>
       unless (← nat i) == nodes.size do throw s!"node out of order: {l}"
       nodes := nodes.push (.app f (← cs.mapM nat))
-    | "n" :: i :: "l" :: _ =>
+    | "n" :: i :: "l" :: srt :: _ =>
       unless (← nat i) == nodes.size do throw s!"node out of order: {l}"
-      let pre := s!"n {i} l "
-      nodes := nodes.push (.lit (l.drop pre.length).toString)
+      let pre := s!"n {i} l {srt} "
+      nodes := nodes.push (.lit srt (l.drop pre.length).toString)
     | "s" :: i :: k :: args =>
       unless (← nat i) == steps.size do throw s!"step out of order: {l}"
       let st ← match k, args with

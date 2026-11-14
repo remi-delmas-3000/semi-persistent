@@ -1597,7 +1597,10 @@ where
     ) -> Option<crate::egraph::cert::ClientTerm<Cfg::G>> {
         use crate::egraph::cert::ClientTerm;
         match ct {
-            CTerm::Lit(val, _) => Some(ClientTerm::Lit(crate::egraph::cert::lit_spelling(val))),
+            CTerm::Lit(val, sort) => Some(ClientTerm::Lit(
+                self.eg.sort_name(*sort).to_string(),
+                crate::egraph::cert::lit_spelling(val),
+            )),
             CTerm::App { op, children, .. } => {
                 let mut kids = Vec::with_capacity(children.len());
                 for c in children {

@@ -38,12 +38,12 @@ use super::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
-/// A term as the program wrote it: an application, a literal, or a node a
-/// `let` name stands for.
+/// A term as the program wrote it: an application, a literal (its sort and
+/// spelling), or a node a `let` name stands for.
 #[derive(Clone, Debug)]
 pub enum ClientTerm<G> {
     Node(G),
-    Lit(String),
+    Lit(String, String),
     App(String, Vec<ClientTerm<G>>),
 }
 
@@ -317,6 +317,10 @@ impl<G: Clone> Scope<'_, G> {
     }
 
     /// `Env.rewriteRules` of `Parse.lean`.
+    fn rewrite_rule(&self, lhs: &Sx, rhs: &Sx, tags: &[Sx]) -> Option<CRule<G>> {
+        self.rewrite_rules(lhs, rhs, tags).into_iter().next()
+    }
+
     fn rewrite_rules(&self, lhs: &Sx, rhs: &Sx, tags: &[Sx]) -> Vec<CRule<G>> {
         let (lhs, root) = match lhs {
             Sx::List(v) => match v.as_slice() {
@@ -363,15 +367,20 @@ impl<G: Clone> Scope<'_, G> {
         }
     }
 
-    /// `Env.ruleRules` of `Parse.lean`.
-    fn rule_rules(&self, body: &[Sx], actions: &[Sx]) -> Vec<CRule<G>> {
+    /// `Env.ruleRules` of `Parse.lean`: one entry per `union` action, `None`
+    /// for one the reader does not read.
+    fn rule_rules(&self, body: &[Sx], actions: &[Sx]) -> Vec<Option<CRule<G>>> {
+        let n_unions = actions
+            .iter()
+            .filter(|a| matches!(a, Sx::List(v) if matches!(v.as_slice(), [Sx::Atom(u), _, _] if u == "union")))
+            .count();
         let Some(eqs) = body
             .iter()
             .map(|g| self.guard(g))
             .collect::<Option<Vec<_>>>()
             .map(|v| v.concat())
         else {
-            return Vec::new();
+            return vec![None; n_unions];
         };
         fn subst<G: Clone>(lets: &[(String, CPat<G>)], p: CPat<G>) -> CPat<G> {
             match p {
@@ -385,24 +394,26 @@ impl<G: Clone> Scope<'_, G> {
         }
         let mut lets: Vec<(String, CPat<G>)> = Vec::new();
         let mut out = Vec::new();
+        let mut broken = false;
         for a in actions {
             let Sx::List(v) = a else { continue };
             match v.as_slice() {
                 [Sx::Atom(u), p, q] if u == "union" => {
-                    if let (Some(l), Some(r)) = (self.pat(p), self.pat(q)) {
-                        out.push(CRule {
+                    out.push(match (self.pat(p), self.pat(q)) {
+                        (Some(l), Some(r)) if !broken => Some(CRule {
                             lhs: subst(&lets, l),
                             rhs: subst(&lets, r),
                             eqs: eqs.clone(),
-                        });
-                    }
+                        }),
+                        _ => None,
+                    });
                 }
                 [Sx::Atom(l), Sx::Atom(x), t] if l == "let" => match self.pat(t) {
                     Some(p) => {
                         let p = subst(&lets, p);
                         lets.insert(0, (x.clone(), p));
                     }
-                    None => return out,
+                    None => broken = true,
                 },
                 _ => {}
             }
@@ -411,14 +422,12 @@ impl<G: Clone> Scope<'_, G> {
     }
 
     /// The rules of the command `x` (`step` of `Parse.lean`).
-    fn rules(&self, x: &Sx) -> Vec<CRule<G>> {
+    fn rules(&self, x: &Sx) -> Vec<Option<CRule<G>>> {
         let Sx::List(v) = x else { return Vec::new() };
         match v.as_slice() {
-            [Sx::Atom(h), l, r, tags @ ..] if h == "rewrite" => self.rewrite_rules(l, r, tags),
+            [Sx::Atom(h), l, r, tags @ ..] if h == "rewrite" => vec![self.rewrite_rule(l, r, tags)],
             [Sx::Atom(h), l, r, tags @ ..] if h == "birewrite" => {
-                let mut rs = self.rewrite_rules(l, r, tags);
-                rs.extend(self.rewrite_rules(r, l, tags));
-                rs
+                vec![self.rewrite_rule(l, r, tags), self.rewrite_rule(r, l, tags)]
             }
             [Sx::Atom(h), Sx::List(body), Sx::List(actions), ..] if h == "rule" => {
                 self.rule_rules(body, actions)
@@ -456,7 +465,9 @@ pub struct CertState<G> {
     unsupported: BTreeMap<&'static str, usize>,
     forms: Vec<(usize, Sx)>,
     /// The rules of the command at each offset, as the checker reads them.
-    rules_at: HashMap<usize, Vec<CRule<G>>>,
+    rules_at: HashMap<usize, Vec<Option<CRule<G>>>>,
+    /// The sort of each literal spelling a rule pattern matched.
+    lit_sorts: HashMap<String, String>,
 }
 
 impl<G> CertState<G> {
@@ -482,6 +493,7 @@ impl<G> CertState<G> {
             unsupported: BTreeMap::new(),
             forms: read_top(src),
             rules_at: HashMap::new(),
+            lit_sorts: HashMap::new(),
         }
     }
 
@@ -600,7 +612,8 @@ where
         }
         let k = if let Some(v) = self.eg.get_lit_val(id) {
             let v = lit_spelling(v);
-            self.add_node((format!("#lit {v}"), Vec::new()), format!("l {v}"))
+            let srt = self.eg.sort_name(self.eg.node_sort(id)).to_string();
+            self.lit_node(&srt, &v)
         } else {
             let kids: Vec<usize> = self
                 .children(id)
@@ -616,6 +629,14 @@ where
         };
         self.node_of.insert(id.to_usize(), k);
         k
+    }
+
+    /// The certificate node of the literal `v` of sort `srt`.
+    fn lit_node(&mut self, srt: &str, v: &str) -> usize {
+        self.add_node(
+            (format!("#lit {srt} {v}"), Vec::new()),
+            format!("l {srt} {v}"),
+        )
     }
 
     fn step(&mut self, s: String) -> usize {
@@ -719,7 +740,26 @@ where
             | Justification::ACSuperposition { .. }
             | Justification::ACInterReduction { .. }
             | Justification::ACAxiomCP { .. }
-            | Justification::InverseCancel { .. } => self.assoc_cong(x, y),
+            | Justification::InverseCancel { .. } => {
+                let r = self.assoc_cong(x, y);
+                if r.is_none() && std::env::var_os("SEMPER_CERT_DEBUG").is_some() {
+                    let law = |n: Cfg::G| {
+                        if self.eg.get_lit_val(n).is_some() {
+                            return "lit".to_string();
+                        }
+                        format!("{:?}", self.eg.ops.info(self.eg.node_op(n)).kind)
+                            .split(['{', '('])
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string()
+                    };
+                    let jk = format!("{j:?}");
+                    let jk = jk.split([' ', '{']).next().unwrap_or("");
+                    eprintln!("lawmiss {jk} {} {}", law(x), law(y));
+                }
+                r
+            }
             Justification::Rewrite { rule_id, .. } => self.rewrite(x, y, rule_id.to_usize()),
             Justification::Cancellative { .. } => self.miss("cancellative"),
             Justification::Assumption { .. } => self.miss("assumption"),
@@ -766,7 +806,7 @@ where
 
     /// The rules of the command at offset `o`, read in the scope the checker's
     /// reader has there.
-    fn rules_for(&mut self, o: usize) -> Vec<CRule<Cfg::G>> {
+    fn rules_for(&mut self, o: usize) -> Vec<Option<CRule<Cfg::G>>> {
         if let Some(rs) = self.rules_at.get(&o) {
             return rs.clone();
         }
@@ -879,10 +919,16 @@ where
         out
     }
 
-    fn lit_member(&self, v: &str, g: Cfg::G) -> Option<Cfg::G> {
-        self.members(g)
+    /// A literal of spelling `v` in `g`'s class; records its sort, which the
+    /// checker's reader takes from the literal's position in the pattern.
+    fn lit_member(&mut self, v: &str, g: Cfg::G) -> Option<Cfg::G> {
+        let m = self
+            .members(g)
             .into_iter()
-            .find(|&m| self.eg.get_lit_val(m).is_some_and(|l| lit_spelling(l) == v))
+            .find(|&m| self.eg.get_lit_val(m).is_some_and(|l| lit_spelling(l) == v))?;
+        let srt = self.eg.sort_name(self.eg.node_sort(m)).to_string();
+        self.lit_sorts.insert(v.to_string(), srt);
+        Some(m)
     }
 
     fn term_member(&mut self, t: &ClientTerm<Cfg::G>, g: Cfg::G) -> Option<Cfg::G> {
@@ -898,7 +944,8 @@ where
                 Some(self.node(g))
             }
             CPat::Lit(v) => {
-                Some(self.add_node((format!("#lit {v}"), Vec::new()), format!("l {v}")))
+                let srt = self.lit_sorts.get(v)?.clone();
+                Some(self.lit_node(&srt, v))
             }
             CPat::Term(t) => self.client_node(t),
             CPat::Opaque => None,
@@ -1068,12 +1115,13 @@ where
             return self.miss("rewrite without a source");
         };
         let rules = self.rules_for(o);
-        if rules.is_empty() {
+        if rules.iter().all(Option::is_none) {
             // A rest variable, a multiplicity, a primitive or a `:let`: the
             // checker's reader reads no rule from the command.
             return self.miss("rule outside the checker's language");
         }
         for (j, r) in rules.iter().enumerate() {
+            let Some(r) = r else { continue };
             for (l, rr, flip) in [(x, y, false), (y, x, true)] {
                 let mut sig = Vec::new();
                 let Some(anchors) = self.bind(r, l, rr, &mut sig) else {
@@ -1265,9 +1313,7 @@ where
                 }
                 self.node(*g)
             }
-            ClientTerm::Lit(v) => {
-                self.add_node((format!("#lit {v}"), Vec::new()), format!("l {v}"))
-            }
+            ClientTerm::Lit(srt, v) => self.lit_node(srt, v),
             ClientTerm::App(f, kids) => {
                 let mut ids = Vec::with_capacity(kids.len());
                 for k in kids {

@@ -1,0 +1,11 @@
+; A has no elements in some many-sorted models, so both rules can hold
+; vacuously while c and d differ. A one-sorted model has no empty sort, and
+; there f(x) = c and f(x) = d give c = d.
+(sort A)
+(sort C)
+(function c () C)
+(function d () C)
+(function f (A) C)
+(rewrite (f x) (c))
+(rewrite (f y) (d))
+(check-eq (c) (d))

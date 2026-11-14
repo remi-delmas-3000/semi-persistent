@@ -1,0 +1,9 @@
+semper-cert 1
+n 0 a c
+n 1 a d
+n 2 a f 0
+s 0 rule 262 0 2 0 1 x 0
+s 1 rule 282 0 2 1 1 y 0
+s 2 symm 0
+s 3 trans 2 1
+g 302 3
