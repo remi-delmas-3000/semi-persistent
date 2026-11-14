@@ -210,6 +210,8 @@ pub struct EGraph<
     rule_partial: Vec<bool>,
     /// The instance premise notes append to, while a rule's actions run.
     rule_open: Option<u32>,
+    /// Whether a `Rewrite` step cited the open instance.
+    rule_cited: bool,
     /// One `ProofLens` per open scope.
     rule_marks: Vec<ProofLens>,
     /// Proof mode: the node `add_with_creation_evidence` built for a client
@@ -245,6 +247,16 @@ pub struct EGraph<
     /// an evidence build, and completion's own monomials, which are not client
     /// terms.
     no_evidence: bool,
+    /// Set while a rule's actions run. A right-hand side is built over class
+    /// roots, so an application of a plain or commutative operator stands for
+    /// the canonical node: a hash-cons hit on a node with history returns that
+    /// node instead of a flagged duplicate, and the instance's premises relate
+    /// the roots to the bound nodes. Without this, a saturating run adds a
+    /// duplicate for every such rebuild and e-matching enumerates them all:
+    /// `bench/search-dfs-small.rules.egg` grew to 2.69 billion match steps and
+    /// 1.5 GB against 47 million and 10 MB. An n-ary build keeps its evidence
+    /// node, whose children are the ones the rule wrote.
+    rhs_build: bool,
     /// Set for one merge: the class root that must survive it. A `Build` merge
     /// keeps the canonical node's root, so an evidence node never becomes the
     /// representative that later builds store as a child.
@@ -571,6 +583,7 @@ where
             rule_premises: Vec::new(),
             rule_partial: Vec::new(),
             rule_open: None,
+            rule_cited: false,
             rule_marks: Vec::new(),
             creation_memo: std::collections::HashMap::new(),
             creation_log: Vec::new(),
@@ -581,6 +594,7 @@ where
             record_flatten: false,
             flatten_witness: Vec::new(),
             no_evidence: false,
+            rhs_build: false,
             force_survivor: None,
             merge_premise_index: std::collections::HashMap::new(),
             merge_premise_pairs: Vec::new(),
@@ -1411,7 +1425,7 @@ where
                 }
             }
             OpKind::Normal { .. } | OpKind::Commutative { .. }
-                if PROOFS && !children.is_empty() =>
+                if PROOFS && !children.is_empty() && !self.no_evidence && !self.rhs_build =>
             {
                 return self.add_with_creation_evidence(op, children, node_flags);
             }
@@ -3128,13 +3142,37 @@ where
         id
     }
 
-    /// The open instance, for the `Rewrite` steps its actions record.
-    pub(crate) fn open_rule_instance(&self) -> u32 {
+    /// Set or clear `rhs_build`, returning its previous value.
+    pub(crate) fn set_rhs_build(&mut self, v: bool) -> bool {
+        std::mem::replace(&mut self.rhs_build, v)
+    }
+
+    /// The open instance, for the `Rewrite` step its action records: marks
+    /// the instance cited, so [`end_rule_instance`](Self::end_rule_instance)
+    /// keeps it.
+    pub(crate) fn open_rule_instance(&mut self) -> u32 {
+        if self.rule_open.is_some() {
+            self.rule_cited = true;
+        }
         self.rule_open.unwrap_or(crate::union_find::NO_INSTANCE)
     }
 
+    /// Close the open instance. An instance no `Rewrite` step cites (a match
+    /// whose actions merged nothing, as most matches of a saturating run are
+    /// after their first round) is dropped with its premises and its id is
+    /// reused: without that the premise log grows with every match of every
+    /// round rather than with the merges.
     pub(crate) fn end_rule_instance(&mut self) {
-        self.rule_open = None;
+        if let Some(id) = self.rule_open.take()
+            && !std::mem::take(&mut self.rule_cited)
+            && id as usize + 1 == self.rule_starts.len()
+        {
+            let start = self.rule_starts[id as usize];
+            self.rule_premises.truncate(start);
+            self.rule_starts.pop();
+            self.rule_partial.pop();
+        }
+        self.rule_cited = false;
     }
 
     /// Record that the open instance needs `a` and `b` equal. A no-op with no
@@ -3160,6 +3198,7 @@ where
         self.rule_partial.truncate(len.rule_starts);
         self.rule_premises.truncate(len.rule_premises);
         self.rule_open = None;
+        self.rule_cited = false;
         self.build_starts.truncate(len.build_starts);
         self.build_collapsed.truncate(len.build_starts);
         self.build_premises.truncate(len.build_premises);

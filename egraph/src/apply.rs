@@ -1586,6 +1586,7 @@ where
     Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut env = RhsEnv::new(query, rule.rhs_locals);
+    let saved_rhs = P && eg.set_rhs_build(true);
     if P {
         eg.begin_rule_instance();
         note_match_premises(&rule.query, query, eg, globals);
@@ -1611,6 +1612,7 @@ where
     }
     if P {
         eg.end_rule_instance();
+        eg.set_rhs_build(saved_rhs);
     }
     debug_assert!(
         env.locals_are_unbound(),

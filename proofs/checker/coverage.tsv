@@ -173,7 +173,7 @@ egraph/tests/egg/audit_mset_into_positional.egg	0	0	skipped
 egraph/tests/egg/audit_seq_count_past_u64.egg	0	0	skipped
 egraph/tests/egg/audit_union_coalesce_overflow.egg	0	0	skipped
 egraph/tests/egg/bench/acgen.native.egg	1	1	checked
-egraph/tests/egg/bench/acgen.rules.egg	0	0	engine-timeout
+egraph/tests/egg/bench/acgen.rules.egg	0	1	checked
 egraph/tests/egg/bench/array.rules.egg	0	0	skipped
 egraph/tests/egg/bench/bdd.native.egg	0	0	unread
 egraph/tests/egg/bench/bdd.rules.egg	0	0	unread
@@ -201,7 +201,7 @@ egraph/tests/egg/bench/matrix.rules.egg	0	3	checked
 egraph/tests/egg/bench/resolution.native.egg	0	2	checked
 egraph/tests/egg/bench/resolution.rules.egg	0	2	checked
 egraph/tests/egg/bench/subsume.rules.egg	2	2	checked
-egraph/tests/egg/bench/typecheck.rules.egg	0	4	checked
+egraph/tests/egg/bench/typecheck.rules.egg	1	4	checked
 egraph/tests/egg/bench/until.native.egg	0	1	checked
 egraph/tests/egg/bench/until.rules.egg	0	1	checked
 egraph/tests/egg/bignum_all_ops.egg	0	24	checked
@@ -447,7 +447,7 @@ egraph/tests/egg/collection_rules_absent.egg	0	0	skipped
 egraph/tests/egg/comm_match_both_bindings.egg	2	3	checked
 egraph/tests/egg/comm_match_both_orders.egg	1	1	checked
 egraph/tests/egg/comm_match_global.egg	2	2	checked
-egraph/tests/egg/comm_match_nested.egg	0	1	checked
+egraph/tests/egg/comm_match_nested.egg	1	1	checked
 egraph/tests/egg/comm_match_no_false.egg	0	0	checked
 egraph/tests/egg/conform-cc-cert/cs1_0000.egg	1	5	checked
 egraph/tests/egg/conform-cc-cert/cs1_0001.egg	79	120	checked
@@ -1091,7 +1091,7 @@ egraph/tests/egg/conform-rounds/r1_0038.egg	4	5	checked
 egraph/tests/egg/conform-rounds/r1_0039.egg	5	12	checked
 egraph/tests/egg/conform-rounds/r1_0040.egg	3	34	checked
 egraph/tests/egg/conform-rounds/r1_0041.egg	4	4	checked
-egraph/tests/egg/conform-rounds/r1_0042.egg	3	5	checked
+egraph/tests/egg/conform-rounds/r1_0042.egg	4	5	checked
 egraph/tests/egg/conform-rounds/r1_0043.egg	0	0	checked
 egraph/tests/egg/conform-rounds/r1_0044.egg	1	1	checked
 egraph/tests/egg/conform-rounds/r1_0045.egg	3	3	checked
@@ -1179,7 +1179,7 @@ egraph/tests/egg/conform-rounds/r1_0126.egg	6	8	checked
 egraph/tests/egg/conform-rounds/r1_0127.egg	3	3	checked
 egraph/tests/egg/conform-rounds/r1_0128.egg	1	5	checked
 egraph/tests/egg/conform-rounds/r1_0129.egg	0	5	checked
-egraph/tests/egg/conform-rounds/r1_0130.egg	3	6	checked
+egraph/tests/egg/conform-rounds/r1_0130.egg	4	6	checked
 egraph/tests/egg/conform-rounds/r1_0131.egg	3	4	checked
 egraph/tests/egg/conform-rounds/r1_0132.egg	3	6	checked
 egraph/tests/egg/conform-rounds/r1_0133.egg	4	4	checked
@@ -1330,7 +1330,7 @@ egraph/tests/egg/conform/c1_0077.egg	0	0	checked
 egraph/tests/egg/conform/c1_0078.egg	0	0	checked
 egraph/tests/egg/conform/c1_0079.egg	0	0	checked
 egraph/tests/egg/conform/c1_0080.egg	2	5	checked
-egraph/tests/egg/conform/c1_0081.egg	0	10	checked
+egraph/tests/egg/conform/c1_0081.egg	1	10	checked
 egraph/tests/egg/conform/c1_0082.egg	0	1	checked
 egraph/tests/egg/conform/c1_0083.egg	0	4	checked
 egraph/tests/egg/conform/c1_0084.egg	0	0	checked

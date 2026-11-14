@@ -913,8 +913,37 @@ where
             return Vec::new();
         }
         let mut out = vec![kids.clone()];
-        if n == 2 && self.kind(self.eg.node_op(m)) == LeanKind::Comm {
-            out.push(vec![kids[1], kids[0]]);
+        match self.kind(self.eg.node_op(m)) {
+            LeanKind::Comm if n == 2 => out.push(vec![kids[1], kids[0]]),
+            // An AC or ACI node stores its children sorted, not in the order a
+            // pattern names them; the kernel's `cong` compares them as a
+            // multiset (a set), so any order checks.
+            LeanKind::Ac | LeanKind::Aci if (2..=4).contains(&n) => {
+                fn perms<T: Copy>(v: &[T], out: &mut Vec<Vec<T>>) {
+                    if v.len() <= 1 {
+                        out.push(v.to_vec());
+                        return;
+                    }
+                    for i in 0..v.len() {
+                        let mut rest = v.to_vec();
+                        let x = rest.remove(i);
+                        let mut tails = Vec::new();
+                        perms(&rest, &mut tails);
+                        for mut t in tails {
+                            t.insert(0, x);
+                            out.push(t);
+                        }
+                    }
+                }
+                let mut all = Vec::new();
+                perms(&kids, &mut all);
+                for p in all {
+                    if !out.contains(&p) {
+                        out.push(p);
+                    }
+                }
+            }
+            _ => {}
         }
         out
     }
@@ -1157,6 +1186,33 @@ where
                     s
                 });
             }
+        }
+        if std::env::var_os("SEMPER_CERT_DEBUG").is_some() {
+            let show = |w: &Self, n: Cfg::G| {
+                let kids: Vec<String> = w
+                    .children(n)
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{}@{}",
+                            w.eg.node_op_name(*c),
+                            w.eg.find_const(*c).to_usize()
+                        )
+                    })
+                    .collect();
+                format!(
+                    "{}#{}({})",
+                    w.eg.node_op_name(n),
+                    n.to_usize(),
+                    kids.join(" ")
+                )
+            };
+            eprintln!(
+                "rewritemiss o={o} x={} y={} rules={:?}",
+                show(self, x),
+                show(self, y),
+                rules
+            );
         }
         self.miss("rewrite not matched")
     }
