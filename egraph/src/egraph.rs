@@ -251,7 +251,14 @@ pub struct EGraph<
     /// roots, so an application of a plain or commutative operator stands for
     /// the canonical node: a hash-cons hit on a node with history returns that
     /// node instead of a flagged duplicate, and the instance's premises relate
-    /// the roots to the bound nodes. Without this, a saturating run adds a
+    /// the roots to the bound nodes. The `Rewrite` step then joins the left-hand
+    /// side to a node whose original children can differ from the instance's
+    /// (rule `F(x) -> H(x)` with `x = A` lands on `H(B)` after `A = B`). The log
+    /// is the record a replaying checker follows, not a complete derivation: the
+    /// node's history and the union-find edges, which are never compressed,
+    /// contain the equalities between the two child lists, and the certificate
+    /// writer (`egraph/cert.rs`) adds the congruence step that uses them.
+    /// Without this, a saturating run adds a
     /// duplicate for every such rebuild and e-matching enumerates them all:
     /// `bench/search-dfs-small.rules.egg` grew to 2.69 billion match steps and
     /// 1.5 GB against 47 million and 10 MB. An n-ary build keeps its evidence
