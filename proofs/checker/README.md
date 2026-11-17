@@ -154,7 +154,7 @@ The 8,744 `check-eq` the kernel does not prove:
 
 The certificates this replaces proved 5,702 `check-eq`. `coverage.tsv` is
 lower than the certificates for 6 programs (14 `check-eq`) and lower than the
-replay was before it rejected merges without a kernel step for 7 (93
+replay was before it rejected merges without a kernel step for 7 (89
 `check-eq`); each such row states the cause.
 
 Cost: the 1,442 streams total 235 MB; the median is 1.2 kB and the largest
