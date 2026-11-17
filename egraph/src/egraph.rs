@@ -4877,6 +4877,28 @@ where
         // The replay stream's witnesses, one per critical pair (`None` for a
         // peak too large to spell).
         let tracing = self.tracing();
+        // Each rule as the replay stream names it, read now: whether a rule's
+        // right side is its class as one argument is a fact of the round's
+        // start, and the round's own merges can change the class.
+        let rule_wit: std::collections::HashMap<(usize, usize), [Cfg::G; 3]> = if tracing {
+            rules
+                .iter()
+                .map(|r| {
+                    (
+                        (r.node.to_usize(), r.rhs_node.to_usize()),
+                        self.trace_rule((r.node, r.rhs_node)),
+                    )
+                })
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
+        let wit_of = |eg: &Self, p: (Cfg::G, Cfg::G)| -> [Cfg::G; 3] {
+            rule_wit
+                .get(&(p.0.to_usize(), p.1.to_usize()))
+                .copied()
+                .unwrap_or_else(|| eg.trace_rule(p))
+        };
         let mut crit_trace: Vec<Option<CritTrace<Cfg::G>>> = Vec::new();
         // A multiset as a list of its classes, each repeated by its count.
         let spell = |parts: &[&[(Cfg::G, Cfg::M)]]| -> Option<Vec<Cfg::G>> {
@@ -5581,7 +5603,7 @@ where
                                 .chain(
                                     rules
                                         .iter()
-                                        .flat_map(|&k| self.trace_rule(target_pairs[k as usize])),
+                                        .flat_map(|&k| wit_of(self, target_pairs[k as usize])),
                                 )
                                 .collect::<Vec<_>>(),
                         );
@@ -5796,7 +5818,7 @@ where
                     let post = |range: &[u32]| -> Vec<Cfg::G> {
                         range
                             .iter()
-                            .flat_map(|&k| self.trace_rule(nf_pairs_by_op[t][k as usize]))
+                            .flat_map(|&k| wit_of(self, nf_pairs_by_op[t][k as usize]))
                             .collect()
                     };
                     let (post_a, post_b) = (post(&log[..split.get()]), post(&log[split.get()..]));
@@ -5813,7 +5835,7 @@ where
                     ids.extend(&ct.peak);
                     for side in [&ct.a, &ct.b] {
                         ids.push(num(side.len()));
-                        ids.extend(side.iter().flat_map(|&p| self.trace_rule(p)));
+                        ids.extend(side.iter().flat_map(|&p| wit_of(self, p)));
                     }
                     ids.push(num(post_a.len() / 3));
                     ids.extend(post_a);
