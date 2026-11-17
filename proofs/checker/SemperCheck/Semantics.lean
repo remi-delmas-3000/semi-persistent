@@ -11,7 +11,8 @@ rules are required only of elements of the right sorts: an `assoc`, `ac` or
 `aci` operator of result sort `s` folds a binary operation that is closed on
 `s` and associative there (commutative for `ac` and `aci`, idempotent for
 `aci`, with the declared identity as its unit and the value of the empty
-application); a `comm` operator is symmetric on well-sorted arguments; a rule
+application; with `:inverse g`, `g` gives inverses for it; with `:nilpotent n`,
+`n` copies of an element make the unit; with `:cancellative`, it cancels); a `comm` operator is symmetric on well-sorted arguments; a rule
 holds for every assignment of its variables to elements of their sorts.
 
 Every many-sorted algebra of the program gives such a model: take the
@@ -71,7 +72,16 @@ def OpSat (d : OpDecl) : Prop :=
       ((k = .ac ∨ k = .aci) → ∀ x y, M.dom d.res x → M.dom d.res y → b x y = b y x) ∧
       (k = .aci → ∀ x, M.dom d.res x → b x x = x) ∧
       (∀ u, d.unit = some u → M.dom d.res (M.eval u) ∧ M.app d.name [] = M.eval u ∧
-        ∀ x, M.dom d.res x → b (M.eval u) x = x ∧ b x (M.eval u) = x)
+        ∀ x, M.dom d.res x → b (M.eval u) x = x ∧ b x (M.eval u) = x) ∧
+      -- `:inverse g`, with the unit `u`: `g` sends an element to its inverse.
+      (∀ g u, d.inverse = some g → d.unit = some u → ∀ x, M.dom d.res x →
+        M.dom d.res (M.app g [x]) ∧ b x (M.app g [x]) = M.eval u) ∧
+      -- `:nilpotent (n + 1)`, with the unit `u`: `n + 1` copies make the unit.
+      (∀ n u, d.nilpotent = some (n + 1) → d.unit = some u → ∀ x, M.dom d.res x →
+        (List.replicate n x).foldl b x = M.eval u) ∧
+      -- `:cancellative`.
+      (d.cancellative = true → ∀ x y z, M.dom d.res x → M.dom d.res y → M.dom d.res z →
+        b x z = b y z → x = y)
 
 def RuleSat (r : Rule) : Prop :=
   ∀ σ : String → M.α,

@@ -49,6 +49,14 @@ inductive Step where
   | axiom (o a b : Nat)
   | rule (o j : Nat) (σ : List (String × Nat)) (prems : List Nat) (a b : Nat)
   | cong (f : String) (a b : Nat) (prems : List Nat)
+  /-- `a = f(x, g(x))` is the unit `e` of `f`, whose `:inverse` is `g`. -/
+  | inv (f : String) (a x q e : Nat)
+  /-- `a = f(x, .., x)`, with `k + 1` arguments, is the unit `e` of `f`, which
+  is `:nilpotent (k + 1)`. -/
+  | nil (f : String) (a x k e : Nat)
+  /-- Step `s` concludes `f(a, z) = f(b, z)`, so `a = b`: `f` is
+  `:cancellative`, or has `:inverse` and a unit. -/
+  | cancel (f : String) (s a b z : Nat)
   deriving Repr, Inhabited
 
 structure Cert where
@@ -217,6 +225,31 @@ def congOk (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
     | .comm => C.congComm f a b prems
     | _ => C.congAssoc f a b prems
 
+def invOk (f : String) (a x q e : Nat) : Bool :=
+  match C.P.opDecl? f with
+  | some d =>
+    d.kind.isAssoc && decide (C.nodes[a]? = some (.app f [x, q])) &&
+    (match d.inverse with
+      | some g => decide (C.nodes[q]? = some (.app g [x]))
+      | none => false) &&
+    decide (C.unitOf f = some e)
+  | none => false
+
+def nilOk (f : String) (a x k e : Nat) : Bool :=
+  match C.P.opDecl? f with
+  | some d =>
+    d.kind.isAssoc && decide (C.nodes[a]? = some (.app f (x :: List.replicate k x))) &&
+    decide (d.nilpotent = some (k + 1)) && decide (C.unitOf f = some e)
+  | none => false
+
+def cancelOk (f : String) (p q a b z : Nat) : Bool :=
+  match C.P.opDecl? f with
+  | some d =>
+    d.kind.isAssoc && decide (C.nodes[p]? = some (.app f [a, z])) &&
+    decide (C.nodes[q]? = some (.app f [b, z])) &&
+    (d.cancellative || (d.inverse.isSome && (C.unitOf f).isSome))
+  | none => false
+
 /-- The command at offset `o`. -/
 def decl? (o : Nat) : Option Decl :=
   (C.P.decls.find? (·.1 == o)).map (·.2)
@@ -270,6 +303,12 @@ def inferStep (acc : Array Concl) : Step → Option Concl
   | .cong f a b prems =>
     match premConcls acc prems with
     | some (ps, pos) => if C.congOk f a b ps then some ⟨a, b, pos⟩ else none
+    | none => none
+  | .inv f a x q e => if C.invOk f a x q e then some ⟨a, e, 0⟩ else none
+  | .nil f a x k e => if C.nilOk f a x k e then some ⟨a, e, 0⟩ else none
+  | .cancel f s a b z =>
+    match acc[s]? with
+    | some c => if C.cancelOk f c.a c.b a b z then some ⟨a, b, c.pos⟩ else none
     | none => none
 
 /-- The conclusion of a step that does not check: `0 = 0`, which holds, so a

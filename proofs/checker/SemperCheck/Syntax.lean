@@ -53,14 +53,12 @@ structure OpDecl where
   res : String
   /-- The `:identity` of an `assoc`, `ac` or `aci` operator. -/
   unit : Option Term := none
-  /-- `:nilpotent n`: `n` copies of an argument equal the unit. Read by the
-  replayer only; the certificate kernel and its models do not use it. -/
+  /-- `:nilpotent n`: `n` copies of an argument equal the unit. -/
   nilpotent : Option Nat := none
-  /-- `:inverse g`: an argument and `g` applied to it equal the unit. Read by
-  the replayer only. -/
+  /-- `:inverse g`: an argument and `g` applied to it equal the unit. -/
   inverse : Option String := none
   /-- `:cancellative`: two applications that share arguments and are equal
-  stay equal without them. Read by the replayer only. -/
+  stay equal without them. -/
   cancellative : Bool := false
   deriving Repr, Inhabited
 

@@ -173,8 +173,29 @@ theorem assoc_laws {d : OpDecl} (hs : M.OpSat d) (hk : d.kind.isAssoc = true) :
   | comm => simp [hd, Kind.isAssoc] at hk
   | assoc | ac | aci =>
     rw [hd] at hs
-    obtain ⟨b, hc, hA, hApp, hC, hI, hU⟩ := hs
+    obtain ⟨b, hc, hA, hApp, hC, hI, hU, -⟩ := hs
     exact ⟨b, ⟨hc, hA, hApp⟩, hC, hI, hU⟩
+
+/-- The laws of an `assoc`, `ac` or `aci` operator that the `inv`, `nil` and
+`cancel` steps use, through one binary operation. -/
+theorem assoc_laws_ext {d : OpDecl} (hs : M.OpSat d) (hk : d.kind.isAssoc = true) :
+    ∃ b : M.α → M.α → M.α, AssocLaws M d.name d.res b ∧
+      (∀ u, d.unit = some u → M.dom d.res (M.eval u) ∧ M.app d.name [] = M.eval u ∧
+        ∀ x, M.dom d.res x → b (M.eval u) x = x ∧ b x (M.eval u) = x) ∧
+      (∀ g u, d.inverse = some g → d.unit = some u → ∀ x, M.dom d.res x →
+        M.dom d.res (M.app g [x]) ∧ b x (M.app g [x]) = M.eval u) ∧
+      (∀ n u, d.nilpotent = some (n + 1) → d.unit = some u → ∀ x, M.dom d.res x →
+        (List.replicate n x).foldl b x = M.eval u) ∧
+      (d.cancellative = true → ∀ x y z, M.dom d.res x → M.dom d.res y → M.dom d.res z →
+        b x z = b y z → x = y) := by
+  unfold Model.OpSat at hs
+  cases hd : d.kind with
+  | plain => simp [hd, Kind.isAssoc] at hk
+  | comm => simp [hd, Kind.isAssoc] at hk
+  | assoc | ac | aci =>
+    rw [hd] at hs
+    obtain ⟨b, hc, hA, hApp, -, -, hU, hInv, hNil, hCan⟩ := hs
+    exact ⟨b, ⟨hc, hA, hApp⟩, hU, hInv, hNil, hCan⟩
 
 /-- A well-sorted node's value is an element of its sort. -/
 theorem nval_dom {P : Program} {nodes : Array Node} (hwf : wfNodes nodes = true)
@@ -573,6 +594,125 @@ theorem congOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes =
 
 /-! ## Steps -/
 
+/-- The unit's node has the unit's value. -/
+theorem unitOf_sound (hwf : wfNodes C.nodes = true) {f : String} {d : OpDecl} {e : Nat}
+    (hd : C.P.opDecl? f = some d) (h : C.unitOf f = some e) :
+    ∃ u, d.unit = some u ∧ nval M C.nodes e = M.eval u := by
+  unfold unitOf at h
+  rw [hd] at h
+  obtain ⟨u, hu, hint⟩ := Option.bind_eq_some_iff.1 h
+  exact ⟨u, hu, intern_sound hwf u e hint⟩
+
+/-- `f(x, g(x))` is the unit. -/
+theorem invOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    (hT : Typed M C.P) {f : String} {a x q e : Nat} (h : C.invOk f a x q e = true) :
+    nval M C.nodes a = nval M C.nodes e := by
+  unfold invOk at h
+  cases hd : C.P.opDecl? f with
+  | none => simp [hd] at h
+  | some d =>
+    rw [hd] at h
+    cases hg : d.inverse with
+    | none => simp [hg] at h
+    | some g =>
+      simp only [hg, Bool.and_eq_true, decide_eq_true_eq] at h
+      obtain ⟨⟨⟨hk, hn⟩, hq⟩, hu⟩ := h
+      obtain ⟨u, hdu, hev⟩ := unitOf_sound (M := M) hwf hd hu
+      obtain ⟨hmem, hname⟩ := opDecl_spec hd
+      obtain ⟨b, L, -, hInv, -, -⟩ := assoc_laws_ext (hT.1 d hmem).2 hk
+      obtain ⟨d', hd', hA, -⟩ := wfSorts_app hws hn
+      rw [hd] at hd'
+      cases hd'
+      have hx : M.dom d.res (nval M C.nodes x) :=
+        nval_dom hwf hws hT x _ ((hA hk).1 x (by simp))
+      obtain ⟨hgx, hlaw⟩ := hInv g u hg hdu _ hx
+      rw [nval_app hwf hn, hev]
+      simp only [List.map_cons, List.map_nil]
+      rw [nval_app hwf hq]
+      simp only [List.map_cons, List.map_nil]
+      rw [← hname, L.app _ _ hx (by
+        intro y hy
+        rw [List.mem_singleton] at hy
+        rw [hy]
+        exact hgx)]
+      simpa using hlaw
+
+/-- `f` of `k + 1` copies of `x` is the unit. -/
+theorem nilOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    (hT : Typed M C.P) {f : String} {a x k e : Nat} (h : C.nilOk f a x k e = true) :
+    nval M C.nodes a = nval M C.nodes e := by
+  unfold nilOk at h
+  cases hd : C.P.opDecl? f with
+  | none => simp [hd] at h
+  | some d =>
+    rw [hd] at h
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+    obtain ⟨⟨⟨hk, hn⟩, hnil⟩, hu⟩ := h
+    obtain ⟨u, hdu, hev⟩ := unitOf_sound (M := M) hwf hd hu
+    obtain ⟨hmem, hname⟩ := opDecl_spec hd
+    obtain ⟨b, L, -, -, hNil, -⟩ := assoc_laws_ext (hT.1 d hmem).2 hk
+    obtain ⟨d', hd', hA, -⟩ := wfSorts_app hws hn
+    rw [hd] at hd'
+    cases hd'
+    have hx : M.dom d.res (nval M C.nodes x) :=
+      nval_dom hwf hws hT x _ ((hA hk).1 x (by simp))
+    rw [nval_app hwf hn, hev]
+    simp only [List.map_cons, List.map_replicate]
+    rw [← hname, L.app _ _ hx (by
+      intro y hy
+      rw [List.eq_of_mem_replicate hy]
+      exact hx)]
+    exact hNil k u hnil hdu _ hx
+
+/-- From `f(a, z) = f(b, z)`, `a = b`. -/
+theorem cancelOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    (hT : Typed M C.P) {f : String} {p q a b z : Nat} (h : C.cancelOk f p q a b z = true)
+    (hpq : nval M C.nodes p = nval M C.nodes q) : nval M C.nodes a = nval M C.nodes b := by
+  unfold cancelOk at h
+  cases hd : C.P.opDecl? f with
+  | none => simp [hd] at h
+  | some d =>
+    rw [hd] at h
+    simp only [Bool.and_eq_true, decide_eq_true_eq, Bool.or_eq_true] at h
+    obtain ⟨⟨⟨hk, hp⟩, hq⟩, hlaw⟩ := h
+    obtain ⟨hmem, hname⟩ := opDecl_spec hd
+    obtain ⟨b', L, hU, hInv, -, hCan⟩ := assoc_laws_ext (hT.1 d hmem).2 hk
+    obtain ⟨d1, hd1, hA1, -⟩ := wfSorts_app hws hp
+    rw [hd] at hd1
+    cases hd1
+    obtain ⟨d2, hd2, hA2, -⟩ := wfSorts_app hws hq
+    rw [hd] at hd2
+    cases hd2
+    have ha : M.dom d.res (nval M C.nodes a) := nval_dom hwf hws hT a _ ((hA1 hk).1 a (by simp))
+    have hz : M.dom d.res (nval M C.nodes z) := nval_dom hwf hws hT z _ ((hA1 hk).1 z (by simp))
+    have hb : M.dom d.res (nval M C.nodes b) := nval_dom hwf hws hT b _ ((hA2 hk).1 b (by simp))
+    rw [nval_app hwf hp, nval_app hwf hq] at hpq
+    simp only [List.map_cons, List.map_nil] at hpq
+    rw [← hname, L.app _ _ ha (by
+        intro y hy
+        rw [List.mem_singleton] at hy
+        rw [hy]
+        exact hz),
+      L.app _ _ hb (by
+        intro y hy
+        rw [List.mem_singleton] at hy
+        rw [hy]
+        exact hz)] at hpq
+    simp only [List.foldl_cons, List.foldl_nil] at hpq
+    cases hlaw with
+    | inl hc => exact hCan hc _ _ _ ha hb hz hpq
+    | inr hgu =>
+      obtain ⟨hgs, hus⟩ := hgu
+      obtain ⟨g, hg⟩ := Option.isSome_iff_exists.1 hgs
+      obtain ⟨e, he⟩ := Option.isSome_iff_exists.1 hus
+      obtain ⟨u, hdu, -⟩ := unitOf_sound (M := M) hwf hd he
+      obtain ⟨hgz, hzz⟩ := hInv g u hg hdu _ hz
+      have h2 : b' (b' (nval M C.nodes a) (nval M C.nodes z)) (M.app g [nval M C.nodes z]) =
+          b' (b' (nval M C.nodes b) (nval M C.nodes z)) (M.app g [nval M C.nodes z]) := by rw [hpq]
+      rw [L.assoc _ _ _ ha hz hgz, L.assoc _ _ _ hb hz hgz, hzz,
+        ((hU u hdu).2.2 _ ha).2, ((hU u hdu).2.2 _ hb).2] at h2
+      exact h2
+
 /-- The conclusion holds in every model of the commands it cites. -/
 def Valid (M : Model) (C : Ctx) (c : Concl) : Prop :=
   M.Models C.P c.pos → nval M C.nodes c.a = nval M C.nodes c.b
@@ -716,6 +856,30 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
         cases h
         exact congOk_sound hwf hws hT ((premConcls_sound hacc hps).1 hM)
           (premConcls_sound hacc hps).2 hok
+      · cases h
+    · cases h
+  | inv f a x q e =>
+    simp only [inferStep] at h
+    split at h
+    · rename_i hok
+      cases h
+      exact invOk_sound hwf hws hT hok
+    · cases h
+  | nil f a x k e =>
+    simp only [inferStep] at h
+    split at h
+    · rename_i hok
+      cases h
+      exact nilOk_sound hwf hws hT hok
+    · cases h
+  | cancel f s a b z =>
+    simp only [inferStep] at h
+    split at h
+    · rename_i c hc
+      split at h
+      · rename_i hok
+        cases h
+        exact cancelOk_sound hwf hws hT hok ((hacc s c hc).1 hM)
       · cases h
     · cases h
 
