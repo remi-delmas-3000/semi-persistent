@@ -159,6 +159,34 @@ itself, because the engine applies that rule at some law steps and not at
 others; a `p` check with `d = 1` reduces the peak with the unit dropped first
 and with the inverse pairs cancelled first. Each is a fixed pair of attempts.
 
+## Soundness: the plan
+
+The replayer's checks are not proved correct one by one. Instead the replayer
+justifies every merge to the certificate kernel, which is proved
+(`goal_sound`, `Sound.lean`):
+
+- each link of the union-find carries a kernel step that proves its two nodes
+  equal, so the equality of two nodes of one class is a `trans` chain of
+  checked steps;
+- each check emits the kernel steps that derive its merge: `axiom` for `x`;
+  `cong` with class premises for `c`, `w`, `t`; `rule` on the instance the
+  walk built, joined to the matched and built nodes by `cong` steps, for a
+  firing; a chain of `cong` steps through the intermediate monomials for `i`
+  and `p`;
+- the kernel checks every step, and a `check-eq` is proved when the kernel
+  accepts the step that joins its two terms.
+
+The theorem for the replay is then `goal_sound` applied to the steps the
+replayer emitted. A wrong check in the replayer emits a step the kernel
+rejects: it loses a goal and cannot prove a false one. The kernel needs new
+steps, each with its law in the models and its soundness lemma, for what it
+does not have: counts modulo `n` (`:nilpotent`), inverse pairs and the group
+consequences of `v` lines (`:inverse`), and cancellation (`:cancellative`).
+
+State of this plan: `Replay.lean` decides each check without emitting steps.
+The proof-producing union-find, the emission of steps, and the kernel's new
+steps are not written.
+
 ## Not in this version
 
 A firing of a rule with a rest variable, a multiplicity variable or a primitive
