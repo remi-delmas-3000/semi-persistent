@@ -174,9 +174,11 @@ Cost: the 1,442 streams total 235 MB; the median is 1.3 kB and the largest
 `bench/math-microbenchmark.rules.egg`); `bench/acgen.rules.egg` (1,120,646
 events, a 50 MB stream, 6,647,265 kernel steps, every event checked) takes
 11.4 s and 539 MB. With the stream on, the engine runs that benchmark in
-11.3 s and 706 MB against 10.4 s and 700 MB in proof mode without it.
+11.7 s and 706 MB against 10.6 s and 704 MB in proof mode without it (two
+runs each).
 
-`SEMPER_REPLAY_SHOW=n` prints the first `n` failed events, merges without
-kernel steps and `check-eq` not proved; with `SEMPER_REPLAY_NODES` set, it
+`SEMPER_REPLAY_SHOW=n` prints the first `n` failed events (a failed completion
+event with the monomials it reached), merges without kernel steps and
+`check-eq` not proved; with `SEMPER_REPLAY_NODES` set, it
 also prints the table id, class root and definition of each node a failed
 event names.

@@ -103,7 +103,9 @@ def tr (S : St P) (i : Nat) : Option Nat := S.cid.getD i none
 def node? (S : St P) (x : String) : Option Nat := x.toNat?.bind S.tr
 
 def fail (S : St P) (cause : String) : St P :=
-  { S with failed := S.failed.insert cause (S.failed.getD cause 0 + 1), nFailed := S.nFailed + 1, lastCause := cause,
+  -- A cause can carry a detail after ` | `, which is shown and not counted by.
+  let key := (cause.splitOn " | ").headD cause
+  { S with failed := S.failed.insert key (S.failed.getD key 0 + 1), nFailed := S.nFailed + 1, lastCause := cause,
            splices := [], inverses := [] }
 
 /-- Runs `k` on the checked state, taken out of `S` while `k` runs so that
@@ -497,7 +499,7 @@ def rewrite (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List N
       let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)))
       match applyRule S f m lc (if atom then [r] else monomial S f W r) once with
       | some (q, left, m') => rewrite now S f W m' once (done.push { l, r, q, rest := left, after := m', atom }) rest
-      | none => throw "completion: rule does not apply"
+      | none => throw s!"completion: rule does not apply | rule {done.size}: left side {ls} as classes {lc}, monomial {m} as classes {classesOf S m}"
     | _ => throw "completion: rule of another operator"
 
 /-- The monomial `m` has the value of node `t`: it is `t`'s arguments, or it
@@ -559,7 +561,8 @@ def interReduce (S R : St P) (a b n : Nat) (rules : List (Nat × Nat × Bool)) :
   let W : List (Nat × List Nat) := []
   let first := lawReduce R f (as.flatMap (expand R W))
   let (m, steps) ← rewrite S R f W first false #[] rules
-  unless reaches S f W m t do throw "completion: normal form differs"
+  unless reaches S f W m t do
+    throw s!"completion: normal form differs | {m} as classes {classesOf S (lawReduce S f m)}"
   pure { f, start := .inl n, first, steps, target := .inl t }
 
 /-- The witnesses of a critical-pair merge (`p` line). -/
@@ -637,7 +640,8 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
       throw "completion: cancellation empties a side"
     let (mA', tA) ← rewrite S R f W left false #[] w.postA
     let (mB', tB) ← rewrite S R f W right false #[] w.postB
-    unless reaches S f W mA' a && reaches S f W mB' b do throw "completion: normal form differs"
+    unless reaches S f W mA' a && reaches S f W mB' b do
+      throw s!"completion: normal form differs | after cancellation: left {left} right {right}, side A {mA'} as classes {classesOf S (lawReduce S f mA')}, side B {mB'} as classes {classesOf S (lawReduce S f mB')}"
     -- What side A loses: its arguments that are not in `left`.
     let gone := left.foldl (fun m x => m.erase x) mA
     pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inr mA },
@@ -648,7 +652,8 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
   else
     let (mA, sA) ← rewrite S R f W mA false sA w.postA
     let (mB, sB) ← rewrite S R f W mB false sB w.postB
-    unless reaches S f W mA a && reaches S f W mB b do throw "completion: normal form differs"
+    unless reaches S f W mA a && reaches S f W mB b do
+      throw s!"completion: normal form differs | side A {mA} as classes {classesOf S (lawReduce S f mA)}, side B {mB} as classes {classesOf S (lawReduce S f mB)}"
     pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inl a },
            b := { f, start := .inr peak, peak := w.reduceB, first := firstB, steps := sB, target := .inl b } }
 
