@@ -1036,7 +1036,13 @@ def congStepC (S : St P) (f : String) (a b : Nat) : St P × Pf :=
         if pa == a && pb == b then (S, none)
         else
           let (S, p1) := congStep S f a pa
+          -- The plain forms by `f`'s laws, or one of them an argument of
+          -- the other's class.
           let (S, p2) := congStep S f pa pb
+          let (S, p2) := if p2.isSome then (S, p2) else collapse S pa pb
+          let (S, p2) := if p2.isSome then (S, p2) else
+            (let (S, q) := collapse S pb pa
+             if q.isSome then symmP S pb pa q else (S, none))
           let (S, p3) := congStep S f pb b
           let (S, q) := transP S a pb p1 p2
           transP S a b q p3
