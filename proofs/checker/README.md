@@ -125,37 +125,41 @@ sort is not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` the kernel proves (`replay_sound` covers them), of 29,808 | 20,729 |
-| programs with every `check-eq` proved, of 1,066 | 603 |
-| kernel steps checked | 12,523,913 |
-| `check-eq` the replayer joins | 25,416 |
+| `check-eq` the kernel proves (`replay_sound` covers them), of 29,808 | 21,064 |
+| programs with every `check-eq` proved, of 1,066 | 609 |
+| kernel steps the replayer emits | 12,519,568 |
+| emitted steps the kernel rejects | 0 |
 | events replayed | 7,396,094 |
-| events whose check fails | 213,130 |
+| events whose check fails | 221,582 |
 | merges the replayer does not check | 292,225 |
 
-The 9,079 `check-eq` the kernel does not prove:
+A merge is applied only when the replayer has a kernel step for it, so every
+two nodes of one class are joined by a chain of steps; the sweep fails if the
+kernel rejects a step the replayer emitted. The replayer finds the two terms
+of 21,066 `check-eq` in one class; for 2 of them it cannot spell a term as the
+kernel interns it.
+
+The 8,744 `check-eq` the kernel does not prove:
 
 - 3,252 are in the 267 programs with a rule firing the stream writes as opaque:
   a rule with a primitive, a rest variable or a multiplicity variable, which
   the reader does not read (292,221 such merges, 287,931 of them in
   `bench/math-microbenchmark.native.egg`). Later events of these programs fail
   because the merge was not applied.
-- 4,687 are joined by the replayer through a merge it has no kernel step for:
-  11,744 merges, of which 4,810 inter-reductions, 3,575 law steps and 3,233
-  critical pairs. The step builder does not finish them; the largest groups are
-  merges through a class that holds its own application, and cancellation
-  without a unit.
-- The rest are in programs where a check fails first: a law step whose
-  arguments differ (most after an opaque firing), a rule firing the walk does
-  not follow, a completion merge.
+- The rest are in programs where an event fails: 2,213 merges pass the
+  replayer's check and get no kernel step (1,304 inter-reductions, 560
+  critical pairs, 337 law steps; the largest groups are merges through a class
+  that holds its own application, and cancellation without a unit), and the
+  events after such a merge fail because it was not applied.
 
 The certificates this replaces proved 5,702 `check-eq`. `coverage.tsv` is
-higher for 565 programs (15,041 `check-eq`) and lower for 6 (14 `check-eq`),
-each with the cause in its row.
+lower than the certificates for 6 programs (14 `check-eq`) and lower than the
+replay was before it rejected merges without a kernel step for 7 (93
+`check-eq`); each such row states the cause.
 
 Cost: the 1,442 streams total 235 MB; the median is 1.2 kB and the largest
-94 MB. The slowest replay, kernel run included, takes 21 s
-(`conform-cc-cert/cs1_0013.egg`) and the largest 1.05 GB
+94 MB. The slowest replay, kernel run included, takes 25 s
+(`conform-cc-cert/cs1_0013.egg`) and the largest 1.16 GB
 (`bench/math-microbenchmark.rules.egg`); `bench/acgen.rules.egg` (1,120,646
 events, a 50 MB stream, 6,647,265 kernel steps, every event checked) takes
 16 s. With the stream on, the engine runs that benchmark in 11.3 s and 706 MB

@@ -45,6 +45,17 @@ def replay (progPath tracePath : String) : IO UInt32 := do
   let cert := Replay.certOf S
   let nSteps := cert.steps.size
   if (runCert P cert).isNone then IO.println "kernel: the node table is rejected"
+  -- The steps the replayer emitted that the kernel does not accept: each
+  -- concludes only `0 = 0`, and none should exist.
+  let mut rejected := 0
+  if let some (C, acc) := runCert P cert then
+    let mut seen : Array Concl := #[]
+    for st in cert.steps do
+      if (C.checkStep seen st).isNone then
+        rejected := rejected + 1
+        if rejected ≤ shown then IO.eprintln s!"kernel rejects step {seen.size}: {repr st}"
+      seen := seen.push (acc[seen.size]!)
+  IO.println s!"kernel: {rejected} steps rejected"
   -- `Replay.replay_sound` is about exactly these.
   let kernel := (Replay.provedBy P cert).length
   IO.println s!"kernel: {nSteps} steps, {kernel} of {total} check-eq proved"

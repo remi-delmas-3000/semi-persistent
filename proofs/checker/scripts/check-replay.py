@@ -184,6 +184,7 @@ def check_one(path, args):
     return path, {
         "status": "replayed", "events": events, "failed": failed, "unchecked": unchecked,
         "joined": joined, "total": total, "steps": int(k.group(1)), "proved": int(k.group(2)),
+        "rejected": int((re.search(r"kernel: (\d+) steps rejected", p.stdout) or [0, 0])[1]),
         "bytes": size, "secs": secs, "rss_mb": rss_mb,
         "failed_by": by("failed"), "unchecked_by": by("unchecked"),
         "nostep_by": by("no kernel step"),
@@ -252,6 +253,8 @@ def main():
             continue
         if st in ("engine-error", "engine-timeout", "replay-timeout", "replay-error", "rejected"):
             failures.append(f"{path}: {st} {' | '.join(r.get('detail', []))}")
+        elif r.get("rejected", 0):
+            failures.append(f"{path}: the kernel rejects {r['rejected']} steps the replay emitted")
         elif path in base and r.get("proved", 0) < base[path][0]:
             failures.append(f"{path}: proves {r.get('proved', 0)} check-eq, baseline "
                             f"{base[path][0]}")
@@ -267,6 +270,7 @@ def main():
           f"({sum(r['steps'] for r in done)} steps); "
           f"{sum(1 for r in with_goal if r['proved'] == r['total'])} of {len(with_goal)} programs "
           "with a check-eq fully proved")
+    print(f"{sum(r['rejected'] for r in done)} emitted steps rejected by the kernel")
     print(f"{sum(r['joined'] for r in done)} of {total} check-eq joined by the replay; "
           f"{sum(r['events'] for r in done)} events, {sum(r['failed'] for r in done)} failed, "
           f"{sum(r['unchecked'] for r in done)} unchecked")

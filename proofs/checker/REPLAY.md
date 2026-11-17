@@ -188,9 +188,11 @@ justifies every merge to the kernel, which is proved (`goal_sound`,
 replayer emitted: a `check-eq` the kernel accepts from a replay holds in every
 model of the commands before it. It assumes nothing about the stream or the
 replayer. A wrong check in the replayer emits a step the kernel rejects: it
-loses a goal and cannot prove a false one. A merge the replayer joins without
-a kernel step (`semper-check` counts them by line kind) proves nothing: the
-proof of a class equality stops at such a link.
+loses a goal and cannot prove a false one. A merge whose check passes but for which the replayer
+has no kernel step is not applied (`semper-check` counts them by line kind), so
+every two nodes of one class are joined by a chain of steps, and
+`scripts/check-replay.py` fails if the kernel rejects a step the replayer
+emitted.
 
 ## Not in this version
 

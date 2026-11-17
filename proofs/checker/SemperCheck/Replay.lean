@@ -158,10 +158,15 @@ def symmP (S : St) (x y : Nat) : Pf → St × Pf
   | p => (S, p)
 
 /-- `x = z` from `x = y` and `y = z`. -/
-def transP (S : St) (x z : Nat) : Pf → Pf → St × Pf
+def transP (S : St) (_x _z : Nat) : Pf → Pf → St × Pf
   | some none, q => (S, q)
   | p, some none => (S, p)
-  | some (some s), some (some t) => let (S, u) := emit S (.trans s t) x z; (S, some (some u))
+  | some (some s), some (some t) =>
+    -- The kernel needs the first step to end where the second starts.
+    match S.concl[s]?, S.concl[t]? with
+    | some (a, b), some (c, d) =>
+      if b == c then let (S, u) := emit S (.trans s t) a d; (S, some (some u)) else (S, none)
+    | _, _ => (S, none)
   | _, _ => (S, none)
 
 /-- A step that concludes `x = y`, a reflexivity when they are one node. -/
@@ -221,6 +226,13 @@ def St.mergeBy (S : St) (a b : Nat) (pf : Pf) : St :=
         let (S, q) := transP S rb a q r
         transP S rb ra q pa
     let (lo, hi) := (min ra rb, max ra rb)
+    -- A merge is applied only with a kernel step for its link: every pair of
+    -- nodes of one class is then joined by a chain of steps. (The measurement
+    -- mode `assume` joins without one.)
+    if (link.bind id).isNone && !S.assume then
+      { S with unjustified := S.unjustified.insert S.cur (S.unjustified.getD S.cur 0 + 1),
+               nUnjustified := S.nUnjustified + 1 }
+    else
     let S := if S.proof.size ≤ hi then
         { S with proof := S.proof ++ Array.replicate (hi + 1 - S.proof.size) none }
       else S
