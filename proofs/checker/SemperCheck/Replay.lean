@@ -1159,6 +1159,13 @@ def monoNode (S : St P) (f : String) (m : List Nat) (literal : Nat := 0) : St P 
     let d := Node.app f m
     intern S d
 
+/-- Node `x` with a plain member in place of each argument that is an
+application of `f`: `x` itself when it has none, or is no application of `f`. -/
+def plainArgs (S : St P) (f : String) (x : Nat) : St P × Option Nat :=
+  match S.defOf x with
+  | some (.app g cs) => if g == f && !cs.isEmpty then monoNode S f cs else (S, some x)
+  | _ => (S, some x)
+
 /-- The kernel steps of a derivation: the proof that its start is its
 target, and the start's node. Each rewrite of `q` copies of `l` by `r` is
 three `cong` steps: the monomial is `f(l, .., l, rest)` by `f`'s laws, which
@@ -1194,6 +1201,21 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
     let (S3, t3) := monoNode S2 f st.after
     S := S3
     let (some t1, some t2, some t3) := (t1, t2, t3) | return (S, none)
+    -- The kernel reads through the rule's node and through each of its
+    -- arguments that is an application of `f`, which stands for its class.
+    -- So the monomial is first `f(l', .., rest)`, where `l'` is `l` with a
+    -- plain member for each such argument, and `l' = l` argument by argument.
+    let (S', l') := plainArgs S f st.l
+    S := S'
+    if let some l' := l' then
+      if l' != st.l then
+        let (S', pl) := congStep S f l' st.l
+        S := S'.mergeBy l' st.l pl
+        let (S', t1') := monoNode S f (List.replicate st.q l' ++ st.rest) st.q
+        S := S'
+        let some t1' := t1' | return (S, none)
+        let (S', pf') := hop S cur t1' pf
+        S := S'; pf := pf'; cur := t1'
     let (S', pf') := hop S cur t1 pf
     S := S'; pf := pf'
     -- `f(l, .., rest) = f(r, .., rest)`: each differing argument is `l = r`.
@@ -1210,7 +1232,21 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
     S := S.mergeBy t1 t2 p2
     let (S', pf') := transP S start t2 pf p2
     S := S'; pf := pf'
-    let (S', pf') := hop S t2 t3 pf
+    cur := t2
+    -- The same for a right side read as its arguments.
+    if !st.atom then
+      let (S', r') := plainArgs S f r
+      S := S'
+      if let some r' := r' then
+        if r' != r then
+          let (S', pr) := congStep S f r r'
+          S := S'.mergeBy r r' pr
+          let (S', t2') := monoNode S f (List.replicate st.q r' ++ st.rest) st.q
+          S := S'
+          let some t2' := t2' | return (S, none)
+          let (S', pf') := hop S cur t2' pf
+          S := S'; pf := pf'; cur := t2'
+    let (S', pf') := hop S cur t3 pf
     S := S'; cur := t3; pf := pf'
   let target ← match c.target with
     | .inl n => pure n
