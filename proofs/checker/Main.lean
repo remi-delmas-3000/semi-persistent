@@ -48,6 +48,11 @@ def replay (progPath tracePath : String) : IO UInt32 := do
   -- `Replay.replay_sound` is about exactly these.
   let kernel := (Replay.provedBy P cert).length
   IO.println s!"kernel: {nSteps} steps, {kernel} of {total} check-eq proved"
+  if shown > 0 then
+    let got := (Replay.provedBy P cert).map (·.1)
+    for (o, d) in P.decls do
+      if let .goal .. := d then
+        if !got.contains o then IO.eprintln s!"kernel: check-eq at byte {o} not proved"
   IO.println s!"{S.events} events replayed, {nFailed} failed, {nUnchecked} unchecked; {proved} of {total} check-eq proved"
   return if proved == total && nFailed == 0 && nUnchecked == 0 then 0 else 1
 

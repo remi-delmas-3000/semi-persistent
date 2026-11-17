@@ -1055,7 +1055,9 @@ partial def writtenP (S : St) (t : Term) : St × Option (Nat × Nat × Pf) :=
     | some n => (S, some (n, n, some none))
     | none => (S, none)
   | .app f args => Id.run do
-    let some n := eval S t | return (S, none)
+    -- A nested application the engine's term builder spliced has no node of
+    -- its own: the term then stands for itself.
+    let node := eval S t
     let mut S := S
     let mut ws : Array Nat := #[]
     for a in args do
@@ -1073,8 +1075,11 @@ partial def writtenP (S : St) (t : Term) : St × Option (Nat × Nat × Pf) :=
           S := S'
           pure w
         else return (S, none)
-    let (S', p) := congStepL S f w n
-    return (S'.mergeBy w n p, some (w, n, p))
+    match node with
+    | some n =>
+      let (S', p) := congStepL S f w n
+      return (S'.mergeBy w n p, some (w, n, p))
+    | none => return (S, some (w, w, some none))
 
 /-- The node of a monomial: `f` applied to its arguments, or the unit for
 none. -/
@@ -1332,14 +1337,12 @@ partial def walkB (p : Pat) : WalkM (Nat × Nat) := do
   | _ =>
     let w ← get
     -- A `let` name's term: the engine fetched the name's node.
+    -- The pattern is the name's term when the node is defined as that term,
+    -- argument for argument; otherwise the name is further down the pattern.
     if let (n, true) :: rest := w.rhs then
-      match (Pat.toTerm? p).bind (eval w.S) with
-      | some m =>
-        if w.S.fd m == w.S.fd n then
-          set { w with rhs := rest }
-          return (n, ← letInstance p n)
-        else throw "rule: let name differs"
-      | none => throw "rule: let name differs"
+      if ((Pat.toTerm? p).map (denotes w.S n)).getD false then
+        set { w with rhs := rest }
+        return (n, ← letInstance p n)
     match p with
     | .lit s v =>
       match w.rhs with

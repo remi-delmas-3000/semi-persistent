@@ -924,7 +924,11 @@ where
         // child itself — which is also why the splice arms below hand it raw
         // match bindings. Going through `eval` would `find` each child twice.
         RhsArg::One(RhsOp::FetchNode(node)) => out.push(env.node(*node)),
-        RhsArg::One(RhsOp::FetchGlobal(gid)) => out.push(globals.binding(*gid)),
+        RhsArg::One(RhsOp::FetchGlobal(gid)) => {
+            let n = globals.binding(*gid);
+            eg.trace_rhs(n, true);
+            out.push(n)
+        }
         RhsArg::One(inner) => out.push(eval(inner, env, eg, model, globals)?),
         RhsArg::OneMult { body, mult } => {
             // Multiplicity 0 omits the child without evaluating it, so an
