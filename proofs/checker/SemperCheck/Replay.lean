@@ -75,7 +75,12 @@ structure St where
   lits : Std.HashMap (String × String) Nat := {}
   /-- Each mark: the number of definitions, the classes and the spelling
   table at the mark. -/
-  snaps : Array (Nat × Array Nat × Array (Option Nat) × Spell) := #[]
+  snaps : Array (Nat × Array Nat × Array (Option Nat) × Array (Option Nat) × Spell) := #[]
+  /-- For a class's root, a member that is no application of an associative
+  operator, when the class has one. A monomial's term names a class by such a
+  member: the kernel reads through an application of the operator, and would
+  read the class's root as its arguments. -/
+  plain : Array (Option Nat) := #[]
   /-- The kernel steps emitted so far, and what each concludes. The kernel
   (`Kernel.lean`, proved by `goal_sound`) checks them after the replay. -/
   steps : Array Step := #[]
@@ -94,6 +99,7 @@ structure St where
   /-- The kind of the line being replayed, and the merges that got no kernel
   step, by kind. -/
   cur : String := ""
+  nUnjustified : Nat := 0
   unjustified : Std.HashMap String Nat := {}
   /-- Splice witnesses for the next `t`, `c` or `w` line. -/
   splices : List (Nat × Nat) := []
@@ -219,8 +225,16 @@ def St.mergeBy (S : St) (a b : Nat) (pf : Pf) : St :=
         { S with proof := S.proof ++ Array.replicate (hi + 1 - S.proof.size) none }
       else S
     let S := { S with parent := (grow S.parent (hi + 1)).setIfInBounds hi lo }
+    -- The merged class keeps a plain member of either side.
+    let S := match S.plain.getD lo none, S.plain.getD hi none with
+      | none, some m =>
+        let plain := if S.plain.size ≤ lo then S.plain ++ Array.replicate (lo + 1 - S.plain.size) none
+          else S.plain
+        { S with plain := plain.setIfInBounds lo (some m) }
+      | _, _ => S
     let S := if (link.bind id).isNone then
-        { S with unjustified := S.unjustified.insert S.cur (S.unjustified.getD S.cur 0 + 1) }
+        { S with unjustified := S.unjustified.insert S.cur (S.unjustified.getD S.cur 0 + 1),
+                 nUnjustified := S.nUnjustified + 1 }
       else S
     { S with proof := S.proof.setIfInBounds hi (link.bind id) }
 
@@ -849,6 +863,25 @@ def congStepL (S : St) (f : String) (a b : Nat) : St × Pf :=
   let (S, p) := congStep S f a b
   if p.isSome then (S, p)
   else
+  -- One node's arguments are all in the other's class (`f(x, x) = x` under
+  -- ACI, or one argument): the node is one of them, which is the other node.
+  let u := (S.unit f).map S.fd
+  let collapse (S : St) (x other : Nat) : St × Pf :=
+    let atoms := (kview S f x).filter fun y => some (S.fd y) != u
+    match atoms.head? with
+    | some y =>
+      if x != y && atoms.all (fun z => S.fd z == S.fd other) then
+        let (S, p1) := congStep S f x y
+        let (S, p2) := eqP S y other
+        transP S x other p1 p2
+      else (S, none)
+    | none => (S, none)
+  let (S, p) := collapse S a b
+  if p.isSome then (S, p)
+  else
+  let (S, p) := collapse S b a
+  if p.isSome then (let (S, q) := symmP S b a p; (S, q))
+  else
     let laws := match S.P.opDecl? f with
       | some d => d.inverse.isSome || d.nilpotent.isSome
       | none => false
@@ -1003,13 +1036,25 @@ def intern (S : St) (d : Def) : St × Nat :=
   | some t => (S, t)
   | none =>
     let t := S.defs.size
-    ({ S with defs := S.defs.push (some d), index := S.index.insert d t }, t)
+    let isPlain := match d with
+      | .lit _ _ => true
+      | .app f _ => !(S.P.kind f).isAssoc
+    ({ S with defs := S.defs.push (some d), index := S.index.insert d t,
+              plain := (if S.plain.size ≤ t then S.plain ++ Array.replicate (t + 1 - S.plain.size) none
+                else S.plain).setIfInBounds t (if isPlain then some t else none) }, t)
 
 /-- The node of a monomial: `f` applied to its arguments, or the unit for
 none. -/
-def monoNode (S : St) (f : String) (m : List Nat) : St × Option Nat :=
+def monoNode (S : St) (f : String) (m : List Nat) (literal : Nat := 0) : St × Option Nat :=
   if m.isEmpty then (S, S.unit f)
   else
+    -- An argument that is an application of `f` stands for its class: name
+    -- the class by a plain member, which the kernel reads as one argument.
+    -- The first `literal` arguments are a rule's nodes, read as they are.
+    let m := m.take literal ++ (m.drop literal).map fun x =>
+      match S.defOf x with
+      | some (.app g _) => if g == f then (S.plain.getD (S.fd x) none).getD x else x
+      | _ => x
     let d := Def.app f m
     if wellSorted S d then let (S, t) := intern S d; (S, some t) else (S, none)
 
@@ -1040,8 +1085,8 @@ def emitChain (S : St) (c : Chain) : St × Option (Nat × Nat × Pf) := Id.run d
     S := S'; cur := t; pf := pf'
   | (S', none) => return (S', none)
   for st in c.steps do
-    let (S1, t1) := monoNode S f (List.replicate st.q st.l ++ st.rest)
-    let (S2, t2) := monoNode S1 f (List.replicate st.q st.r ++ st.rest)
+    let (S1, t1) := monoNode S f (List.replicate st.q st.l ++ st.rest) st.q
+    let (S2, t2) := monoNode S1 f (List.replicate st.q st.r ++ st.rest) st.q
     let (S3, t3) := monoNode S2 f st.after
     S := S3
     let (some t1, some t2, some t3) := (t1, t2, t3) | return (S, none)
@@ -1607,16 +1652,16 @@ def stepCore (S : St) (line : String) : St :=
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
     match d.toNat? with
-    | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.parent, S.proof, S.spell) }
+    | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.parent, S.proof, S.plain, S.spell) }
     | _ => S.fail "mark: unreadable"
   | ["restore", d] =>
     match d.toNat? with
     | some (d + 1) =>
       match S.snaps[d]? with
-      | some (n, p, pf, sp) =>
+      | some (n, p, pf, pl, sp) =>
         -- The engine's ids past the mark are free again; the table keeps its
         -- nodes, and the kernel steps emitted since stay true.
-        { S with cid := S.cid.extract 0 n, parent := p, proof := pf, spell := sp, roundParent := p,
+        { S with cid := S.cid.extract 0 n, parent := p, proof := pf, plain := pl, spell := sp, roundParent := p,
                  roundProof := pf,
                  snaps := S.snaps.extract 0 (d + 1), fire := none }
       | none => S.fail "restore: no such mark"
@@ -1625,8 +1670,8 @@ def stepCore (S : St) (line : String) : St :=
     match d.toNat? with
     | some d =>
       match S.snaps[d]? with
-      | some (n, p, pf, sp) =>
-        { S with cid := S.cid.extract 0 n, parent := p, proof := pf, spell := sp, roundParent := p,
+      | some (n, p, pf, pl, sp) =>
+        { S with cid := S.cid.extract 0 n, parent := p, proof := pf, plain := pl, spell := sp, roundParent := p,
                  roundProof := pf,
                  snaps := S.snaps.extract 0 d, fire := none }
       | none => S.fail "restore: no such mark"

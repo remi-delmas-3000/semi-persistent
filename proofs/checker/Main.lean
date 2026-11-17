@@ -28,8 +28,10 @@ def replay (progPath tracePath : String) : IO UInt32 := do
   repeat
     let line ← h.getLine
     if line.isEmpty then break
+    let beforeU := S.nUnjustified
     let before := S.nFailed
     S := Replay.step S ((line.splitOn "\n").headD "")
+    if S.nUnjustified > beforeU && beforeU < shown then IO.eprintln s!"no kernel step at event {S.events}: {line}"
     if S.nFailed > before && S.nFailed ≤ shown then IO.eprintln s!"failed event {S.events} [{S.lastCause}]: {line}"
   let total := (P.decls.filter fun (_, d) => match d with | .goal .. => true | _ => false).length
   let proved := (P.decls.filter fun (o, d) =>
