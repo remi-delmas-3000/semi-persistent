@@ -144,28 +144,28 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 26,343 |
-| programs with every `check-eq` proved, of 1,066 | 763 |
-| kernel steps checked | 12,487,996 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 26,354 |
+| programs with every `check-eq` proved, of 1,066 | 765 |
+| kernel steps checked | 12,486,207 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,098 |
-| events whose check fails | 211,249 |
+| events whose check fails | 211,225 |
 | events the stream gives no witness for | 292,222 |
-| merges whose kernel steps are not found | 18 |
+| merges whose kernel steps are not found | 22 |
 
-The 3,465 `check-eq` not proved:
+The 3,454 `check-eq` not proved:
 
 - 3,263 are in the 245 programs with a rule firing the stream writes as
   opaque: a rule with a primitive, a rest variable or a multiplicity variable,
   which the reader does not read (292,218 such merges, 287,931 of them in
   `bench/math-microbenchmark.native.egg`). Later events of these programs fail
   because the merge was not applied.
-- 202 are in 61 programs with no such firing. `check-replay.py --failed FILE`
-  lists every failed event (program, event number, cause, line: 211,249
+- 191 are in 59 programs with no such firing. `check-replay.py --failed FILE`
+  lists every failed event (program, event number, cause, line: 211,225
   lines) and counts these programs by the cause of their first failed event,
   since a program's later failures can follow from the merge the first one did
-  not apply. 164 of the 202 are in 43 programs whose first failure is a rule
-  the reader does not read. The other 38 are in 18 programs, at most 7 in
+  not apply. 164 of the 191 are in 43 programs whose first failure is a rule
+  the reader does not read. The other 27 are in 16 programs, at most 6 in
   one: a rule with `:flatten` matched through a nested application (4
   programs), a law step whose normal form the replayer computes differently
   (4), and single cases.
