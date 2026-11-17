@@ -48,7 +48,7 @@ program.
 | `x off a b` | the `union` at `off` merged `a` and `b`, the nodes of its two terms |
 | `c a b` | congruence merged `a` and `b` |
 | `w a b` | one of `a`, `b` is an application of an operator with laws, merged with the other, the node or class its arguments normalize to |
-| `s c m` | splice witness for the next `c` or `w` line: node `m` is in the class of argument `c` and is an application of the same associative operator |
+| `s c m` | splice witness for the next `c`, `w` or `m` line (before an `m` line: an argument a `:flatten` match read through a member of its class): node `m` is in the class of argument `c` and is an application of the same associative operator |
 | `r off k` | a rule of the command at `off` fired; `k` is `w` for a `rewrite` (its left side is matched) and `r` for a `rule` (both sides of its `union` actions are built) |
 | `e id f c1 .. ck` | within a firing: the pattern application `f` matched node `id`, with its argument patterns bound to `c1 .. ck` (`c:m` for an argument pattern of multiplicity `m`); one line per application of the matched patterns, arguments before the application (`f` is `#lit` for a literal pattern) |
 | `b id1 .. idk` | within a firing: the nodes the built patterns' applications evaluated to, arguments before the application (`g` before an id marks the node of a `let` name, which stands for the name's whole term) |

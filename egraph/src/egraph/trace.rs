@@ -103,6 +103,9 @@ pub struct Trace {
     /// to; `true` marks the node of a `let` name, which stands for the name's
     /// whole term.
     rhs: Vec<(usize, bool)>,
+    /// The firing's splice witnesses: `(argument, member)`, written as `s`
+    /// lines before each of its `m` lines.
+    splices: Vec<(usize, usize)>,
     /// The witnesses of the completion merge about to happen: its line's
     /// letter and the node ids after the merged pair.
     law: Option<(char, Vec<usize>)>,
@@ -264,6 +267,7 @@ where
         if let Some(t) = self.trace.as_mut() {
             t.atoms.clear();
             t.rhs.clear();
+            t.splices.clear();
             t.firing = t
                 .rule_src
                 .get(rule)
@@ -310,6 +314,19 @@ where
             t.atoms.push(k as usize);
             let at = t.atom_at;
             t.atoms[at] += 1;
+        }
+    }
+
+    /// Within the firing, a `:flatten` match read argument `c` through
+    /// `member`, an application of the matched operator in `c`'s class.
+    pub(crate) fn trace_splice(&mut self, c: Cfg::G, member: Cfg::G) {
+        if let Some(t) = self.trace.as_mut()
+            && t.firing.is_some()
+        {
+            let pair = (c.to_usize(), member.to_usize());
+            if !t.splices.contains(&pair) {
+                t.splices.push(pair);
+            }
         }
     }
 
@@ -431,8 +448,13 @@ where
                         let (r, global) = t.rhs[i];
                         let _ = write!(t.out, " {}{r}", if global { "g" } else { "" });
                     }
+                    t.out.push('\n');
+                    for i in 0..t.splices.len() {
+                        let (c, member) = t.splices[i];
+                        let _ = writeln!(t.out, "s {c} {member}");
+                    }
                     let j = f.base + f.action.saturating_sub(1);
-                    let _ = writeln!(t.out, "\nm {j} {x} {y}");
+                    let _ = writeln!(t.out, "m {j} {x} {y}");
                     t.firing = Some(f);
                 }
                 None => {

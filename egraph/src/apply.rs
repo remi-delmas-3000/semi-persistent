@@ -1496,6 +1496,10 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 for c in children {
                     eg.trace_atom_arg(bind(c));
                 }
+                if query.flatten && matches!(atom, RAtom::AExact { .. }) {
+                    let bound: Vec<Cfg::G> = children.iter().map(&bind).collect();
+                    trace_splices(eg, *op, m.get(*node), &bound);
+                }
             }
             RAtom::ACExact { node, op, elems } | RAtom::Comm { node, op, elems } => {
                 eg.trace_atom(m.get(*node), Some(*op));
@@ -1506,17 +1510,54 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     };
                     eg.trace_atom_arg_n(bind(v), *k);
                 }
+                if query.flatten && matches!(atom, RAtom::ACExact { .. }) {
+                    let bound: Vec<Cfg::G> = elems.iter().map(|(v, _)| bind(v)).collect();
+                    trace_splices(eg, *op, m.get(*node), &bound);
+                }
             }
             RAtom::ACIExact { node, op, elems } => {
                 eg.trace_atom(m.get(*node), Some(*op));
                 for c in elems {
                     eg.trace_atom_arg(bind(c));
                 }
+                if query.flatten {
+                    let bound: Vec<Cfg::G> = elems.iter().map(&bind).collect();
+                    trace_splices(eg, *op, m.get(*node), &bound);
+                }
             }
             RAtom::Lit { node, .. } => eg.trace_atom(m.get(*node), None),
             // A literal-value binding reads a node the atoms already name.
             RAtom::Eq(..) | RAtom::EqGlobal(..) | RAtom::LitBind { .. } => {}
             _ => return eg.trace_atom_opaque(),
+        }
+    }
+}
+
+/// The splice witnesses of a `:flatten` match of `node`: for each bound
+/// argument that is no stored child, the same-operator members the view read
+/// it through (`view_premises`).
+fn trace_splices<Cfg, L, const T: bool, const P: bool>(
+    eg: &mut EGraph<Cfg, L, T, P>,
+    op: Cfg::O,
+    node: Cfg::G,
+    bound: &[Cfg::G],
+) where
+    Cfg: EGraphConfig,
+    L: LitVal,
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
+{
+    let mut kids: Vec<Cfg::G> = Vec::new();
+    eg.for_each_child(node, |c, _| kids.push(c));
+    for &p in bound {
+        let mut budget = VIEW_BUDGET;
+        let Some(pairs) = view_premises(eg, op, &kids, p, VIEW_DEPTH, &mut budget) else {
+            continue;
+        };
+        for (a, b) in pairs {
+            if a != b && eg.get_lit_val(b).is_none() && eg.node_op(b) == op {
+                eg.trace_splice(a, b);
+            }
         }
     }
 }

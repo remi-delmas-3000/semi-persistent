@@ -897,7 +897,7 @@ egraph/tests/egg/conform-flatten/f2_0044.egg	6	6	replayed
 egraph/tests/egg/conform-flatten/f2_0045.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0046.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0047.egg	0	1	replayed
-egraph/tests/egg/conform-flatten/f2_0048.egg	2	6	replayed
+egraph/tests/egg/conform-flatten/f2_0048.egg	4	6	replayed
 egraph/tests/egg/conform-flatten/f2_0049.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0050.egg	0	366	replayed
 egraph/tests/egg/conform-flatten/f2_0051.egg	3	3	replayed
@@ -1330,7 +1330,7 @@ egraph/tests/egg/conform/c1_0077.egg	0	0	replayed
 egraph/tests/egg/conform/c1_0078.egg	0	0	replayed
 egraph/tests/egg/conform/c1_0079.egg	0	0	replayed
 egraph/tests/egg/conform/c1_0080.egg	5	5	replayed
-egraph/tests/egg/conform/c1_0081.egg	3	10	replayed
+egraph/tests/egg/conform/c1_0081.egg	10	10	replayed
 egraph/tests/egg/conform/c1_0082.egg	0	1	replayed
 egraph/tests/egg/conform/c1_0083.egg	0	4	replayed
 egraph/tests/egg/conform/c1_0084.egg	0	0	replayed
@@ -1466,7 +1466,7 @@ egraph/tests/egg/extract_basic.egg	1	1	replayed
 egraph/tests/egg/f64_all_ops.egg	0	11	replayed
 egraph/tests/egg/f64_arith.egg	0	1	replayed
 egraph/tests/egg/flatten_ac_mult.egg	0	2	replayed
-egraph/tests/egg/flatten_assoc.egg	0	2	replayed
+egraph/tests/egg/flatten_assoc.egg	2	2	replayed
 egraph/tests/egg/flatten_cycle.egg	2	3	replayed
 egraph/tests/egg/flatten_demand_refold.egg	0	1	replayed
 egraph/tests/egg/flatten_demand_refold_control.egg	0	1	replayed

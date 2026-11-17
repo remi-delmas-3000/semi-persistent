@@ -836,6 +836,11 @@ def congStep (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
     if !(argsOf other).isEmpty && (argsOf x).any (fun y => S.fd y == S.fd other)
         && !target.contains (S.fd other) then
       target := target.insert (S.fd other) other
+  -- The kernel replaces an argument once and reads the result as it is: an
+  -- argument that a replaced node flattens to stands for its own class.
+  for (_, m) in target.toList do
+    for z in kview S f m do
+      if !target.contains (S.fd z) then target := target.insert (S.fd z) z
   for y in va ++ vb do
     if !target.contains (S.fd y) then target := target.insert (S.fd y) y
   -- The kernel's two sides: each argument's node, flattened, without the unit.
@@ -1599,8 +1604,8 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
       | _, none => throw "rule: argument differs"
     match S.defOf n with
     | some (.app h ds) =>
-      if h != f || (let (x, y) := nf2 S f ds cs false (some n); x != y) then
-        throw "rule: matched node differs"
+      if h != f || (let (x, y) := nf2 S f ds cs; x != y) then
+        throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} as classes {(nf2 S f ds cs).1}, pattern {f} bound to {cs} as classes {(nf2 S f ds cs).2}, splices {S.splices}"
     | _ => throw "rule: matched node differs"
     set { w with atoms := rest, σ := σ }
     let i ← instOf f ic.toList n
