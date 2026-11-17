@@ -136,15 +136,18 @@ partial def expand (S : St) (W : List (Nat × List Nat)) (a : Nat) : List Nat :=
   | none => [a]
 
 /-- Removes each argument that is `inv` applied to a node together with one
-argument in that node's class. -/
-def cancelInverse (S : St) (inv : String) (xs : List Nat) : List Nat := Id.run do
+argument in that node's class; with `unit` given, also each argument that is
+`inv` applied to a node of the unit's class. -/
+def cancelInverse (S : St) (inv : String) (unit : Option Nat) (xs : List Nat) : List Nat := Id.run do
   let mut out := xs.toArray
   for a in xs do
     if let some (.app g [y]) := S.defOf a then
       if g == inv then
         if let some i := out.findIdx? (· == a) then
           let rest := out.eraseIdxIfInBounds i
-          if let some j := rest.findIdx? (fun b => S.fd b == S.fd y) then
+          -- `inv(e)` is `e`: with `unit` given, it goes by itself.
+          if unit == some (S.fd y) then out := rest
+          else if let some j := rest.findIdx? (fun b => S.fd b == S.fd y) then
             out := rest.eraseIdxIfInBounds j
   return out.toList
 
@@ -161,7 +164,7 @@ An associative operator's argument is one class unless a witness splices it:
 the engine's (`s` lines, checked here), or an application of `f` that appears
 among the arguments, which witnesses its own class. Both lists use the same
 witnesses. -/
-def nf2 (S : St) (f : String) (as bs : List Nat) : List Nat × List Nat :=
+def nf2 (S : St) (f : String) (as bs : List Nat) (invUnit : Bool := false) : List Nat × List Nat :=
   match S.P.kind f with
   | .plain => (as.map S.fd, bs.map S.fd)
   | .comm => ((as.map S.fd).mergeSort (· ≤ ·), (bs.map S.fd).mergeSort (· ≤ ·))
@@ -175,12 +178,14 @@ def nf2 (S : St) (f : String) (as bs : List Nat) : List Nat × List Nat :=
     let u := (S.units[f]?).map S.fd
     let d := S.P.opDecl? f
     let one (xs : List Nat) : List Nat :=
-      let atoms := xs.flatMap (expand S W)
+      -- The unit's arguments go first, as in the engine: `f(e, inv(e))` is
+      -- `inv(e)`, which is in `e`'s class only once that is derived.
+      let atoms := (xs.flatMap (expand S W)).filter fun a => some (S.fd a) != u
       let atoms := match k, d.bind (·.inverse) with
         | .assoc, _ => atoms
-        | _, some inv => cancelInverse S inv atoms
+        | _, some inv => cancelInverse S inv (if invUnit then u else none) atoms
         | _, none => atoms
-      let cls := (atoms.map S.fd).filter fun c => some c != u
+      let cls := atoms.map S.fd
       match k with
       | .assoc => cls
       | .ac =>
@@ -195,13 +200,15 @@ def nf2 (S : St) (f : String) (as bs : List Nat) : List Nat × List Nat :=
 arguments have the same normal form, or the normal form is the one class of
 `n`, or it is empty and `n` is in the unit's class. -/
 def spells (S : St) (n : Nat) (f : String) (cs : List Nat) : Bool :=
-  (match S.defOf n with
-    | some (.app g ds) => g == f && (let (x, y) := nf2 S f ds cs; x == y)
-    | _ => false)
-  || ((S.P.kind f).isAssoc &&
-      (let t := (nf2 S f cs []).1
-       -- One class left: the application is that class. None left: it is the unit.
-       t == [S.fd n] || (t.isEmpty && (S.units[f]?).map S.fd == some (S.fd n))))
+  -- The engine normalizes with and without `inv(e) = e`, at different events.
+  [false, true].any fun invUnit =>
+    (match S.defOf n with
+      | some (.app g ds) => g == f && (let (x, y) := nf2 S f ds cs invUnit; x == y)
+      | _ => false)
+    || ((S.P.kind f).isAssoc &&
+        (let t := (nf2 S f cs [] invUnit).1
+         -- One class left: the application is that class. None left: it is the unit.
+         t == [S.fd n] || (t.isEmpty && (S.units[f]?).map S.fd == some (S.fd n))))
 
 /-- Node `n`'s definition is the term `t`, argument for argument. -/
 partial def denotes (S : St) (n : Nat) : Term → Bool
@@ -225,11 +232,11 @@ removed, and each class kept once (ACI) or its count modulo `n`
 (`:nilpotent n`). -/
 def lawReduce (S : St) (f : String) (atoms : List Nat) : List Nat :=
   let d := S.P.opDecl? f
-  let paired : List Nat := match d.bind (fun d => d.inverse) with
-    | some inv => cancelInverse S inv atoms
-    | none => atoms
   let u := (S.units[f]?).map S.fd
-  let live : List Nat := paired.filter fun a => some (S.fd a) != u
+  let nonUnit : List Nat := atoms.filter fun a => some (S.fd a) != u
+  let live : List Nat := match d.bind (fun d => d.inverse) with
+    | some inv => cancelInverse S inv u nonUnit
+    | none => nonUnit
   -- Each class with its atoms, in order of first occurrence.
   let groups : Array (Nat × Array Nat) := live.foldl (fun groups a =>
     let c := S.fd a
@@ -396,6 +403,42 @@ def peakMerge (S : St) (a b : Nat) (w : Peak) : Except String Unit := do
   let mA ← rewrite S f W mA w.postA
   let mB ← rewrite S f W mB w.postB
   unless reaches S f W mA a && reaches S f W mB b do throw "completion: normal form differs"
+
+/-- `v a b n1 n2`: a consequence of the group law of an operator `f` with
+`:inverse g`, where `n1 = g(x1)` and `n2 = g(x2)` (`n2` is `n1` when one node
+is enough). One of:
+- `g` is injective: `n1` and `n2` in one class give `x1 = x2`;
+- `g(g(z)) = z`: `x1` in the class of `n2` gives `n1 = x2`;
+- `g(x) = e` exactly when `x = e`;
+- under `:nilpotent k`: `f(x1, .., x1) = n1` and `f(n1, .., n1) = x1`, with
+  `k - 1` arguments. -/
+def groupLaw (S : St) (a b n1 n2 : Nat) : Except String Unit := do
+  let some (.app g [x1]) := S.defOf n1 | throw "group law: not an inverse node"
+  let some (.app g' [x2]) := S.defOf n2 | throw "group law: not an inverse node"
+  let some d := S.P.ops.find? (fun d => d.inverse == some g && (d.kind == .ac || d.kind == .aci))
+    | throw "group law: no operator with this inverse"
+  unless g' == g do throw "group law: not an inverse node"
+  let f := d.name
+  let fd := S.fd
+  let is (p q : Nat) : Bool := (fd a == fd p && fd b == fd q) || (fd a == fd q && fd b == fd p)
+  let unit := (S.units[f]?).map fd
+  -- `x` is what `k - 1` arguments in `y`'s class normalize to; `n1` stands
+  -- for one of them when it is in that class, so that a self-inverse cancels.
+  let power (x y : Nat) : Bool :=
+    match d.nilpotent with
+    | some (k + 1) =>
+      let plain := List.replicate k y
+      let withInv := if fd n1 == fd y && k > 0 then n1 :: List.replicate (k - 1) y else plain
+      reaches S f [] plain x || reaches S f [] withInv x
+    | _ => false
+  let injective := fd n1 == fd n2 && is x1 x2
+  let involution := fd x1 == fd n2 && is n1 x2
+  let unitIn := (unit == some (fd n1) || unit == some (fd x1)) && is n1 x1
+  let powers := (power a x1 && fd b == fd n1) || (power b x1 && fd a == fd n1) ||
+    (power a n1 && fd b == fd x1) || (power b n1 && fd a == fd x1) ||
+    -- `k - 1 = 1`: the power is its one argument.
+    (d.nilpotent == some 2 && is n1 x1)
+  unless injective || involution || unitIn || powers do throw "group law: no case applies"
 
 /-- `c` and `c:k` fields as node ids, a counted one repeated. -/
 def ids (xs : List String) : Option (List Nat) := do
@@ -622,10 +665,23 @@ def step (S : St) (line : String) : St :=
   | ["w", a, b] =>
     match a.toNat?, b.toNat? with
     | some a, some b =>
-      match S.defOf a with
-      | some (.app f as) => if spells S b f as then S.merge a b else S.fail "law: arguments differ"
-      | _ => S.fail "law: not an application"
+      -- Either node can be the application whose arguments normalize to the other.
+      let one (x y : Nat) : Bool :=
+        match S.defOf x with
+        | some (.app f as) => spells S y f as
+        | _ => false
+      if one a b || one b a then S.merge a b
+      else match S.defOf a, S.defOf b with
+        | some (.app _ _), _ | _, some (.app _ _) => S.fail "law: arguments differ"
+        | _, _ => S.fail "law: not an application"
     | _, _ => S.fail "law: unreadable"
+  | ["v", a, b, n1, n2] =>
+    match a.toNat?, b.toNat?, n1.toNat?, n2.toNat? with
+    | some a, some b, some n1, some n2 =>
+      match groupLaw S a b n1 n2 with
+      | .ok () => S.merge a b
+      | .error e => S.fail e
+    | _, _, _, _ => S.fail "group law: unreadable"
   | ["r", off, kind] =>
     match off.toNat? with
     | some o => { S with fire := some (o, kind == "w"), atoms := #[], rhs := [], events := S.events - 1 }

@@ -33,8 +33,6 @@ pub struct Trace {
     file: Option<std::io::BufWriter<std::fs::File>>,
     /// Bytes written to `file`.
     bytes: u64,
-    /// Whether the stream names the unit's node of the operator of index `i`.
-    units: Vec<bool>,
     /// The offset of the `union` command about to merge.
     axiom_off: Option<usize>,
     /// The source of each rule, by rule id: the offset of its command, the
@@ -116,20 +114,6 @@ where
             let srt = self.sort_name(self.node_sort(id));
             let _ = writeln!(t.out, "l {i} {srt} {}", cert::lit_spelling(v));
         } else {
-            // The first application of an operator with a unit follows the
-            // line that names the unit's node, which was created before it.
-            let op = self.node_op(id);
-            let oi = op.to_usize();
-            if t.units.len() <= oi {
-                t.units.resize(oi + 1, false);
-            }
-            if !t.units[oi]
-                && let Some(u) = self.unit_node(op)
-                && u != id
-            {
-                t.units[oi] = true;
-                let _ = writeln!(t.out, "z {} {}", self.ops.info(op).name, u.to_usize());
-            }
             let _ = write!(t.out, "n {i} {}", self.node_op_name(id));
             let one = <Cfg::M as crate::multiplicity::MultiplicityLike>::ONE;
             self.for_each_child(id, |c, m| {
@@ -141,6 +125,15 @@ where
             t.out.push('\n');
         }
         self.trace = Some(t);
+    }
+
+    /// `z`: node `unit` is the unit of `op`, written when the declaration
+    /// registers it.
+    pub(crate) fn trace_unit(&mut self, op: Cfg::O, unit: Cfg::G) {
+        let name = self.ops.info(op).name.clone();
+        if let Some(t) = self.trace.as_mut() {
+            let _ = writeln!(t.out, "z {name} {}", unit.to_usize());
+        }
     }
 
     /// `t`: the program term `op(kids)` evaluated to `id`.
@@ -431,7 +424,6 @@ where
         let depth = self.history.depth();
         if let Some(t) = self.trace.as_mut() {
             let _ = writeln!(t.out, "{what} {depth}");
-            t.units.clear();
             t.firing = None;
         }
     }

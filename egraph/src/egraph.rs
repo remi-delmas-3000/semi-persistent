@@ -976,6 +976,7 @@ where
             Err(ContainerError::DuplicateKey) => panic!("operator already has a unit node"),
             Err(_) => panic!("unit/inverse-op map exhausted its index word"),
         }
+        self.trace_unit(op, unit);
     }
     /// Count one right-hand-side action skipped for having no value (`apply::NO_VALUE`).
     pub(crate) fn count_no_value(&mut self) {
@@ -4398,6 +4399,8 @@ where
                 node: gid,
                 reduct: cc_mirror::mono(&ms),
             });
+            // `w`: `gid`'s arguments, with the inverse pairs cancelled, are `c`.
+            self.trace_law('w', []);
             changed |= self.repair_merge(
                 c,
                 gid,
@@ -4406,6 +4409,7 @@ where
                     node_b: gid,
                 },
             );
+            self.trace_law_end();
             #[cfg(debug_assertions)]
             self.cc_mirror_untag();
         }
@@ -4468,6 +4472,10 @@ where
         let mut merges: Vec<(Cfg::G, Cfg::G)> = Vec::new();
         // `(op, base, k−1, target)`: the node `base^(k−1)` to build and merge with `target`.
         let mut powers: Vec<(Cfg::O, Cfg::G, Cfg::M, Cfg::G)> = Vec::new();
+        // For the replay stream: the inverse node or nodes each entry of `merges`
+        // and of `powers` rests on.
+        let mut merge_wit: Vec<[Cfg::G; 2]> = Vec::new();
+        let mut power_wit: Vec<Cfg::G> = Vec::new();
         // The inference each entry of `merges` and of `powers` is, for its mirror tag.
         #[cfg(debug_assertions)]
         let mut merge_why: Vec<(Cfg::O, cc_mirror::InvRule<Cfg::G>)> = Vec::new();
@@ -4491,23 +4499,29 @@ where
             };
             // `(class of inv(x), class of x)`, sorted: equal first components are two
             // inverse nodes in one class.
-            let mut classes: Vec<(Cfg::G, Cfg::G)> = Vec::with_capacity(nodes.len());
+            let mut classes: Vec<(Cfg::G, Cfg::G, Cfg::G)> = Vec::with_capacity(nodes.len());
             for &(node, x) in &nodes {
                 let y = self.classes.find_const(node);
-                classes.push((y, x));
+                classes.push((y, x, node));
                 if let Some(e) = unit {
                     if y == e && x != e {
+                        merge_wit.push([node, node]);
                         merges.push((x, node));
                         #[cfg(debug_assertions)]
                         merge_why.push((op, cc_mirror::InvRule::R2InvUnit { node }));
                     }
                     if x == e && y != e {
+                        merge_wit.push([node, node]);
                         merges.push((node, x));
                         #[cfg(debug_assertions)]
                         merge_why.push((op, cc_mirror::InvRule::R2UnitInv { node }));
                     }
                 }
                 if let Some(k) = power {
+                    power_wit.push(node);
+                    if y != x {
+                        power_wit.push(node);
+                    }
                     powers.push((op, x, k, node));
                     #[cfg(debug_assertions)]
                     power_why.push(cc_mirror::InvRule::R4 { node });
@@ -4521,6 +4535,7 @@ where
             classes.sort_unstable();
             for w in classes.windows(2) {
                 if w[0].0 == w[1].0 && w[0].1 != w[1].1 {
+                    merge_wit.push([w[0].2, w[1].2]);
                     merges.push((w[0].1, w[1].1));
                     #[cfg(debug_assertions)]
                     merge_why.push((op, cc_mirror::InvRule::R1Inj));
@@ -4529,6 +4544,7 @@ where
             for &(node, x) in &nodes {
                 // `x` holds some `inv(z)`, so `node` is `inv(inv(z))`.
                 if let Ok(i) = classes.binary_search_by(|p| p.0.cmp(&x)) {
+                    merge_wit.push([node, classes[i].2]);
                     merges.push((node, classes[i].1));
                     #[cfg(debug_assertions)]
                     merge_why.push((op, cc_mirror::InvRule::R1Inv { node }));
@@ -4538,12 +4554,14 @@ where
         let mut changed = false;
         #[cfg(debug_assertions)]
         let mut merge_why = merge_why.into_iter();
-        for (a, b) in merges {
+        for (i, (a, b)) in merges.into_iter().enumerate() {
             #[cfg(debug_assertions)]
             {
                 let (op, rule) = merge_why.next().expect("one inference per merge");
                 self.cc_mirror_tag(cc_mirror::MergeWhy::InverseLaw { op, rule });
             }
+            // `v`: a consequence of the group law, with its inverse nodes.
+            self.trace_law('v', merge_wit[i]);
             changed |= self.repair_merge(
                 a,
                 b,
@@ -4552,16 +4570,18 @@ where
                     node_b: b,
                 },
             );
+            self.trace_law_end();
             #[cfg(debug_assertions)]
             self.cc_mirror_untag();
         }
         let mut scratch: Vec<Cfg::C> = Vec::new();
         #[cfg(debug_assertions)]
         let mut power_why = power_why.into_iter();
-        for (op, base, k, target) in powers {
+        for (i, (op, base, k, target)) in powers.into_iter().enumerate() {
             let c = self
                 .add_monomial(op, &[(base, k)], &mut scratch)
                 .expect("a count below the nilpotent order fits every multiplicity width");
+            self.trace_law('v', [power_wit[i], power_wit[i]]);
             #[cfg(debug_assertions)]
             {
                 let rule = power_why.next().expect("one inference per power");
@@ -4575,6 +4595,7 @@ where
                     node_b: target,
                 },
             );
+            self.trace_law_end();
             #[cfg(debug_assertions)]
             self.cc_mirror_untag();
         }
