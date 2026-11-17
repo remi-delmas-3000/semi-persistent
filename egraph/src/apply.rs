@@ -1500,13 +1500,11 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
             RAtom::ACExact { node, op, elems } | RAtom::Comm { node, op, elems } => {
                 eg.trace_atom(m.get(*node), Some(*op));
                 for (v, k) in elems {
-                    // A count past 64 is not spelled out: the firing is opaque.
-                    let RMult::Exact(k @ ..=64) = k else {
+                    // A multiplicity variable is not spelled out: the firing is opaque.
+                    let RMult::Exact(k) = k else {
                         return eg.trace_atom_opaque();
                     };
-                    for _ in 0..*k {
-                        eg.trace_atom_arg(bind(v));
-                    }
+                    eg.trace_atom_arg_n(bind(v), *k);
                 }
             }
             RAtom::ACIExact { node, op, elems } => {

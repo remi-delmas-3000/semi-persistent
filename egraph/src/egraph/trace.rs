@@ -178,14 +178,6 @@ where
         self.trace = Some(t);
     }
 
-    /// `o`: a completion round starts. Its `i` and `p` merges are computed
-    /// on the classes as they are at this line.
-    pub(crate) fn trace_round(&mut self) {
-        if let Some(t) = self.trace.as_mut() {
-            t.out.push_str("o\n");
-        }
-    }
-
     /// `z`: node `unit` is the unit of `op`, written when the declaration
     /// registers it.
     pub(crate) fn trace_unit(&mut self, op: Cfg::O, unit: Cfg::G) {
@@ -296,10 +288,18 @@ where
     /// The node the last `e` line's next argument pattern is bound to.
     #[inline]
     pub(crate) fn trace_atom_arg(&mut self, c: Cfg::G) {
+        self.trace_atom_arg_n(c, 1);
+    }
+
+    /// The node the last `e` line's next argument pattern is bound to, which
+    /// the pattern takes `k` times: written `c:k`.
+    #[inline]
+    pub(crate) fn trace_atom_arg_n(&mut self, c: Cfg::G, k: u64) {
         if let Some(t) = self.trace.as_mut()
             && t.firing.is_some()
         {
             t.atoms.push(c.to_usize());
+            t.atoms.push(k as usize);
             let at = t.atom_at;
             t.atoms[at] += 1;
         }
@@ -406,12 +406,15 @@ where
                                 self.ops.info(crate::id::id_at(op)).name.as_str()
                             };
                             let _ = write!(t.out, "e {node} {name}");
-                            for j in i + 3..i + 3 + k {
-                                let c = t.atoms[j];
+                            for j in 0..k {
+                                let (c, n) = (t.atoms[i + 3 + 2 * j], t.atoms[i + 4 + 2 * j]);
                                 let _ = write!(t.out, " {c}");
+                                if n != 1 {
+                                    let _ = write!(t.out, ":{n}");
+                                }
                             }
                             t.out.push('\n');
-                            i += 3 + k;
+                            i += 3 + 2 * k;
                         }
                         f.written = true;
                     }

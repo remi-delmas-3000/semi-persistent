@@ -31,8 +31,7 @@ abbrev Spell := Std.HashMap (String × List Nat) Nat
 structure St (P : Program) where
   declAt : Std.HashMap Nat Decl := {}
   /-- The node table, the kernel conclusions, the classes with the step that
-  proves each link, the classes at each mark and at the round's start, and
-  the `check-eq` proved. -/
+  proves each link, the classes at each mark, and the `check-eq` proved. -/
   core : Core P := Core.new P
   /-- The table id of each of the engine's node ids. A restore discards the
   engine's ids past the mark, and the engine reuses them; the table keeps its
@@ -113,9 +112,6 @@ its arrays are held once and updated in place. -/
   let S := { S with core := Core.new P }
   let (c, x) := k c
   ({ S with core := c }, x)
-
-/-- The state with the classes of the round's start as its classes. -/
-def atRound (S : St P) : St P := { S with core := S.core.atRound }
 
 end St
 
@@ -383,9 +379,9 @@ def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false) : L
 arguments have the same normal form, or the normal form is the one class of
 `n`, or it is empty and `n` is in the unit's class. -/
 def spells (S : St P) (n : Nat) (f : String) (cs : List Nat) : Bool :=
-  -- The engine normalizes with and without `inv(e) = e`, at different events.
-  [false, true].any fun invUnit =>
-    (match S.defOf n with
+  -- An inverse of a node of the unit's class goes by itself: `inv(e) = e`.
+  let invUnit := true
+  (match S.defOf n with
       | some (.app g ds) => g == f && (let (x, y) := nf2 S f ds cs invUnit; x == y)
       | _ => false)
     || ((S.prog.kind f).isAssoc &&
@@ -405,17 +401,13 @@ recognizable, and reduces it by the operator's laws after each rewrite. -/
 removed, and each class kept once (ACI) or its count modulo `n`
 (`:nilpotent n`). -/
 def lawReduce (S : St P) (f : String) (atoms : List Nat) (inverse : Bool := true)
-    (inverseFirst : Bool := false) : List Nat :=
+ : List Nat :=
   let d := S.prog.opDecl? f
   let u := (S.unit f).map S.fd
   let dropUnit (xs : List Nat) : List Nat := xs.filter fun a => some (S.fd a) != u
-  -- The engine drops the unit's arguments before it cancels inverse pairs,
-  -- except in a group-law critical pair, whose peak holds the pair it cancels
-  -- even when one of the two is in the unit's class (`inverseFirst`).
+  -- The unit's arguments go before the inverse pairs are cancelled.
   let live : List Nat := match inverse, d.bind (fun d => d.inverse) with
-    | true, some inv =>
-      if inverseFirst then dropUnit (cancelInverse S inv none atoms)
-      else cancelInverse S inv u (dropUnit atoms)
+    | true, some inv => cancelInverse S inv u (dropUnit atoms)
     | _, _ => dropUnit atoms
   -- Each class with its atoms, in order of first occurrence.
   let groups : Array (Nat × Array Nat) := live.foldl (fun groups a =>
@@ -591,7 +583,7 @@ peak reduced by the laws, with `reduceB`) and rewrite it by their rules; with
 occurrence of `keep`'s class), which the operator's `:cancellative` law
 allows when both sides stay non-empty or the operator has a unit; each side
 then rewrites by its remaining rules. -/
-def peakMerge (S : St P) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) :
+def peakMerge (S : St P) (a b : Nat) (w : Peak) :
     Except String PeakPlan := do
   let named := a :: b :: (w.preA ++ w.preB ++ w.postA ++ w.postB).flatMap fun (l, r, _) => [l, r]
   -- The operator: that of the first rule, else of a merged node.
@@ -605,7 +597,7 @@ def peakMerge (S : St P) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) :
   let peak := w.peak.flatMap (expand S W)
   -- A critical pair's own rules rewrite the peak once each; the normal form's
   -- rules, after it, rewrite every copy.
-  let firstB := if w.reduceB then lawReduce S f peak (inverseFirst := inverseFirst) else peak
+  let firstB := if w.reduceB then lawReduce S f peak else peak
   let (mA, sA) ← rewrite S f W peak true #[] w.preA
   let (mB, sB) ← rewrite S f W firstB true #[] w.preB
   if w.cancel then
@@ -1602,7 +1594,6 @@ def stepCore (S : St P) (line : String) : St P :=
       if denotes S u t then { S with units := S.units.insert f u, events := S.events - 1 }
       else S.fail "unit: its node differs"
     | _, _ => S.fail "unit: no such unit"
-  | ["o"] => { (S.withCore fun c => (c.roundStart, ())).1 with events := S.events - 1 }
   | ["j", m] =>
     match S.node? m with
     | some m => { S with inverses := m :: S.inverses, events := S.events - 1 }
@@ -1748,18 +1739,9 @@ def stepCore (S : St P) (line : String) : St P :=
   | "i" :: a :: b :: n :: rest =>
     match S.node? a, S.node? b, S.node? n, (rest.mapM (fun (x : String) => x.toNat?)).bind (rules S) with
     | some a, some b, some n, some rs =>
-      -- On the current classes, else on the classes at the round's start: the
-      -- engine reads a round's monomials through the latter, and builds the
-      -- nodes it merges through the former. Either check is sound.
       -- The derivation is computed first, on classes the state shares; the
       -- kernel steps are emitted after, when the state is held once again.
-      let plan := match interReduce S a b n rs with
-        | .ok c => Except.ok c
-        | .error e =>
-          match interReduce S.atRound a b n rs with
-          | .ok c => .ok c
-          | .error _ => .error e
-      match plan with
+      match interReduce S a b n rs with
       | .ok c =>
         let (S, r) := emitChain S c
         match r with
@@ -1775,15 +1757,7 @@ def stepCore (S : St P) (line : String) : St P :=
   | "p" :: a :: b :: rest =>
     match S.node? a, S.node? b, (rest.mapM (fun (x : String) => x.toNat?)).bind (Peak.read S) with
     | some a, some b, some w =>
-      let plan :=
-        let R := S.atRound
-        let tries := [peakMerge S a b w, peakMerge S a b w (inverseFirst := true),
-                      peakMerge R a b w, peakMerge R a b w (inverseFirst := true)]
-        match tries.find? (·.isOk), tries.head? with
-        | some ok, _ => ok
-        | none, some e => e
-        | none, none => .error "completion: unreadable"
-      match plan with
+      match peakMerge S a b w with
       | .ok pl =>
         -- Both sides start at the peak's term.
         let (S, ra) := emitChain S pl.a
