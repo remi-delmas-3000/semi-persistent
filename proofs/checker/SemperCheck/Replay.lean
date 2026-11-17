@@ -23,7 +23,7 @@ open SemperCheck
 inductive Def where
   | lit (s v : String)
   | app (f : String) (args : List Nat)
-  deriving Inhabited
+  deriving Inhabited, BEq, Hashable
 
 /-- The root of `i`'s class. A non-root's parent is a smaller id, so the walk
 ends without a step count. -/
@@ -53,7 +53,15 @@ abbrev Spell := Std.HashMap (String × List Nat) Nat
 structure St where
   P : Program
   declAt : Std.HashMap Nat Decl
+  /-- The node table: every node the stream defined, each definition once.
+  A table id is what the classes, the spelling table and every check use. -/
   defs : Array (Option Def) := #[]
+  /-- The table id of each definition. -/
+  index : Std.HashMap Def Nat := {}
+  /-- The table id of each of the engine's node ids. A restore discards the
+  engine's ids past the mark, and the engine reuses them; the table keeps its
+  nodes. -/
+  cid : Array (Option Nat) := #[]
   parent : Array Nat := #[]
   /-- The classes at the start of the completion round (`o` line): the round's
   merges are computed on them. They refine the current classes. -/
@@ -93,6 +101,11 @@ namespace St
 def fd (S : St) (i : Nat) : Nat := find S.parent i
 
 def defOf (S : St) (i : Nat) : Option Def := S.defs.getD i none
+
+/-- The table id of the engine's node `i`. -/
+def tr (S : St) (i : Nat) : Option Nat := S.cid.getD i none
+
+def node? (S : St) (x : String) : Option Nat := x.toNat?.bind S.tr
 
 def fail (S : St) (cause : String) : St :=
   { S with failed := S.failed.insert cause (S.failed.getD cause 0 + 1), nFailed := S.nFailed + 1, lastCause := cause,
@@ -351,6 +364,10 @@ def pairs : List Nat → List (Nat × Nat × Bool)
   | l :: r :: k :: rest => (l, r, k == 1) :: pairs rest
   | _ => []
 
+/-- The rules of a line, their nodes as table ids. -/
+def rules (S : St) (xs : List Nat) : Option (List (Nat × Nat × Bool)) :=
+  (pairs xs).mapM fun (l, r, k) => do pure (← S.tr l, ← S.tr r, k)
+
 /-- `i a b n l1 r1 ..`: node `n`, a member of one merged class, rewrites by
 the rules to the other merged node. -/
 def interReduce (S : St) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Except String Unit := do
@@ -376,24 +393,25 @@ structure Peak where
 
 /-- Reads the fields after `p a b`: `cancel reduceB hasKeep [keep] k peak..
 na (l r).. nb (l r).. npa (l r).. (l r)..`. -/
-def Peak.read (xs : List Nat) : Option Peak := do
+def Peak.read (S : St) (xs : List Nat) : Option Peak := do
   let (cancel, xs) ← xs.head?.map (·, xs.tail)
   let (reduceB, xs) ← xs.head?.map (·, xs.tail)
   let (hasKeep, xs) ← xs.head?.map (·, xs.tail)
-  let (keep, xs) ← if hasKeep == 1 then xs.head?.map (fun k => (some k, xs.tail)) else some (none, xs)
+  let (keep, xs) ← if hasKeep == 1 then xs.head?.bind (fun k => (S.tr k).map fun k => (some k, xs.tail))
+    else some (none, xs)
   let (k, xs) ← xs.head?.map (·, xs.tail)
   if xs.length < k then none
-  let (peak, xs) := (xs.take k, xs.drop k)
+  let (peak, xs) := (← (xs.take k).mapM S.tr, xs.drop k)
   let (na, xs) ← xs.head?.map (·, xs.tail)
   if xs.length < 3 * na then none
-  let (preA, xs) := (pairs (xs.take (3 * na)), xs.drop (3 * na))
+  let (preA, xs) := (← rules S (xs.take (3 * na)), xs.drop (3 * na))
   let (nb, xs) ← xs.head?.map (·, xs.tail)
   if xs.length < 3 * nb then none
-  let (preB, xs) := (pairs (xs.take (3 * nb)), xs.drop (3 * nb))
+  let (preB, xs) := (← rules S (xs.take (3 * nb)), xs.drop (3 * nb))
   let (npa, xs) ← xs.head?.map (·, xs.tail)
   if xs.length < 3 * npa then none
   return { cancel := cancel == 1, reduceB := reduceB == 1, keep, peak, preA, preB,
-           postA := pairs (xs.take (3 * npa)), postB := pairs (xs.drop (3 * npa)) }
+           postA := ← rules S (xs.take (3 * npa)), postB := ← rules S (xs.drop (3 * npa)) }
 
 /-- `p a b ..`: the merged nodes `a` and `b` are what the two sides of a
 critical pair rewrite to. Both sides start from the peak (side B from the
@@ -475,13 +493,13 @@ def groupLaw (S : St) (a b n1 n2 : Nat) : Except String Unit := do
   unless injective || involution || unitIn || powers do throw "group law: no case applies"
 
 /-- `c` and `c:k` fields as node ids, a counted one repeated. -/
-def ids (xs : List String) : Option (List Nat) := do
+def ids (S : St) (xs : List String) : Option (List Nat) := do
   let mut out : Array Nat := #[]
   for x in xs do
     match x.splitOn ":" with
-    | [n] => out := out.push (← n.toNat?)
+    | [n] => out := out.push (← S.node? n)
     | [n, k] =>
-      let n ← n.toNat?
+      let n ← S.node? n
       let k ← k.toNat?
       if k > 65536 then none
       for _ in [0:k] do out := out.push n
@@ -642,55 +660,78 @@ def fireRule (S : St) (r : Rule) (rewrite : Bool) : WalkM (Nat × Nat) := do
 
 /-! ## One line -/
 
-/-- Records the definition of node `i`, which has none: a node is defined
-once, so that its value never changes while a class holds it. -/
-def setDef (S : St) (i : Nat) (d : Def) : St :=
-  let defs := if S.defs.size ≤ i then S.defs ++ Array.replicate (i + 1 - S.defs.size) none
-    else S.defs
-  { S with defs := defs.setIfInBounds i (some d) }
+def sortOf (S : St) (t : Nat) : Option String :=
+  match S.defOf t with
+  | some (.lit s _) => some s
+  | some (.app f _) => (S.P.opDecl? f).map (·.res)
+  | none => none
+
+/-- The definition is well-sorted, as the kernel requires of every node. -/
+def wellSorted (S : St) : Def → Bool
+  | .lit s _ => S.P.litSorts.contains s
+  | .app f cs =>
+    match S.P.opDecl? f with
+    | none => false
+    | some d =>
+      if d.kind.isAssoc then
+        cs.all (fun c => sortOf S c == some d.res) && (!cs.isEmpty || d.unit.isSome)
+      else cs.length == d.args.length && (cs.zip d.args).all fun (c, s) => sortOf S c == some s
+
+/-- The table id of definition `d`, added to the table if it is new. -/
+def intern (S : St) (d : Def) : St × Nat :=
+  match S.index[d]? with
+  | some t => (S, t)
+  | none =>
+    let t := S.defs.size
+    ({ S with defs := S.defs.push (some d), index := S.index.insert d t }, t)
+
+/-- The engine's node `i` is definition `d`. An id is defined once between
+restores. -/
+def define (S : St) (i : Nat) (d : Def) : St :=
+  if (S.tr i).isSome then S.fail "definition: node already defined"
+  else if !wellSorted S d then S.fail "definition: ill-sorted"
+  else
+    let (S, t) := intern S d
+    let cid := if S.cid.size ≤ i then S.cid ++ Array.replicate (i + 1 - S.cid.size) none else S.cid
+    let S := { S with cid := cid.setIfInBounds i (some t) }
+    match d with
+    | .lit s v => { S with lits := S.lits.insert (s, v) t }
+    | _ => S
 
 def step (S : St) (line : String) : St :=
   let S := { S with events := S.events + 1 }
   match line.splitOn " " with
   | "n" :: id :: f :: kids =>
-    match id.toNat?, ids kids with
-    | some i, some cs =>
-      if (S.defOf i).isSome then S.fail "definition: node already defined"
-      else if cs.all (· < i) then setDef S i (.app f cs)
-      else S.fail "definition: argument after its node"
+    match id.toNat?, ids S kids with
+    | some i, some cs => define S i (.app f cs)
     | _, _ => S.fail "definition: unreadable"
   | "l" :: id :: s :: rest =>
     match id.toNat? with
-    | some i =>
-      if (S.defOf i).isSome then S.fail "definition: node already defined"
-      else
-        let v := " ".intercalate rest
-        let S := setDef S i (.lit s v)
-        { S with lits := S.lits.insert (s, v) i }
+    | some i => define S i (.lit s (" ".intercalate rest))
     | none => S.fail "definition: unreadable"
   | "t" :: id :: f :: kids =>
-    match id.toNat?, ids kids with
+    match S.node? id, ids S kids with
     | some i, some cs =>
       if spells S i f cs then { S with spell := S.spell.insert (f, cs) i, splices := [], inverses := [] }
       else S.fail "term: its node differs"
     | _, _ => S.fail "term: unreadable"
   | ["s", c, m] =>
-    match c.toNat?, m.toNat? with
+    match S.node? c, S.node? m with
     | some c, some m => { S with splices := (c, m) :: S.splices, events := S.events - 1 }
     | _, _ => S.fail "splice: unreadable"
   | ["z", f, u] =>
-    match u.toNat?, (S.P.opDecl? f).bind (·.unit) with
+    match S.node? u, (S.P.opDecl? f).bind (·.unit) with
     | some u, some t =>
       if denotes S u t then { S with units := S.units.insert f u, events := S.events - 1 }
       else S.fail "unit: its node differs"
     | _, _ => S.fail "unit: no such unit"
   | ["o"] => { S with roundParent := S.parent, events := S.events - 1 }
   | ["j", m] =>
-    match m.toNat? with
+    match S.node? m with
     | some m => { S with inverses := m :: S.inverses, events := S.events - 1 }
     | none => S.fail "inverse witness: unreadable"
   | ["x", off, a, b] =>
-    match off.toNat?, a.toNat?, b.toNat? with
+    match off.toNat?, S.node? a, S.node? b with
     | some o, some a, some b =>
       match S.declAt[o]? with
       | some (.axiom l r) =>
@@ -699,7 +740,7 @@ def step (S : St) (line : String) : St :=
       | _ => S.fail "union: no such command"
     | _, _, _ => S.fail "union: unreadable"
   | ["c", a, b] =>
-    match a.toNat?, b.toNat? with
+    match S.node? a, S.node? b with
     | some a, some b =>
       match S.defOf a, S.defOf b with
       | some (.app f as), some (.app g bs) =>
@@ -708,7 +749,7 @@ def step (S : St) (line : String) : St :=
       | _, _ => S.fail "congruence: not two applications"
     | _, _ => S.fail "congruence: unreadable"
   | ["w", a, b] =>
-    match a.toNat?, b.toNat? with
+    match S.node? a, S.node? b with
     | some a, some b =>
       -- Either node can be the application whose arguments normalize to the other.
       let one (x y : Nat) : Bool :=
@@ -721,7 +762,7 @@ def step (S : St) (line : String) : St :=
         | _, _ => S.fail "law: not an application"
     | _, _ => S.fail "law: unreadable"
   | ["v", a, b, n1, n2] =>
-    match a.toNat?, b.toNat?, n1.toNat?, n2.toNat? with
+    match S.node? a, S.node? b, S.node? n1, S.node? n2 with
     | some a, some b, some n1, some n2 =>
       match groupLaw S a b n1 n2 with
       | .ok () => S.merge a b
@@ -732,17 +773,17 @@ def step (S : St) (line : String) : St :=
     | some o => { S with fire := some (o, kind == "w"), atoms := #[], rhs := [], events := S.events - 1 }
     | none => S.fail "rule: unreadable"
   | "e" :: id :: f :: kids =>
-    match id.toNat?, ids kids with
+    match S.node? id, ids S kids with
     | some i, some cs => { S with atoms := S.atoms.push (i, f, cs), events := S.events - 1 }
     | _, _ => S.fail "rule: unreadable"
   | "b" :: xs =>
     let one (x : String) : Option (Nat × Bool) :=
-      if x.startsWith "g" then (x.drop 1).toString.toNat?.map (·, true) else x.toNat?.map (·, false)
+      if x.startsWith "g" then (S.node? (x.drop 1).toString).map (·, true) else (S.node? x).map (·, false)
     match xs.mapM one with
     | some r => { S with rhs := r, events := S.events - 1 }
     | none => S.fail "rule: unreadable"
   | ["m", j, a, b] =>
-    match j.toNat?, a.toNat?, b.toNat?, S.fire with
+    match j.toNat?, S.node? a, S.node? b, S.fire with
     | some j, some a, some b, some (o, rw) =>
       -- The engine cites a rule by an offset inside its command.
       match ((S.P.decls.filter (·.1 ≤ o)).getLast?.map (·.2) : Option Decl) with
@@ -759,7 +800,7 @@ def step (S : St) (line : String) : St :=
       | _ => S.fail "rule: no such command"
     | _, _, _, _ => S.fail "rule: unreadable"
   | ["g", off, a, b] =>
-    match off.toNat?, a.toNat?, b.toNat? with
+    match off.toNat?, S.node? a, S.node? b with
     | some o, some a, some b =>
       match S.declAt[o]? with
       | some (.goal l r) =>
@@ -770,17 +811,17 @@ def step (S : St) (line : String) : St :=
       | _ => S.fail "goal: no such command"
     | _, _, _ => S.fail "goal: unreadable"
   | "i" :: a :: b :: n :: rest =>
-    match a.toNat?, b.toNat?, n.toNat?, rest.mapM (·.toNat?) with
+    match S.node? a, S.node? b, S.node? n, (rest.mapM (fun (x : String) => x.toNat?)).bind (rules S) with
     | some a, some b, some n, some rs =>
       -- On the current classes, else on the classes at the round's start: the
       -- engine reads a round's monomials through the latter, and builds the
       -- nodes it merges through the former. Either check is sound.
-      match interReduce S a b n (pairs rs), interReduce { S with parent := S.roundParent } a b n (pairs rs) with
+      match interReduce S a b n rs, interReduce { S with parent := S.roundParent } a b n rs with
       | .ok (), _ | _, .ok () => S.merge a b
       | .error e, _ => S.fail e
     | _, _, _, _ => S.fail "completion: unreadable"
   | "p" :: a :: b :: rest =>
-    match a.toNat?, b.toNat?, (rest.mapM (fun (x : String) => x.toNat?)).bind Peak.read with
+    match S.node? a, S.node? b, (rest.mapM (fun (x : String) => x.toNat?)).bind (Peak.read S) with
     | some a, some b, some w =>
       let R := { S with parent := S.roundParent }
       let tries := [peakMerge S a b w, peakMerge S a b w (inverseFirst := true),
@@ -792,15 +833,15 @@ def step (S : St) (line : String) : St :=
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
     match d.toNat? with
-    | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.defs.size, S.parent, S.spell) }
+    | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.parent, S.spell) }
     | _ => S.fail "mark: unreadable"
   | ["restore", d] =>
     match d.toNat? with
     | some (d + 1) =>
       match S.snaps[d]? with
       | some (n, p, sp) =>
-        -- The nodes defined since the mark are discarded with their ids.
-        { S with defs := S.defs.extract 0 n, parent := p, spell := sp, roundParent := p,
+        -- The engine's ids past the mark are free again; the table keeps its nodes.
+        { S with cid := S.cid.extract 0 n, parent := p, spell := sp, roundParent := p,
                  snaps := S.snaps.extract 0 (d + 1), fire := none }
       | none => S.fail "restore: no such mark"
     | _ => S.fail "restore: unreadable"
@@ -809,7 +850,7 @@ def step (S : St) (line : String) : St :=
     | some d =>
       match S.snaps[d]? with
       | some (n, p, sp) =>
-        { S with defs := S.defs.extract 0 n, parent := p, spell := sp, roundParent := p,
+        { S with cid := S.cid.extract 0 n, parent := p, spell := sp, roundParent := p,
                  snaps := S.snaps.extract 0 d, fire := none }
       | none => S.fail "restore: no such mark"
     | none => S.fail "restore: unreadable"
@@ -817,7 +858,7 @@ def step (S : St) (line : String) : St :=
     let S := { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), splices := [], inverses := [] }
     match S.assume, rest with
     | true, [a, b] =>
-      match a.toNat?, b.toNat? with
+      match S.node? a, S.node? b with
       | some a, some b => S.merge a b
       | _, _ => S
     | _, _ => S
