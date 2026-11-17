@@ -363,7 +363,8 @@ An associative operator's argument is one class unless a witness splices it:
 the engine's (`s` lines, checked here), or an application of `f` that appears
 among the arguments, which witnesses its own class. Both lists use the same
 witnesses. -/
-def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false) : List Nat × List Nat :=
+def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false)
+    (self : Option Nat := none) : List Nat × List Nat :=
   match S.prog.kind f with
   | .plain => (as.map S.fd, bs.map S.fd)
   | .comm => ((as.map S.fd).mergeSort (· ≤ ·), (bs.map S.fd).mergeSort (· ≤ ·))
@@ -373,7 +374,9 @@ def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false) : L
       | some (.app g cs) => if g == f && !cs.isEmpty && S.fd m == S.fd c then some (S.fd c, cs) else none
       | _ => none
     let own := ((as ++ bs).flatMap (nested S.defs f)).map fun (x, cs) => (S.fd x, cs)
-    let W := given ++ own
+    -- The node whose arguments are `as` witnesses its own class: a rule with
+    -- `:flatten` matches it through an argument of that class.
+    let W := given ++ own ++ (match self with | some n => [(S.fd n, as)] | none => [])
     let u := (S.unit f).map S.fd
     let d := S.prog.opDecl? f
     let one (xs : List Nat) : List Nat :=
@@ -823,6 +826,12 @@ def congStep (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
     | _ => []
   for (m, _) in (argsOf a ++ argsOf b).flatMap (nested S.defs f) do
     if !target.contains (S.fd m) then target := target.insert (S.fd m) m
+  -- An argument of one node in the class of the other node: it goes to that
+  -- node, which the kernel reads as its arguments.
+  for (x, other) in [(a, b), (b, a)] do
+    if !(argsOf other).isEmpty && (argsOf x).any (fun y => S.fd y == S.fd other)
+        && !target.contains (S.fd other) then
+      target := target.insert (S.fd other) other
   for y in va ++ vb do
     if !target.contains (S.fd y) then target := target.insert (S.fd y) y
   -- The kernel's two sides: each argument's node, flattened, without the unit.
@@ -1583,7 +1592,8 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
       | _, none => throw "rule: argument differs"
     match S.defOf n with
     | some (.app h ds) =>
-      if h != f || (let (x, y) := nf2 S f ds cs; x != y) then throw "rule: matched node differs"
+      if h != f || (let (x, y) := nf2 S f ds cs false (some n); x != y) then
+        throw "rule: matched node differs"
     | _ => throw "rule: matched node differs"
     set { w with atoms := rest, σ := σ }
     let i ← instOf f ic.toList n
