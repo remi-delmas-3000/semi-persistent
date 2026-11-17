@@ -19,6 +19,7 @@ use crate::union_find::{Justification, ProofBuf};
 #[cfg(debug_assertions)]
 pub mod cc_mirror;
 pub mod cert;
+pub mod trace;
 
 /// How a completion op's monomial counts are bounded during normalization (design "three
 /// independent axes"): unbounded ℕ (MSet plain AC), clamped to {0,1} by dedup (Set idempotent =
@@ -268,6 +269,8 @@ pub struct EGraph<
     /// keeps the canonical node's root, so an evidence node never becomes the
     /// representative that later builds store as a child.
     force_survivor: Option<Cfg::G>,
+    /// The replay stream, when one is being written (`--trace`).
+    trace: Option<Box<trace::Trace>>,
     /// Proof mode: the premises of the steps whose children `explain_deep`
     /// pairs by class (unordered congruence, `Normalize`, `Build`), computed
     /// from the classes just before the merge and keyed by the merged pair.
@@ -603,6 +606,7 @@ where
             no_evidence: false,
             rhs_build: false,
             force_survivor: None,
+            trace: None,
             merge_premise_index: std::collections::HashMap::new(),
             merge_premise_pairs: Vec::new(),
             merge_premise_log: Vec::new(),
@@ -1566,6 +1570,9 @@ where
             .nodes
             .add_evidence_nary(op, ids, counted, &self.ops, flags);
         self.classes.add_singleton(id);
+        if self.trace.is_some() {
+            self.trace_node(id);
+        }
         let inst = u32::try_from(self.build_starts.len()).expect("build count exceeds u32");
         self.build_starts.push(self.build_premises.len());
         self.build_premises.extend_from_slice(&splices);
@@ -2346,6 +2353,9 @@ where
                 }
             };
             self.touched.extend(absorbed);
+        }
+        if self.trace.is_some() {
+            self.trace_merge(a, b, just);
         }
         // Tee every merge (direct, congruence, completion — all route through
         // here) to the Nelson-Oppen export log. Captured at merge time with the
@@ -5703,6 +5713,7 @@ where
         self.rule_marks
             .truncate((self.history.depth() as usize).saturating_sub(1));
         self.rule_marks.push(rule_len);
+        self.trace_mark("mark");
         EGraphToken {
             group,
             completion_outcome: self.completion_outcome,
@@ -5759,6 +5770,7 @@ where
         // restore moves both (touched cleared, classes regrown). Drop it so the next
         // `rebuild` rescans rather than trusting a comparison against a discarded state.
         self.repair_state = None;
+        self.trace_mark("restore");
     }
 
     /// `restore_with` then `pop_scope`, fused (design doc 08 §1): every member
@@ -5799,6 +5811,7 @@ where
         self.normalizations.clear();
         self.touched.clear();
         self.repair_state = None;
+        self.trace_mark("rpop");
     }
 
     /// Drop the open top scope (the SMT-LIB `pop`): every member undoes and
@@ -5830,6 +5843,7 @@ where
         self.normalizations.clear();
         self.touched.clear();
         self.repair_state = None;
+        self.trace_mark("rpop");
     }
 
     /// Proof-mode `add` for plain and commutative operators: keep the evidence
@@ -6072,6 +6086,9 @@ where
                 None => self.classes.set_atomic(repr),
             }
             self.touched.push(id);
+            if self.trace.is_some() {
+                self.trace_node(id);
+            }
         }
         result.id()
     }

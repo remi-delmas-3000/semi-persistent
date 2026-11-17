@@ -972,6 +972,7 @@ where
                         b: b_id,
                     });
                     let axiom_id = self.alloc_axiom_id(a_id, b_id);
+                    self.eg.trace_union();
                     self.eg
                         .merge_justified(a_id, b_id, Justification::axiom(axiom_id));
                 } else {
@@ -1009,6 +1010,7 @@ where
                                     };
                                     self.proved_eqs.push(g);
                                 }
+                                self.eg.trace_goal(a_id, b_id);
                                 return Ok(());
                             }
                             (false, aborted) => {
@@ -1036,6 +1038,7 @@ where
                     };
                     self.proved_eqs.push(g);
                 }
+                self.eg.trace_goal(a_id, b_id);
             }
             CCommand::CheckNeq(a, b, complete) => {
                 let lazy = self.lazy_for(*complete);
@@ -1150,6 +1153,9 @@ where
                 let rule_id = self.eg.register_rule(&name, "", "");
                 if let crate::ast::Span::Range { start, .. } = span {
                     self.rule_spans.insert(rule_id.to_usize(), *start as usize);
+                    let base = self.eg.trace_rules_at(*start as usize);
+                    self.eg
+                        .trace_rule_source(rule_id.to_usize(), *start as usize, base, true);
                 }
                 let compiled_rhs = crate::apply::compile_rhs(rhs);
                 let mut actions = vec![crate::apply::CompiledAction::Union(
@@ -1183,6 +1189,9 @@ where
                 let rule_id = self.eg.register_rule(&name, "", "");
                 if let crate::ast::Span::Range { start, .. } = span {
                     self.rule_spans.insert(rule_id.to_usize(), *start as usize);
+                    let base = self.eg.trace_rules_at(*start as usize);
+                    self.eg
+                        .trace_rule_source(rule_id.to_usize(), *start as usize, base, false);
                 }
                 let compiled: Vec<_> = actions
                     .iter()
@@ -1554,6 +1563,21 @@ where
                     .eg
                     .add_with_counts(*op, &kids)
                     .map_err(InterpError::TermError)?;
+                if self.eg.tracing() {
+                    let ks: Vec<(usize, String)> = kids
+                        .iter()
+                        .map(|(g, k)| {
+                            let k = match k {
+                                Some(k) if **k != num_bigint::BigUint::from(1u32) => {
+                                    format!(":{k}")
+                                }
+                                _ => String::new(),
+                            };
+                            (g.to_usize(), k)
+                        })
+                        .collect();
+                    self.eg.trace_term(id, *op, &ks);
+                }
                 (id, *sort)
             }
             CTerm::Counted(t, _) => self.build_cterm(t)?,

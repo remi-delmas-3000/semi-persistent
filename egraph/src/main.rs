@@ -43,6 +43,11 @@ struct Cli {
     #[arg(long, value_name = "FILE", requires = "proofs")]
     cert: Option<std::path::PathBuf>,
 
+    /// Write the replay stream to FILE as the program runs, for the replayer of
+    /// `proofs/checker` (`proofs/checker/REPLAY.md`). Requires --proofs.
+    #[arg(long, value_name = "FILE", requires = "proofs")]
+    trace: Option<std::path::PathBuf>,
+
     /// Comma-separated type groups: machine, bignum
     #[arg(long, default_value = "bignum", value_delimiter = ',')]
     types: Vec<String>,
@@ -259,6 +264,7 @@ fn main() {
         union_by: cli.union_by,
         dump_proofs: cli.dump_proofs.clone(),
         cert: cli.cert.clone(),
+        trace: cli.trace.clone(),
     };
 
     macro_rules! dispatch {
@@ -317,6 +323,7 @@ struct EngineOptions {
     union_by: semi_persistent_egraph::UnionBy,
     dump_proofs: Option<std::path::PathBuf>,
     cert: Option<std::path::PathBuf>,
+    trace: Option<std::path::PathBuf>,
 }
 
 fn run<Cfg, L, M, const PROOFS: bool>(
@@ -351,6 +358,15 @@ fn run<Cfg, L, M, const PROOFS: bool>(
     if opts.cert.is_some() {
         interp.cert = Some(semi_persistent_egraph::cert::CertState::new(src));
     }
+    if let Some(path) = &opts.trace {
+        match std::fs::File::create(path) {
+            Ok(file) => interp.eg.trace_start(src, file),
+            Err(e) => {
+                eprintln!("error creating trace '{}': {e}", path.display());
+                process::exit(1);
+            }
+        }
+    }
     let mut globals = semi_persistent_egraph::resolve::GlobalCtx::new();
     let checked = match semi_persistent_egraph::sortcheck::sortcheck_program(
         surface_cmds.to_vec(),
@@ -377,6 +393,15 @@ fn run<Cfg, L, M, const PROOFS: bool>(
             _ => eprintln!("error: {e}"),
         }
         process::exit(1);
+    }
+    if let Some(path) = &opts.trace {
+        match interp.eg.trace_flush(true) {
+            Ok(bytes) => eprintln!("wrote trace: {bytes} bytes to {}", path.display()),
+            Err(e) => {
+                eprintln!("error writing trace '{}': {e}", path.display());
+                process::exit(1);
+            }
+        }
     }
     if let Some(path) = &opts.dump_proofs {
         use std::io::Write as _;

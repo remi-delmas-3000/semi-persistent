@@ -379,7 +379,15 @@ def Env.decl (E : Env) (f : String) (args : List String) (res : String) (tags : 
   let unit ← match identityOf tags with
     | some t => if k.isAssoc then some <$> (Prod.fst <$> E.term (some res) t) else pure none
     | none => pure none
-  pure { name := f, kind := k, args, res, unit }
+  let nilpotent := if (atoms tags).contains ":nilpotent" then
+      match tagArg ":nilpotent" tags with
+      | some (.atom n) => some (n.toNat?.getD 2)
+      | _ => some 2
+    else none
+  let inverse := match tagArg ":inverse" tags with
+    | some (.atom g) => some g
+    | _ => none
+  pure { name := f, kind := k, args, res, unit, nilpotent, inverse }
 
 def sortNames : SExp → List String
   | .list xs => atoms xs

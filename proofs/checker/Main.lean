@@ -12,7 +12,37 @@ when an input does not parse.
 
 open SemperCheck
 
+/-- `semper-check --replay PROGRAM.egg TRACE`: replays the engine's event
+stream (`REPLAY.md`). Not covered by a soundness theorem yet. -/
+def replay (progPath tracePath : String) : IO UInt32 := do
+  let P ← match parseProgram (← IO.FS.readFile progPath) with
+    | .ok P => pure P
+    | .error e => IO.eprintln s!"program: {e}"; return 2
+  let h ← IO.FS.Handle.mk tracePath .read
+  let mut S := Replay.start P
+  if (← IO.getEnv "SEMPER_REPLAY_ASSUME").isSome then
+    S := { S with assume := true }
+    IO.eprintln "measurement mode: unchecked merges are applied; proved counts are not proofs"
+  -- `SEMPER_REPLAY_SHOW=n` prints the first `n` failed lines.
+  let shown := ((← IO.getEnv "SEMPER_REPLAY_SHOW").bind (·.toNat?)).getD 0
+  repeat
+    let line ← h.getLine
+    if line.isEmpty then break
+    let before := S.nFailed
+    S := Replay.step S ((line.splitOn "\n").headD "")
+    if S.nFailed > before && S.nFailed ≤ shown then IO.eprintln s!"failed event {S.events}: {line}"
+  let total := (P.decls.filter fun (_, d) => match d with | .goal .. => true | _ => false).length
+  let proved := (P.decls.filter fun (o, d) =>
+    match d with | .goal .. => S.proved.contains o | _ => false).length
+  let nFailed := S.nFailed
+  let nUnchecked := S.unchecked.fold (fun n _ k => n + k) 0
+  for (c, k) in S.failed.toList do IO.println s!"failed: {k} {c}"
+  for (c, k) in S.unchecked.toList do IO.println s!"unchecked: {k} {c}"
+  IO.println s!"{S.events} events replayed, {nFailed} failed, {nUnchecked} unchecked; {proved} of {total} check-eq proved"
+  return if proved == total && nFailed == 0 && nUnchecked == 0 then 0 else 1
+
 def main (args : List String) : IO UInt32 := do
+  if let ["--replay", progPath, tracePath] := args then return ← replay progPath tracePath
   let [progPath, certPath] := args
     | IO.eprintln "usage: semper-check PROGRAM.egg CERT"; return 2
   let P ← match parseProgram (← IO.FS.readFile progPath) with

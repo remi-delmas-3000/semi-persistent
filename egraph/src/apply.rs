@@ -722,11 +722,14 @@ where
             let n = globals.binding(*gid);
             let r = eg.find(n);
             eg.note_rule_premise(r, n);
+            eg.trace_rhs(n, true);
             r
         }
         RhsOp::Lit(op, val) => {
             let id = eg.lits_mut().intern(val.clone());
-            eg.add_lit(*op, id)
+            let n = eg.add_lit(*op, id);
+            eg.trace_rhs(n, false);
+            n
         }
         RhsOp::LitVar(op, lvid) => {
             let val_id = env.query.get_lit_val(*lvid);
@@ -778,6 +781,7 @@ where
                 Children::Counted(cs) => eg.add_mset(*o, cs).map_err(|_| overflow(eg))?,
                 Children::Positional(ids) | Children::Distinct(ids) => eg.add(*o, ids),
             };
+            eg.trace_rhs(id, false);
             // `--flatten-rhs`: an atomic same-op child is kept nested by `add` (its class
             // is used elsewhere, and an `:inverse` law may need it whole), so give the
             // result its flat alternative as a second node. Not for an operator with an
@@ -1460,6 +1464,60 @@ pub(crate) fn note_match_premises<Cfg, L, Q, S: Copy, const T: bool, const P: bo
     }
 }
 
+/// Write the firing's `e` lines: for each pattern application, the node it
+/// matched and the nodes its argument patterns are bound to, in the query's
+/// atom order (arguments before the application). A query with a part the
+/// stream cannot spell makes the firing opaque.
+fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
+    query: &crate::resolve::ResolvedQuery<Cfg::O, S, L>,
+    m: &Q,
+    eg: &mut EGraph<Cfg, L, T, P>,
+    globals: &crate::resolve::GlobalCtx<S, Cfg::G>,
+) where
+    Cfg: EGraphConfig,
+    L: LitVal,
+    Q: crate::ematch::MatchView<Cfg> + ?Sized,
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
+{
+    use crate::resolve::{PatVar, RAtom, RMult};
+    let bind = |v: &PatVar| match v {
+        PatVar::Local(id) => m.get(*id),
+        PatVar::Global(g) => globals.binding(*g),
+    };
+    for atom in &query.atoms {
+        match atom {
+            RAtom::Plain { node, op, children } | RAtom::AExact { node, op, children } => {
+                eg.trace_atom(m.get(*node), Some(*op));
+                for c in children {
+                    eg.trace_atom_arg(bind(c));
+                }
+            }
+            RAtom::ACExact { node, op, elems } | RAtom::Comm { node, op, elems } => {
+                eg.trace_atom(m.get(*node), Some(*op));
+                for (v, k) in elems {
+                    // A count past 64 is not spelled out: the firing is opaque.
+                    let RMult::Exact(k @ ..=64) = k else {
+                        return eg.trace_atom_opaque();
+                    };
+                    for _ in 0..*k {
+                        eg.trace_atom_arg(bind(v));
+                    }
+                }
+            }
+            RAtom::ACIExact { node, op, elems } => {
+                eg.trace_atom(m.get(*node), Some(*op));
+                for c in elems {
+                    eg.trace_atom_arg(bind(c));
+                }
+            }
+            RAtom::Lit { node, .. } => eg.trace_atom(m.get(*node), None),
+            RAtom::Eq(..) | RAtom::EqGlobal(..) => {}
+            _ => return eg.trace_atom_opaque(),
+        }
+    }
+}
+
 /// Levels of nesting the view search descends: a flattened view splices a
 /// same-operator member of a child's class, and its children can be spliced in
 /// turn; a regrouped element is a group whose own elements can be regrouped.
@@ -1591,6 +1649,10 @@ where
         eg.begin_rule_instance();
         note_match_premises(&rule.query, query, eg, globals);
     }
+    if eg.tracing() {
+        eg.trace_fire(rule.rule_id.to_usize());
+        trace_atoms(&rule.query, query, eg, globals);
+    }
     // Actions are applied in order and an error stops at the one that faulted:
     // the earlier actions' effects stay in the e-graph. That is deliberate. The
     // run is over, so nothing reads the graph again except a diagnostic, and
@@ -1599,6 +1661,7 @@ where
     let mut changes = 0;
     let mut faulted = None;
     for action in &rule.actions {
+        eg.trace_action(matches!(action, CompiledAction::Union(..)));
         match apply_action(action, &mut env, eg, model, globals) {
             Ok(n) => changes += n,
             // A right-hand side with no value is not built: this action does nothing, the
@@ -1610,6 +1673,7 @@ where
             }
         }
     }
+    eg.trace_fire_end();
     if P {
         eg.end_rule_instance();
         eg.set_rhs_build(saved_rhs);
