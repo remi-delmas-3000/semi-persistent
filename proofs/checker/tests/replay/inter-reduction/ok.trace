@@ -1,3 +1,4 @@
+o
 n 0 a
 t 0 a
 n 1 b
@@ -11,10 +12,12 @@ t 4 e
 n 5 Add 3 4
 t 5 Add 3 4
 x 550 2 5
+o
 t 0 a
 n 6 w
 t 6 w
 x 564 0 6
+o
 t 3 c
 t 4 e
 n 7 y
@@ -28,5 +31,8 @@ n 9 Add 0 1 7
 n 10 Add 1 6 7
 w 10 9
 t 10 Add 1 6 7
+o
 i 9 8 8 5 2 0
+o
+o
 g 632 8 10

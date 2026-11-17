@@ -6,12 +6,12 @@ import SemperCheck.Sound
 `Core P` is the part of the replayer's state that a proved `check-eq` depends
 on: the node table, the conclusions of the kernel steps checked so far, the
 union-find over node ids with the step that proves each link, the classes at
-each mark, and the `check-eq` proved.
+each mark and at the start of the completion round, and the `check-eq` proved.
 
 A `Core P` carries its invariant (`Raw.Ok`): the table is well-formed and
 well-sorted, every conclusion holds in every model of the commands it cites,
-every link of the union-find (current or marked) is the conclusion of a
-checked step, and every recorded `check-eq` holds in every
+every link of the union-find (current, marked, or at the round's start) is the
+conclusion of a checked step, and every recorded `check-eq` holds in every
 model of the commands before it. The only functions that build a `Core P` are
 the ones in this file, and each proves that it keeps the invariant:
 
@@ -20,7 +20,8 @@ the ones in this file, and each proves that it keeps the invariant:
   far and appends its conclusion;
 * `link` points a node at a smaller one, given a checked step that concludes
   the two equal;
-* `mark`, `restore` save and reinstate classes whose links are checked;
+* `mark`, `restore`, `roundStart`, `atRound` save and reinstate classes whose
+  links are checked;
 * `goal` records a `check-eq` that a checked step concludes.
 
 The rest of the replayer (`Replay.lean`) decides which of these to call. It
@@ -270,6 +271,9 @@ structure Raw where
   parent : Array Nat := #[]
   /-- For a node with a smaller parent, the step that concludes the two equal. -/
   proof : Array (Option Nat) := #[]
+  /-- The classes at the start of the completion round. -/
+  roundParent : Array Nat := #[]
+  roundProof : Array (Option Nat) := #[]
   /-- The classes at each mark. -/
   snaps : List (Array Nat × Array (Option Nat)) := []
   /-- The `check-eq` proved: offset, left term, right term. -/
@@ -287,6 +291,7 @@ structure Ok (P : Program) (r : Raw) : Prop where
   valid : ∀ M : Model, Ctx.AllValid M (r.ctx P) r.acc
   bnd : ∀ (s : Nat) (c : Concl), r.acc[s]? = some c → c.a = c.b ∨ (c.a < r.nodes.size ∧ c.b < r.nodes.size)
   links : Links r.acc r.parent r.proof
+  round : Links r.acc r.roundParent r.roundProof
   snaps : ∀ x ∈ r.snaps, Links r.acc x.1 x.2
   goals : ∀ g ∈ r.goals, ∀ M : Model, M.Models P g.1 → M.eval g.2.1 = M.eval g.2.2
 
@@ -296,6 +301,7 @@ theorem Ok.empty (P : Program) : Ok P {} where
   valid := by intro M s c h; simp at h
   bnd := by intro s c h; simp at h
   links := Links.empty _
+  round := Links.empty _
   snaps := by intro x hx; cases hx
   goals := by intro g hg; cases hg
 
@@ -335,6 +341,7 @@ theorem addNode_ok {P : Program} {r : Raw} (h : Ok P r) (n : Node) : Ok P (addNo
           · exact .inl he
           · refine .inr ⟨?_, ?_⟩ <;> simp only [Array.size_push] <;> omega
         links := h.links
+        round := h.round
         snaps := h.snaps
         goals := h.goals }
   · exact h
@@ -365,6 +372,7 @@ theorem push_ok {P : Program} {r : Raw} (h : Ok P r) (c : Concl)
     · cases hs; exact hb
     · exact h.bnd s c' hs
   links := h.links.push c
+  round := h.round.push c
   snaps := fun x hx => (h.snaps x hx).push c
   goals := h.goals
 
@@ -442,7 +450,7 @@ theorem mark_ok {P : Program} {r : Raw} (h : Ok P r) (d : Nat) : Ok P (mark r d)
 def restore (r : Raw) (d keep : Nat) : Raw × Bool :=
   match r.snaps.reverse[d]? with
   | some (p, pf) =>
-    ({ r with parent := p, proof := pf,
+    ({ r with parent := p, proof := pf, roundParent := p, roundProof := pf,
               snaps := (r.snaps.reverse.take keep).reverse }, true)
   | none => (r, false)
 
@@ -453,8 +461,20 @@ theorem restore_ok {P : Program} {r : Raw} (h : Ok P r) (d keep : Nat) :
   · rename_i p pf hs
     have hm : (p, pf) ∈ r.snaps := List.mem_reverse.1 (List.mem_of_getElem? hs)
     have hl := h.snaps _ hm
-    exact { h with links := hl, snaps := fun x hx => h.snaps x (mem_keep hx) }
+    exact { h with links := hl, round := hl, snaps := fun x hx => h.snaps x (mem_keep hx) }
   · exact h
+
+/-- The completion round starts: its classes are the current ones. -/
+def roundStart (r : Raw) : Raw := { r with roundParent := r.parent, roundProof := r.proof }
+
+theorem roundStart_ok {P : Program} {r : Raw} (h : Ok P r) : Ok P (roundStart r) :=
+  { h with round := h.links }
+
+/-- The state with the classes of the round's start as its classes. -/
+def atRound (r : Raw) : Raw := { r with parent := r.roundParent, proof := r.roundProof }
+
+theorem atRound_ok {P : Program} {r : Raw} (h : Ok P r) : Ok P (atRound r) :=
+  { h with links := h.round }
 
 /-- Records the `check-eq l r` at offset `o`, when step `s` concludes it from
 commands before `o`. -/
@@ -523,6 +543,10 @@ def mark (c : Core P) (d : Nat) : Core P := ⟨c.1.mark d, Raw.mark_ok c.2 d⟩
 def restore (c : Core P) (d keep : Nat) : Core P × Bool :=
   match h : c.1.restore d keep with
   | (r, t) => (⟨r, by have := Raw.restore_ok c.2 d keep; rw [h] at this; exact this⟩, t)
+
+def roundStart (c : Core P) : Core P := ⟨c.1.roundStart, Raw.roundStart_ok c.2⟩
+
+def atRound (c : Core P) : Core P := ⟨c.1.atRound, Raw.atRound_ok c.2⟩
 
 def goal (c : Core P) (o : Nat) (lhs rhs : Term) (s : Nat) : Core P × Bool :=
   match h : c.1.goal P o lhs rhs s with

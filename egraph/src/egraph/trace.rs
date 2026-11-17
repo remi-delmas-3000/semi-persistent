@@ -178,6 +178,14 @@ where
         self.trace = Some(t);
     }
 
+    /// `o`: a completion round starts. The round reads its monomials through
+    /// the classes as they are at this line; its merges do not update them.
+    pub(crate) fn trace_round(&mut self) {
+        if let Some(t) = self.trace.as_mut() {
+            t.out.push_str("o\n");
+        }
+    }
+
     /// `z`: node `unit` is the unit of `op`, written when the declaration
     /// registers it.
     pub(crate) fn trace_unit(&mut self, op: Cfg::O, unit: Cfg::G) {

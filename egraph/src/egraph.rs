@@ -4697,6 +4697,9 @@ where
             /// the rule is the equality `node = rhs_node`, its proof premise.
             rhs_node: G,
         }
+        // The round's monomials are read through the classes as they are now;
+        // its merges do not update them. The replay stream marks the point.
+        self.trace_round();
         let mut rules: Vec<Rule<Cfg::G, Cfg::O, Cfg::M>> = Vec::new();
         let mut rhs_buf: Vec<(Cfg::G, Cfg::M)> = Vec::new();
         // Iterate the AC node partition directly (ascending global id), not all nodes: the

@@ -31,7 +31,8 @@ abbrev Spell := Std.HashMap (String × List Nat) Nat
 structure St (P : Program) where
   declAt : Std.HashMap Nat Decl := {}
   /-- The node table, the kernel conclusions, the classes with the step that
-  proves each link, the classes at each mark, and the `check-eq` proved. -/
+  proves each link, the classes at each mark and at the round's start, and
+  the `check-eq` proved. -/
   core : Core P := Core.new P
   /-- The table id of each of the engine's node ids. A restore discards the
   engine's ids past the mark, and the engine reuses them; the table keeps its
@@ -112,6 +113,9 @@ its arrays are held once and updated in place. -/
   let S := { S with core := Core.new P }
   let (c, x) := k c
   ({ S with core := c }, x)
+
+/-- The state with the classes of the round's start as its classes. -/
+def atRound (S : St P) : St P := { S with core := S.core.atRound }
 
 end St
 
@@ -476,18 +480,20 @@ structure Rewrote where
   /-- The right side is `r` as one argument. -/
   atom : Bool := false
 
-/-- Rewrites `m` by the rules `rules`, in order: the result and each rewrite. -/
-def rewrite (S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false)
+/-- Rewrites `m` by the rules `rules`, in order: the result and each rewrite.
+Monomials are read on the classes of `S`; a rule's two nodes are in one class
+of `now`, the current classes. -/
+def rewrite (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false)
     (done : Array Rewrote := #[]) : List (Nat × Nat × Bool) → Except String (List Nat × Array Rewrote)
   | [] => pure (m, done)
   | (l, r, atom) :: rest => do
-    if S.fd l != S.fd r then throw "completion: rule sides in two classes"
+    if now.fd l != now.fd r then throw "completion: rule sides in two classes"
     match S.defOf l with
     | some (.app g ls) =>
       if g != f then throw "completion: rule of another operator"
       let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)))
       match applyRule S f m lc (if atom then [r] else monomial S f W r) once with
-      | some (q, left, m') => rewrite S f W m' once (done.push { l, r, q, rest := left, after := m', atom }) rest
+      | some (q, left, m') => rewrite now S f W m' once (done.push { l, r, q, rest := left, after := m', atom }) rest
       | none => throw "completion: rule does not apply"
     | _ => throw "completion: rule of another operator"
 
@@ -538,16 +544,18 @@ structure PeakPlan where
   cancel : Option (List Nat × List Nat × List Nat × Chain × Chain) := none
 
 /-- `i a b n l1 r1 ..`: node `n`, a member of one merged class, rewrites by
-the rules to the other merged node. -/
-def interReduce (S : St P) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Except String Chain := do
+the rules to the other merged node. The engine computes a round's rewrites on
+the classes at the round's start (`R`), and builds the nodes it merges on the
+current ones (`S`): the derivation is read on `R`, its ends on `S`. -/
+def interReduce (S R : St P) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Except String Chain := do
   let some (.app f as) := S.defOf n | throw "completion: start is not an application"
   unless (S.prog.kind f).isAssoc && S.prog.kind f != .assoc do throw "completion: not an AC operator"
   let t ← if S.fd n == S.fd b then pure a else if S.fd n == S.fd a then pure b
     else throw "completion: start in neither class"
   -- A monomial is a node's arguments, each one class, as the engine reads it.
   let W : List (Nat × List Nat) := []
-  let first := lawReduce S f (as.flatMap (expand S W))
-  let (m, steps) ← rewrite S f W first false #[] rules
+  let first := lawReduce R f (as.flatMap (expand R W))
+  let (m, steps) ← rewrite S R f W first false #[] rules
   unless reaches S f W m t do throw "completion: normal form differs"
   pure { f, start := .inl n, first, steps, target := .inl t }
 
@@ -591,7 +599,7 @@ peak reduced by the laws, with `reduceB`) and rewrite it by their rules; with
 occurrence of `keep`'s class), which the operator's `:cancellative` law
 allows when both sides stay non-empty or the operator has a unit; each side
 then rewrites by its remaining rules. -/
-def peakMerge (S : St P) (a b : Nat) (w : Peak) :
+def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
     Except String PeakPlan := do
   let named := a :: b :: (w.preA ++ w.preB ++ w.postA ++ w.postB).flatMap fun (l, r, _) => [l, r]
   -- The operator: that of the first rule, else of a merged node.
@@ -602,28 +610,28 @@ def peakMerge (S : St P) (a b : Nat) (w : Peak) :
     | throw "completion: no AC operator"
   -- A monomial is a node's arguments, each one class, as the engine reads it.
   let W : List (Nat × List Nat) := []
-  let peak := w.peak.flatMap (expand S W)
+  let peak := w.peak.flatMap (expand R W)
   -- A critical pair's own rules rewrite the peak once each; the normal form's
   -- rules, after it, rewrite every copy.
-  let firstB := if w.reduceB then lawReduce S f peak (peak := true) else peak
-  let (mA, sA) ← rewrite S f W peak true #[] w.preA
-  let (mB, sB) ← rewrite S f W firstB true #[] w.preB
+  let firstB := if w.reduceB then lawReduce R f peak (peak := true) else peak
+  let (mA, sA) ← rewrite S R f W peak true #[] w.preA
+  let (mB, sB) ← rewrite S R f W firstB true #[] w.preB
   if w.cancel then
     -- Declared, or a consequence of the group laws (`:inverse`).
     unless ((S.prog.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
       throw "completion: operator is not cancellative"
-    let (mA, mB) := (lawReduce S f mA, lawReduce S f mB)
-    let (ca, cb) := (classesOf S mA, classesOf S mB)
-    let keep := w.keep.map S.fd
+    let (mA, mB) := (lawReduce R f mA, lawReduce R f mB)
+    let (ca, cb) := (classesOf R mA, classesOf R mB)
+    let keep := w.keep.map R.fd
     -- The common part: each class, as many times as both sides hold it.
     let common := ca.eraseDups.map fun c =>
       (c, min (countOf c ca) (countOf c cb) - (if some c == keep then 1 else 0))
-    let drop (m : List Nat) := common.foldl (fun m (c, k) => dropClass S c k m) m
+    let drop (m : List Nat) := common.foldl (fun m (c, k) => dropClass R c k m) m
     let (left, right) := (drop mA, drop mB)
     unless (!left.isEmpty && !right.isEmpty) || (S.unit f).isSome do
       throw "completion: cancellation empties a side"
-    let (mA', tA) ← rewrite S f W left false #[] w.postA
-    let (mB', tB) ← rewrite S f W right false #[] w.postB
+    let (mA', tA) ← rewrite S R f W left false #[] w.postA
+    let (mB', tB) ← rewrite S R f W right false #[] w.postB
     unless reaches S f W mA' a && reaches S f W mB' b do throw "completion: normal form differs"
     -- What side A loses: its arguments that are not in `left`.
     let gone := left.foldl (fun m x => m.erase x) mA
@@ -633,8 +641,8 @@ def peakMerge (S : St P) (a b : Nat) (w : Peak) :
              { f, start := .inr left, first := left, steps := tA, target := .inl a },
              { f, start := .inr right, first := right, steps := tB, target := .inl b }) }
   else
-    let (mA, sA) ← rewrite S f W mA false sA w.postA
-    let (mB, sB) ← rewrite S f W mB false sB w.postB
+    let (mA, sA) ← rewrite S R f W mA false sA w.postA
+    let (mB, sB) ← rewrite S R f W mB false sB w.postB
     unless reaches S f W mA a && reaches S f W mB b do throw "completion: normal form differs"
     pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inl a },
            b := { f, start := .inr peak, peak := w.reduceB, first := firstB, steps := sB, target := .inl b } }
@@ -1650,6 +1658,7 @@ def stepCore (S : St P) (line : String) : St P :=
       if denotes S u t then { S with units := S.units.insert f u, events := S.events - 1 }
       else S.fail "unit: its node differs"
     | _, _ => S.fail "unit: no such unit"
+  | ["o"] => { (S.withCore fun c => (c.roundStart, ())).1 with events := S.events - 1 }
   | ["j", m] =>
     match S.node? m with
     | some m => { S with inverses := m :: S.inverses, events := S.events - 1 }
@@ -1797,7 +1806,7 @@ def stepCore (S : St P) (line : String) : St P :=
     | some a, some b, some n, some rs =>
       -- The derivation is computed first, on classes the state shares; the
       -- kernel steps are emitted after, when the state is held once again.
-      match interReduce S a b n rs with
+      match interReduce S S.atRound a b n rs with
       | .ok c =>
         let (S, r) := emitChain S c
         match r with
@@ -1813,7 +1822,7 @@ def stepCore (S : St P) (line : String) : St P :=
   | "p" :: a :: b :: rest =>
     match S.node? a, S.node? b, (rest.mapM (fun (x : String) => x.toNat?)).bind (Peak.read S) with
     | some a, some b, some w =>
-      match peakMerge S a b w with
+      match peakMerge S S.atRound a b w with
       | .ok pl =>
         -- Both sides start at the peak's term.
         let (S, ra) := emitChain S pl.a
