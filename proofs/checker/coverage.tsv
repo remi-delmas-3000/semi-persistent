@@ -524,7 +524,7 @@ egraph/tests/egg/conform-cc-cert/cs1_0071.egg	8	8	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0072.egg	52	52	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0073.egg	123	123	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0074.egg	34	34	replayed
-egraph/tests/egg/conform-cc-cert/cs1_0075.egg	127	201	replayed
+egraph/tests/egg/conform-cc-cert/cs1_0075.egg	201	201	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0076.egg	26	26	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0077.egg	125	125	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0078.egg	90	90	replayed
@@ -630,7 +630,7 @@ egraph/tests/egg/conform-cc-cert/cs1_0177.egg	34	34	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0178.egg	32	32	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0179.egg	50	50	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0180.egg	15	15	replayed
-egraph/tests/egg/conform-cc-cert/cs1_0181.egg	113	125	replayed
+egraph/tests/egg/conform-cc-cert/cs1_0181.egg	125	125	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0182.egg	65	65	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0183.egg	17	17	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0184.egg	44	44	replayed

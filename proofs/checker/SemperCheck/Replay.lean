@@ -998,6 +998,35 @@ def congStepC (S : St P) (f : String) (a b : Nat) : St P × Pf :=
   let (S, p) := viaPlain S b a
   if p.isSome then (let (S, q) := symmP S b a p; (S, q))
   else
+  -- Both nodes with a plain member for each argument that is an application
+  -- of `f`: each is its plain form argument by argument, and the plain forms
+  -- are equal by `f`'s laws.
+  let plainForm (S : St P) (x : Nat) : St P × Option Nat :=
+    match S.defOf x with
+    | some (.app g cs) =>
+      if g != f || cs.isEmpty then (S, some x)
+      else appNode S f (cs.map fun y =>
+        match S.defOf y with
+        | some (.app h _) => if h == f then (S.plain.getD (S.fd y) none).getD y else y
+        | _ => y)
+    | _ => (S, some x)
+  let both (S : St P) : St P × Pf :=
+    match plainForm S a with
+    | (S, some pa) =>
+      match plainForm S b with
+      | (S, some pb) =>
+        if pa == a && pb == b then (S, none)
+        else
+          let (S, p1) := congStep S f a pa
+          let (S, p2) := congStep S f pa pb
+          let (S, p3) := congStep S f pb b
+          let (S, q) := transP S a pb p1 p2
+          transP S a b q p3
+      | (S, none) => (S, none)
+    | (S, none) => (S, none)
+  let (S, p) := both S
+  if p.isSome then (S, p)
+  else
     -- `a`'s arguments, without the unit's, are the arguments of a node of the
     -- table in `b`'s class (or the same with `a`, `b` exchanged).
     let viaNode (S : St P) (x other : Nat) : St P × Pf :=
