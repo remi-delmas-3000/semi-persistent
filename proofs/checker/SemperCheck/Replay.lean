@@ -691,6 +691,14 @@ def congStep (S : St) (f : String) (a b : Nat) : St × Pf := Id.run do
       if g == f && !cs.isEmpty && S.fd m == S.fd c && !target.contains (S.fd c) then
         target := target.insert (S.fd c) m
     | _ => pure ()
+  -- An application of `f` nested in either node's arguments: the kernel reads
+  -- through it, so every argument of its class goes to it and is read the
+  -- same way.
+  let argsOf (x : Nat) : List Nat := match S.defOf x with
+    | some (.app g cs) => if g == f then cs else []
+    | _ => []
+  for (m, _) in (argsOf a ++ argsOf b).flatMap (nested S.defs f) do
+    if !target.contains (S.fd m) then target := target.insert (S.fd m) m
   for y in va ++ vb do
     if !target.contains (S.fd y) then target := target.insert (S.fd y) y
   -- The kernel's two sides: each argument's node, flattened, without the unit.
