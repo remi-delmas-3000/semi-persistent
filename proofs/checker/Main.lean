@@ -30,7 +30,7 @@ def replay (progPath tracePath : String) : IO UInt32 := do
     if line.isEmpty then break
     let before := S.nFailed
     S := Replay.step S ((line.splitOn "\n").headD "")
-    if S.nFailed > before && S.nFailed ≤ shown then IO.eprintln s!"failed event {S.events}: {line}"
+    if S.nFailed > before && S.nFailed ≤ shown then IO.eprintln s!"failed event {S.events} [{S.lastCause}]: {line}"
   let total := (P.decls.filter fun (_, d) => match d with | .goal .. => true | _ => false).length
   let proved := (P.decls.filter fun (o, d) =>
     match d with | .goal .. => S.proved.contains o | _ => false).length

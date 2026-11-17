@@ -59,6 +59,9 @@ structure OpDecl where
   /-- `:inverse g`: an argument and `g` applied to it equal the unit. Read by
   the replayer only. -/
   inverse : Option String := none
+  /-- `:cancellative`: two applications that share arguments and are equal
+  stay equal without them. Read by the replayer only. -/
+  cancellative : Bool := false
   deriving Repr, Inhabited
 
 /-- `lhs = rhs` for every assignment of the variables, each to an element of

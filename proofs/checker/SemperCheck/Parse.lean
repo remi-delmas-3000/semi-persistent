@@ -387,7 +387,8 @@ def Env.decl (E : Env) (f : String) (args : List String) (res : String) (tags : 
   let inverse := match tagArg ":inverse" tags with
     | some (.atom g) => some g
     | _ => none
-  pure { name := f, kind := k, args, res, unit, nilpotent, inverse }
+  pure { name := f, kind := k, args, res, unit, nilpotent, inverse,
+         cancellative := (atoms tags).contains ":cancellative" }
 
 def sortNames : SExp → List String
   | .list xs => atoms xs

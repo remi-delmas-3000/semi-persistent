@@ -73,6 +73,7 @@ structure St where
   events : Nat := 0
   failed : Std.HashMap String Nat := {}
   nFailed : Nat := 0
+  lastCause : String := ""
   /-- Measurement only: apply the merges of `u` lines without a check, to
   tell a check that fails by itself from one that fails because an earlier
   merge was not applied. A goal proved this way is not proved. -/
@@ -86,7 +87,7 @@ def fd (S : St) (i : Nat) : Nat := find S.parent i
 def defOf (S : St) (i : Nat) : Option Def := S.defs.getD i none
 
 def fail (S : St) (cause : String) : St :=
-  { S with failed := S.failed.insert cause (S.failed.getD cause 0 + 1), nFailed := S.nFailed + 1,
+  { S with failed := S.failed.insert cause (S.failed.getD cause 0 + 1), nFailed := S.nFailed + 1, lastCause := cause,
            splices := [] }
 
 def merge (S : St) (a b : Nat) : St :=
@@ -210,6 +211,184 @@ partial def denotes (S : St) (n : Nat) : Term → Bool
   | .app f ts => match S.defOf n with
     | some (.app g cs) => g == f && cs.length == ts.length && (cs.zip ts).all fun (c, t) => denotes S c t
     | _ => false
+
+/-! ## Completion merges
+
+Both merged nodes derive from one start monomial: each side rewrites it by
+rules, in order, where a rule is a pair of nodes in one class and a rewrite
+replaces the left node's arguments by the right node's. The replayer keeps a
+monomial as a list of argument nodes, so that an inverse application stays
+recognizable, and reduces it by the operator's laws after each rewrite. -/
+
+/-- A monomial reduced by `f`'s laws: inverse pairs and the unit's class
+removed, and each class kept once (ACI) or its count modulo `n`
+(`:nilpotent n`). -/
+def lawReduce (S : St) (f : String) (atoms : List Nat) : List Nat :=
+  let d := S.P.opDecl? f
+  let paired : List Nat := match d.bind (fun d => d.inverse) with
+    | some inv => cancelInverse S inv atoms
+    | none => atoms
+  let u := (S.units[f]?).map S.fd
+  let live : List Nat := paired.filter fun a => some (S.fd a) != u
+  -- Each class with its atoms, in order of first occurrence.
+  let groups : Array (Nat × Array Nat) := live.foldl (fun groups a =>
+    let c := S.fd a
+    match groups.findIdx? (fun g => g.1 == c) with
+    | some i => groups.modify i fun (c, xs) => (c, xs.push a)
+    | none => groups.push (c, #[a])) #[]
+  let keep (limit : Nat → Nat) : List Nat :=
+    groups.toList.flatMap fun (_, xs) => (xs.toList.take (limit xs.size))
+  match S.P.kind f, d.bind (fun d => d.nilpotent) with
+  | .aci, _ => keep fun _ => 1
+  | _, some n => if n > 0 then keep (fun k => k % n) else live
+  | _, none => live
+
+/-- The classes of a monomial, sorted. -/
+def classesOf (S : St) (atoms : List Nat) : List Nat := (atoms.map S.fd).mergeSort (· ≤ ·)
+
+def countOf (c : Nat) (xs : List Nat) : Nat := (xs.filter (· == c)).length
+
+/-- Removes `k` atoms of class `c`. -/
+def dropClass (S : St) (c : Nat) : Nat → List Nat → List Nat
+  | 0, xs => xs
+  | _, [] => []
+  | k + 1, x :: xs => if S.fd x == c then dropClass S c k xs else x :: dropClass S c (k + 1) xs
+
+/-- The monomial `m` with the classes `l` replaced by the atoms `r`, as many
+times as `m` holds `l` (once under ACI or a nilpotent law, where a class's
+count is bounded). `none` when `m` does not hold `l`. -/
+def applyRule (S : St) (f : String) (m : List Nat) (l : List Nat) (r : List Nat) : Option (List Nat) :=
+  let mc := classesOf S m
+  let distinct := l.eraseDups
+  if l.isEmpty || !distinct.all (fun c => countOf c mc ≥ countOf c l) then none
+  else
+    let bounded := S.P.kind f == .aci || ((S.P.opDecl? f).bind (·.nilpotent)).isSome
+    let q := if bounded then 1
+      else distinct.foldl (fun q c => min q (countOf c mc / countOf c l)) (mc.length + 1)
+    let rest := distinct.foldl (fun m c =>
+      dropClass S c (if S.P.kind f == .aci then countOf c mc else q * countOf c l) m) m
+    some (lawReduce S f (rest ++ (List.replicate q r).flatten))
+
+/-- The arguments of `x` as a monomial of `f`: its own, if it is an
+application of `f`, else `x` itself. -/
+def monomial (S : St) (f : String) (W : List (Nat × List Nat)) (x : Nat) : List Nat :=
+  -- A node that is one argument is still expanded when a witness splices its
+  -- class: every list of one event reads a class the same way.
+  match S.defOf x with
+  | some (.app g cs) => if g == f && !cs.isEmpty then cs.flatMap (expand S W) else expand S W x
+  | _ => expand S W x
+
+/-- Rewrites `m` by the rules `rules`, in order. -/
+def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) :
+    List (Nat × Nat) → Except String (List Nat)
+  | [] => pure m
+  | (l, r) :: rest => do
+    if S.fd l != S.fd r then throw "completion: rule sides in two classes"
+    match S.defOf l with
+    | some (.app g ls) =>
+      if g != f then throw "completion: rule of another operator"
+      let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)))
+      match applyRule S f m lc (monomial S f W r) with
+      | some m' => rewrite S f W m' rest
+      | none => throw "completion: rule does not apply"
+    | _ => throw "completion: rule of another operator"
+
+/-- The splice witnesses a completion event shares: the applications of `f`
+nested in the arguments of the nodes it names. -/
+def lawWitnesses (S : St) (f : String) (nodes : List Nat) : List (Nat × List Nat) :=
+  (nodes.flatMap fun x =>
+    match S.defOf x with
+    | some (.app g cs) => if g == f then cs.flatMap (nested S.defs f) else []
+    | _ => []).map fun (x, cs) => (S.fd x, cs)
+
+def pairs : List Nat → List (Nat × Nat)
+  | l :: r :: rest => (l, r) :: pairs rest
+  | _ => []
+
+/-- `i a b n l1 r1 ..`: node `n`, a member of one merged class, rewrites by
+the rules to the other merged node. -/
+def interReduce (S : St) (a b n : Nat) (rules : List (Nat × Nat)) : Except String Unit := do
+  let some (.app f as) := S.defOf n | throw "completion: start is not an application"
+  unless (S.P.kind f).isAssoc && S.P.kind f != .assoc do throw "completion: not an AC operator"
+  let t ← if S.fd n == S.fd b then pure a else if S.fd n == S.fd a then pure b
+    else throw "completion: start in neither class"
+  let W := lawWitnesses S f (n :: t :: rules.flatMap fun (l, r) => [l, r])
+  let m ← rewrite S f W (lawReduce S f (as.flatMap (expand S W))) rules
+  if classesOf S m != classesOf S (lawReduce S f (monomial S f W t)) then
+    throw "completion: normal form differs"
+
+/-- The witnesses of a critical-pair merge (`p` line). -/
+structure Peak where
+  cancel : Bool
+  reduceB : Bool
+  keep : Option Nat
+  peak : List Nat
+  preA : List (Nat × Nat)
+  preB : List (Nat × Nat)
+  postA : List (Nat × Nat)
+  postB : List (Nat × Nat)
+
+/-- Reads the fields after `p a b`: `cancel reduceB hasKeep [keep] k peak..
+na (l r).. nb (l r).. npa (l r).. (l r)..`. -/
+def Peak.read (xs : List Nat) : Option Peak := do
+  let (cancel, xs) ← xs.head?.map (·, xs.tail)
+  let (reduceB, xs) ← xs.head?.map (·, xs.tail)
+  let (hasKeep, xs) ← xs.head?.map (·, xs.tail)
+  let (keep, xs) ← if hasKeep == 1 then xs.head?.map (fun k => (some k, xs.tail)) else some (none, xs)
+  let (k, xs) ← xs.head?.map (·, xs.tail)
+  if xs.length < k then none
+  let (peak, xs) := (xs.take k, xs.drop k)
+  let (na, xs) ← xs.head?.map (·, xs.tail)
+  if xs.length < 2 * na then none
+  let (preA, xs) := (pairs (xs.take (2 * na)), xs.drop (2 * na))
+  let (nb, xs) ← xs.head?.map (·, xs.tail)
+  if xs.length < 2 * nb then none
+  let (preB, xs) := (pairs (xs.take (2 * nb)), xs.drop (2 * nb))
+  let (npa, xs) ← xs.head?.map (·, xs.tail)
+  if xs.length < 2 * npa then none
+  return { cancel := cancel == 1, reduceB := reduceB == 1, keep, peak, preA, preB,
+           postA := pairs (xs.take (2 * npa)), postB := pairs (xs.drop (2 * npa)) }
+
+/-- `p a b ..`: the merged nodes `a` and `b` are what the two sides of a
+critical pair rewrite to. Both sides start from the peak (side B from the
+peak reduced by the laws, with `reduceB`) and rewrite it by their rules; with
+`cancel`, the common part of the two results is then removed (except one
+occurrence of `keep`'s class), which the operator's `:cancellative` law
+allows when both sides stay non-empty or the operator has a unit; each side
+then rewrites by its remaining rules. -/
+def peakMerge (S : St) (a b : Nat) (w : Peak) : Except String Unit := do
+  let named := a :: b :: (w.preA ++ w.preB ++ w.postA ++ w.postB).flatMap fun (l, r) => [l, r]
+  -- The operator: that of the first rule, else of a merged node.
+  let some f := (named.reverse.findSome? fun x =>
+      match S.defOf x with
+      | some (.app g _) => if (S.P.kind g).isAssoc && S.P.kind g != .assoc then some g else none
+      | _ => none)
+    | throw "completion: no AC operator"
+  let W := lawWitnesses S f named ++ ((w.peak.flatMap (nested S.defs f)).map fun (x, cs) => (S.fd x, cs))
+  let peak := w.peak.flatMap (expand S W)
+  let mA ← rewrite S f W peak w.preA
+  let mB ← rewrite S f W (if w.reduceB then lawReduce S f peak else peak) w.preB
+  let (mA, mB) ← if w.cancel then do
+      -- Declared, or a consequence of the group laws (`:inverse`).
+      unless ((S.P.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
+        throw "completion: operator is not cancellative"
+      let (mA, mB) := (lawReduce S f mA, lawReduce S f mB)
+      let (ca, cb) := (classesOf S mA, classesOf S mB)
+      let keep := w.keep.map S.fd
+      -- The common part: each class, as many times as both sides hold it.
+      let common := ca.eraseDups.map fun c =>
+        (c, min (countOf c ca) (countOf c cb) - (if some c == keep then 1 else 0))
+      let drop (m : List Nat) := common.foldl (fun m (c, k) => dropClass S c k m) m
+      let (mA, mB) := (drop mA, drop mB)
+      unless (!mA.isEmpty && !mB.isEmpty) || (S.units[f]?).isSome do
+        throw "completion: cancellation empties a side"
+      pure (mA, mB)
+    else pure (mA, mB)
+  let mA ← rewrite S f W mA w.postA
+  let mB ← rewrite S f W mB w.postB
+  let same (m : List Nat) (t : Nat) :=
+    classesOf S (lawReduce S f m) == classesOf S (lawReduce S f (monomial S f W t))
+  unless same mA a && same mB b do throw "completion: normal form differs"
 
 /-- `c` and `c:k` fields as node ids, a counted one repeated. -/
 def ids (xs : List String) : Option (List Nat) := do
@@ -482,6 +661,20 @@ def step (S : St) (line : String) : St :=
         else S.fail "goal: its terms differ"
       | _ => S.fail "goal: no such command"
     | _, _, _ => S.fail "goal: unreadable"
+  | "i" :: a :: b :: n :: rest =>
+    match a.toNat?, b.toNat?, n.toNat?, rest.mapM (·.toNat?) with
+    | some a, some b, some n, some rs =>
+      match interReduce S a b n (pairs rs) with
+      | .ok () => S.merge a b
+      | .error e => S.fail e
+    | _, _, _, _ => S.fail "completion: unreadable"
+  | "p" :: a :: b :: rest =>
+    match a.toNat?, b.toNat?, (rest.mapM (fun (x : String) => x.toNat?)).bind Peak.read with
+    | some a, some b, some w =>
+      match peakMerge S a b w with
+      | .ok () => S.merge a b
+      | .error e => S.fail e
+    | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
     match d.toNat? with
     | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.parent, S.spell) }

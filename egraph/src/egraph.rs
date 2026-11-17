@@ -60,6 +60,21 @@ struct ProofLens {
     merge_premise_log: usize,
 }
 
+/// For the replay stream: how a critical pair's two reducts derive from one
+/// peak monomial. Side A (the first reduct) rewrites the peak as written;
+/// side B rewrites it as written or, with `reduce_b`, after the operator's
+/// laws reduced it. With `cancel`, the common part of the two results is then
+/// removed, except one occurrence of `keep`'s class.
+#[derive(Clone, Debug)]
+struct CritTrace<G> {
+    cancel: bool,
+    keep: Option<G>,
+    reduce_b: bool,
+    peak: Vec<G>,
+    a: Vec<(G, G)>,
+    b: Vec<(G, G)>,
+}
+
 /// Live-node threshold under which mark/restore stay sequential (see
 /// [`EGraph::fanout_enabled`]): below it the scope dispatch costs more than the
 /// members' mark/restore work.
@@ -4836,6 +4851,22 @@ where
         // rules' `node = rhs_node` pairs and the inverse nodes a group-law pair used).
         // The normalization's own rules are added when the pair is closed.
         let mut crit_prem: Vec<Vec<(Cfg::G, Cfg::G)>> = Vec::new();
+        // The replay stream's witnesses, one per critical pair (`None` for a
+        // peak too large to spell).
+        let tracing = self.tracing();
+        let mut crit_trace: Vec<Option<CritTrace<Cfg::G>>> = Vec::new();
+        // A multiset as a list of its classes, each repeated by its count.
+        let spell = |parts: &[&[(Cfg::G, Cfg::M)]]| -> Option<Vec<Cfg::G>> {
+            let mut out = Vec::new();
+            for &(g, k) in parts.iter().flat_map(|p| p.iter()) {
+                let k = usize::try_from(k.to_u64()?).ok()?;
+                if out.len() + k > 256 {
+                    return None;
+                }
+                out.extend(std::iter::repeat_n(g, k));
+            }
+            Some(out)
+        };
         let rule_pair = |r: &Rule<Cfg::G, Cfg::O, Cfg::M>| (r.node, r.rhs_node);
 
         // (A′) Normalize every active monomial node against the rules and merge its
@@ -4913,6 +4944,24 @@ where
                                 if PROOFS {
                                     crit_prem.resize(crit.len(), vec![rule_pair(&rules[ti])]);
                                 }
+                                if tracing {
+                                    // Peak `M + a`: the rule gives `N + a`; idempotence
+                                    // gives `M`, then the rule gives `N`.
+                                    let rp = rule_pair(&rules[ti]);
+                                    crit_trace.resize(
+                                        crit.len(),
+                                        spell(&[&rules[ti].lhs, &[(a, Cfg::M::ONE)]]).map(|peak| {
+                                            CritTrace {
+                                                cancel: false,
+                                                keep: None,
+                                                reduce_b: true,
+                                                peak,
+                                                a: vec![rp],
+                                                b: vec![rp],
+                                            }
+                                        }),
+                                    );
+                                }
                                 #[cfg(debug_assertions)]
                                 crit_why.push(cc_mirror::PairWhy::Idem { rule: m_node, a });
                             }
@@ -4939,6 +4988,21 @@ where
                             crit.push((op, CpOrigin::AxiomCp, r1, r2));
                             if PROOFS {
                                 crit_prem.resize(crit.len(), vec![rule_pair(&rules[ti])]);
+                            }
+                            if tracing {
+                                // Peak `M + a^(n-m)`: the rule gives `N + a^(n-m)`;
+                                // nilpotence gives `M - a^m`.
+                                crit_trace.resize(
+                                    crit.len(),
+                                    spell(&[&rules[ti].lhs, &[(a, k)]]).map(|peak| CritTrace {
+                                        cancel: false,
+                                        keep: None,
+                                        reduce_b: true,
+                                        peak,
+                                        a: vec![rule_pair(&rules[ti])],
+                                        b: Vec::new(),
+                                    }),
+                                );
                             }
                             #[cfg(debug_assertions)]
                             crit_why.push(cc_mirror::PairWhy::Nil { rule: m_node, a });
@@ -5005,6 +5069,41 @@ where
                                     }
                                 }
                                 crit_prem.resize(crit.len(), prem);
+                            }
+                            if tracing {
+                                // Peak `M + z`: the rule gives `N + z`; the group law
+                                // gives `M - a`. The inverse node stands for its class
+                                // in the peak, so the replay sees the pair it cancels:
+                                // `inv(a)` for `z`, or `inv(z)` for one `a`.
+                                let mut peak = spell(&[&rules[ti].lhs, &[(z, Cfg::M::ONE)]]);
+                                if let Some(peak) = peak.as_mut() {
+                                    let (ra, rz) =
+                                        (self.classes.find_const(a), self.classes.find_const(z));
+                                    let n = peak.len();
+                                    if let Some(node) = self.nodes.plain1.probe(&inv, &[ra])
+                                        && self.classes.find_const(node) == rz
+                                    {
+                                        peak[n - 1] = node;
+                                    } else if let Some(node) = self.nodes.plain1.probe(&inv, &[rz])
+                                        && self.classes.find_const(node) == ra
+                                        && let Some(i) = peak[..n - 1]
+                                            .iter()
+                                            .position(|&x| self.classes.find_const(x) == ra)
+                                    {
+                                        peak[i] = node;
+                                    }
+                                }
+                                crit_trace.resize(
+                                    crit.len(),
+                                    peak.map(|peak| CritTrace {
+                                        cancel: false,
+                                        keep: None,
+                                        reduce_b: true,
+                                        peak,
+                                        a: vec![rule_pair(&rules[ti])],
+                                        b: Vec::new(),
+                                    }),
+                                );
                             }
                         }
                     }
@@ -5086,6 +5185,21 @@ where
                     crit_prem.resize(
                         crit.len(),
                         vec![rule_pair(&rules[ti]), rule_pair(&rules[pi])],
+                    );
+                }
+                if tracing {
+                    // Peak: the least common multiple of the two left sides; each
+                    // rule rewrites it.
+                    crit_trace.resize(
+                        crit.len(),
+                        spell(&[&ab_buf]).map(|peak| CritTrace {
+                            cancel: false,
+                            keep: None,
+                            reduce_b: false,
+                            peak,
+                            a: vec![rule_pair(&rules[ti])],
+                            b: vec![rule_pair(&rules[pi])],
+                        }),
                     );
                 }
                 #[cfg(debug_assertions)]
@@ -5196,9 +5310,28 @@ where
                 } else {
                     Vec::new()
                 };
+                let first = crit.len();
                 push_cancel(&mut crit, op, has_unit, &pl, m, r);
                 if PROOFS {
                     crit_prem.resize(crit.len(), vec![rule_pair(&rules[ti])]);
+                }
+                if tracing {
+                    // Peak `M` (plus the constant `c` of a per-constant pair): the
+                    // rule gives `N` (plus `c`), and the common part cancels.
+                    crit_trace.resize(first, None);
+                    for i in first..crit.len() {
+                        let keep = needs_pool.then(|| crit[i].3[0].0);
+                        let one = keep.map(|c| [(c, Cfg::M::ONE)]);
+                        let extra: &[(Cfg::G, Cfg::M)] = one.as_ref().map_or(&[], |o| o);
+                        crit_trace.push(spell(&[&rules[ti].lhs, extra]).map(|peak| CritTrace {
+                            cancel: true,
+                            keep,
+                            reduce_b: false,
+                            peak,
+                            a: Vec::new(),
+                            b: vec![rule_pair(&rules[ti])],
+                        }));
+                    }
                 }
                 #[cfg(debug_assertions)]
                 crit_why.resize(
@@ -5226,12 +5359,33 @@ where
                     } else {
                         Vec::new()
                     };
+                    let first = crit.len();
                     push_cancel(&mut crit, op, has_unit, &pl, m, r);
                     if PROOFS {
                         crit_prem.resize(
                             crit.len(),
                             vec![rule_pair(&rules[ti]), rule_pair(&rules[pj])],
                         );
+                    }
+                    if tracing {
+                        // Peak `M1 + M2` (plus a per-constant pair's `c`): the two
+                        // rules give `N1 + N2` (plus `c`), and the common part cancels.
+                        crit_trace.resize(first, None);
+                        for i in first..crit.len() {
+                            let keep = needs_pool.then(|| crit[i].3[0].0);
+                            let one = keep.map(|c| [(c, Cfg::M::ONE)]);
+                            let extra: &[(Cfg::G, Cfg::M)] = one.as_ref().map_or(&[], |o| o);
+                            crit_trace.push(spell(&[&rules[ti].lhs, &rules[pj].lhs, extra]).map(
+                                |peak| CritTrace {
+                                    cancel: true,
+                                    keep,
+                                    reduce_b: false,
+                                    peak,
+                                    a: Vec::new(),
+                                    b: vec![rule_pair(&rules[ti]), rule_pair(&rules[pj])],
+                                },
+                            ));
+                        }
                     }
                     #[cfg(debug_assertions)]
                     crit_why.resize(
@@ -5392,9 +5546,24 @@ where
                     prem.extend(applied.borrow().iter().map(|&k| target_pairs[k as usize]));
                     prem.extend(inverse_prem);
                     self.pending_premises = Some(prem);
+                    // `i`: the node normalized, then each rule applied, in order.
+                    if self.tracing() {
+                        let rules = applied.borrow();
+                        self.trace_law(
+                            'i',
+                            std::iter::once(node)
+                                .chain(
+                                    rules
+                                        .iter()
+                                        .flat_map(|&k| self.trace_rule(target_pairs[k as usize])),
+                                )
+                                .collect::<Vec<_>>(),
+                        );
+                    }
                 }
                 do_merge(self, c_prime, class, just);
                 self.pending_premises = None;
+                self.trace_law_end();
                 #[cfg(debug_assertions)]
                 self.cc_mirror_untag();
                 // Collapse: the node was reducible by another rule (proper containment),
@@ -5490,15 +5659,24 @@ where
             };
             // Normalize both reducts in the op's count domain (idempotent → set, nilpotent →
             // mod-n, plain AC → ℕ) before comparing/merging.
+            // Where the rules applied to the first reduct end in `applied` and
+            // those applied to the second begin: the replay stream keeps the
+            // two sides apart.
+            let split = std::cell::Cell::new(0usize);
+            let mark = || split.set(applied.borrow().len());
             let normalized = match self.op_clamp(op) {
                 CompletionClamp::Idempotent => {
                     try_normalize_set_into(&mut n1_buf, &mut nf_ping, &r1, nf_rules).and_then(
-                        |()| try_normalize_set_into(&mut n2_buf, &mut nf_ping, &r2, nf_rules),
+                        |()| {
+                            mark();
+                            try_normalize_set_into(&mut n2_buf, &mut nf_ping, &r2, nf_rules)
+                        },
                     )
                 }
                 CompletionClamp::Nilpotent { order } => {
                     try_normalize_nilpotent_into(&mut n1_buf, &mut nf_ping, &r1, nf_rules, order)
                         .and_then(|()| {
+                            mark();
                             try_normalize_nilpotent_into(
                                 &mut n2_buf,
                                 &mut nf_ping,
@@ -5510,6 +5688,7 @@ where
                 }
                 CompletionClamp::Multiset => {
                     try_normalize_ms_into(&mut n1_buf, &mut nf_ping, &r1, nf_rules).and_then(|()| {
+                        mark();
                         try_normalize_ms_into(&mut n2_buf, &mut nf_ping, &r2, nf_rules)
                     })
                 }
@@ -5580,9 +5759,43 @@ where
                 }
                 prem.extend(inverse_prem);
                 self.pending_premises = Some(prem);
+                // `p`: the pair's peak and each side's rules, before and after
+                // the cancellation.
+                if let Some(Some(ct)) = crit_trace.get(ci)
+                    && let Some(t) = table
+                {
+                    let log = applied.borrow();
+                    let post = |range: &[u32]| -> Vec<Cfg::G> {
+                        range
+                            .iter()
+                            .flat_map(|&k| self.trace_rule(nf_pairs_by_op[t][k as usize]))
+                            .collect()
+                    };
+                    let (post_a, post_b) = (post(&log[..split.get()]), post(&log[split.get()..]));
+                    // A count field holds a number, not a node: it goes through
+                    // the same id type, which is a plain index.
+                    let num = |n: usize| -> Cfg::G { crate::id::id_at(n) };
+                    let mut ids: Vec<Cfg::G> = vec![
+                        num(usize::from(ct.cancel)),
+                        num(usize::from(ct.reduce_b)),
+                        num(usize::from(ct.keep.is_some())),
+                    ];
+                    ids.extend(ct.keep);
+                    ids.push(num(ct.peak.len()));
+                    ids.extend(&ct.peak);
+                    for side in [&ct.a, &ct.b] {
+                        ids.push(num(side.len()));
+                        ids.extend(side.iter().flat_map(|&p| self.trace_rule(p)));
+                    }
+                    ids.push(num(post_a.len() / 2));
+                    ids.extend(post_a);
+                    ids.extend(post_b);
+                    self.trace_law('p', ids);
+                }
             }
             changed |= do_merge(self, c1, c2, just);
             self.pending_premises = None;
+            self.trace_law_end();
             #[cfg(debug_assertions)]
             self.cc_mirror_untag();
         }

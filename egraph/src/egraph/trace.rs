@@ -54,6 +54,9 @@ pub struct Trace {
     /// to; `true` marks the node of a `let` name, which stands for the name's
     /// whole term.
     rhs: Vec<(usize, bool)>,
+    /// The witnesses of the completion merge about to happen: its line's
+    /// letter and the node ids after the merged pair.
+    law: Option<(char, Vec<usize>)>,
     /// The offsets of the program's `union` and `check-eq` forms, in order.
     union_offsets: Vec<usize>,
     goal_offsets: Vec<usize>,
@@ -357,6 +360,20 @@ where
                     let _ = writeln!(t.out, "u rewrite {x} {y}");
                 }
             },
+            Some(
+                Justification::ACInterReduction { .. }
+                | Justification::InverseCancel { .. }
+                | Justification::ACSuperposition { .. }
+                | Justification::ACAxiomCP { .. }
+                | Justification::Cancellative { .. },
+            ) if t.law.is_some() => {
+                let (kind, ids) = t.law.take().expect("checked by the guard");
+                let _ = write!(t.out, "{kind} {x} {y}");
+                for i in ids {
+                    let _ = write!(t.out, " {i}");
+                }
+                t.out.push('\n');
+            }
             Some(j) => {
                 let kind = format!("{j:?}");
                 let kind = kind.split([' ', '{', '(']).next().unwrap_or("?");
@@ -369,6 +386,48 @@ where
         self.trace = Some(t);
         // An I/O error surfaces at the final flush.
         let _ = self.trace_flush(false);
+    }
+
+    /// A completion rule `l = r` as the stream names it. When `r`'s class is
+    /// one argument of `l`'s operator (an atomic class, which holds a member
+    /// that is no application of that operator), the engine's `r` is the class
+    /// root, which can itself be such an application; the stream names the
+    /// other kind of member, so that the replayer reads one argument.
+    pub(crate) fn trace_rule(&self, (l, r): (Cfg::G, Cfg::G)) -> [Cfg::G; 2] {
+        if self.get_lit_val(l).is_some() || self.get_lit_val(r).is_some() {
+            return [l, r];
+        }
+        let op = self.node_op(l);
+        let root = self.classes.find_const(r);
+        let unit = self
+            .unit_node(op)
+            .is_some_and(|u| self.classes.find_const(u) == root);
+        let atomic = self
+            .classes
+            .repr_id(root)
+            .is_some_and(|repr| self.classes.atomic(repr));
+        if unit || !atomic || self.node_op(r) != op {
+            return [l, r];
+        }
+        let other = self
+            .class_members(r)
+            .find(|&m| self.get_lit_val(m).is_some() || self.node_op(m) != op);
+        [l, other.unwrap_or(r)]
+    }
+
+    /// The next merge is a completion merge with these witnesses: the line
+    /// `kind a b ids..` replaces its `u` line. Cleared by
+    /// [`trace_law_end`](Self::trace_law_end) when no merge took place.
+    pub(crate) fn trace_law(&mut self, kind: char, ids: impl IntoIterator<Item = Cfg::G>) {
+        if let Some(t) = self.trace.as_mut() {
+            t.law = Some((kind, ids.into_iter().map(|g| g.to_usize()).collect()));
+        }
+    }
+
+    pub(crate) fn trace_law_end(&mut self) {
+        if let Some(t) = self.trace.as_mut() {
+            t.law = None;
+        }
     }
 
     /// `mark d`, `restore d`, `rpop d`: the engine's mark stack after the
