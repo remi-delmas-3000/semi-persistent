@@ -232,15 +232,10 @@ def St.mergeBy (S : St P) (a b : Nat) (pf : Pf) : St P :=
 /-- A merge the replayer has no kernel step for: it is not applied. -/
 def St.merge (S : St P) (a b : Nat) : St P := S.mergeBy a b none
 
-/-- An associative operator's nested applications among `args`, spliced in as
-the engine's term builder splices them before the arguments are built. -/
-partial def flattenSyn (f : String) (args : List Term) : List Term :=
-  args.flatMap fun
-    | .app g xs => if g == f && !xs.isEmpty then flattenSyn f xs else [.app g xs]
-    | t => [t]
+mutual
 
 /-- The node a program term evaluated to, through the spelling table. -/
-partial def eval (S : St P) : Term → Option Nat
+def eval (S : St P) : Term → Option Nat
   | .lit s v =>
     match S.lits[(s, v)]? with
     | some n =>
@@ -248,19 +243,40 @@ partial def eval (S : St P) : Term → Option Nat
       | some (.lit s' v') => if s' == s && v' == v then some n else none
       | _ => none
     | none => none
-  | .app f args => do
-    let args := if S.prog.kind f == .assoc then flattenSyn f args else args
-    let ids ← args.mapM (eval S)
-    S.spell[(f, ids)]?
+  | .app f args =>
+    (evalArgs S (if S.prog.kind f == .assoc then some f else none) args).bind fun ids =>
+      S.spell[(f, ids)]?
+
+/-- The nodes of a term's arguments. With `fl = some f`, the arguments of a
+nested application of `f` take its place, as the engine's term builder
+splices them before the arguments are built. -/
+def evalArgs (S : St P) (fl : Option String) : List Term → Option (List Nat)
+  | [] => some []
+  | .app g xs :: rest =>
+    if fl == some g && !xs.isEmpty then
+      (evalArgs S fl xs).bind fun a => (evalArgs S fl rest).map (a ++ ·)
+    else (eval S (.app g xs)).bind fun a => (evalArgs S fl rest).map (a :: ·)
+  | .lit s v :: rest => (eval S (.lit s v)).bind fun a => (evalArgs S fl rest).map (a :: ·)
+
+end
+
+mutual
 
 /-- Node `n`'s definition is the term `t`, argument for argument. -/
-partial def denotes (S : St P) (n : Nat) : Term → Bool
+def denotes (S : St P) (n : Nat) : Term → Bool
   | .lit s v => match S.defOf n with
     | some (.lit s' v') => s' == s && v' == v
     | _ => false
   | .app f ts => match S.defOf n with
-    | some (.app g cs) => g == f && cs.length == ts.length && (cs.zip ts).all fun (c, t) => denotes S c t
+    | some (.app g cs) => g == f && denotesArgs S cs ts
     | _ => false
+
+def denotesArgs (S : St P) : List Nat → List Term → Bool
+  | [], [] => true
+  | c :: cs, t :: ts => denotes S c t && denotesArgs S cs ts
+  | _, _ => false
+
+end
 
 /-- The node of `f`'s unit: the one a `z` line named, if its definition still
 is the declared unit (a restore can have discarded it). -/
@@ -281,12 +297,19 @@ def nested (defs : Array Node) (f : String) (x : Nat) : List (Nat × List Nat) :
 termination_by x
 
 /-- `a`, or the arguments a witness for `a`'s class splices in. A class is
-not expanded inside its own expansion. -/
-partial def expand (S : St P) (W : List (Nat × List Nat)) (a : Nat) : List Nat :=
-  let c := S.fd a
-  match W.find? (·.1 == c) with
-  | some (_, cs) => cs.flatMap (expand S (W.filter (·.1 != c)))
+not expanded inside its own expansion: each expansion removes its witness. -/
+def expand (S : St P) (W : List (Nat × List Nat)) (a : Nat) : List Nat :=
+  match h : W.find? (·.1 == S.fd a) with
+  | some (_, cs) => cs.flatMap (expand S (W.filter (·.1 != S.fd a)))
   | none => [a]
+termination_by W.length
+decreasing_by
+  have hm := List.mem_of_find?_eq_some h
+  have hp := List.find?_some h
+  rw [List.length_unattach]
+  conv => rhs; rw [← List.length_attach (l := W)]
+  apply List.length_filter_lt_length_iff_exists.2
+  exact ⟨⟨_, hm⟩, List.mem_attach _ _, by simp_all⟩
 
 /-- Removes each argument that is `inv` applied to a node together with one
 argument in that node's class; with `unit` given, also each argument that is
@@ -670,10 +693,13 @@ def ids (S : St P) (xs : List String) : Option (List Nat) := do
 
 /-- The arguments node `x` flattens to under `f`, as the kernel's `view`
 reads them: through every application of `f` nested in them. -/
-partial def kview (S : St P) (f : String) (x : Nat) : List Nat :=
+def kview (S : St P) (f : String) (x : Nat) : List Nat :=
   match S.defOf x with
-  | some (.app g cs) => if g == f && !cs.isEmpty then cs.flatMap (kview S f) else [x]
+  | some (.app g cs) =>
+    if g == f && !cs.isEmpty then cs.flatMap fun c => if _h : c < x then kview S f c else [c]
+    else [x]
   | _ => [x]
+termination_by x
 
 /-- A `cong` step that concludes `a = b` for two nodes whose arguments the
 replayer found equal as classes under `f`'s laws: its premises prove each
@@ -787,7 +813,7 @@ def appNode (S : St P) (f : String) (m : List Nat) : St P × Option Nat :=
 by `f`'s laws, then `f(e, rest)` by the `inv` step, then `f(rest)`; each `n`
 arguments of one class under `:nilpotent n` likewise, by the `nil` step. An
 inverse of a node of the unit's class is first proved to be the unit. -/
-partial def lawNormP (S : St P) (f : String) (x : Nat) : St P × Option (Nat × Pf) := Id.run do
+def lawNormP (S : St P) (f : String) (x : Nat) : St P × Option (Nat × Pf) := Id.run do
   let some d := S.prog.opDecl? f | return (S, some (x, some none))
   let some u := S.unit f | return (S, some (x, some none))
   if d.inverse.isNone && d.nilpotent.isNone then return (S, some (x, some none))
@@ -1024,10 +1050,18 @@ def groupLawP (S : St P) (a b n1 n2 : Nat) : St P × Pf := Id.run do
                 if p.isSome then S := S1.mergeBy t other p else S := S1
   return eqP S a b
 
+mutual
+
 /-- The table id of a program term as the kernel interns it: child for child. -/
-partial def internT (S : St P) : Term → Option Nat
+def internT (S : St P) : Term → Option Nat
   | .lit s v => S.index[Node.lit s v]?
-  | .app f args => (args.mapM (internT S)).bind fun cs => S.index[Node.app f cs]?
+  | .app f args => (internTs S args).bind fun cs => S.index[Node.app f cs]?
+
+def internTs (S : St P) : List Term → Option (List Nat)
+  | [] => some []
+  | t :: ts => (internT S t).bind fun a => (internTs S ts).map (a :: ·)
+
+end
 
 /-- The proof that the program term `t`, of table id `w`, is node `a`: the
 one its `t` line recorded, when the term evaluated to `a`. -/
@@ -1067,45 +1101,56 @@ the proof that the two are equal: each argument's term is its node, and `f` of
 the argument terms is the node by `f`'s laws (a nested application of an
 associative operator, which the engine's term builder splices, among them).
 The terms join their nodes' classes. -/
-partial def writtenP (S : St P) (t : Term) : St P × Option (Nat × Nat × Pf) :=
+def writtenApp (S : St P) (f : String) (noArgs : Bool) (node : Option Nat) (ws : Array Nat) :
+    St P × Option (Nat × Nat × Pf) := Id.run do
+  let mut S := S
+  let d := Node.app f ws.toList
+  let w ← match S.index[d]? with
+    | some w => pure w
+    | none =>
+      match intern S d with
+      | (S', some w) =>
+        S := S'
+        pure w
+      | (S', none) => return (S', none)
+  match node with
+  | some n =>
+    -- `f()` is the unit, by the kernel's `unit` step.
+    if noArgs && (S.prog.kind f).isAssoc then
+      if let some u := S.unit f then
+        let (S', st) := emit S (.unit f w u) w u
+        let S' := S'.mergeBy w u (some (some st))
+        let (S', p) := eqP S' w n
+        return (S'.mergeBy w n p, some (w, n, p))
+    let (S', p) := congStepL S f w n
+    return (S'.mergeBy w n p, some (w, n, p))
+  | none => return (S, some (w, w, some none))
+
+mutual
+
+def writtenP (S : St P) (t : Term) : St P × Option (Nat × Nat × Pf) :=
   match t with
   | .lit s v =>
     match S.index[Node.lit s v]? with
     | some n => (S, some (n, n, some none))
     | none => (S, none)
-  | .app f args => Id.run do
+  | .app f args =>
     -- A nested application the engine's term builder spliced has no node of
     -- its own: the term then stands for itself.
-    let node := eval S t
-    let mut S := S
-    let mut ws : Array Nat := #[]
-    for a in args do
-      match writtenP S a with
-      | (S', some (w, m, p)) =>
-        S := S'.mergeBy w m p
-        ws := ws.push w
-      | (S', none) => return (S', none)
-    let d := Node.app f ws.toList
-    let w ← match S.index[d]? with
-      | some w => pure w
-      | none =>
-        match intern S d with
-        | (S', some w) =>
-          S := S'
-          pure w
-        | (S', none) => return (S', none)
-    match node with
-    | some n =>
-      -- `f()` is the unit, by the kernel's `unit` step.
-      if args.isEmpty && (S.prog.kind f).isAssoc then
-        if let some u := S.unit f then
-          let (S', st) := emit S (.unit f w u) w u
-          let S' := S'.mergeBy w u (some (some st))
-          let (S', p) := eqP S' w n
-          return (S'.mergeBy w n p, some (w, n, p))
-      let (S', p) := congStepL S f w n
-      return (S'.mergeBy w n p, some (w, n, p))
-    | none => return (S, some (w, w, some none))
+    let node := eval S (.app f args)
+    match writtenArgs S args #[] with
+    | (S, some ws) => writtenApp S f args.isEmpty node ws
+    | (S, none) => (S, none)
+
+/-- Each argument's term, joined to the node it evaluated to. -/
+def writtenArgs (S : St P) : List Term → Array Nat → St P × Option (Array Nat)
+  | [], ws => (S, some ws)
+  | a :: rest, ws =>
+    match writtenP S a with
+    | (S', some (w, m, p)) => writtenArgs (S'.mergeBy w m p) rest (ws.push w)
+    | (S', none) => (S', none)
+
+end
 
 /-- The node of a monomial: `f` applied to its arguments, or the unit for
 none. -/
@@ -1253,20 +1298,36 @@ def withS {α : Type} (k : St P → St P × α) : WalkM P α :=
 
 def key (p : Pat) : String := toString (repr p)
 
-partial def Pat.toTerm? : Pat → Option Term
+mutual
+
+def Pat.toTerm? : Pat → Option Term
   | .var _ => none
   | .lit s v => some (.lit s v)
-  | .app f ps => (ps.mapM Pat.toTerm?).map (.app f)
+  | .app f ps => (Pat.toTerms? ps).map (.app f)
+
+def Pat.toTerms? : List Pat → Option (List Term)
+  | [] => some []
+  | p :: ps => (Pat.toTerm? p).bind fun t => (Pat.toTerms? ps).map (t :: ·)
+
+end
+
+mutual
 
 /-- The operator and the number of arguments of the first line a pattern's
 match writes: that of its first innermost application or literal. -/
-partial def firstLine : Pat → String × Nat
+def firstLine : Pat → String × Nat
   | .var _ => ("", 0)
   | .lit _ _ => ("#lit", 0)
-  | .app f ps =>
-    match ps.find? (fun q => match q with | .var _ => false | _ => true) with
-    | some q => firstLine q
-    | none => (f, ps.length)
+  | .app f ps => (firstOf ps).getD (f, ps.length)
+
+/-- The first line of the first pattern that is no variable. -/
+def firstOf : List Pat → Option (String × Nat)
+  | [] => none
+  | .var _ :: ps => firstOf ps
+  | .lit s v :: _ => some (firstLine (.lit s v))
+  | .app f qs :: _ => some (firstLine (.app f qs))
+
+end
 
 /-- The instance `f(ic)` of an application pattern, joined to node `n`. -/
 def instOf (f : String) (ic : List Nat) (n : Nat) : WalkM P Nat := do
@@ -1289,15 +1350,66 @@ def letInstance (p : Pat) (n : Nat) : WalkM P Nat := do
       (S.mergeBy t n pf, t)
   | none => pure n
 
+/-- A ground argument the next line does not match is a `let` name's term:
+the engine bound it to the name's node and wrote no line for it. -/
+def groundNode (q : Pat) : WalkM P (Option Nat) := do
+  let w ← get
+  -- The lines come arguments first: the next one is for `q`'s first
+  -- innermost application or literal.
+  match q, w.atoms with
+  | .app _ _, (_, h, cs) :: _ =>
+    let (g, k) := firstLine q
+    if g == h && cs.length == k then pure none
+    else pure ((Pat.toTerm? q).bind (eval w.S))
+  | .app _ _, [] => pure ((Pat.toTerm? q).bind (eval w.S))
+  | _, _ => pure none
+
+/-- The application pattern `f(ps)` against the next line, once each argument
+that is no variable has its matched node and instance in `sub`. -/
+def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat × Nat))) :
+    WalkM P (Nat × Nat) := do
+  let w ← get
+  match w.atoms with
+  | (n, g, cs) :: rest =>
+    let S := w.S
+    if g != f || cs.length != ps.length then throw "rule: line for another application"
+    let mut σ := w.σ
+    let mut ic : Array Nat := #[]
+    for (q, o, c) in ps.zip (sub.zip cs) do
+      match q, o with
+      | .var x, _ =>
+        match σ.lookup x with
+        | some y =>
+          if S.fd y != S.fd c then throw "rule: variable bound twice"
+          ic := ic.push y
+        | none =>
+          σ := (x, c) :: σ
+          ic := ic.push c
+      | _, some (m, i) =>
+        if S.fd m != S.fd c then throw "rule: argument differs"
+        ic := ic.push i
+      | _, none => throw "rule: argument differs"
+    match S.defOf n with
+    | some (.app h ds) =>
+      if h != f || (let (x, y) := nf2 S f ds cs; x != y) then throw "rule: matched node differs"
+    | _ => throw "rule: matched node differs"
+    set { w with atoms := rest, σ := σ }
+    let i ← instOf f ic.toList n
+    modify fun w => { w with memo := (key, n, i) :: w.memo }
+    pure (n, i)
+  | [] => throw "rule: no line for an application"
+
+mutual
+
 /-- The node the pattern `p` matched and its instance, consuming the firing's
 `e` lines: arguments first, then the application's own line. -/
-partial def walkQ (p : Pat) : WalkM P (Nat × Nat) := do
+def walkQ (p : Pat) : WalkM P (Nat × Nat) :=
   match p with
-  | .var x =>
+  | .var x => do
     match (← get).σ.lookup x with
     | some n => pure (n, n)
     | none => throw "rule: unbound variable"
-  | .lit s v =>
+  | .lit s v => do
     let w ← get
     match w.atoms with
     | (n, "#lit", _) :: rest =>
@@ -1307,98 +1419,79 @@ partial def walkQ (p : Pat) : WalkM P (Nat × Nat) := do
         else throw "rule: literal differs"
       | _ => throw "rule: literal differs"
     | _ => throw "rule: no line for a literal"
-  | .app f ps =>
-    -- A ground argument the next line does not match is a `let` name's term:
-    -- the engine bound it to the name's node and wrote no line for it.
-    let groundNode (q : Pat) : WalkM P (Option Nat) := do
-      let w ← get
-      -- The lines come arguments first: the next one is for `q`'s first
-      -- innermost application or literal.
-      match q, w.atoms with
-      | .app _ _, (_, h, cs) :: _ =>
-        let (g, k) := firstLine q
-        if g == h && cs.length == k then pure none
-        else pure ((Pat.toTerm? q).bind (eval w.S))
-      | .app _ _, [] => pure ((Pat.toTerm? q).bind (eval w.S))
-      | _, _ => pure none
-    let mut sub : Array (Option (Nat × Nat)) := #[]
-    for q in ps do
-      match q with
-      | .var _ => sub := sub.push none
-      | _ =>
-        match ← groundNode q with
-        | some n => sub := sub.push (some (n, ← letInstance q n))
-        | none => sub := sub.push (some (← walkQ q))
-    let w ← get
-    match w.atoms with
-    | (n, g, cs) :: rest =>
-      let S := w.S
-      if g != f || cs.length != ps.length then throw "rule: line for another application"
-      let mut σ := w.σ
-      let mut ic : Array Nat := #[]
-      for (q, o, c) in ps.zip (sub.toList.zip cs) do
-        match q, o with
-        | .var x, _ =>
-          match σ.lookup x with
-          | some y =>
-            if S.fd y != S.fd c then throw "rule: variable bound twice"
-            ic := ic.push y
-          | none =>
-            σ := (x, c) :: σ
-            ic := ic.push c
-        | _, some (m, i) =>
-          if S.fd m != S.fd c then throw "rule: argument differs"
-          ic := ic.push i
-        | _, none => throw "rule: argument differs"
-      match S.defOf n with
-      | some (.app h ds) =>
-        if h != f || (let (x, y) := nf2 S f ds cs; x != y) then throw "rule: matched node differs"
-      | _ => throw "rule: matched node differs"
-      set { w with atoms := rest, σ := σ }
-      let i ← instOf f ic.toList n
-      modify fun w => { w with memo := (key p, n, i) :: w.memo }
+  | .app f ps => walkQs ps >>= walkApp (key (.app f ps)) f ps
+
+/-- The matched node and instance of each argument that is no variable. -/
+def walkQs : List Pat → WalkM P (List (Option (Nat × Nat)))
+  | [] => pure []
+  | .var _ :: rest => walkQs rest >>= fun r => pure (none :: r)
+  | .lit s v :: rest =>
+    walkQ (.lit s v) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
+  | .app f qs :: rest =>
+    groundNode (.app f qs) >>= fun g =>
+      (match g with
+        | some n => letInstance (.app f qs) n >>= fun i => pure (n, i)
+        | none => walkQ (.app f qs)) >>= fun x =>
+      walkQs rest >>= fun r => pure (some x :: r)
+
+end
+
+/-- A `let` name's term on the right-hand side: the engine fetched the name's
+node. The pattern is the name's term when the node is defined as that term,
+argument for argument; otherwise the name is further down the pattern. -/
+def letName? (p : Pat) : WalkM P (Option (Nat × Nat)) := do
+  let w ← get
+  if let (n, true) :: rest := w.rhs then
+    if ((Pat.toTerm? p).map (denotes w.S n)).getD false then
+      set { w with rhs := rest }
+      return some (n, ← letInstance p n)
+  return none
+
+/-- The built application `f` of the built arguments `cs` against the next
+`b` node. -/
+def builtApp (f : String) (cs : List (Nat × Nat)) : WalkM P (Nat × Nat) := do
+  let w ← get
+  match w.rhs with
+  | (n, _) :: rest =>
+    if spells w.S n f (cs.map (·.1)) then
+      set { w with rhs := rest }
+      let i ← instOf f (cs.map (·.2)) n
       pure (n, i)
-    | [] => throw "rule: no line for an application"
+    else throw "rule: built node differs"
+  | [] => throw "rule: no node for a built application"
+
+mutual
 
 /-- The node the pattern `p` was built as and its instance, consuming the
 firing's `b` nodes. -/
-partial def walkB (p : Pat) : WalkM P (Nat × Nat) := do
+def walkB (p : Pat) : WalkM P (Nat × Nat) :=
   match p with
-  | .var x =>
+  | .var x => do
     match (← get).σ.lookup x with
     | some n => pure (n, n)
     | none => throw "rule: unbound variable"
-  | _ =>
+  | .lit s v => do
+    if let some r ← letName? (.lit s v) then return r
     let w ← get
-    -- A `let` name's term: the engine fetched the name's node.
-    -- The pattern is the name's term when the node is defined as that term,
-    -- argument for argument; otherwise the name is further down the pattern.
-    if let (n, true) :: rest := w.rhs then
-      if ((Pat.toTerm? p).map (denotes w.S n)).getD false then
-        set { w with rhs := rest }
-        return (n, ← letInstance p n)
-    match p with
-    | .lit s v =>
-      match w.rhs with
-      | (n, _) :: rest =>
-        match w.S.defOf n with
-        | some (.lit s' v') =>
-          if s' == s && v' == v then set { w with rhs := rest }; pure (n, n)
-          else throw "rule: built literal differs"
-        | _ => throw "rule: built literal differs"
-      | [] => throw "rule: no node for a built literal"
-    | .app f ps =>
-      let cs ← ps.mapM walkB
-      let w ← get
-      match w.rhs with
-      | (n, _) :: rest =>
-        if spells w.S n f (cs.map (·.1)) then
-          set { w with rhs := rest }
-          let i ← instOf f (cs.map (·.2)) n
-          pure (n, i)
-        else throw "rule: built node differs"
-      | [] => throw "rule: no node for a built application"
-    | .var _ => throw "rule: unbound variable"
+    match w.rhs with
+    | (n, _) :: rest =>
+      match w.S.defOf n with
+      | some (.lit s' v') =>
+        if s' == s && v' == v then set { w with rhs := rest }; pure (n, n)
+        else throw "rule: built literal differs"
+      | _ => throw "rule: built literal differs"
+    | [] => throw "rule: no node for a built literal"
+  | .app f ps =>
+    letName? (.app f ps) >>= fun r =>
+      match r with
+      | some r => pure r
+      | none => walkBs ps >>= builtApp f
+
+def walkBs : List Pat → WalkM P (List (Nat × Nat))
+  | [] => pure []
+  | p :: ps => walkB p >>= fun x => walkBs ps >>= fun r => pure (x :: r)
+
+end
 
 /-- One side of a body equality: a bound variable's node, a matched pattern's
 node and instance, or `none` for a variable not bound yet. -/
