@@ -844,7 +844,7 @@ def lawNormP (S : St P) (f : String) (x : Nat) (peak : Bool := false) :
                 let (S1, p3) := symmP S1 pn q p2
                 let (S1, p4) := transP S1 q u p3 (some (some s1))
                 S := S1.mergeBy q u p4
-            else if let some b := atoms.find? (fun b => b != a && S.fd b == S.fd y) then
+            else if let some b := (atoms.erase a).find? (fun b => S.fd b == S.fd y) then
               let (S1, pn) := appNode S f [y, q]
               S := S1
               if let some pn := pn then
