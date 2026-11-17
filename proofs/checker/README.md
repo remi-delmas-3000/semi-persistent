@@ -120,37 +120,33 @@ the second column.
 
 | | checked merges only | unchecked merges applied (`--assume`) |
 | --- | --- | --- |
-| `check-eq` in one class, of 29,808 | 7,697 | 28,352 |
-| programs with every `check-eq` in one class, of 1,066 | 283 | 916 |
+| `check-eq` in one class, of 29,808 | 25,145 | 28,505 |
+| programs with every `check-eq` in one class, of 1,066 | 689 | 929 |
 | events | 7,396,091 | 7,396,091 |
-| events that fail their check | 241,713 | 3,459 |
-| merges not checked yet | 300,563 | 300,563 |
+| events that fail their check | 213,865 | 3,206 |
+| merges not checked | 292,771 | 292,771 |
 
 The first column counts a `check-eq` only when the merges that join its two
 terms all passed their checks. The certificate writer reaches 7,664 with the
-parked law-trace work (branch `wip/law-trace`) and 5,702 on this branch. The second column applies the
-merges the replayer does not check, to separate a check that fails by itself
-from one that fails because an earlier merge was not applied: 238,254 of the
-241,713 failures are of the second kind.
+parked law-trace work (branch `wip/law-trace`) and 5,702 on this branch. The
+second column applies the merges the replayer does not check, to separate a
+check that fails by itself from one that fails because an earlier merge was
+not applied.
 
-The merges not checked yet, by the engine's justification: 292,767 rule
-firings the stream writes as opaque (287,931 of them in one benchmark,
-`bench/math-microbenchmark.native.egg`; these are rules with a primitive, a
-rest variable or a multiplicity variable, which the reader does not read), and
-7,796 completion merges (5,523 inter-reduction, 1,232 superposition, 519 axiom
-critical pairs, 369 cancellation, 153 inverse cancellation). Under `--assume`,
-the 1,456 `check-eq` still apart are in programs whose most frequent failure
-is a law step whose arguments differ (1,177, of which 1,153 in programs with
-`:nilpotent`, `:inverse` or `:cancellative`), a rule firing the walk does not
-follow or the reader does not read (197), a completion merge (38), or a
-congruence step whose arguments differ (32).
+The merges not checked are rule firings the stream writes as opaque (292,767,
+of which 287,931 in one benchmark, `bench/math-microbenchmark.native.egg`):
+rules with a primitive, a rest variable or a multiplicity variable, which the
+reader does not read. Of the 4,663 `check-eq` not proved in the first column,
+3,398 are in the 267 programs with such firings. The rest are in programs
+whose first failing event is a completion merge (633 `check-eq`), a rule
+firing the walk does not follow (about 300), or a law or congruence step.
 
 Cost: the 1,442 streams total 235 MB; the median is 1.2 kB and the largest
 94 MB (`bench/math-microbenchmark.rules.egg`, 1,958,093 events, replayed in
-8.0 s and 183 MB). The slowest replay takes 8.3 s and the largest 247 MB. With
+8.0 s and 183 MB). The slowest replay takes 8.4 s and the largest 248 MB. With
 the stream on, the engine runs `bench/acgen.rules.egg` (1,120,646 events, a
-50 MB stream, every event checked) in 12.0 s and 705 MB against 10.8 s and
-703 MB in proof mode without it, and `bench/search-dfs-small.rules.egg` in
+50 MB stream, every event checked) in 11.3 s and 706 MB against 10.4 s and
+700 MB in proof mode without it, and `bench/search-dfs-small.rules.egg` in
 2.4 s either way (a 47 kB stream; the reader does not read that program, so
 it has no replay).
 
