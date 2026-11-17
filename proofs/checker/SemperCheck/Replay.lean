@@ -201,7 +201,6 @@ between the two roots carries the proof that they are. -/
 def St.mergeBy (S : St) (a b : Nat) (pf : Pf) : St :=
   let (S, ra, pa) := findP S a
   let (S, rb, pb) := findP S b
-  let S := { S with splices := [], inverses := [] }
   if ra == rb then S
   else
     -- `hi = lo`, through `a = b` in the direction that starts at `hi`.
@@ -724,6 +723,132 @@ def congStep (S : St) (f : String) (a b : Nat) : St × Pf := Id.run do
   let (S', s) := emit S (.cong f a b prems.toList) a b
   return (S', some (some s))
 
+/-- What `a` is the inverse of under `inv`, and the inverse application that
+says so: `a` itself, or a witness (`j` line) in its class. -/
+def inverseNode (S : St) (inv : String) (a : Nat) : Option (Nat × Nat) :=
+  let arg (m : Nat) : Option (Nat × Nat) :=
+    match S.defOf m with
+    | some (.app g [y]) => if g == inv then some (m, y) else none
+    | _ => none
+  (arg a).orElse fun _ => S.inverses.findSome? fun m => if S.fd m == S.fd a then arg m else none
+
+/-- `f` applied to `m`, a node the kernel accepts, or `none`. -/
+def appNode (S : St) (f : String) (m : List Nat) : St × Option Nat :=
+  let d := Def.app f m
+  if m.isEmpty then (S, none)
+  else match S.index[d]? with
+    | some t => (S, some t)
+    | none =>
+      -- Well-sorted: an argument of `f` has `f`'s sort.
+      let ok : Bool := match S.P.opDecl? f with
+        | some dd => m.all fun c =>
+            (match S.defOf c with
+              | some (.lit s _) => some s
+              | some (.app g _) => (S.P.opDecl? g).map (·.res)
+              | none => none) == some dd.res
+        | none => false
+      if ok then
+        let t := S.defs.size
+        ({ S with defs := S.defs.push (some d), index := S.index.insert d t }, some t)
+      else (S, none)
+
+/-- Node `x` reduced by `f`'s inverse and nilpotent laws, and the proof that
+`x` is the result. Each inverse pair `y, g(y)` becomes `f(f(y, g(y)), rest)`
+by `f`'s laws, then `f(e, rest)` by the `inv` step, then `f(rest)`; each `n`
+arguments of one class under `:nilpotent n` likewise, by the `nil` step. An
+inverse of a node of the unit's class is first proved to be the unit. -/
+partial def lawNormP (S : St) (f : String) (x : Nat) : St × Option (Nat × Pf) := Id.run do
+  let some d := S.P.opDecl? f | return (S, some (x, some none))
+  let some u := S.unit f | return (S, some (x, some none))
+  if d.inverse.isNone && d.nilpotent.isNone then return (S, some (x, some none))
+  let mut S := S
+  let mut cur := x
+  let mut pf : Pf := some none
+  -- A bound on the passes: each removes at least one argument.
+  let mut atoms := (kview S f cur).filter fun a => S.fd a != S.fd u
+  for _ in [0:atoms.length + 1] do
+    atoms := (kview S f cur).filter fun a => S.fd a != S.fd u
+    -- What the next pass replaces by the unit: a node `f(..)` that a step
+    -- proves is the unit, and the arguments it stands for.
+    let mut found : Option (Nat × Nat × List Nat) := none
+    if let some g := d.inverse then
+      for a in atoms do
+        if found.isNone then
+          if let some (q, y) := inverseNode S g a then
+            if S.fd y == S.fd u then
+              -- `f(y, g(y))` is the unit and, `y` being the unit, is `g(y)`.
+              let (S1, pn) := appNode S f [y, q]
+              S := S1
+              if let some pn := pn then
+                let (S1, s1) := emit S (.inv f pn y q u) pn u
+                let (S1, p2) := congStep S1 f pn q
+                let (S1, p3) := symmP S1 pn q p2
+                let (S1, p4) := transP S1 q u p3 (some (some s1))
+                S := S1.mergeBy q u p4
+            else if let some b := atoms.find? (fun b => b != a && S.fd b == S.fd y) then
+              let (S1, pn) := appNode S f [y, q]
+              S := S1
+              if let some pn := pn then
+                let (S1, s1) := emit S (.inv f pn y q u) pn u
+                S := S1
+                found := some (pn, s1, (atoms.erase a).erase b)
+    if found.isNone then
+      if let some (n + 1) := d.nilpotent then
+        for a in atoms do
+          if found.isNone then
+            let same := atoms.filter fun b => S.fd b == S.fd a
+            if same.length ≥ n + 1 then
+              let (S1, pn) := appNode S f (a :: List.replicate n a)
+              S := S1
+              if let some pn := pn then
+                let (S1, s1) := emit S (.nil f pn a n u) pn u
+                S := S1
+                let gone := same.take (n + 1)
+                found := some (pn, s1, gone.foldl (fun m b => m.erase b) atoms)
+    match found with
+    | none => return (S, some (cur, pf))
+    | some (pn, s1, rest) =>
+      let (S1, t1) := appNode S f (pn :: rest)
+      let (S1, t2) := appNode S1 f (u :: rest)
+      S := S1
+      let (some t1, some t2) := (t1, t2) | return (S, none)
+      let (S1, t3) := if rest.isEmpty then (S, some u) else appNode S f rest
+      S := S1
+      let some t3 := t3 | return (S, none)
+      let (S1, p1) := congStep S f cur t1
+      let (S1, s2) := emit S1 (.cong f t1 t2 [s1]) t1 t2
+      let (S1, p3) := congStep S1 f t2 t3
+      let (S1, q) := transP S1 cur t2 p1 (some (some s2))
+      let (S1, q) := transP S1 cur t3 q p3
+      let (S1, q') := transP S1 x t3 pf q
+      S := (S1.mergeBy cur t3 q)
+      pf := q'
+      cur := t3
+      if q'.isNone then return (S, none)
+  return (S, some (cur, pf))
+
+/-- `congStep`, and when it gives no step for an operator with an inverse or
+a nilpotent law: both nodes reduced by those laws, then `congStep`. -/
+def congStepL (S : St) (f : String) (a b : Nat) : St × Pf :=
+  let (S, p) := congStep S f a b
+  if p.isSome then (S, p)
+  else
+    let laws := match S.P.opDecl? f with
+      | some d => d.inverse.isSome || d.nilpotent.isSome
+      | none => false
+    if !laws then (S, none)
+    else
+      match lawNormP S f a with
+      | (S, some (ta, pa)) =>
+        match lawNormP S f b with
+        | (S, some (tb, pb)) =>
+          let (S, p) := congStep S f ta tb
+          let (S, q) := transP S a tb pa p
+          let (S, pb') := symmP S b tb pb
+          transP S a b q pb'
+        | (S, none) => (S, none)
+      | (S, none) => (S, none)
+
 /-- The table id of a program term as the kernel interns it: child for child. -/
 partial def internT (S : St) : Term → Option Nat
   | .lit s v => S.index[Def.lit s v]?
@@ -792,7 +917,7 @@ def emitChain (S : St) (c : Chain) : St × Option (Nat × Pf) := Id.run do
   let mut pf : Pf := some none
   -- One `cong` by `f`'s laws from the current node to `next`.
   let hop (S : St) (cur next : Nat) (pf : Pf) : St × Pf :=
-    let (S, p) := congStep S f cur next
+    let (S, p) := congStepL S f cur next
     let S := S.mergeBy cur next p
     transP S start next pf p
   match monoNode S f c.first with
@@ -853,7 +978,7 @@ def termLine (S : St) (i : Nat) (f : String) (cs : List Nat) : St := Id.run do
       p1 := some (some s)
     else p1 := none
   -- `f` of the argument nodes is the node, by the operator's laws.
-  let (S', p2) := congStep S f t2 i
+  let (S', p2) := congStepL S f t2 i
   S := (S'.mergeBy t2 i p2).mergeBy w t2 p1
   let (S', p) := transP S w i p1 p2
   return { S' with lastTerm := S'.lastTerm.insert i (w, p), byTerm := S'.byTerm.insert w (i, p) }
@@ -904,7 +1029,7 @@ def instOf (f : String) (ic : List Nat) (n : Nat) : WalkM Nat := do
   unless wellSorted (← get).S d do throw "rule: instance ill-sorted"
   withS fun S =>
     let (S, i) := intern S d
-    let (S, p) := congStep S f i n
+    let (S, p) := congStepL S f i n
     (S.mergeBy i n p, i)
 
 /-- A ground pattern that stands for a `let` name's term: its instance is
@@ -1099,7 +1224,7 @@ def define (S : St) (i : Nat) (d : Def) : St :=
     | .lit s v => { S with lits := S.lits.insert (s, v) t }
     | _ => S
 
-def step (S : St) (line : String) : St :=
+def stepCore (S : St) (line : String) : St :=
   let S := { S with events := S.events + 1, cur := (line.splitOn " ").headD "" }
   match line.splitOn " " with
   | "n" :: id :: f :: kids =>
@@ -1158,7 +1283,7 @@ def step (S : St) (line : String) : St :=
       match S.defOf a, S.defOf b with
       | some (.app f as), some (.app g bs) =>
         if f == g && (let (x, y) := nf2 S f as bs; x == y) then
-          let (S, p) := congStep S f a b
+          let (S, p) := congStepL S f a b
           S.mergeBy a b p
         else S.fail "congruence: arguments differ"
       | _, _ => S.fail "congruence: not two applications"
@@ -1177,7 +1302,7 @@ def step (S : St) (line : String) : St :=
               (match S.defOf b with | some (.app g _) => g | _ => f)
           | _, some (.app g _) => g
           | _, _ => ""
-        let (S, p) := congStep S f a b
+        let (S, p) := congStepL S f a b
         S.mergeBy a b p
       else match S.defOf a, S.defOf b with
         | some (.app _ _), _ | _, some (.app _ _) => S.fail "law: arguments differ"
@@ -1352,6 +1477,13 @@ def step (S : St) (line : String) : St :=
     | _, _ => S
   | [""] => { S with events := S.events - 1 }
   | _ => S.fail "unreadable line"
+
+/-- Replays one line. The witness lines (`s`, `j`) hold until the next line
+of another kind has been replayed. -/
+def step (S : St) (line : String) : St :=
+  let S := stepCore S line
+  if line.startsWith "s " || line.startsWith "j " then S
+  else { S with splices := [], inverses := [] }
 
 def start (P : Program) : St :=
   { P, declAt := P.decls.foldl (fun m (o, d) => m.insert o d) {} }
