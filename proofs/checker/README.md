@@ -144,34 +144,31 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 25,802 |
-| programs with every `check-eq` proved, of 1,066 | 740 |
-| kernel steps checked | 12,632,286 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 26,343 |
+| programs with every `check-eq` proved, of 1,066 | 763 |
+| kernel steps checked | 12,487,996 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,098 |
-| events whose check fails | 212,324 |
+| events whose check fails | 211,249 |
 | events the stream gives no witness for | 292,222 |
-| merges whose kernel steps are not found | 19 |
+| merges whose kernel steps are not found | 18 |
 
-The 4,006 `check-eq` not proved:
+The 3,465 `check-eq` not proved:
 
 - 3,263 are in the 245 programs with a rule firing the stream writes as
   opaque: a rule with a primitive, a rest variable or a multiplicity variable,
   which the reader does not read (292,218 such merges, 287,931 of them in
   `bench/math-microbenchmark.native.egg`). Later events of these programs fail
   because the merge was not applied.
-- 743 are in 84 programs with no such firing. `check-replay.py --failed FILE`
-  lists every failed event (program, event number, cause, line: 212,324
+- 202 are in 61 programs with no such firing. `check-replay.py --failed FILE`
+  lists every failed event (program, event number, cause, line: 211,249
   lines) and counts these programs by the cause of their first failed event,
   since a program's later failures can follow from the merge the first one did
-  not apply. The two largest groups are a completion merge whose derivation
-  reaches a monomial other than the engine's merged node (15 programs, 300
-  `check-eq`) and one where a rule of the line does not apply to the monomial
-  the replayer has (9 programs, 127); 162 more are behind a rule the reader
-  does not read. In the cases read so far the replayer's classes at the event
-  differ from the engine's: the replayer holds a merge the engine has not made
-  yet, or reads a rule's node through classes the engine merged inside the
-  round (`conform-cc-cert/cs1_0059.egg`, `conform-cc-cert/cs1_0155.egg`).
+  not apply. 164 of the 202 are in 43 programs whose first failure is a rule
+  the reader does not read. The other 38 are in 18 programs, at most 7 in
+  one: a rule with `:flatten` matched through a nested application (4
+  programs), a law step whose normal form the replayer computes differently
+  (4), and single cases.
 
 The certificates this replaces proved 5,702 `check-eq`, and the replay before
 the replayer was proved 21,066. No program proves fewer than under either.
