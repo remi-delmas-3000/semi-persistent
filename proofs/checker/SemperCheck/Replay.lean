@@ -192,12 +192,15 @@ def nf2 (S : St) (f : String) (as bs : List Nat) : List Nat × List Nat :=
 
 /-- Node `n` has the value of `f(cs)`: it is an application of `f` whose
 arguments have the same normal form, or the normal form is the one class of
-`n`. -/
+`n`, or it is empty and `n` is in the unit's class. -/
 def spells (S : St) (n : Nat) (f : String) (cs : List Nat) : Bool :=
   (match S.defOf n with
     | some (.app g ds) => g == f && (let (x, y) := nf2 S f ds cs; x == y)
     | _ => false)
-  || ((S.P.kind f).isAssoc && (nf2 S f cs []).1 == [S.fd n])
+  || ((S.P.kind f).isAssoc &&
+      (let t := (nf2 S f cs []).1
+       -- One class left: the application is that class. None left: it is the unit.
+       t == [S.fd n] || (t.isEmpty && (S.units[f]?).map S.fd == some (S.fd n))))
 
 /-- Node `n`'s definition is the term `t`, argument for argument. -/
 partial def denotes (S : St) (n : Nat) : Term → Bool
