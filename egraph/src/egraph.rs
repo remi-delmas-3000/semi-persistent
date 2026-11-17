@@ -5565,8 +5565,11 @@ where
                     // inverse pairs that cancelled.
                     let mut prem = vec![(node, class)];
                     prem.extend(applied.borrow().iter().map(|&k| target_pairs[k as usize]));
+                    let inverse_nodes: Vec<Cfg::G> = inverse_prem.iter().map(|p| p.0).collect();
                     prem.extend(inverse_prem);
                     self.pending_premises = Some(prem);
+                    // The inverse nodes the normal form's cancellation used.
+                    self.trace_inverse_nodes(&inverse_nodes);
                     // `i`: the node normalized, then each rule applied, in order.
                     if self.tracing() {
                         let rules = applied.borrow();
@@ -5778,8 +5781,10 @@ where
                             .map(|&k| nf_pairs_by_op[t][k as usize]),
                     );
                 }
+                let inverse_nodes: Vec<Cfg::G> = inverse_prem.iter().map(|p| p.0).collect();
                 prem.extend(inverse_prem);
                 self.pending_premises = Some(prem);
+                self.trace_inverse_nodes(&inverse_nodes);
                 // `p`: the pair's peak and each side's rules, before and after
                 // the cancellation.
                 if let Some(Some(ct)) = crit_trace.get(ci)

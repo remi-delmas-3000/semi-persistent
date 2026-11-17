@@ -64,6 +64,9 @@ structure St where
   snaps : Array (Array Nat × Spell) := #[]
   /-- Splice witnesses for the next `t`, `c` or `w` line. -/
   splices : List (Nat × Nat) := []
+  /-- Inverse witnesses (`j` lines) for the next line: inverse applications,
+  each standing for its class. -/
+  inverses : List Nat := []
   /-- The open firing: its command's offset, and whether it is a `rewrite`. -/
   fire : Option (Nat × Bool) := none
   atoms : Array (Nat × String × List Nat) := #[]
@@ -88,10 +91,10 @@ def defOf (S : St) (i : Nat) : Option Def := S.defs.getD i none
 
 def fail (S : St) (cause : String) : St :=
   { S with failed := S.failed.insert cause (S.failed.getD cause 0 + 1), nFailed := S.nFailed + 1, lastCause := cause,
-           splices := [] }
+           splices := [], inverses := [] }
 
 def merge (S : St) (a b : Nat) : St :=
-  { S with parent := union S.parent a b, splices := [] }
+  { S with parent := union S.parent a b, splices := [], inverses := [] }
 
 end St
 
@@ -139,16 +142,23 @@ partial def expand (S : St) (W : List (Nat × List Nat)) (a : Nat) : List Nat :=
 argument in that node's class; with `unit` given, also each argument that is
 `inv` applied to a node of the unit's class. -/
 def cancelInverse (S : St) (inv : String) (unit : Option Nat) (xs : List Nat) : List Nat := Id.run do
+  -- What `a` is the inverse of: its own argument, or that of a witness (`j`
+  -- line) in its class.
+  let inverseOf (a : Nat) : Option Nat :=
+    let arg (m : Nat) : Option Nat :=
+      match S.defOf m with
+      | some (.app g [y]) => if g == inv then some y else none
+      | _ => none
+    (arg a).orElse fun _ => S.inverses.findSome? fun m => if S.fd m == S.fd a then arg m else none
   let mut out := xs.toArray
   for a in xs do
-    if let some (.app g [y]) := S.defOf a then
-      if g == inv then
-        if let some i := out.findIdx? (· == a) then
-          let rest := out.eraseIdxIfInBounds i
-          -- `inv(e)` is `e`: with `unit` given, it goes by itself.
-          if unit == some (S.fd y) then out := rest
-          else if let some j := rest.findIdx? (fun b => S.fd b == S.fd y) then
-            out := rest.eraseIdxIfInBounds j
+    if let some y := inverseOf a then
+      if let some i := out.findIdx? (· == a) then
+        let rest := out.eraseIdxIfInBounds i
+        -- `inv(e)` is `e`: with `unit` given, it goes by itself.
+        if unit == some (S.fd y) then out := rest
+        else if let some j := rest.findIdx? (fun b => S.fd b == S.fd y) then
+          out := rest.eraseIdxIfInBounds j
   return out.toList
 
 /-- Sorted classes with each class's count reduced modulo `n`. -/
@@ -643,7 +653,7 @@ def step (S : St) (line : String) : St :=
   | "t" :: id :: f :: kids =>
     match id.toNat?, ids kids with
     | some i, some cs =>
-      if spells S i f cs then { S with spell := S.spell.insert (f, cs) i, splices := [] }
+      if spells S i f cs then { S with spell := S.spell.insert (f, cs) i, splices := [], inverses := [] }
       else S.fail "term: its node differs"
     | _, _ => S.fail "term: unreadable"
   | ["s", c, m] =>
@@ -656,6 +666,10 @@ def step (S : St) (line : String) : St :=
       if denotes S u t then { S with units := S.units.insert f u, events := S.events - 1 }
       else S.fail "unit: its node differs"
     | _, _ => S.fail "unit: no such unit"
+  | ["j", m] =>
+    match m.toNat? with
+    | some m => { S with inverses := m :: S.inverses, events := S.events - 1 }
+    | none => S.fail "inverse witness: unreadable"
   | ["x", off, a, b] =>
     match off.toNat?, a.toNat?, b.toNat? with
     | some o, some a, some b =>
@@ -769,7 +783,7 @@ def step (S : St) (line : String) : St :=
       | none => S.fail "restore: no such mark"
     | none => S.fail "restore: unreadable"
   | "u" :: kind :: rest =>
-    let S := { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), splices := [] }
+    let S := { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), splices := [], inverses := [] }
     match S.assume, rest with
     | true, [a, b] =>
       match a.toNat?, b.toNat? with

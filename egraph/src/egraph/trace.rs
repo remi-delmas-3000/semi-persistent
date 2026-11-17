@@ -288,6 +288,22 @@ where
         b: Cfg::G,
         just: Option<Justification<Cfg::G>>,
     ) {
+        if self.trace.is_none() {
+            return;
+        }
+        // A law step cancels inverse pairs among the arguments of either node.
+        if matches!(
+            just,
+            Some(
+                Justification::Build { .. }
+                    | Justification::Normalize { .. }
+                    | Justification::InverseCancel { .. }
+                    | Justification::Congruence { .. }
+            )
+        ) {
+            self.trace_node_inverses(a);
+            self.trace_node_inverses(b);
+        }
         let Some(mut t) = self.trace.take() else {
             return;
         };
@@ -401,6 +417,57 @@ where
             .repr_id(root)
             .is_some_and(|repr| self.classes.atomic(repr));
         [l, r, flag(!unit && (atomic || self.node_op(r) != op))]
+    }
+
+    /// `j m`: inverse witnesses for the next line. For each argument class in
+    /// `classes` of an application of `op`, the node `m = inv(x)` of that
+    /// class's root `x`, when it exists: a class that holds such a node cancels
+    /// against `x` without any argument being an inverse application. One
+    /// hash-cons probe per class.
+    pub(crate) fn trace_inverses(&mut self, op: Cfg::O, classes: impl IntoIterator<Item = Cfg::G>) {
+        if self.trace.is_none() {
+            return;
+        }
+        let Some(inv) = self.inverse_op(op) else {
+            return;
+        };
+        let mut found: Vec<usize> = Vec::new();
+        for c in classes {
+            let root = self.classes.find_const(c);
+            if let Some(n) = self.nodes.plain1.probe(&inv, &[root])
+                && !found.contains(&n.to_usize())
+            {
+                found.push(n.to_usize());
+            }
+        }
+        if let Some(t) = self.trace.as_mut() {
+            for n in found {
+                let _ = writeln!(t.out, "j {n}");
+            }
+        }
+    }
+
+    /// `j m` for each inverse node of `nodes`.
+    pub(crate) fn trace_inverse_nodes(&mut self, nodes: &[Cfg::G]) {
+        if let Some(t) = self.trace.as_mut() {
+            for n in nodes {
+                let _ = writeln!(t.out, "j {}", n.to_usize());
+            }
+        }
+    }
+
+    /// The inverse witnesses of an application `node`'s own arguments.
+    fn trace_node_inverses(&mut self, node: Cfg::G) {
+        if self.trace.is_none() || self.get_lit_val(node).is_some() {
+            return;
+        }
+        let op = self.node_op(node);
+        if self.inverse_op(op).is_none() {
+            return;
+        }
+        let mut kids: Vec<Cfg::G> = Vec::new();
+        self.for_each_child(node, |c, _| kids.push(c));
+        self.trace_inverses(op, kids);
     }
 
     /// The next merge is a completion merge with these witnesses: the line
