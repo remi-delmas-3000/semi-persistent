@@ -886,9 +886,11 @@ def lawNormP (S : St P) (f : String) (x : Nat) (peak : Bool := false) :
       if q'.isNone then return (S, none)
   return (S, some (cur, pf))
 
-/-- `congStep`, and when it gives no step for an operator with an inverse or
-a nilpotent law: both nodes reduced by those laws, then `congStep`. -/
-def congStepL (S : St P) (f : String) (a b : Nat) (peak : Bool := false) : St P × Pf :=
+/-- A step for `a = b` under `f`'s associativity, commutativity, idempotence
+and unit, by the first of these that applies: `congStep`; all of one node's
+arguments in the other's class; one node's arguments each standing for a
+class, named by a plain member. -/
+def congStepC (S : St P) (f : String) (a b : Nat) : St P × Pf :=
   let (S, p) := congStep S f a b
   if p.isSome then (S, p)
   else
@@ -938,6 +940,13 @@ def congStepL (S : St P) (f : String) (a b : Nat) (peak : Bool := false) : St P 
   else
   let (S, p) := viaPlain S b a
   if p.isSome then (let (S, q) := symmP S b a p; (S, q))
+  else (S, none)
+
+/-- `congStepC`, and when it gives no step for an operator with an inverse or
+a nilpotent law: both nodes reduced by those laws, then `congStepC`. -/
+def congStepL (S : St P) (f : String) (a b : Nat) (peak : Bool := false) : St P × Pf :=
+  let (S, p) := congStepC S f a b
+  if p.isSome then (S, p)
   else
     let laws := match S.prog.opDecl? f with
       | some d => d.inverse.isSome || d.nilpotent.isSome
@@ -948,7 +957,7 @@ def congStepL (S : St P) (f : String) (a b : Nat) (peak : Bool := false) : St P 
       | (S, some (ta, pa)) =>
         match lawNormP S f b with
         | (S, some (tb, pb)) =>
-          let (S, p) := congStep S f ta tb
+          let (S, p) := congStepC S f ta tb
           let (S, q) := transP S a tb pa p
           let (S, pb') := symmP S b tb pb
           transP S a b q pb'
