@@ -505,12 +505,37 @@ def rewrite (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List N
       | none => throw s!"completion: rule does not apply | rule {done.size}: left side {ls} as classes {lc}, monomial {m} as classes {classesOf S m}"
     | _ => throw "completion: rule of another operator"
 
+/-- The table's application of `f` to the arguments `m`, in the table's
+order, if it holds one. -/
+def nodeOfArgs (S : St P) (f : String) (m : List Nat) : Option Nat :=
+  if m.isEmpty then none else S.index[Node.app f (m.mergeSort (· ≤ ·))]?
+
+/-- `y` is the unit's node, or an application of `f` in the unit's class. -/
+def unitLike (S : St P) (f : String) (y : Nat) : Bool :=
+  match S.unit f with
+  | some u => y == u || (S.fd y == S.fd u && (match S.defOf y with
+      | some (.app g _) => g == f
+      | _ => false))
+  | none => false
+
 /-- The monomial `m` has the value of node `t`: it is `t`'s arguments, or it
 is the one class of `t` (a result of one argument is that argument's class,
 whose root can itself be an application of `f`). -/
 def reaches (S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (t : Nat) : Bool :=
   let c := classesOf S (lawReduce S f m)
-  c == classesOf S (lawReduce S f (monomial S f W t)) || c == [S.fd t]
+  c == classesOf S (lawReduce S f (monomial S f W t)) || c == [S.fd t] ||
+    -- The engine builds the node of the result: when the table holds the
+    -- application of `f` to these arguments, the result is that node's class.
+    -- The node is looked up before inverse pairs are cancelled, and with the
+    -- arguments of the unit's class that are no application of `f` kept: the
+    -- replayer can hold such an argument in the unit's class before the
+    -- engine does.
+    (match nodeOfArgs S f (lawReduce S f m (inverse := false)) with
+      | some x => S.fd x == S.fd t
+      | none => false) ||
+    (match nodeOfArgs S f (m.filter fun y => !(unitLike S f y)) with
+      | some x => S.fd x == S.fd t
+      | none => false)
 
 /-- The splice witnesses a completion event shares: the applications of `f`
 nested in the arguments of the nodes it names. -/
@@ -644,7 +669,7 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
     let (mA', tA) ← rewrite S R f W left false #[] w.postA
     let (mB', tB) ← rewrite S R f W right false #[] w.postB
     unless reaches S f W mA' a && reaches S f W mB' b do
-      throw s!"completion: normal form differs | after cancellation: left {left} right {right}, side A {mA'} as classes {classesOf S (lawReduce S f mA')}, side B {mB'} as classes {classesOf S (lawReduce S f mB')}"
+      throw s!"completion: normal form differs | after cancellation: left {left} right {right}, side A {mA'} as classes {classesOf S (lawReduce S f mA')}, side B {mB'} as classes {classesOf S (lawReduce S f mB')}, without inverse cancellation {lawReduce S f mB' (inverse := false)} roots {(lawReduce S f mB' (inverse := false)).map S.fd}"
     -- What side A loses: its arguments that are not in `left`.
     let gone := left.foldl (fun m x => m.erase x) mA
     pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inr mA },
@@ -961,7 +986,37 @@ def congStepC (S : St P) (f : String) (a b : Nat) : St P × Pf :=
   else
   let (S, p) := viaPlain S b a
   if p.isSome then (let (S, q) := symmP S b a p; (S, q))
-  else (S, none)
+  else
+    -- `a`'s arguments, without the unit's, are the arguments of a node of the
+    -- table in `b`'s class (or the same with `a`, `b` exchanged).
+    let viaNode (S : St P) (x other : Nat) : St P × Pf :=
+      match nodeOfArgs S f ((kview S f x).filter fun y => some (S.fd y) != u) with
+      | some n =>
+        if n != x && S.fd n == S.fd other then
+          let (S, p1) := congStep S f x n
+          if p1.isNone then (S, none)
+          else
+            let (S, p2) := eqP S n other
+            transP S x other p1 p2
+        else (S, none)
+      | none => (S, none)
+    let (S, p) := viaNode S a b
+    if p.isSome then (S, p)
+    else
+      let (S, p) := viaNode S b a
+      if p.isSome then (let (S, q) := symmP S b a p; (S, q))
+      else
+        -- The same with only the unit's node dropped from `a`'s arguments.
+        match nodeOfArgs S f ((kview S f a).filter fun y => some y != S.unit f) with
+        | some n =>
+          if n != a && S.fd n == S.fd b then
+            let (S, p1) := congStep S f a n
+            if p1.isNone then (S, none)
+            else
+              let (S, p2) := eqP S n b
+              transP S a b p1 p2
+          else (S, none)
+        | none => (S, none)
 
 /-- `congStepC`, and when it gives no step for an operator with an inverse or
 a nilpotent law: both nodes reduced by those laws, then `congStepC`. -/
