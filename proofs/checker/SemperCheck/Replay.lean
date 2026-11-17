@@ -496,7 +496,16 @@ structure Chain where
   start : Nat ⊕ List Nat
   first : List Nat
   steps : Array Rewrote
-  target : Nat
+  target : Nat ⊕ List Nat
+
+/-- The derivations of a critical pair: each side from the peak; with a
+cancellation, each side first to its monomial before it, then `left`, `right`
+(what stays of each side) and `common` (what both lose), then each side from
+what stays. -/
+structure PeakPlan where
+  a : Chain
+  b : Chain
+  cancel : Option (List Nat × List Nat × List Nat × Chain × Chain) := none
 
 /-- `i a b n l1 r1 ..`: node `n`, a member of one merged class, rewrites by
 the rules to the other merged node. -/
@@ -510,7 +519,7 @@ def interReduce (S : St) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Exc
   let first := lawReduce S f (as.flatMap (expand S W))
   let (m, steps) ← rewrite S f W first false #[] rules
   unless reaches S f W m t do throw "completion: normal form differs"
-  pure { f, start := .inl n, first, steps, target := t }
+  pure { f, start := .inl n, first, steps, target := .inl t }
 
 /-- The witnesses of a critical-pair merge (`p` line). -/
 structure Peak where
@@ -553,7 +562,7 @@ occurrence of `keep`'s class), which the operator's `:cancellative` law
 allows when both sides stay non-empty or the operator has a unit; each side
 then rewrites by its remaining rules. -/
 def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) :
-    Except String (Option (Chain × Chain)) := do
+    Except String PeakPlan := do
   let named := a :: b :: (w.preA ++ w.preB ++ w.postA ++ w.postB).flatMap fun (l, r, _) => [l, r]
   -- The operator: that of the first rule, else of a merged node.
   let some f := (named.reverse.findSome? fun x =>
@@ -569,29 +578,36 @@ def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) :
   let firstB := if w.reduceB then lawReduce S f peak (inverseFirst := inverseFirst) else peak
   let (mA, sA) ← rewrite S f W peak true #[] w.preA
   let (mB, sB) ← rewrite S f W firstB true #[] w.preB
-  let (mA, mB) ← if w.cancel then do
-      -- Declared, or a consequence of the group laws (`:inverse`).
-      unless ((S.P.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
-        throw "completion: operator is not cancellative"
-      let (mA, mB) := (lawReduce S f mA, lawReduce S f mB)
-      let (ca, cb) := (classesOf S mA, classesOf S mB)
-      let keep := w.keep.map S.fd
-      -- The common part: each class, as many times as both sides hold it.
-      let common := ca.eraseDups.map fun c =>
-        (c, min (countOf c ca) (countOf c cb) - (if some c == keep then 1 else 0))
-      let drop (m : List Nat) := common.foldl (fun m (c, k) => dropClass S c k m) m
-      let (mA, mB) := (drop mA, drop mB)
-      unless (!mA.isEmpty && !mB.isEmpty) || (S.unit f).isSome do
-        throw "completion: cancellation empties a side"
-      pure (mA, mB)
-    else pure (mA, mB)
-  let (mA, sA) ← rewrite S f W mA false sA w.postA
-  let (mB, sB) ← rewrite S f W mB false sB w.postB
-  unless reaches S f W mA a && reaches S f W mB b do throw "completion: normal form differs"
-  -- The kernel has no cancellation step: such a merge gets no kernel steps.
-  if w.cancel then pure none
-  else pure (some ({ f, start := .inr peak, first := peak, steps := sA, target := a },
-                   { f, start := .inr peak, first := firstB, steps := sB, target := b }))
+  if w.cancel then
+    -- Declared, or a consequence of the group laws (`:inverse`).
+    unless ((S.P.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
+      throw "completion: operator is not cancellative"
+    let (mA, mB) := (lawReduce S f mA, lawReduce S f mB)
+    let (ca, cb) := (classesOf S mA, classesOf S mB)
+    let keep := w.keep.map S.fd
+    -- The common part: each class, as many times as both sides hold it.
+    let common := ca.eraseDups.map fun c =>
+      (c, min (countOf c ca) (countOf c cb) - (if some c == keep then 1 else 0))
+    let drop (m : List Nat) := common.foldl (fun m (c, k) => dropClass S c k m) m
+    let (left, right) := (drop mA, drop mB)
+    unless (!left.isEmpty && !right.isEmpty) || (S.unit f).isSome do
+      throw "completion: cancellation empties a side"
+    let (mA', tA) ← rewrite S f W left false #[] w.postA
+    let (mB', tB) ← rewrite S f W right false #[] w.postB
+    unless reaches S f W mA' a && reaches S f W mB' b do throw "completion: normal form differs"
+    -- What side A loses: its arguments that are not in `left`.
+    let gone := left.foldl (fun m x => m.erase x) mA
+    pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inr mA },
+           b := { f, start := .inr peak, first := firstB, steps := sB, target := .inr mB },
+           cancel := some (left, right, gone,
+             { f, start := .inr left, first := left, steps := tA, target := .inl a },
+             { f, start := .inr right, first := right, steps := tB, target := .inl b }) }
+  else
+    let (mA, sA) ← rewrite S f W mA false sA w.postA
+    let (mB, sB) ← rewrite S f W mB false sB w.postB
+    unless reaches S f W mA a && reaches S f W mB b do throw "completion: normal form differs"
+    pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inl a },
+           b := { f, start := .inr peak, first := firstB, steps := sB, target := .inl b } }
 
 /-- `v a b n1 n2`: a consequence of the group law of an operator `f` with
 `:inverse g`, where `n1 = g(x1)` and `n2 = g(x2)` (`n2` is `n1` when one node
@@ -1002,7 +1018,7 @@ target, and the start's node. Each rewrite of `q` copies of `l` by `r` is
 three `cong` steps: the monomial is `f(l, .., l, rest)` by `f`'s laws, which
 is `f(r, .., r, rest)` argument by argument from `l = r`, which is the next
 monomial by `f`'s laws. The nodes on the way join the start's class. -/
-def emitChain (S : St) (c : Chain) : St × Option (Nat × Pf) := Id.run do
+def emitChain (S : St) (c : Chain) : St × Option (Nat × Nat × Pf) := Id.run do
   let f := c.f
   let mut S := S
   let start ← match c.start with
@@ -1047,8 +1063,14 @@ def emitChain (S : St) (c : Chain) : St × Option (Nat × Pf) := Id.run do
     S := S'; pf := pf'
     let (S', pf') := hop S t2 t3 pf
     S := S'; cur := t3; pf := pf'
-  let (S', pf') := hop S cur c.target pf
-  return (S', some (start, pf'))
+  let target ← match c.target with
+    | .inl n => pure n
+    | .inr m =>
+      match monoNode S f m with
+      | (S', some t) => S := S'; pure t
+      | (S', none) => return (S', none)
+  let (S', pf') := hop S cur target pf
+  return (S', some (start, target, pf'))
 
 /-- The kernel steps of a `t` line, whose check passed: the term as the
 program writes it (its arguments' own terms as arguments) is node `i`. -/
@@ -1507,12 +1529,12 @@ def stepCore (S : St) (line : String) : St :=
       | .ok c =>
         let (S, r) := emitChain S c
         match r with
-        | some (start, pf) =>
-          -- `n` is the target; `n` is in the class of the other merged node.
-          let other := if c.target == a then b else a
+        | some (start, target, pf) =>
+          -- The start is in the class of the merged node that is not the target.
+          let other := if target == a then b else a
           let (S, q) := eqP S other start
-          let (S, q) := transP S other c.target q pf
-          S.mergeBy other c.target q
+          let (S, q) := transP S other target q pf
+          S.mergeBy other target q
         | none => S.merge a b
       | .error e => S.fail e
     | _, _, _, _ => S.fail "completion: unreadable"
@@ -1528,17 +1550,59 @@ def stepCore (S : St) (line : String) : St :=
         | none, some e => e
         | none, none => .error "completion: unreadable"
       match plan with
-      | .ok (some (ca, cb)) =>
-        -- Both sides start at the peak's term: `a` is it, and it is `b`.
-        let (S, ra) := emitChain S ca
-        let (S, rb) := emitChain S cb
-        match ra, rb with
-        | some (start, pa), some (_, pb) =>
-          let (S, q) := symmP S start a pa
-          let (S, q) := transP S a b q pb
-          S.mergeBy a b q
-        | _, _ => S.merge a b
-      | .ok none => S.merge a b
+      | .ok pl =>
+        -- Both sides start at the peak's term.
+        let (S, ra) := emitChain S pl.a
+        let (S, rb) := emitChain S pl.b
+        match ra, rb, pl.cancel with
+        | some (start, ta, pa), some (_, tb, pb), none =>
+          -- `a` is the peak's term, which is `b`.
+          let (S, q) := symmP S start ta pa
+          let (S, q) := transP S ta tb q pb
+          S.mergeBy ta tb q
+        | some (start, ta, pa), some (_, tb, pb), some (left, right, gone, ca, cb) =>
+          -- Each side's monomial before the cancellation is `f(kept, lost)`;
+          -- the two are equal, so the `cancel` step equates what they keep,
+          -- and each side goes on from there.
+          let f := pl.a.f
+          let (S, nl) := monoNode S f left
+          let (S, nr) := monoNode S f right
+          let (S, ng) := monoNode S f gone
+          match nl, nr, ng with
+          | some nl, some nr, some ng =>
+            if gone.isEmpty then
+              -- Nothing is lost: the two sides are what they were.
+              let (S, q) := symmP S start ta pa
+              let (S, q) := transP S ta tb q pb
+              let S := S.mergeBy ta tb q
+              let (S, r1) := emitChain S ca
+              let (S, r2) := emitChain S cb
+              match r1, r2 with
+              | some (_, _, _), some (_, _, _) => let (S, q) := eqP S a b; S.mergeBy a b q
+              | _, _ => S.merge a b
+            else
+              let (S, la) := appNode S f [nl, ng]
+              let (S, lb) := appNode S f [nr, ng]
+              match la, lb with
+              | some la, some lb =>
+                let (S, p1) := congStepL S f la ta
+                let (S, p2) := congStepL S f tb lb
+                let (S, q) := symmP S start ta pa
+                let (S, q) := transP S la start p1 q
+                let (S, q) := transP S la tb q pb
+                let (S, q) := transP S la lb q p2
+                match stepOf S la q with
+                | (S, some st) =>
+                  let (S, c) := emit S (.cancel f st nl nr ng) nl nr
+                  let S := S.mergeBy nl nr (some (some c))
+                  let (S, _) := emitChain S ca
+                  let (S, _) := emitChain S cb
+                  let (S, q) := eqP S a b
+                  S.mergeBy a b q
+                | (S, none) => S.merge a b
+              | _, _ => S.merge a b
+          | _, _, _ => S.merge a b
+        | _, _, _ => S.merge a b
       | .error e => S.fail e
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
