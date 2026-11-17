@@ -259,7 +259,13 @@ def Env.eqn (E : Env) (p q : SExp) : PatM (Pat × Pat) := do
 to exist (no constraint in a model, whose operators are total). -/
 def Env.guard (E : Env) : SExp → PatM (List (Pat × Pat))
   | .list [.atom "=", p, q] => do return [← E.eqn p q]
-  | x => do let _ ← E.pat none x; return []
+  -- A fact that is no equality binds its variables and adds no condition:
+  -- it is kept as the pattern equal to itself, which holds in every model.
+  | x => do
+    let (p, _) ← E.pat none x
+    match p with
+    | .app .. => return [(p, p)]
+    | _ => return []
 
 /-- Gives the pending pairs of variables their sorts, until none changes. -/
 def settle : Nat → PatM Unit

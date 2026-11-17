@@ -1512,7 +1512,8 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 }
             }
             RAtom::Lit { node, .. } => eg.trace_atom(m.get(*node), None),
-            RAtom::Eq(..) | RAtom::EqGlobal(..) => {}
+            // A literal-value binding reads a node the atoms already name.
+            RAtom::Eq(..) | RAtom::EqGlobal(..) | RAtom::LitBind { .. } => {}
             _ => return eg.trace_atom_opaque(),
         }
     }

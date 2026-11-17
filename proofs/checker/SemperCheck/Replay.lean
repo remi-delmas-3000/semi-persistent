@@ -1043,6 +1043,39 @@ def intern (S : St) (d : Def) : St × Nat :=
               plain := (if S.plain.size ≤ t then S.plain ++ Array.replicate (t + 1 - S.plain.size) none
                 else S.plain).setIfInBounds t (if isPlain then some t else none) }, t)
 
+/-- A program term as the kernel interns it, the node it evaluated to, and
+the proof that the two are equal: each argument's term is its node, and `f` of
+the argument terms is the node by `f`'s laws (a nested application of an
+associative operator, which the engine's term builder splices, among them).
+The terms join their nodes' classes. -/
+partial def writtenP (S : St) (t : Term) : St × Option (Nat × Nat × Pf) :=
+  match t with
+  | .lit s v =>
+    match S.index[Def.lit s v]? with
+    | some n => (S, some (n, n, some none))
+    | none => (S, none)
+  | .app f args => Id.run do
+    let some n := eval S t | return (S, none)
+    let mut S := S
+    let mut ws : Array Nat := #[]
+    for a in args do
+      match writtenP S a with
+      | (S', some (w, m, p)) =>
+        S := S'.mergeBy w m p
+        ws := ws.push w
+      | (S', none) => return (S', none)
+    let d := Def.app f ws.toList
+    let w ← match S.index[d]? with
+      | some w => pure w
+      | none =>
+        if wellSorted S d then
+          let (S', w) := intern S d
+          S := S'
+          pure w
+        else return (S, none)
+    let (S', p) := congStepL S f w n
+    return (S'.mergeBy w n p, some (w, n, p))
+
 /-- The node of a monomial: `f` applied to its arguments, or the unit for
 none. -/
 def monoNode (S : St) (f : String) (m : List Nat) (literal : Nat := 0) : St × Option Nat :=
@@ -1188,6 +1221,16 @@ partial def Pat.toTerm? : Pat → Option Term
   | .lit s v => some (.lit s v)
   | .app f ps => (ps.mapM Pat.toTerm?).map (.app f)
 
+/-- The operator and the number of arguments of the first line a pattern's
+match writes: that of its first innermost application or literal. -/
+partial def firstLine : Pat → String × Nat
+  | .var _ => ("", 0)
+  | .lit _ _ => ("#lit", 0)
+  | .app f ps =>
+    match ps.find? (fun q => match q with | .var _ => false | _ => true) with
+    | some q => firstLine q
+    | none => (f, ps.length)
+
 /-- The instance `f(ic)` of an application pattern, joined to node `n`. -/
 def instOf (f : String) (ic : List Nat) (n : Nat) : WalkM Nat := do
   let d := Def.app f ic
@@ -1230,9 +1273,12 @@ partial def walkQ (p : Pat) : WalkM (Nat × Nat) := do
     -- the engine bound it to the name's node and wrote no line for it.
     let groundNode (q : Pat) : WalkM (Option Nat) := do
       let w ← get
+      -- The lines come arguments first: the next one is for `q`'s first
+      -- innermost application or literal.
       match q, w.atoms with
-      | .app g qs, (_, h, cs) :: _ =>
-        if g == h && cs.length == qs.length then pure none
+      | .app _ _, (_, h, cs) :: _ =>
+        let (g, k) := firstLine q
+        if g == h && cs.length == k then pure none
         else pure ((Pat.toTerm? q).bind (eval w.S))
       | .app _ _, [] => pure ((Pat.toTerm? q).bind (eval w.S))
       | _, _ => pure none
@@ -1427,18 +1473,22 @@ def stepCore (S : St) (line : String) : St :=
       match S.declAt[o]? with
       | some (.axiom l r) =>
         if eval S l == some a && eval S r == some b then
-          match internT S l, internT S r with
-          | some tl, some tr =>
-            -- `a` is the left term, which the `union` equates to the right
-            -- term, which is `b`.
-            let (S, ax) := emit S (.axiom o tl tr) tl tr
-            let (S, pl) := termP S tl a
-            let (S, pr) := termP S tr b
-            let (S, q) := symmP S tl a pl
-            let (S, q) := transP S a tr q (some (some ax))
-            let (S, q) := transP S a b q pr
-            S.mergeBy a b q
-          | _, _ => S.merge a b
+          match writtenP S l with
+          | (S, some (tl, _, pl)) =>
+            match writtenP S r with
+            | (S, some (tr, _, pr)) =>
+              -- `a` is the left term, which the `union` equates to the right
+              -- term, which is `b`.
+              let (S, ax) := emit S (.axiom o tl tr) tl tr
+              let (S, q1) := eqP S a tl
+              let _ := pl
+              let _ := pr
+              let (S, q) := transP S a tr q1 (some (some ax))
+              let (S, q2) := eqP S tr b
+              let (S, q) := transP S a b q q2
+              S.mergeBy a b q
+            | (S, none) => S.merge a b
+          | (S, none) => S.merge a b
         else S.fail "union: its terms differ"
       | _ => S.fail "union: no such command"
     | _, _, _ => S.fail "union: unreadable"
@@ -1540,18 +1590,17 @@ def stepCore (S : St) (line : String) : St :=
           if S.fd a == S.fd b then
             let S := { S with proved := o :: S.proved }
             -- The kernel's goal step: left term = `a` = `b` = right term.
-            match internT S l, internT S r with
-            | some tl, some tr =>
-              let (S, pl) := termP S tl a
-              let (S, pab) := eqP S a b
-              let (S, pr) := termP S tr b
-              let (S, qr) := symmP S tr b pr
-              let (S, q) := transP S tl b pl pab
-              let (S, q) := transP S tl tr q qr
-              match stepOf S tl q with
-              | (S, some st) => { S with goalSteps := (o, st) :: S.goalSteps }
+            match writtenP S l with
+            | (S, some (tl, _, _)) =>
+              match writtenP S r with
+              | (S, some (tr, _, _)) =>
+                -- The terms have joined their nodes' classes.
+                let (S, q) := eqP S tl tr
+                match stepOf S tl q with
+                | (S, some st) => { S with goalSteps := (o, st) :: S.goalSteps }
+                | (S, none) => S
               | (S, none) => S
-            | _, _ => S
+            | (S, none) => S
           else S.fail "goal: not in one class"
         else S.fail "goal: its terms differ"
       | _ => S.fail "goal: no such command"
