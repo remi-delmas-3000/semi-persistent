@@ -230,13 +230,19 @@ recognizable, and reduces it by the operator's laws after each rewrite. -/
 /-- A monomial reduced by `f`'s laws: inverse pairs and the unit's class
 removed, and each class kept once (ACI) or its count modulo `n`
 (`:nilpotent n`). -/
-def lawReduce (S : St) (f : String) (atoms : List Nat) : List Nat :=
+def lawReduce (S : St) (f : String) (atoms : List Nat) (inverse : Bool := true)
+    (inverseFirst : Bool := false) : List Nat :=
   let d := S.P.opDecl? f
   let u := (S.units[f]?).map S.fd
-  let nonUnit : List Nat := atoms.filter fun a => some (S.fd a) != u
-  let live : List Nat := match d.bind (fun d => d.inverse) with
-    | some inv => cancelInverse S inv u nonUnit
-    | none => nonUnit
+  let dropUnit (xs : List Nat) : List Nat := xs.filter fun a => some (S.fd a) != u
+  -- The engine drops the unit's arguments before it cancels inverse pairs,
+  -- except in a group-law critical pair, whose peak holds the pair it cancels
+  -- even when one of the two is in the unit's class (`inverseFirst`).
+  let live : List Nat := match inverse, d.bind (fun d => d.inverse) with
+    | true, some inv =>
+      if inverseFirst then dropUnit (cancelInverse S inv none atoms)
+      else cancelInverse S inv u (dropUnit atoms)
+    | _, _ => dropUnit atoms
   -- Each class with its atoms, in order of first occurrence.
   let groups : Array (Nat × Array Nat) := live.foldl (fun groups a =>
     let c := S.fd a
@@ -263,17 +269,20 @@ def dropClass (S : St) (c : Nat) : Nat → List Nat → List Nat
 
 /-- The monomial `m` with the classes `l` replaced by the atoms `r`, as many
 times as `m` holds `l` (once under ACI or a nilpotent law, where a class's
-count is bounded). `none` when `m` does not hold `l`. -/
-def applyRule (S : St) (f : String) (m : List Nat) (l : List Nat) (r : List Nat) : Option (List Nat) :=
+count is bounded, and once when `once` is set). `none` when `m` does not hold `l`. -/
+def applyRule (S : St) (f : String) (m : List Nat) (l : List Nat) (r : List Nat) (once : Bool := false) :
+    Option (List Nat) :=
   let mc := classesOf S m
   let distinct := l.eraseDups
   if l.isEmpty || !distinct.all (fun c => countOf c mc ≥ countOf c l) then none
   else
     let bounded := S.P.kind f == .aci || ((S.P.opDecl? f).bind (·.nilpotent)).isSome
-    let q := if bounded then 1
+    let q := if bounded || once then 1
       else distinct.foldl (fun q c => min q (countOf c mc / countOf c l)) (mc.length + 1)
     let rest := distinct.foldl (fun m c => dropClass S c (q * countOf c l) m) m
-    some (lawReduce S f (rest ++ (List.replicate q r).flatten))
+    -- Between rewrites the engine clamps counts and drops the unit; it cancels
+    -- inverse pairs on the normal form only.
+    some (lawReduce S f (rest ++ (List.replicate q r).flatten) (inverse := false))
 
 /-- The arguments of `x` as a monomial of `f`: its own, if it is an
 application of `f`, else `x` itself. -/
@@ -285,7 +294,7 @@ def monomial (S : St) (f : String) (W : List (Nat × List Nat)) (x : Nat) : List
   | _ => expand S W x
 
 /-- Rewrites `m` by the rules `rules`, in order. -/
-def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) :
+def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false) :
     List (Nat × Nat × Bool) → Except String (List Nat)
   | [] => pure m
   | (l, r, atom) :: rest => do
@@ -294,8 +303,8 @@ def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) :
     | some (.app g ls) =>
       if g != f then throw "completion: rule of another operator"
       let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)))
-      match applyRule S f m lc (if atom then [r] else monomial S f W r) with
-      | some m' => rewrite S f W m' rest
+      match applyRule S f m lc (if atom then [r] else monomial S f W r) once with
+      | some m' => rewrite S f W m' once rest
       | none => throw "completion: rule does not apply"
     | _ => throw "completion: rule of another operator"
 
@@ -329,7 +338,7 @@ def interReduce (S : St) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Exc
     else throw "completion: start in neither class"
   -- A monomial is a node's arguments, each one class, as the engine reads it.
   let W : List (Nat × List Nat) := []
-  let m ← rewrite S f W (lawReduce S f (as.flatMap (expand S W))) rules
+  let m ← rewrite S f W (lawReduce S f (as.flatMap (expand S W))) false rules
   unless reaches S f W m t do throw "completion: normal form differs"
 
 /-- The witnesses of a critical-pair merge (`p` line). -/
@@ -371,7 +380,7 @@ peak reduced by the laws, with `reduceB`) and rewrite it by their rules; with
 occurrence of `keep`'s class), which the operator's `:cancellative` law
 allows when both sides stay non-empty or the operator has a unit; each side
 then rewrites by its remaining rules. -/
-def peakMerge (S : St) (a b : Nat) (w : Peak) : Except String Unit := do
+def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) : Except String Unit := do
   let named := a :: b :: (w.preA ++ w.preB ++ w.postA ++ w.postB).flatMap fun (l, r, _) => [l, r]
   -- The operator: that of the first rule, else of a merged node.
   let some f := (named.reverse.findSome? fun x =>
@@ -382,8 +391,11 @@ def peakMerge (S : St) (a b : Nat) (w : Peak) : Except String Unit := do
   -- A monomial is a node's arguments, each one class, as the engine reads it.
   let W : List (Nat × List Nat) := []
   let peak := w.peak.flatMap (expand S W)
-  let mA ← rewrite S f W peak w.preA
-  let mB ← rewrite S f W (if w.reduceB then lawReduce S f peak else peak) w.preB
+  -- A critical pair's own rules rewrite the peak once each; the normal form's
+  -- rules, after it, rewrite every copy.
+  let mA ← rewrite S f W peak true w.preA
+  let mB ← rewrite S f W (if w.reduceB then lawReduce S f peak (inverseFirst := inverseFirst) else peak)
+    true w.preB
   let (mA, mB) ← if w.cancel then do
       -- Declared, or a consequence of the group laws (`:inverse`).
       unless ((S.P.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
@@ -400,8 +412,8 @@ def peakMerge (S : St) (a b : Nat) (w : Peak) : Except String Unit := do
         throw "completion: cancellation empties a side"
       pure (mA, mB)
     else pure (mA, mB)
-  let mA ← rewrite S f W mA w.postA
-  let mB ← rewrite S f W mB w.postB
+  let mA ← rewrite S f W mA false w.postA
+  let mB ← rewrite S f W mB false w.postB
   unless reaches S f W mA a && reaches S f W mB b do throw "completion: normal form differs"
 
 /-- `v a b n1 n2`: a consequence of the group law of an operator `f` with
@@ -734,9 +746,9 @@ def step (S : St) (line : String) : St :=
   | "p" :: a :: b :: rest =>
     match a.toNat?, b.toNat?, (rest.mapM (fun (x : String) => x.toNat?)).bind Peak.read with
     | some a, some b, some w =>
-      match peakMerge S a b w with
-      | .ok () => S.merge a b
-      | .error e => S.fail e
+      match peakMerge S a b w, peakMerge S a b w (inverseFirst := true) with
+      | .ok (), _ | _, .ok () => S.merge a b
+      | .error e, _ => S.fail e
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
     match d.toNat? with
