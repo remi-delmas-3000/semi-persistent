@@ -1,5 +1,5 @@
 import SemperCheck.Parse
-import SemperCheck.Kernel
+import SemperCheck.Core
 import Std.Data.HashMap
 
 /-!
@@ -7,13 +7,16 @@ import Std.Data.HashMap
 
 Reads the engine's event stream in order (`proofs/checker/REPLAY.md`) and
 checks each event against its own classes: a table of node definitions and a
-union-find over node ids. A check is a fixed number of class lookups, a sort
-of a node's arguments by class, or the instantiation of a pattern; none
-searches.
+union-find over node ids.
 
-This file is the executable replayer. It is not yet covered by a soundness
-theorem: what it reports as proved is a measurement of the design, not a
-checked proof.
+The table, the classes and the proved `check-eq` are a `Core P`
+(`Core.lean`), which only its proved operations build: a node enters the table
+if it is well-sorted, a kernel step's conclusion is recorded if the kernel's
+check accepts the step, and two classes are joined only by a link that a
+recorded conclusion proves. Each event's check is the construction of the
+kernel steps that justify its merge, from the event's witnesses and the
+current classes; a merge whose steps the kernel rejects is not applied.
+`ReplaySound.lean` states what follows for the state after any stream.
 -/
 
 namespace SemperCheck.Replay
@@ -21,83 +24,41 @@ namespace SemperCheck.Replay
 open SemperCheck
 
 /-- What a node id stands for. -/
-inductive Def where
-  | lit (s v : String)
-  | app (f : String) (args : List Nat)
-  deriving Inhabited, BEq, Hashable
-
-/-- The root of `i`'s class. A non-root's parent is a smaller id, so the walk
-ends without a step count. -/
-def find (parent : Array Nat) (i : Nat) : Nat :=
-  match parent[i]? with
-  | some p => if _h : p < i then find parent p else i
-  | none => i
-termination_by i
-
-def grow (p : Array Nat) (n : Nat) : Array Nat := Id.run do
-  let mut p := p
-  for i in [p.size:n] do p := p.push i
-  return p
-
-/-- Merges the classes of `a` and `b`: the larger root points to the smaller. -/
-def union (parent : Array Nat) (a b : Nat) : Array Nat :=
-  let ra := find parent a
-  let rb := find parent b
-  if ra == rb then parent
-  else
-    let lo := min ra rb
-    let hi := max ra rb
-    (grow parent (hi + 1)).setIfInBounds hi lo
+abbrev Def := Node
 
 abbrev Spell := Std.HashMap (String × List Nat) Nat
 
-structure St where
-  P : Program
-  declAt : Std.HashMap Nat Decl
-  /-- The node table: every node the stream defined, each definition once.
-  A table id is what the classes, the spelling table and every check use. -/
-  defs : Array (Option Def) := #[]
-  /-- The table id of each definition. -/
-  index : Std.HashMap Def Nat := {}
+structure St (P : Program) where
+  declAt : Std.HashMap Nat Decl := {}
+  /-- The node table, the kernel conclusions, the classes with the step that
+  proves each link, the classes at each mark and at the round's start, and
+  the `check-eq` proved. -/
+  core : Core P := Core.new P
   /-- The table id of each of the engine's node ids. A restore discards the
   engine's ids past the mark, and the engine reuses them; the table keeps its
   nodes. -/
   cid : Array (Option Nat) := #[]
-  parent : Array Nat := #[]
-  /-- The classes at the start of the completion round (`o` line): the round's
-  merges are computed on them. They refine the current classes. -/
-  roundParent : Array Nat := #[]
   /-- `(f, c1 .. ck) -> id`: the program term `f(c1 .. ck)` evaluated to `id`. -/
   spell : Spell := {}
   /-- The node of each operator's unit (`z` lines). -/
   units : Std.HashMap String Nat := {}
   /-- Each literal's node, checked against its definition on use. -/
   lits : Std.HashMap (String × String) Nat := {}
-  /-- Each mark: the number of definitions, the classes and the spelling
-  table at the mark. -/
-  snaps : Array (Nat × Array Nat × Array (Option Nat) × Array (Option Nat) × Spell) := #[]
+  /-- Each mark: the number of engine ids, the plain members and the spelling
+  table at the mark. The classes at the mark are in `core`. -/
+  snaps : Array (Nat × Array (Option Nat) × Spell) := #[]
   /-- For a class's root, a member that is no application of an associative
   operator, when the class has one. A monomial's term names a class by such a
   member: the kernel reads through an application of the operator, and would
   read the class's root as its arguments. -/
   plain : Array (Option Nat) := #[]
-  /-- The kernel steps emitted so far, and what each concludes. The kernel
-  (`Kernel.lean`, proved by `goal_sound`) checks them after the replay. -/
-  steps : Array Step := #[]
-  concl : Array (Nat × Nat) := #[]
-  /-- For each node with a parent, the step that proves it equal to its
-  parent, or `none` for a link the replayer has no kernel step for. -/
-  proof : Array (Option Nat) := #[]
-  roundProof : Array (Option Nat) := #[]
   /-- For a node, the last program term that evaluated to it: the term's
   table id and the proof that the term is the node. -/
   lastTerm : Std.HashMap Nat (Nat × Option (Option Nat)) := {}
   /-- For a program term's table id, the node it evaluated to and the proof. -/
   byTerm : Std.HashMap Nat (Nat × Option (Option Nat)) := {}
-  /-- `(o, s)`: step `s` proves the `check-eq` at offset `o`. -/
-  goalSteps : List (Nat × Nat) := []
-  /-- The kind of the line being replayed, and the merges that got no kernel
-  step, by kind. -/
+  /-- The kind of the line being replayed, and the merges whose kernel steps
+  were not found or not accepted, by kind. None of them is applied. -/
   cur : String := ""
   nUnjustified : Nat := 0
   unjustified : Std.HashMap String Nat := {}
@@ -111,31 +72,50 @@ structure St where
   atoms : Array (Nat × String × List Nat) := #[]
   /-- The right-hand side's nodes; `true` marks a `let` name's node. -/
   rhs : List (Nat × Bool) := []
+  /-- The `check-eq` whose two nodes were in one class at their `g` line. -/
   proved : List Nat := []
   events : Nat := 0
   failed : Std.HashMap String Nat := {}
   nFailed : Nat := 0
   lastCause : String := ""
-  /-- Measurement only: apply the merges of `u` lines without a check, to
-  tell a check that fails by itself from one that fails because an earlier
-  merge was not applied. A goal proved this way is not proved. -/
-  assume : Bool := false
   unchecked : Std.HashMap String Nat := {}
+
+variable {P : Program}
+
+instance : Inhabited (St P) := ⟨{}⟩
+
+/-- The program replayed against. -/
+@[reducible] def St.prog (_S : St P) : Program := P
 
 namespace St
 
-def fd (S : St) (i : Nat) : Nat := find S.parent i
+def defs (S : St P) : Array Node := S.core.nodes
 
-def defOf (S : St) (i : Nat) : Option Def := S.defs.getD i none
+def index (S : St P) : Std.HashMap Node Nat := S.core.index
+
+def fd (S : St P) (i : Nat) : Nat := find S.core.parent i
+
+def defOf (S : St P) (i : Nat) : Option Def := S.core.nodes[i]?
 
 /-- The table id of the engine's node `i`. -/
-def tr (S : St) (i : Nat) : Option Nat := S.cid.getD i none
+def tr (S : St P) (i : Nat) : Option Nat := S.cid.getD i none
 
-def node? (S : St) (x : String) : Option Nat := x.toNat?.bind S.tr
+def node? (S : St P) (x : String) : Option Nat := x.toNat?.bind S.tr
 
-def fail (S : St) (cause : String) : St :=
+def fail (S : St P) (cause : String) : St P :=
   { S with failed := S.failed.insert cause (S.failed.getD cause 0 + 1), nFailed := S.nFailed + 1, lastCause := cause,
            splices := [], inverses := [] }
+
+/-- Runs `k` on the checked state, taken out of `S` while `k` runs so that
+its arrays are held once and updated in place. -/
+@[inline] def withCore {α : Type} (S : St P) (k : Core P → Core P × α) : St P × α :=
+  let c := S.core
+  let S := { S with core := Core.new P }
+  let (c, x) := k c
+  ({ S with core := c }, x)
+
+/-- The state with the classes of the round's start as its classes. -/
+def atRound (S : St P) : St P := { S with core := S.core.atRound }
 
 end St
 
@@ -146,58 +126,62 @@ A proof that two nodes are equal is `none` (the replayer has no kernel step),
 
 abbrev Pf := Option (Option Nat)
 
-def emit (S : St) (st : Step) (a b : Nat) : St × Nat :=
-  -- The size is read first: reading it after the push would keep a second
-  -- reference to the array and make the push copy it.
-  let n := S.steps.size
-  ({ S with steps := S.steps.push st, concl := S.concl.push (a, b) }, n)
+/-- Has the kernel check step `st`, and gives its index. The kernel records
+the step's conclusion, or `0 = 0` for a step it rejects. -/
+def emit (S : St P) (st : Step) (_a _b : Nat) : St P × Nat :=
+  S.withCore fun c =>
+    -- The size is read first: reading it after the push would keep a second
+    -- reference to the array and make the push copy it.
+    let n := c.acc.size
+    (c.emit st, n)
 
 /-- `x = y` from `x = y`'s reverse. -/
-def symmP (S : St) (x y : Nat) : Pf → St × Pf
+def symmP (S : St P) (x y : Nat) : Pf → St P × Pf
   | some (some s) => let (S, t) := emit S (.symm s) y x; (S, some (some t))
   | p => (S, p)
 
 /-- `x = z` from `x = y` and `y = z`. -/
-def transP (S : St) (_x _z : Nat) : Pf → Pf → St × Pf
+def transP (S : St P) (_x _z : Nat) : Pf → Pf → St P × Pf
   | some none, q => (S, q)
   | p, some none => (S, p)
   | some (some s), some (some t) =>
     -- The kernel needs the first step to end where the second starts.
-    match S.concl[s]?, S.concl[t]? with
-    | some (a, b), some (c, d) =>
-      if b == c then let (S, u) := emit S (.trans s t) a d; (S, some (some u)) else (S, none)
+    match S.core.acc[s]?, S.core.acc[t]? with
+    | some c, some d =>
+      if c.b == d.a then let (S, u) := emit S (.trans s t) c.a d.b; (S, some (some u)) else (S, none)
     | _, _ => (S, none)
   | _, _ => (S, none)
 
 /-- A step that concludes `x = y`, a reflexivity when they are one node. -/
-def stepOf (S : St) (x : Nat) : Pf → St × Option Nat
+def stepOf (S : St P) (x : Nat) : Pf → St P × Option Nat
   | some (some s) => (S, some s)
   | some none => let (S, s) := emit S (.refl x) x x; (S, some s)
   | none => (S, none)
 
+/-- Points `hi` at `lo`, if step `s` concludes `hi = lo`. -/
+def St.link (S : St P) (hi lo s : Nat) : St P × Bool := S.withCore fun c => c.link hi lo s
+
 /-- The root of `i`'s class and the proof that `i` is it. -/
-partial def findP (S : St) (i : Nat) : St × Nat × Pf :=
-  match S.parent[i]? with
+def findP (S : St P) (i : Nat) : St P × Nat × Pf :=
+  match S.core.parent[i]? with
   | some p =>
-    if p < i then
+    if _h : p < i then
       let (S, r, q) := findP S p
-      match S.proof.getD i none with
+      match S.core.proof.getD i none with
       | some s =>
         let (S, pf) := transP S i r (some (some s)) q
         -- Point `i` at its root, with the proof just composed.
         match pf with
         | some (some t) =>
-          if r != p then
-            ({ S with parent := S.parent.setIfInBounds i r,
-                      proof := S.proof.setIfInBounds i (some t) }, r, pf)
-          else (S, r, pf)
+          if r != p then ((S.link i r t).1, r, pf) else (S, r, pf)
         | _ => (S, r, pf)
       | none => (S, r, none)
     else (S, i, some none)
   | none => (S, i, some none)
+termination_by i
 
 /-- The proof that `x` and `y`, of one class, are equal. -/
-def eqP (S : St) (x y : Nat) : St × Pf :=
+def eqP (S : St P) (x y : Nat) : St P × Pf :=
   if x == y then (S, some none)
   else
     let (S, rx, px) := findP S x
@@ -207,9 +191,14 @@ def eqP (S : St) (x y : Nat) : St × Pf :=
       let (S, qy) := symmP S y ry py
       transP S x y px qy
 
+def St.noStep (S : St P) : St P :=
+  { S with unjustified := S.unjustified.insert S.cur (S.unjustified.getD S.cur 0 + 1),
+           nUnjustified := S.nUnjustified + 1 }
+
 /-- Merges the classes of `a` and `b`, which `pf` proves equal: the link
-between the two roots carries the proof that they are. -/
-def St.mergeBy (S : St) (a b : Nat) (pf : Pf) : St :=
+between the two roots carries the step that proves them equal. Without such a
+step, accepted by the kernel, the classes stay apart. -/
+def St.mergeBy (S : St P) (a b : Nat) (pf : Pf) : St P :=
   let (S, ra, pa) := findP S a
   let (S, rb, pb) := findP S b
   if ra == rb then S
@@ -226,32 +215,22 @@ def St.mergeBy (S : St) (a b : Nat) (pf : Pf) : St :=
         let (S, q) := transP S rb a q r
         transP S rb ra q pa
     let (lo, hi) := (min ra rb, max ra rb)
-    -- A merge is applied only with a kernel step for its link: every pair of
-    -- nodes of one class is then joined by a chain of steps. (The measurement
-    -- mode `assume` joins without one.)
-    if (link.bind id).isNone && !S.assume then
-      { S with unjustified := S.unjustified.insert S.cur (S.unjustified.getD S.cur 0 + 1),
-               nUnjustified := S.nUnjustified + 1 }
-    else
-    let S := if S.proof.size ≤ hi then
-        { S with proof := S.proof ++ Array.replicate (hi + 1 - S.proof.size) none }
-      else S
-    let S := { S with parent := (grow S.parent (hi + 1)).setIfInBounds hi lo }
-    -- The merged class keeps a plain member of either side.
-    let S := match S.plain.getD lo none, S.plain.getD hi none with
-      | none, some m =>
-        let plain := if S.plain.size ≤ lo then S.plain ++ Array.replicate (lo + 1 - S.plain.size) none
-          else S.plain
-        { S with plain := plain.setIfInBounds lo (some m) }
-      | _, _ => S
-    let S := if (link.bind id).isNone then
-        { S with unjustified := S.unjustified.insert S.cur (S.unjustified.getD S.cur 0 + 1),
-                 nUnjustified := S.nUnjustified + 1 }
-      else S
-    { S with proof := S.proof.setIfInBounds hi (link.bind id) }
+    match link with
+    | some (some s) =>
+      match S.link hi lo s with
+      | (S, true) =>
+        -- The merged class keeps a plain member of either side.
+        match S.plain.getD lo none, S.plain.getD hi none with
+        | none, some m =>
+          let plain := if S.plain.size ≤ lo then S.plain ++ Array.replicate (lo + 1 - S.plain.size) none
+            else S.plain
+          { S with plain := plain.setIfInBounds lo (some m) }
+        | _, _ => S
+      | (S, false) => S.noStep
+    | _ => S.noStep
 
-/-- A merge the replayer has no kernel step for. -/
-def St.merge (S : St) (a b : Nat) : St := S.mergeBy a b none
+/-- A merge the replayer has no kernel step for: it is not applied. -/
+def St.merge (S : St P) (a b : Nat) : St P := S.mergeBy a b none
 
 /-- An associative operator's nested applications among `args`, spliced in as
 the engine's term builder splices them before the arguments are built. -/
@@ -261,7 +240,7 @@ partial def flattenSyn (f : String) (args : List Term) : List Term :=
     | t => [t]
 
 /-- The node a program term evaluated to, through the spelling table. -/
-partial def eval (S : St) : Term → Option Nat
+partial def eval (S : St P) : Term → Option Nat
   | .lit s v =>
     match S.lits[(s, v)]? with
     | some n =>
@@ -270,12 +249,12 @@ partial def eval (S : St) : Term → Option Nat
       | _ => none
     | none => none
   | .app f args => do
-    let args := if S.P.kind f == .assoc then flattenSyn f args else args
+    let args := if S.prog.kind f == .assoc then flattenSyn f args else args
     let ids ← args.mapM (eval S)
     S.spell[(f, ids)]?
 
 /-- Node `n`'s definition is the term `t`, argument for argument. -/
-partial def denotes (S : St) (n : Nat) : Term → Bool
+partial def denotes (S : St P) (n : Nat) : Term → Bool
   | .lit s v => match S.defOf n with
     | some (.lit s' v') => s' == s && v' == v
     | _ => false
@@ -285,15 +264,15 @@ partial def denotes (S : St) (n : Nat) : Term → Bool
 
 /-- The node of `f`'s unit: the one a `z` line named, if its definition still
 is the declared unit (a restore can have discarded it). -/
-def St.unit (S : St) (f : String) : Option Nat :=
-  match S.units[f]?, (S.P.opDecl? f).bind (·.unit) with
+def St.unit (S : St P) (f : String) : Option Nat :=
+  match S.units[f]?, (S.prog.opDecl? f).bind (·.unit) with
   | some u, some t => if denotes S u t then some u else none
   | _, _ => none
 
 /-- The applications of `f` among `xs` and, literally nested, below them:
 each is a splice witness for its own class. -/
-def nested (defs : Array (Option Def)) (f : String) (x : Nat) : List (Nat × List Nat) :=
-  match defs.getD x none with
+def nested (defs : Array Node) (f : String) (x : Nat) : List (Nat × List Nat) :=
+  match defs[x]? with
   | some (.app g cs) =>
     if g == f && !cs.isEmpty then
       (x, cs) :: cs.flatMap fun c => if _h : c < x then nested defs f c else []
@@ -303,7 +282,7 @@ termination_by x
 
 /-- `a`, or the arguments a witness for `a`'s class splices in. A class is
 not expanded inside its own expansion. -/
-partial def expand (S : St) (W : List (Nat × List Nat)) (a : Nat) : List Nat :=
+partial def expand (S : St P) (W : List (Nat × List Nat)) (a : Nat) : List Nat :=
   let c := S.fd a
   match W.find? (·.1 == c) with
   | some (_, cs) => cs.flatMap (expand S (W.filter (·.1 != c)))
@@ -312,7 +291,7 @@ partial def expand (S : St) (W : List (Nat × List Nat)) (a : Nat) : List Nat :=
 /-- Removes each argument that is `inv` applied to a node together with one
 argument in that node's class; with `unit` given, also each argument that is
 `inv` applied to a node of the unit's class. -/
-def cancelInverse (S : St) (inv : String) (unit : Option Nat) (xs : List Nat) : List Nat := Id.run do
+def cancelInverse (S : St P) (inv : String) (unit : Option Nat) (xs : List Nat) : List Nat := Id.run do
   -- What `a` is the inverse of: its own argument, or that of a witness (`j`
   -- line) in its class.
   let inverseOf (a : Nat) : Option Nat :=
@@ -345,8 +324,8 @@ An associative operator's argument is one class unless a witness splices it:
 the engine's (`s` lines, checked here), or an application of `f` that appears
 among the arguments, which witnesses its own class. Both lists use the same
 witnesses. -/
-def nf2 (S : St) (f : String) (as bs : List Nat) (invUnit : Bool := false) : List Nat × List Nat :=
-  match S.P.kind f with
+def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false) : List Nat × List Nat :=
+  match S.prog.kind f with
   | .plain => (as.map S.fd, bs.map S.fd)
   | .comm => ((as.map S.fd).mergeSort (· ≤ ·), (bs.map S.fd).mergeSort (· ≤ ·))
   | k =>
@@ -357,7 +336,7 @@ def nf2 (S : St) (f : String) (as bs : List Nat) (invUnit : Bool := false) : Lis
     let own := ((as ++ bs).flatMap (nested S.defs f)).map fun (x, cs) => (S.fd x, cs)
     let W := given ++ own
     let u := (S.unit f).map S.fd
-    let d := S.P.opDecl? f
+    let d := S.prog.opDecl? f
     let one (xs : List Nat) : List Nat :=
       -- The unit's arguments go first, as in the engine: `f(e, inv(e))` is
       -- `inv(e)`, which is in `e`'s class only once that is derived.
@@ -380,13 +359,13 @@ def nf2 (S : St) (f : String) (as bs : List Nat) (invUnit : Bool := false) : Lis
 /-- Node `n` has the value of `f(cs)`: it is an application of `f` whose
 arguments have the same normal form, or the normal form is the one class of
 `n`, or it is empty and `n` is in the unit's class. -/
-def spells (S : St) (n : Nat) (f : String) (cs : List Nat) : Bool :=
+def spells (S : St P) (n : Nat) (f : String) (cs : List Nat) : Bool :=
   -- The engine normalizes with and without `inv(e) = e`, at different events.
   [false, true].any fun invUnit =>
     (match S.defOf n with
       | some (.app g ds) => g == f && (let (x, y) := nf2 S f ds cs invUnit; x == y)
       | _ => false)
-    || ((S.P.kind f).isAssoc &&
+    || ((S.prog.kind f).isAssoc &&
         (let t := (nf2 S f cs [] invUnit).1
          -- One class left: the application is that class. None left: it is the unit.
          t == [S.fd n] || (t.isEmpty && (S.unit f).map S.fd == some (S.fd n))))
@@ -402,9 +381,9 @@ recognizable, and reduces it by the operator's laws after each rewrite. -/
 /-- A monomial reduced by `f`'s laws: inverse pairs and the unit's class
 removed, and each class kept once (ACI) or its count modulo `n`
 (`:nilpotent n`). -/
-def lawReduce (S : St) (f : String) (atoms : List Nat) (inverse : Bool := true)
+def lawReduce (S : St P) (f : String) (atoms : List Nat) (inverse : Bool := true)
     (inverseFirst : Bool := false) : List Nat :=
-  let d := S.P.opDecl? f
+  let d := S.prog.opDecl? f
   let u := (S.unit f).map S.fd
   let dropUnit (xs : List Nat) : List Nat := xs.filter fun a => some (S.fd a) != u
   -- The engine drops the unit's arguments before it cancels inverse pairs,
@@ -423,18 +402,18 @@ def lawReduce (S : St) (f : String) (atoms : List Nat) (inverse : Bool := true)
     | none => groups.push (c, #[a])) #[]
   let keep (limit : Nat → Nat) : List Nat :=
     groups.toList.flatMap fun (_, xs) => (xs.toList.take (limit xs.size))
-  match S.P.kind f, d.bind (fun d => d.nilpotent) with
+  match S.prog.kind f, d.bind (fun d => d.nilpotent) with
   | .aci, _ => keep fun _ => 1
   | _, some n => if n > 0 then keep (fun k => k % n) else live
   | _, none => live
 
 /-- The classes of a monomial, sorted. -/
-def classesOf (S : St) (atoms : List Nat) : List Nat := (atoms.map S.fd).mergeSort (· ≤ ·)
+def classesOf (S : St P) (atoms : List Nat) : List Nat := (atoms.map S.fd).mergeSort (· ≤ ·)
 
 def countOf (c : Nat) (xs : List Nat) : Nat := (xs.filter (· == c)).length
 
 /-- Removes `k` atoms of class `c`. -/
-def dropClass (S : St) (c : Nat) : Nat → List Nat → List Nat
+def dropClass (S : St P) (c : Nat) : Nat → List Nat → List Nat
   | 0, xs => xs
   | _, [] => []
   | k + 1, x :: xs => if S.fd x == c then dropClass S c k xs else x :: dropClass S c (k + 1) xs
@@ -442,13 +421,13 @@ def dropClass (S : St) (c : Nat) : Nat → List Nat → List Nat
 /-- The monomial `m` with the classes `l` replaced by the atoms `r`, as many
 times as `m` holds `l` (once under ACI or a nilpotent law, where a class's
 count is bounded, and once when `once` is set). `none` when `m` does not hold `l`. -/
-def applyRule (S : St) (f : String) (m : List Nat) (l : List Nat) (r : List Nat) (once : Bool := false) :
+def applyRule (S : St P) (f : String) (m : List Nat) (l : List Nat) (r : List Nat) (once : Bool := false) :
     Option (Nat × List Nat × List Nat) :=
   let mc := classesOf S m
   let distinct := l.eraseDups
   if l.isEmpty || !distinct.all (fun c => countOf c mc ≥ countOf c l) then none
   else
-    let bounded := S.P.kind f == .aci || ((S.P.opDecl? f).bind (·.nilpotent)).isSome
+    let bounded := S.prog.kind f == .aci || ((S.prog.opDecl? f).bind (·.nilpotent)).isSome
     let q := if bounded || once then 1
       else distinct.foldl (fun q c => min q (countOf c mc / countOf c l)) (mc.length + 1)
     let rest := distinct.foldl (fun m c => dropClass S c (q * countOf c l) m) m
@@ -458,7 +437,7 @@ def applyRule (S : St) (f : String) (m : List Nat) (l : List Nat) (r : List Nat)
 
 /-- The arguments of `x` as a monomial of `f`: its own, if it is an
 application of `f`, else `x` itself. -/
-def monomial (S : St) (f : String) (W : List (Nat × List Nat)) (x : Nat) : List Nat :=
+def monomial (S : St P) (f : String) (W : List (Nat × List Nat)) (x : Nat) : List Nat :=
   -- A node that is one argument is still expanded when a witness splices its
   -- class: every list of one event reads a class the same way.
   match S.defOf x with
@@ -478,7 +457,7 @@ structure Rewrote where
   atom : Bool := false
 
 /-- Rewrites `m` by the rules `rules`, in order: the result and each rewrite. -/
-def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false)
+def rewrite (S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false)
     (done : Array Rewrote := #[]) : List (Nat × Nat × Bool) → Except String (List Nat × Array Rewrote)
   | [] => pure (m, done)
   | (l, r, atom) :: rest => do
@@ -495,13 +474,13 @@ def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (o
 /-- The monomial `m` has the value of node `t`: it is `t`'s arguments, or it
 is the one class of `t` (a result of one argument is that argument's class,
 whose root can itself be an application of `f`). -/
-def reaches (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (t : Nat) : Bool :=
+def reaches (S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (t : Nat) : Bool :=
   let c := classesOf S (lawReduce S f m)
   c == classesOf S (lawReduce S f (monomial S f W t)) || c == [S.fd t]
 
 /-- The splice witnesses a completion event shares: the applications of `f`
 nested in the arguments of the nodes it names. -/
-def lawWitnesses (S : St) (f : String) (nodes : List Nat) : List (Nat × List Nat) :=
+def lawWitnesses (S : St P) (f : String) (nodes : List Nat) : List (Nat × List Nat) :=
   (nodes.flatMap fun x =>
     match S.defOf x with
     | some (.app g cs) => if g == f then cs.flatMap (nested S.defs f) else []
@@ -514,7 +493,7 @@ def pairs : List Nat → List (Nat × Nat × Bool)
   | _ => []
 
 /-- The rules of a line, their nodes as table ids. -/
-def rules (S : St) (xs : List Nat) : Option (List (Nat × Nat × Bool)) :=
+def rules (S : St P) (xs : List Nat) : Option (List (Nat × Nat × Bool)) :=
   (pairs xs).mapM fun (l, r, k) => do pure (← S.tr l, ← S.tr r, k)
 
 /-- A derivation the kernel steps follow: from a node, or from the term of a
@@ -537,9 +516,9 @@ structure PeakPlan where
 
 /-- `i a b n l1 r1 ..`: node `n`, a member of one merged class, rewrites by
 the rules to the other merged node. -/
-def interReduce (S : St) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Except String Chain := do
+def interReduce (S : St P) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Except String Chain := do
   let some (.app f as) := S.defOf n | throw "completion: start is not an application"
-  unless (S.P.kind f).isAssoc && S.P.kind f != .assoc do throw "completion: not an AC operator"
+  unless (S.prog.kind f).isAssoc && S.prog.kind f != .assoc do throw "completion: not an AC operator"
   let t ← if S.fd n == S.fd b then pure a else if S.fd n == S.fd a then pure b
     else throw "completion: start in neither class"
   -- A monomial is a node's arguments, each one class, as the engine reads it.
@@ -562,7 +541,7 @@ structure Peak where
 
 /-- Reads the fields after `p a b`: `cancel reduceB hasKeep [keep] k peak..
 na (l r).. nb (l r).. npa (l r).. (l r)..`. -/
-def Peak.read (S : St) (xs : List Nat) : Option Peak := do
+def Peak.read (S : St P) (xs : List Nat) : Option Peak := do
   let (cancel, xs) ← xs.head?.map (·, xs.tail)
   let (reduceB, xs) ← xs.head?.map (·, xs.tail)
   let (hasKeep, xs) ← xs.head?.map (·, xs.tail)
@@ -589,13 +568,13 @@ peak reduced by the laws, with `reduceB`) and rewrite it by their rules; with
 occurrence of `keep`'s class), which the operator's `:cancellative` law
 allows when both sides stay non-empty or the operator has a unit; each side
 then rewrites by its remaining rules. -/
-def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) :
+def peakMerge (S : St P) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) :
     Except String PeakPlan := do
   let named := a :: b :: (w.preA ++ w.preB ++ w.postA ++ w.postB).flatMap fun (l, r, _) => [l, r]
   -- The operator: that of the first rule, else of a merged node.
   let some f := (named.reverse.findSome? fun x =>
       match S.defOf x with
-      | some (.app g _) => if (S.P.kind g).isAssoc && S.P.kind g != .assoc then some g else none
+      | some (.app g _) => if (S.prog.kind g).isAssoc && S.prog.kind g != .assoc then some g else none
       | _ => none)
     | throw "completion: no AC operator"
   -- A monomial is a node's arguments, each one class, as the engine reads it.
@@ -608,7 +587,7 @@ def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) :
   let (mB, sB) ← rewrite S f W firstB true #[] w.preB
   if w.cancel then
     -- Declared, or a consequence of the group laws (`:inverse`).
-    unless ((S.P.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
+    unless ((S.prog.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
       throw "completion: operator is not cancellative"
     let (mA, mB) := (lawReduce S f mA, lawReduce S f mB)
     let (ca, cb) := (classesOf S mA, classesOf S mB)
@@ -645,10 +624,10 @@ is enough). One of:
 - `g(x) = e` exactly when `x = e`;
 - under `:nilpotent k`: `f(x1, .., x1) = n1` and `f(n1, .., n1) = x1`, with
   `k - 1` arguments. -/
-def groupLaw (S : St) (a b n1 n2 : Nat) : Except String Unit := do
+def groupLaw (S : St P) (a b n1 n2 : Nat) : Except String Unit := do
   let some (.app g [x1]) := S.defOf n1 | throw "group law: not an inverse node"
   let some (.app g' [x2]) := S.defOf n2 | throw "group law: not an inverse node"
-  let some d := S.P.ops.find? (fun d => d.inverse == some g && (d.kind == .ac || d.kind == .aci))
+  let some d := S.prog.ops.find? (fun d => d.inverse == some g && (d.kind == .ac || d.kind == .aci))
     | throw "group law: no operator with this inverse"
   unless g' == g do throw "group law: not an inverse node"
   let f := d.name
@@ -674,7 +653,7 @@ def groupLaw (S : St) (a b n1 n2 : Nat) : Except String Unit := do
   unless injective || involution || unitIn || powers do throw "group law: no case applies"
 
 /-- `c` and `c:k` fields as node ids, a counted one repeated. -/
-def ids (S : St) (xs : List String) : Option (List Nat) := do
+def ids (S : St P) (xs : List String) : Option (List Nat) := do
   let mut out : Array Nat := #[]
   for x in xs do
     match x.splitOn ":" with
@@ -691,7 +670,7 @@ def ids (S : St) (xs : List String) : Option (List Nat) := do
 
 /-- The arguments node `x` flattens to under `f`, as the kernel's `view`
 reads them: through every application of `f` nested in them. -/
-partial def kview (S : St) (f : String) (x : Nat) : List Nat :=
+partial def kview (S : St P) (f : String) (x : Nat) : List Nat :=
   match S.defOf x with
   | some (.app g cs) => if g == f && !cs.isEmpty then cs.flatMap (kview S f) else [x]
   | _ => [x]
@@ -703,10 +682,10 @@ each flattened argument to one node of its class, the unit's node for the
 unit's class and the splice witness for a spliced class (associative
 operators). `none` when a premise has no proof or the kernel's reading of the
 two sides would differ. -/
-def congStep (S : St) (f : String) (a b : Nat) : St × Pf := Id.run do
+def congStep (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   if a == b then return (S, some none)
   let mut S := S
-  let kind := S.P.kind f
+  let kind := S.prog.kind f
   if !kind.isAssoc then
     let (some (.app g as), some (.app h bs)) := (S.defOf a, S.defOf b) | return (S, none)
     if g != f || h != f || as.length != bs.length then return (S, none)
@@ -786,7 +765,7 @@ def congStep (S : St) (f : String) (a b : Nat) : St × Pf := Id.run do
 
 /-- What `a` is the inverse of under `inv`, and the inverse application that
 says so: `a` itself, or a witness (`j` line) in its class. -/
-def inverseNode (S : St) (inv : String) (a : Nat) : Option (Nat × Nat) :=
+def inverseNode (S : St P) (inv : String) (a : Nat) : Option (Nat × Nat) :=
   let arg (m : Nat) : Option (Nat × Nat) :=
     match S.defOf m with
     | some (.app g [y]) => if g == inv then some (m, y) else none
@@ -794,32 +773,22 @@ def inverseNode (S : St) (inv : String) (a : Nat) : Option (Nat × Nat) :=
   (arg a).orElse fun _ => S.inverses.findSome? fun m => if S.fd m == S.fd a then arg m else none
 
 /-- `f` applied to `m`, a node the kernel accepts, or `none`. -/
-def appNode (S : St) (f : String) (m : List Nat) : St × Option Nat :=
-  let d := Def.app f m
+def appNode (S : St P) (f : String) (m : List Nat) : St P × Option Nat :=
+  let d := Node.app f m
   if m.isEmpty then (S, none)
   else match S.index[d]? with
     | some t => (S, some t)
     | none =>
-      -- Well-sorted: an argument of `f` has `f`'s sort.
-      let ok : Bool := match S.P.opDecl? f with
-        | some dd => m.all fun c =>
-            (match S.defOf c with
-              | some (.lit s _) => some s
-              | some (.app g _) => (S.P.opDecl? g).map (·.res)
-              | none => none) == some dd.res
-        | none => false
-      if ok then
-        let t := S.defs.size
-        ({ S with defs := S.defs.push (some d), index := S.index.insert d t }, some t)
-      else (S, none)
+      -- The table takes the node only if it is well-sorted.
+      S.withCore fun c => c.addNode d
 
 /-- Node `x` reduced by `f`'s inverse and nilpotent laws, and the proof that
 `x` is the result. Each inverse pair `y, g(y)` becomes `f(f(y, g(y)), rest)`
 by `f`'s laws, then `f(e, rest)` by the `inv` step, then `f(rest)`; each `n`
 arguments of one class under `:nilpotent n` likewise, by the `nil` step. An
 inverse of a node of the unit's class is first proved to be the unit. -/
-partial def lawNormP (S : St) (f : String) (x : Nat) : St × Option (Nat × Pf) := Id.run do
-  let some d := S.P.opDecl? f | return (S, some (x, some none))
+partial def lawNormP (S : St P) (f : String) (x : Nat) : St P × Option (Nat × Pf) := Id.run do
+  let some d := S.prog.opDecl? f | return (S, some (x, some none))
   let some u := S.unit f | return (S, some (x, some none))
   if d.inverse.isNone && d.nilpotent.isNone then return (S, some (x, some none))
   let mut S := S
@@ -890,14 +859,14 @@ partial def lawNormP (S : St) (f : String) (x : Nat) : St × Option (Nat × Pf) 
 
 /-- `congStep`, and when it gives no step for an operator with an inverse or
 a nilpotent law: both nodes reduced by those laws, then `congStep`. -/
-def congStepL (S : St) (f : String) (a b : Nat) : St × Pf :=
+def congStepL (S : St P) (f : String) (a b : Nat) : St P × Pf :=
   let (S, p) := congStep S f a b
   if p.isSome then (S, p)
   else
   -- One node's arguments are all in the other's class (`f(x, x) = x` under
   -- ACI, or one argument): the node is one of them, which is the other node.
   let u := (S.unit f).map S.fd
-  let collapse (S : St) (x other : Nat) : St × Pf :=
+  let collapse (S : St P) (x other : Nat) : St P × Pf :=
     let atoms := (kview S f x).filter fun y => some (S.fd y) != u
     match atoms.head? with
     | some y =>
@@ -916,7 +885,7 @@ def congStepL (S : St) (f : String) (a b : Nat) : St × Pf :=
   -- `other`'s arguments stand for their classes, some of them applications of
   -- `f`: `x` is `f` of a plain member of each, by `f`'s laws, which is `other`
   -- argument by argument.
-  let viaPlain (S : St) (x other : Nat) : St × Pf :=
+  let viaPlain (S : St P) (x other : Nat) : St P × Pf :=
     match S.defOf other with
     | some (.app g bs) =>
       if g != f || bs.isEmpty then (S, none)
@@ -941,7 +910,7 @@ def congStepL (S : St) (f : String) (a b : Nat) : St × Pf :=
   let (S, p) := viaPlain S b a
   if p.isSome then (let (S, q) := symmP S b a p; (S, q))
   else
-    let laws := match S.P.opDecl? f with
+    let laws := match S.prog.opDecl? f with
       | some d => d.inverse.isSome || d.nilpotent.isSome
       | none => false
     if !laws then (S, none)
@@ -967,15 +936,15 @@ the merge is then read from the classes. With `n1 = g(x1)`, `n2 = g(x2)`:
   dropped, so the other is the unit;
 - under `:nilpotent (k + 1)`, `f(x1^k, x1) = e = f(n1, x1)`, so `x1^k = n1`,
   and the same with `n1` and `x1` exchanged. -/
-def groupLawP (S : St) (a b n1 n2 : Nat) : St × Pf := Id.run do
+def groupLawP (S : St P) (a b n1 n2 : Nat) : St P × Pf := Id.run do
   let (some (.app g [x1]), some (.app _ [x2])) := (S.defOf n1, S.defOf n2) | return (S, none)
-  let some d := S.P.ops.find? (fun d => d.inverse == some g && (d.kind == .ac || d.kind == .aci))
+  let some d := S.prog.ops.find? (fun d => d.inverse == some g && (d.kind == .ac || d.kind == .aci))
     | return (S, none)
   let f := d.name
   let some u := S.unit f | return (S, none)
   let mut S := S
   -- `f(x, q) = e` for an inverse application `q = g(x)`: the node and the step.
-  let invFact (S : St) (x q : Nat) : St × Option (Nat × Nat) :=
+  let invFact (S : St P) (x q : Nat) : St P × Option (Nat × Nat) :=
     match appNode S f [x, q] with
     | (S, some p) => let (S, s) := emit S (.inv f p x q u) p u; (S, some (p, s))
     | (S, none) => (S, none)
@@ -984,11 +953,11 @@ def groupLawP (S : St) (a b n1 n2 : Nat) : St × Pf := Id.run do
   S := S1
   let (some (p1, s1), some (p2, s2)) := (i1, i2) | return (S, none)
   -- `l = r` for two binary nodes proved equal to the unit by `sl`, `sr`.
-  let viaUnit (S : St) (l r : Nat) (sl sr : Pf) : St × Pf :=
+  let viaUnit (S : St P) (l r : Nat) (sl sr : Pf) : St P × Pf :=
     let (S, q) := symmP S r u sr
     transP S l r sl q
   -- From `f(x, z) = f(y, z)`, proved by `pf` between nodes `l`, `r`: `x = y`.
-  let cancel (S : St) (l x y z : Nat) (pf : Pf) : St :=
+  let cancel (S : St P) (l x y z : Nat) (pf : Pf) : St P :=
     match stepOf S l pf with
     | (S, some st) =>
       let (S, c) := emit S (.cancel f st x y z) x y
@@ -1056,13 +1025,13 @@ def groupLawP (S : St) (a b n1 n2 : Nat) : St × Pf := Id.run do
   return eqP S a b
 
 /-- The table id of a program term as the kernel interns it: child for child. -/
-partial def internT (S : St) : Term → Option Nat
-  | .lit s v => S.index[Def.lit s v]?
-  | .app f args => (args.mapM (internT S)).bind fun cs => S.index[Def.app f cs]?
+partial def internT (S : St P) : Term → Option Nat
+  | .lit s v => S.index[Node.lit s v]?
+  | .app f args => (args.mapM (internT S)).bind fun cs => S.index[Node.app f cs]?
 
 /-- The proof that the program term `t`, of table id `w`, is node `a`: the
 one its `t` line recorded, when the term evaluated to `a`. -/
-def termP (S : St) (w a : Nat) : St × Pf :=
+def termP (S : St P) (w a : Nat) : St P × Pf :=
   if w == a then (S, some none)
   else match S.byTerm[w]? with
     | some (n, p) =>
@@ -1072,45 +1041,36 @@ def termP (S : St) (w a : Nat) : St × Pf :=
 
 /-! ## One line -/
 
-def sortOf (S : St) (t : Nat) : Option String :=
+def sortOf (S : St P) (t : Nat) : Option String :=
   match S.defOf t with
   | some (.lit s _) => some s
-  | some (.app f _) => (S.P.opDecl? f).map (·.res)
+  | some (.app f _) => (S.prog.opDecl? f).map (·.res)
   | none => none
 
-/-- The definition is well-sorted, as the kernel requires of every node. -/
-def wellSorted (S : St) : Def → Bool
-  | .lit s _ => S.P.litSorts.contains s
-  | .app f cs =>
-    match S.P.opDecl? f with
-    | none => false
-    | some d =>
-      if d.kind.isAssoc then
-        cs.all (fun c => sortOf S c == some d.res) && (!cs.isEmpty || d.unit.isSome)
-      else cs.length == d.args.length && (cs.zip d.args).all fun (c, s) => sortOf S c == some s
-
-/-- The table id of definition `d`, added to the table if it is new. -/
-def intern (S : St) (d : Def) : St × Nat :=
+/-- The table id of definition `d`, added to the table if it is new and
+well-sorted. -/
+def intern (S : St P) (d : Def) : St P × Option Nat :=
   match S.index[d]? with
-  | some t => (S, t)
+  | some t => (S, some t)
   | none =>
-    let t := S.defs.size
-    let isPlain := match d with
-      | .lit _ _ => true
-      | .app f _ => !(S.P.kind f).isAssoc
-    ({ S with defs := S.defs.push (some d), index := S.index.insert d t,
-              plain := (if S.plain.size ≤ t then S.plain ++ Array.replicate (t + 1 - S.plain.size) none
-                else S.plain).setIfInBounds t (if isPlain then some t else none) }, t)
+    match S.withCore fun c => c.addNode d with
+    | (S, some t) =>
+      let isPlain := match d with
+        | .lit _ _ => true
+        | .app f _ => !(S.prog.kind f).isAssoc
+      ({ S with plain := (if S.plain.size ≤ t then S.plain ++ Array.replicate (t + 1 - S.plain.size) none
+                else S.plain).setIfInBounds t (if isPlain then some t else none) }, some t)
+    | (S, none) => (S, none)
 
 /-- A program term as the kernel interns it, the node it evaluated to, and
 the proof that the two are equal: each argument's term is its node, and `f` of
 the argument terms is the node by `f`'s laws (a nested application of an
 associative operator, which the engine's term builder splices, among them).
 The terms join their nodes' classes. -/
-partial def writtenP (S : St) (t : Term) : St × Option (Nat × Nat × Pf) :=
+partial def writtenP (S : St P) (t : Term) : St P × Option (Nat × Nat × Pf) :=
   match t with
   | .lit s v =>
-    match S.index[Def.lit s v]? with
+    match S.index[Node.lit s v]? with
     | some n => (S, some (n, n, some none))
     | none => (S, none)
   | .app f args => Id.run do
@@ -1125,19 +1085,19 @@ partial def writtenP (S : St) (t : Term) : St × Option (Nat × Nat × Pf) :=
         S := S'.mergeBy w m p
         ws := ws.push w
       | (S', none) => return (S', none)
-    let d := Def.app f ws.toList
+    let d := Node.app f ws.toList
     let w ← match S.index[d]? with
       | some w => pure w
       | none =>
-        if wellSorted S d then
-          let (S', w) := intern S d
+        match intern S d with
+        | (S', some w) =>
           S := S'
           pure w
-        else return (S, none)
+        | (S', none) => return (S', none)
     match node with
     | some n =>
       -- `f()` is the unit, by the kernel's `unit` step.
-      if args.isEmpty && (S.P.kind f).isAssoc then
+      if args.isEmpty && (S.prog.kind f).isAssoc then
         if let some u := S.unit f then
           let (S', st) := emit S (.unit f w u) w u
           let S' := S'.mergeBy w u (some (some st))
@@ -1149,7 +1109,7 @@ partial def writtenP (S : St) (t : Term) : St × Option (Nat × Nat × Pf) :=
 
 /-- The node of a monomial: `f` applied to its arguments, or the unit for
 none. -/
-def monoNode (S : St) (f : String) (m : List Nat) (literal : Nat := 0) : St × Option Nat :=
+def monoNode (S : St P) (f : String) (m : List Nat) (literal : Nat := 0) : St P × Option Nat :=
   if m.isEmpty then (S, S.unit f)
   else
     -- An argument that is an application of `f` stands for its class: name
@@ -1159,15 +1119,15 @@ def monoNode (S : St) (f : String) (m : List Nat) (literal : Nat := 0) : St × O
       match S.defOf x with
       | some (.app g _) => if g == f then (S.plain.getD (S.fd x) none).getD x else x
       | _ => x
-    let d := Def.app f m
-    if wellSorted S d then let (S, t) := intern S d; (S, some t) else (S, none)
+    let d := Node.app f m
+    intern S d
 
 /-- The kernel steps of a derivation: the proof that its start is its
 target, and the start's node. Each rewrite of `q` copies of `l` by `r` is
 three `cong` steps: the monomial is `f(l, .., l, rest)` by `f`'s laws, which
 is `f(r, .., r, rest)` argument by argument from `l = r`, which is the next
 monomial by `f`'s laws. The nodes on the way join the start's class. -/
-def emitChain (S : St) (c : Chain) : St × Option (Nat × Nat × Pf) := Id.run do
+def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.run do
   let f := c.f
   let mut S := S
   let start ← match c.start with
@@ -1179,7 +1139,7 @@ def emitChain (S : St) (c : Chain) : St × Option (Nat × Nat × Pf) := Id.run d
   let mut cur := start
   let mut pf : Pf := some none
   -- One `cong` by `f`'s laws from the current node to `next`.
-  let hop (S : St) (cur next : Nat) (pf : Pf) : St × Pf :=
+  let hop (S : St P) (cur next : Nat) (pf : Pf) : St P × Pf :=
     let (S, p) := congStepL S f cur next
     let S := S.mergeBy cur next p
     transP S start next pf p
@@ -1226,13 +1186,16 @@ def emitChain (S : St) (c : Chain) : St × Option (Nat × Nat × Pf) := Id.run d
 
 /-- The kernel steps of a `t` line, whose check passed: the term as the
 program writes it (its arguments' own terms as arguments) is node `i`. -/
-def termLine (S : St) (i : Nat) (f : String) (cs : List Nat) : St := Id.run do
-  let done (S : St) : St := { S with splices := [], inverses := [] }
+def termLine (S : St P) (i : Nat) (f : String) (cs : List Nat) : St P := Id.run do
+  let done (S : St P) : St P := { S with splices := [], inverses := [] }
   let ws := cs.map fun c => ((S.lastTerm[c]?).map (·.1)).getD c
-  let (dW, dT) := (Def.app f ws, Def.app f cs)
-  if !(wellSorted S dW && wellSorted S dT) then return done S
-  let (S, w) := intern S dW
-  let (S, t2) := intern S dT
+  let (dW, dT) := (Node.app f ws, Node.app f cs)
+  let (S, w) ← match intern S dW with
+    | (S, some w) => pure (S, w)
+    | (S, none) => return done S
+  let (S, t2) ← match intern S dT with
+    | (S, some t) => pure (S, t)
+    | (S, none) => return done S
   let mut S := S
   -- The written term is `f` of the argument nodes: argument by argument.
   let mut p1 : Pf := some none
@@ -1264,8 +1227,8 @@ and builds what the kernel's `rule` step needs: the node of each pattern
 instantiated by the assignment, and the proof that this instance is the node
 the pattern matched or was built as. An instance joins that node's class. -/
 
-structure Walk where
-  S : St
+structure Walk (P : Program) where
+  S : St P
   σ : List (String × Nat) := []
   atoms : List (Nat × String × List Nat)
   rhs : List (Nat × Bool)
@@ -1276,15 +1239,15 @@ structure Walk where
 /-- The walk keeps its state when it fails: the replayer's state is in it,
 and is held by one reference at a time so that its arrays are updated in
 place. -/
-abbrev WalkM := ExceptT String (StateM Walk)
+abbrev WalkM (P : Program) := ExceptT String (StateM (Walk P))
 
-def St.empty : St := { P := { ops := [], litSorts := [], decls := [] }, declAt := {} }
+def St.empty : St P := {}
 
 /-- Runs `k` on the replayer's state, taken out of the walk while `k` runs. -/
-def withS {α : Type} (k : St → St × α) : WalkM α :=
+def withS {α : Type} (k : St P → St P × α) : WalkM P α :=
   modifyGet fun w =>
     let S := w.S
-    let w := { w with S := St.empty }
+    let w : Walk P := { w with S := {} }
     let (S, a) := k S
     (a, { w with S := S })
 
@@ -1306,17 +1269,19 @@ partial def firstLine : Pat → String × Nat
     | none => (f, ps.length)
 
 /-- The instance `f(ic)` of an application pattern, joined to node `n`. -/
-def instOf (f : String) (ic : List Nat) (n : Nat) : WalkM Nat := do
-  let d := Def.app f ic
-  unless wellSorted (← get).S d do throw "rule: instance ill-sorted"
-  withS fun S =>
-    let (S, i) := intern S d
-    let (S, p) := congStepL S f i n
-    (S.mergeBy i n p, i)
+def instOf (f : String) (ic : List Nat) (n : Nat) : WalkM P Nat := do
+  let d := Node.app f ic
+  let i ← withS fun S => intern S d
+  match i with
+  | some i =>
+    withS fun S =>
+      let (S, p) := congStepL S f i n
+      (S.mergeBy i n p, i)
+  | none => throw "rule: instance ill-sorted"
 
 /-- A ground pattern that stands for a `let` name's term: its instance is
 the term as the kernel interns it, joined to the name's node `n`. -/
-def letInstance (p : Pat) (n : Nat) : WalkM Nat := do
+def letInstance (p : Pat) (n : Nat) : WalkM P Nat := do
   match (Pat.toTerm? p).bind (internT (← get).S) with
   | some t =>
     withS fun S =>
@@ -1326,7 +1291,7 @@ def letInstance (p : Pat) (n : Nat) : WalkM Nat := do
 
 /-- The node the pattern `p` matched and its instance, consuming the firing's
 `e` lines: arguments first, then the application's own line. -/
-partial def walkQ (p : Pat) : WalkM (Nat × Nat) := do
+partial def walkQ (p : Pat) : WalkM P (Nat × Nat) := do
   match p with
   | .var x =>
     match (← get).σ.lookup x with
@@ -1345,7 +1310,7 @@ partial def walkQ (p : Pat) : WalkM (Nat × Nat) := do
   | .app f ps =>
     -- A ground argument the next line does not match is a `let` name's term:
     -- the engine bound it to the name's node and wrote no line for it.
-    let groundNode (q : Pat) : WalkM (Option Nat) := do
+    let groundNode (q : Pat) : WalkM P (Option Nat) := do
       let w ← get
       -- The lines come arguments first: the next one is for `q`'s first
       -- innermost application or literal.
@@ -1397,7 +1362,7 @@ partial def walkQ (p : Pat) : WalkM (Nat × Nat) := do
 
 /-- The node the pattern `p` was built as and its instance, consuming the
 firing's `b` nodes. -/
-partial def walkB (p : Pat) : WalkM (Nat × Nat) := do
+partial def walkB (p : Pat) : WalkM P (Nat × Nat) := do
   match p with
   | .var x =>
     match (← get).σ.lookup x with
@@ -1437,7 +1402,7 @@ partial def walkB (p : Pat) : WalkM (Nat × Nat) := do
 
 /-- One side of a body equality: a bound variable's node, a matched pattern's
 node and instance, or `none` for a variable not bound yet. -/
-def side (p : Pat) : WalkM (Option (Nat × Nat)) := do
+def side (p : Pat) : WalkM P (Option (Nat × Nat)) := do
   match p with
   | .var x => pure (((← get).σ.lookup x).map fun n => (n, n))
   | _ =>
@@ -1454,7 +1419,7 @@ def side (p : Pat) : WalkM (Option (Nat × Nat)) := do
       | false, some n => pure (some (n, ← letInstance p n))
       | _, _ => some <$> walkQ p
 
-def bindVar (p : Pat) (n : Nat) : WalkM Unit := do
+def bindVar (p : Pat) (n : Nat) : WalkM P Unit := do
   match p with
   | .var x => modify fun w => { w with σ := (x, n) :: w.σ }
   | _ => throw "rule: equality without a node"
@@ -1470,7 +1435,7 @@ structure Fired where
   σ : List (String × Nat)
   prems : Option (List Nat)
 
-def fireRule (r : Rule) (rewrite : Bool) : WalkM Fired := do
+def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
   let l? ← if rewrite then some <$> walkQ r.lhs else pure none
   for (p, q) in r.eqs do
     match ← side p, ← side q with
@@ -1505,18 +1470,19 @@ def fireRule (r : Rule) (rewrite : Bool) : WalkM Fired := do
 
 /-- The engine's node `i` is definition `d`. An id is defined once between
 restores. -/
-def define (S : St) (i : Nat) (d : Def) : St :=
+def define (S : St P) (i : Nat) (d : Def) : St P :=
   if (S.tr i).isSome then S.fail "definition: node already defined"
-  else if !wellSorted S d then S.fail "definition: ill-sorted"
   else
-    let (S, t) := intern S d
+    match intern S d with
+    | (S, none) => S.fail "definition: ill-sorted"
+    | (S, some t) =>
     let cid := if S.cid.size ≤ i then S.cid ++ Array.replicate (i + 1 - S.cid.size) none else S.cid
     let S := { S with cid := cid.setIfInBounds i (some t) }
     match d with
     | .lit s v => { S with lits := S.lits.insert (s, v) t }
     | _ => S
 
-def stepCore (S : St) (line : String) : St :=
+def stepCore (S : St P) (line : String) : St P :=
   let S := { S with events := S.events + 1, cur := (line.splitOn " ").headD "" }
   match line.splitOn " " with
   | "n" :: id :: f :: kids =>
@@ -1538,12 +1504,12 @@ def stepCore (S : St) (line : String) : St :=
     | some c, some m => { S with splices := (c, m) :: S.splices, events := S.events - 1 }
     | _, _ => S.fail "splice: unreadable"
   | ["z", f, u] =>
-    match S.node? u, (S.P.opDecl? f).bind (·.unit) with
+    match S.node? u, (S.prog.opDecl? f).bind (·.unit) with
     | some u, some t =>
       if denotes S u t then { S with units := S.units.insert f u, events := S.events - 1 }
       else S.fail "unit: its node differs"
     | _, _ => S.fail "unit: no such unit"
-  | ["o"] => { S with roundParent := S.parent, roundProof := S.proof, events := S.events - 1 }
+  | ["o"] => { (S.withCore fun c => (c.roundStart, ())).1 with events := S.events - 1 }
   | ["j", m] =>
     match S.node? m with
     | some m => { S with inverses := m :: S.inverses, events := S.events - 1 }
@@ -1631,7 +1597,7 @@ def stepCore (S : St) (line : String) : St :=
     match j.toNat?, S.node? a, S.node? b, S.fire with
     | some j, some a, some b, some (o, rw) =>
       -- The engine cites a rule by an offset inside its command.
-      match ((S.P.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl)) with
+      match ((S.prog.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl)) with
       | some (od, Decl.rules rs) =>
         match rs[j]? with
         | some (some r) =>
@@ -1678,7 +1644,7 @@ def stepCore (S : St) (line : String) : St :=
                 -- The terms have joined their nodes' classes.
                 let (S, q) := eqP S tl tr
                 match stepOf S tl q with
-                | (S, some st) => { S with goalSteps := (o, st) :: S.goalSteps }
+                | (S, some st) => (S.withCore fun c => c.goal o l r st).1
                 | (S, none) => S
               | (S, none) => S
             | (S, none) => S
@@ -1697,7 +1663,7 @@ def stepCore (S : St) (line : String) : St :=
       let plan := match interReduce S a b n rs with
         | .ok c => Except.ok c
         | .error e =>
-          match interReduce { S with parent := S.roundParent } a b n rs with
+          match interReduce S.atRound a b n rs with
           | .ok c => .ok c
           | .error _ => .error e
       match plan with
@@ -1717,7 +1683,7 @@ def stepCore (S : St) (line : String) : St :=
     match S.node? a, S.node? b, (rest.mapM (fun (x : String) => x.toNat?)).bind (Peak.read S) with
     | some a, some b, some w =>
       let plan :=
-        let R := { S with parent := S.roundParent }
+        let R := S.atRound
         let tries := [peakMerge S a b w, peakMerge S a b w (inverseFirst := true),
                       peakMerge R a b w, peakMerge R a b w (inverseFirst := true)]
         match tries.find? (·.isOk), tries.head? with
@@ -1782,49 +1748,45 @@ def stepCore (S : St) (line : String) : St :=
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
     match d.toNat? with
-    | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.parent, S.proof, S.plain, S.spell) }
+    | some (d + 1) =>
+      let S := (S.withCore fun c => (c.mark d, ())).1
+      { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.plain, S.spell) }
     | _ => S.fail "mark: unreadable"
   | ["restore", d] =>
     match d.toNat? with
     | some (d + 1) =>
-      match S.snaps[d]? with
-      | some (n, p, pf, pl, sp) =>
+      match S.snaps[d]?, S.withCore fun c => c.restore d (d + 1) with
+      | some (n, pl, sp), (S, true) =>
         -- The engine's ids past the mark are free again; the table keeps its
-        -- nodes, and the kernel steps emitted since stay true.
-        { S with cid := S.cid.extract 0 n, parent := p, proof := pf, plain := pl, spell := sp, roundParent := p,
-                 roundProof := pf,
+        -- nodes, and the kernel steps checked since stay true.
+        { S with cid := S.cid.extract 0 n, plain := pl, spell := sp,
                  snaps := S.snaps.extract 0 (d + 1), fire := none }
-      | none => S.fail "restore: no such mark"
+      | _, (S, _) => S.fail "restore: no such mark"
     | _ => S.fail "restore: unreadable"
   | ["rpop", d] =>
     match d.toNat? with
     | some d =>
-      match S.snaps[d]? with
-      | some (n, p, pf, pl, sp) =>
-        { S with cid := S.cid.extract 0 n, parent := p, proof := pf, plain := pl, spell := sp, roundParent := p,
-                 roundProof := pf,
+      match S.snaps[d]?, S.withCore fun c => c.restore d d with
+      | some (n, pl, sp), (S, true) =>
+        { S with cid := S.cid.extract 0 n, plain := pl, spell := sp,
                  snaps := S.snaps.extract 0 d, fire := none }
-      | none => S.fail "restore: no such mark"
+      | _, (S, _) => S.fail "restore: no such mark"
     | none => S.fail "restore: unreadable"
   | "u" :: kind :: rest =>
-    let S := { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), splices := [], inverses := [] }
-    match S.assume, rest with
-    | true, [a, b] =>
-      match S.node? a, S.node? b with
-      | some a, some b => S.merge a b
-      | _, _ => S
-    | _, _ => S
+    -- An event the stream gives no witness for: counted, and nothing is merged.
+    let _ := rest
+    { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), splices := [], inverses := [] }
   | [""] => { S with events := S.events - 1 }
   | _ => S.fail "unreadable line"
 
 /-- Replays one line. The witness lines (`s`, `j`) hold until the next line
 of another kind has been replayed. -/
-def step (S : St) (line : String) : St :=
+def step (S : St P) (line : String) : St P :=
   let S := stepCore S line
   if line.startsWith "s " || line.startsWith "j " then S
   else { S with splices := [], inverses := [] }
 
-def start (P : Program) : St :=
-  { P, declAt := P.decls.foldl (fun m (o, d) => m.insert o d) {} }
+def start (P : Program) : St P :=
+  { declAt := P.decls.foldl (fun m (o, d) => m.insert o d) {} }
 
 end SemperCheck.Replay

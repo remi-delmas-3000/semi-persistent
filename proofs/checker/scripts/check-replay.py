@@ -26,13 +26,8 @@ cannot yet justify every merge (see `proofs/checker/README.md`). `--update`
 rewrites the baseline after a change that proves more; a row's note, its fifth
 column, is kept.
 
-`--assume` sets `SEMPER_REPLAY_ASSUME`: the replayer joins the classes of the
-merges it does not check, which separates a check that fails by itself from
-one that fails because an earlier merge was not applied. The kernel count does
-not change: such a merge has no kernel step.
-
 Usage: check-replay.py [--engine PATH] [--checker PATH] [--out DIR] [--jobs N]
-                       [--timeout SECONDS] [--memory MB] [--assume] [--update]
+                       [--timeout SECONDS] [--memory MB] [--update]
                        [--json FILE] [FILE...]
 """
 
@@ -166,7 +161,7 @@ def check_one(path, args):
     if "node table is rejected" in p.stdout:
         return path, {"status": "rejected", "bytes": size}
     m = re.search(r"(\d+) events replayed, (\d+) failed, (\d+) unchecked; "
-                  r"(\d+) of (\d+) check-eq proved", p.stdout)
+                  r"(\d+) of (\d+) check-eq in one class", p.stdout)
     k = re.search(r"kernel: (\d+) steps, (\d+) of \d+ check-eq proved", p.stdout)
     if not m or not k:
         return path, {"status": "replay-error",
@@ -225,16 +220,12 @@ def main():
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--timeout", type=int, default=60, help="seconds per run")
     ap.add_argument("--memory", type=int, default=4000, help="MB per engine run (Linux)")
-    ap.add_argument("--assume", action="store_true",
-                    help="measurement: join the classes of the merges the replayer does not check")
     ap.add_argument("--update", action="store_true", help="rewrite coverage.tsv")
     ap.add_argument("--json", default=None, help="write the per-program results here")
     ap.add_argument("files", nargs="*", help="programs, relative to the repository root")
     args = ap.parse_args()
     args.out = args.out or tempfile.mkdtemp(prefix="semper-replay-")
     os.makedirs(args.out, exist_ok=True)
-    if args.assume:
-        os.environ["SEMPER_REPLAY_ASSUME"] = "1"
 
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
@@ -264,8 +255,6 @@ def main():
     with_goal = [r for r in done if r["total"]]
     total = sum(r["total"] for r in done)
     print(f"{len(results)} programs: " + ", ".join(f"{n} {s}" for s, n in sorted(statuses.items())))
-    if args.assume:
-        print("measurement mode: the classes of unchecked merges are joined")
     print(f"{sum(r['proved'] for r in done)} of {total} check-eq proved by the kernel "
           f"({sum(r['steps'] for r in done)} steps); "
           f"{sum(1 for r in with_goal if r['proved'] == r['total'])} of {len(with_goal)} programs "

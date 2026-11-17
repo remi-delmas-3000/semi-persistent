@@ -1,73 +1,65 @@
 import SemperCheck.Replay
-import SemperCheck.Sound
 
 /-!
-# What a replayed `check-eq` means
+# What a replay proves
 
-The replayer (`Replay.lean`) is not trusted. Whatever it reads, it ends with a
-node table, a list of kernel steps and, for each `check-eq` it joined, the
-step that should prove it. `provedBy` runs the kernel (`Kernel.lean`) on that
-certificate and keeps the `check-eq` the kernel accepts; `semper-check
---replay` reports exactly their number. `replay_sound` is `goal_sound` for
-them: a kept `check-eq` holds in every model of the commands before it.
+`replay P lines` is the replayer's state after the stream `lines`, read
+against the program `P`: `semper-check --replay` computes it line by line with
+the same `step`. Its checked part is a `Core P` (`Core.lean`), which only
+proved operations build, so the invariant of `Core.lean` holds of the state
+after every event, whatever the stream is and whatever the rest of the
+replayer does:
 
-The statement does not mention the stream or the replayer's state: no property
-of either is assumed. A wrong check in the replayer, or a wrong line in the
-stream, yields a step the kernel rejects.
+* `step_classes`, `replay_classes`: two nodes the replayer holds in one class
+  have one value in every model of the program. An event's check joins two
+  classes only by a link that a kernel-checked step proves, so each event
+  preserves this, the idempotent, nilpotent, inverse and cancellation events
+  included: their steps are the kernel's `cong`, `nil`, `inv` and `cancel`.
+* `replay_sound`: a `check-eq` the replay reports as proved holds in every
+  model of the commands before it.
+
+No hypothesis mentions the stream: a wrong line yields a step the kernel
+rejects, and the merge it was for is not applied.
 -/
 
 namespace SemperCheck.Replay
 
-/-- The certificate a replay ends with. -/
-def certOf (S : St) : Cert :=
-  { nodes := S.defs.map fun d =>
-      match d with
-      | some (.app f cs) => Node.app f cs
-      | some (.lit s v) => Node.lit s v
-      | none => Node.lit "" "",
-    steps := S.steps,
-    goals := S.goalSteps }
+/-- The replayer's state after the stream `lines`. -/
+def replay (P : Program) (lines : List String) : St P := lines.foldl step (start P)
 
-/-- The `check-eq` of `P`, each with its offset, that the kernel accepts from
-`cert`. -/
-def provedBy (P : Program) (cert : Cert) : List (Nat × Term × Term) :=
-  match runCert P cert with
-  | some (C, acc) =>
-    P.decls.filterMap fun (od : Nat × Decl) =>
-      match od.2 with
-      | Decl.goal l r => if C.checkGoal acc cert.goals od.1 l r then some (od.1, l, r) else none
-      | _ => none
-  | none => []
-
-/-- The `check-eq` the replay of `lines` against `P` proves. -/
+/-- The `check-eq` of `P`, each with its offset, that the replay of `lines`
+proves. -/
 def proved (P : Program) (lines : List String) : List (Nat × Term × Term) :=
-  provedBy P (certOf (lines.foldl step (start P)))
+  (replay P lines).core.goals
 
-/-- A `check-eq` the kernel accepts from any certificate holds in every model
-of the commands before it. -/
-theorem provedBy_sound {P : Program} {cert : Cert} {o : Nat} {l r : Term}
-    (h : (o, l, r) ∈ provedBy P cert) (M : Model) (hM : M.Models P o) : M.eval l = M.eval r := by
-  unfold provedBy at h
-  split at h
-  · rename_i C acc hrun
-    obtain ⟨od, -, hod⟩ := List.mem_filterMap.1 h
-    split at hod
-    · rename_i l' r' hd
-      split at hod
-      · rename_i hg
-        simp only [Option.some.injEq, Prod.mk.injEq] at hod
-        obtain ⟨rfl, rfl, rfl⟩ := hod
-        exact goal_sound hrun hg M hM
-      · cases hod
-    · cases hod
-  · simp at h
+/-- After one event, on any state: two nodes of one class have one value in
+every model of the program. -/
+theorem step_classes {P : Program} (S : St P) (line : String) {a b : Nat}
+    (h : (step S line).fd a = (step S line).fd b) (M : Model) (hM : ∀ p, M.Models P p) :
+    nval M (step S line).defs a = nval M (step S line).defs b :=
+  (step S line).core.class_sound h M hM
 
-/-- A `check-eq` the replay of a stream proves holds in every model of the
-commands before it, whatever the stream is. -/
+/-- After any stream: two nodes of one class have one value in every model of
+the program. -/
+theorem replay_classes {P : Program} (lines : List String) {a b : Nat}
+    (h : (replay P lines).fd a = (replay P lines).fd b) (M : Model) (hM : ∀ p, M.Models P p) :
+    nval M (replay P lines).defs a = nval M (replay P lines).defs b :=
+  (replay P lines).core.class_sound h M hM
+
+/-- After one event, on any state: every `check-eq` recorded as proved holds
+in every model of the commands before it. -/
+theorem step_goals {P : Program} (S : St P) (line : String) {o : Nat} {l r : Term}
+    (h : (o, l, r) ∈ (step S line).core.goals) (M : Model) (hM : M.Models P o) :
+    M.eval l = M.eval r :=
+  (step S line).core.goal_sound h M hM
+
+/-- **Soundness of the replay.** A `check-eq` the replay of a stream proves
+holds in every model of the commands before it, whatever the stream is. -/
 theorem replay_sound {P : Program} {lines : List String} {o : Nat} {l r : Term}
     (h : (o, l, r) ∈ proved P lines) (M : Model) (hM : M.Models P o) : M.eval l = M.eval r :=
-  provedBy_sound h M hM
+  (replay P lines).core.goal_sound h M hM
 
 end SemperCheck.Replay
 
 #print axioms SemperCheck.Replay.replay_sound
+#print axioms SemperCheck.Replay.replay_classes

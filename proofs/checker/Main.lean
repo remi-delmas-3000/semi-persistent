@@ -1,4 +1,5 @@
 import SemperCheck
+import Std.Data.HashSet
 
 /-!
 `semper-check PROGRAM.egg CERT`: checks every step of the certificate against
@@ -13,16 +14,14 @@ when an input does not parse.
 open SemperCheck
 
 /-- `semper-check --replay PROGRAM.egg TRACE`: replays the engine's event
-stream (`REPLAY.md`). Not covered by a soundness theorem yet. -/
+stream (`REPLAY.md`) line by line with `Replay.step`. The `check-eq` reported
+as proved are the ones `Replay.replay_sound` is about. -/
 def replay (progPath tracePath : String) : IO UInt32 := do
   let P ← match parseProgram (← IO.FS.readFile progPath) with
     | .ok P => pure P
     | .error e => IO.eprintln s!"program: {e}"; return 2
   let h ← IO.FS.Handle.mk tracePath .read
   let mut S := Replay.start P
-  if (← IO.getEnv "SEMPER_REPLAY_ASSUME").isSome then
-    S := { S with assume := true }
-    IO.eprintln "measurement mode: unchecked merges are applied; proved counts are not proofs"
   -- `SEMPER_REPLAY_SHOW=n` prints the first `n` failed lines.
   let shown := ((← IO.getEnv "SEMPER_REPLAY_SHOW").bind (·.toNat?)).getD 0
   repeat
@@ -30,42 +29,33 @@ def replay (progPath tracePath : String) : IO UInt32 := do
     if line.isEmpty then break
     let beforeU := S.nUnjustified
     let before := S.nFailed
+    let beforeR := S.core.rejected
     S := Replay.step S ((line.splitOn "\n").headD "")
     if S.nUnjustified > beforeU && beforeU < shown then IO.eprintln s!"no kernel step at event {S.events}: {line}"
     if S.nFailed > before && S.nFailed ≤ shown then IO.eprintln s!"failed event {S.events} [{S.lastCause}]: {line}"
+    if S.core.rejected > beforeR && beforeR < shown then IO.eprintln s!"kernel rejects a step at event {S.events}: {line}"
   let total := (P.decls.filter fun (_, d) => match d with | .goal .. => true | _ => false).length
-  let proved := (P.decls.filter fun (o, d) =>
+  let joined := (P.decls.filter fun (o, d) =>
     match d with | .goal .. => S.proved.contains o | _ => false).length
   let nFailed := S.nFailed
   let nUnchecked := S.unchecked.fold (fun n _ k => n + k) 0
   for (c, k) in S.failed.toList do IO.println s!"failed: {k} {c}"
   for (c, k) in S.unchecked.toList do IO.println s!"unchecked: {k} {c}"
   for (c, k) in S.unjustified.toList do IO.println s!"no kernel step: {k} {c}"
-  -- The kernel checks the steps the replay emitted.
-  let cert := Replay.certOf S
-  let nSteps := cert.steps.size
-  if (runCert P cert).isNone then IO.println "kernel: the node table is rejected"
-  -- The steps the replayer emitted that the kernel does not accept: each
+  -- The steps the replayer built that the kernel does not accept: each
   -- concludes only `0 = 0`, and none should exist.
-  let mut rejected := 0
-  if let some (C, acc) := runCert P cert then
-    let mut seen : Array Concl := #[]
-    for st in cert.steps do
-      if (C.checkStep seen st).isNone then
-        rejected := rejected + 1
-        if rejected ≤ shown then IO.eprintln s!"kernel rejects step {seen.size}: {repr st}"
-      seen := seen.push (acc[seen.size]!)
-  IO.println s!"kernel: {rejected} steps rejected"
+  IO.println s!"kernel: {S.core.rejected} steps rejected"
   -- `Replay.replay_sound` is about exactly these.
-  let kernel := (Replay.provedBy P cert).length
-  IO.println s!"kernel: {nSteps} steps, {kernel} of {total} check-eq proved"
+  let got : Std.HashSet Nat := S.core.goals.foldl (fun m g => m.insert g.1) {}
+  let kernel := (P.decls.filter fun (o, d) =>
+    match d with | .goal .. => got.contains o | _ => false).length
+  IO.println s!"kernel: {S.core.acc.size} steps, {kernel} of {total} check-eq proved"
   if shown > 0 then
-    let got := (Replay.provedBy P cert).map (·.1)
     for (o, d) in P.decls do
       if let .goal .. := d then
         if !got.contains o then IO.eprintln s!"kernel: check-eq at byte {o} not proved"
-  IO.println s!"{S.events} events replayed, {nFailed} failed, {nUnchecked} unchecked; {proved} of {total} check-eq proved"
-  return if proved == total && nFailed == 0 && nUnchecked == 0 then 0 else 1
+  IO.println s!"{S.events} events replayed, {nFailed} failed, {nUnchecked} unchecked; {joined} of {total} check-eq in one class"
+  return if kernel == total && nFailed == 0 && nUnchecked == 0 then 0 else 1
 
 def main (args : List String) : IO UInt32 := do
   if let ["--replay", progPath, tracePath] := args then return ← replay progPath tracePath
