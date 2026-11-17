@@ -74,6 +74,8 @@ def check_one(path, args):
         return path, {"status": "replay-error",
                       "detail": (p.stdout + p.stderr).strip().splitlines()[-2:]}
     events, failed, unchecked, proved, total = map(int, m.groups())
+    k = re.search(r"kernel: (\d+) steps, (\d+) of \d+ check-eq proved", p.stdout)
+    steps, kernel = (int(k.group(1)), int(k.group(2))) if k else (0, 0)
     rss = re.search(r"(\d+)\s+maximum resident set size", p.stderr)
     if rss:
         rss_mb = int(rss.group(1)) / 1e6
@@ -82,7 +84,8 @@ def check_one(path, args):
         rss_mb = int(rss.group(1)) / 1e3 if rss else 0.0
     return path, {
         "status": "replayed", "events": events, "failed": failed, "unchecked": unchecked,
-        "proved": proved, "total": total, "bytes": size, "secs": secs, "rss_mb": rss_mb,
+        "proved": proved, "total": total, "kernel": kernel, "steps": steps,
+        "rejected": "node table is rejected" in p.stdout, "bytes": size, "secs": secs, "rss_mb": rss_mb,
         "failed_by": {c: int(n) for n, c in re.findall(r"failed: (\d+) (.+)", p.stdout)},
         "unchecked_by": {c: int(n) for n, c in re.findall(r"unchecked: (\d+) (.+)", p.stdout)},
     }
@@ -122,7 +125,12 @@ def main():
     if args.assume:
         print("measurement mode: unchecked merges applied; the counts below are not proofs")
     with_goal = [r for r in done if r["total"]]
-    print(f"{sum(r['proved'] for r in done)} of {sum(r['total'] for r in done)} check-eq proved; "
+    print(f"kernel (covered by goal_sound): {sum(r['kernel'] for r in done)} of "
+          f"{sum(r['total'] for r in done)} check-eq proved, "
+          f"{sum(1 for r in with_goal if r['kernel'] == r['total'])} of {len(with_goal)} programs "
+          f"fully, {sum(r['steps'] for r in done)} steps, "
+          f"{sum(1 for r in done if r['rejected'])} node tables rejected")
+    print(f"replay (unproved): {sum(r['proved'] for r in done)} of {sum(r['total'] for r in done)} check-eq; "
           f"{sum(1 for r in with_goal if r['proved'] == r['total'])} of {len(with_goal)} programs "
           "with a check-eq fully proved")
     print(f"{sum(r['events'] for r in done)} events, {sum(r['failed'] for r in done)} failed, "

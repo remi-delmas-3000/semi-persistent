@@ -1,4 +1,5 @@
 import SemperCheck.Parse
+import SemperCheck.Kernel
 import Std.Data.HashMap
 
 /-!
@@ -74,7 +75,22 @@ structure St where
   lits : Std.HashMap (String × String) Nat := {}
   /-- Each mark: the number of definitions, the classes and the spelling
   table at the mark. -/
-  snaps : Array (Nat × Array Nat × Spell) := #[]
+  snaps : Array (Nat × Array Nat × Array (Option Nat) × Spell) := #[]
+  /-- The kernel steps emitted so far, and what each concludes. The kernel
+  (`Kernel.lean`, proved by `goal_sound`) checks them after the replay. -/
+  steps : Array Step := #[]
+  concl : Array (Nat × Nat) := #[]
+  /-- For each node with a parent, the step that proves it equal to its
+  parent, or `none` for a link the replayer has no kernel step for. -/
+  proof : Array (Option Nat) := #[]
+  roundProof : Array (Option Nat) := #[]
+  /-- For a node, the last program term that evaluated to it: the term's
+  table id and the proof that the term is the node. -/
+  lastTerm : Std.HashMap Nat (Nat × Option (Option Nat)) := {}
+  /-- For a program term's table id, the node it evaluated to and the proof. -/
+  byTerm : Std.HashMap Nat (Nat × Option (Option Nat)) := {}
+  /-- `(o, s)`: step `s` proves the `check-eq` at offset `o`. -/
+  goalSteps : List (Nat × Nat) := []
   /-- Splice witnesses for the next `t`, `c` or `w` line. -/
   splices : List (Nat × Nat) := []
   /-- Inverse witnesses (`j` lines) for the next line: inverse applications,
@@ -111,10 +127,99 @@ def fail (S : St) (cause : String) : St :=
   { S with failed := S.failed.insert cause (S.failed.getD cause 0 + 1), nFailed := S.nFailed + 1, lastCause := cause,
            splices := [], inverses := [] }
 
-def merge (S : St) (a b : Nat) : St :=
-  { S with parent := union S.parent a b, splices := [], inverses := [] }
-
 end St
+
+/-! ## Proofs
+
+A proof that two nodes are equal is `none` (the replayer has no kernel step),
+`some none` (they are one node), or `some (some s)` (step `s` concludes it). -/
+
+abbrev Pf := Option (Option Nat)
+
+def emit (S : St) (st : Step) (a b : Nat) : St × Nat :=
+  -- The size is read first: reading it after the push would keep a second
+  -- reference to the array and make the push copy it.
+  let n := S.steps.size
+  ({ S with steps := S.steps.push st, concl := S.concl.push (a, b) }, n)
+
+/-- `x = y` from `x = y`'s reverse. -/
+def symmP (S : St) (x y : Nat) : Pf → St × Pf
+  | some (some s) => let (S, t) := emit S (.symm s) y x; (S, some (some t))
+  | p => (S, p)
+
+/-- `x = z` from `x = y` and `y = z`. -/
+def transP (S : St) (x z : Nat) : Pf → Pf → St × Pf
+  | some none, q => (S, q)
+  | p, some none => (S, p)
+  | some (some s), some (some t) => let (S, u) := emit S (.trans s t) x z; (S, some (some u))
+  | _, _ => (S, none)
+
+/-- A step that concludes `x = y`, a reflexivity when they are one node. -/
+def stepOf (S : St) (x : Nat) : Pf → St × Option Nat
+  | some (some s) => (S, some s)
+  | some none => let (S, s) := emit S (.refl x) x x; (S, some s)
+  | none => (S, none)
+
+/-- The root of `i`'s class and the proof that `i` is it. -/
+partial def findP (S : St) (i : Nat) : St × Nat × Pf :=
+  match S.parent[i]? with
+  | some p =>
+    if p < i then
+      let (S, r, q) := findP S p
+      match S.proof.getD i none with
+      | some s =>
+        let (S, pf) := transP S i r (some (some s)) q
+        -- Point `i` at its root, with the proof just composed.
+        match pf with
+        | some (some t) =>
+          if r != p then
+            ({ S with parent := S.parent.setIfInBounds i r,
+                      proof := S.proof.setIfInBounds i (some t) }, r, pf)
+          else (S, r, pf)
+        | _ => (S, r, pf)
+      | none => (S, r, none)
+    else (S, i, some none)
+  | none => (S, i, some none)
+
+/-- The proof that `x` and `y`, of one class, are equal. -/
+def eqP (S : St) (x y : Nat) : St × Pf :=
+  if x == y then (S, some none)
+  else
+    let (S, rx, px) := findP S x
+    let (S, ry, py) := findP S y
+    if rx != ry then (S, none)
+    else
+      let (S, qy) := symmP S y ry py
+      transP S x y px qy
+
+/-- Merges the classes of `a` and `b`, which `pf` proves equal: the link
+between the two roots carries the proof that they are. -/
+def St.mergeBy (S : St) (a b : Nat) (pf : Pf) : St :=
+  let (S, ra, pa) := findP S a
+  let (S, rb, pb) := findP S b
+  let S := { S with splices := [], inverses := [] }
+  if ra == rb then S
+  else
+    -- `hi = lo`, through `a = b` in the direction that starts at `hi`.
+    let (S, link) :=
+      if ra > rb then
+        let (S, q) := symmP S a ra pa
+        let (S, q) := transP S ra b q pf
+        transP S ra rb q pb
+      else
+        let (S, q) := symmP S b rb pb
+        let (S, r) := symmP S a b pf
+        let (S, q) := transP S rb a q r
+        transP S rb ra q pa
+    let (lo, hi) := (min ra rb, max ra rb)
+    let S := if S.proof.size ≤ hi then
+        { S with proof := S.proof ++ Array.replicate (hi + 1 - S.proof.size) none }
+      else S
+    let S := { S with parent := (grow S.parent (hi + 1)).setIfInBounds hi lo }
+    { S with proof := S.proof.setIfInBounds hi (link.bind id) }
+
+/-- A merge the replayer has no kernel step for. -/
+def St.merge (S : St) (a b : Nat) : St := S.mergeBy a b none
 
 /-- An associative operator's nested applications among `args`, spliced in as
 the engine's term builder splices them before the arguments are built. -/
@@ -506,157 +611,92 @@ def ids (S : St) (xs : List String) : Option (List Nat) := do
     | _ => none
   return out.toList
 
-/-! ## A rule firing -/
+/-! ## Kernel steps for the checks -/
 
-structure Walk where
-  σ : List (String × Nat) := []
-  atoms : List (Nat × String × List Nat)
-  rhs : List (Nat × Bool)
-  /-- The node of each matched pattern, by the pattern's printed form. -/
-  memo : List (String × Nat) := []
+/-- The arguments node `x` flattens to under `f`, as the kernel's `view`
+reads them: through every application of `f` nested in them. -/
+partial def kview (S : St) (f : String) (x : Nat) : List Nat :=
+  match S.defOf x with
+  | some (.app g cs) => if g == f && !cs.isEmpty then cs.flatMap (kview S f) else [x]
+  | _ => [x]
 
-abbrev WalkM := StateT Walk (Except String)
+/-- A `cong` step that concludes `a = b` for two nodes whose arguments the
+replayer found equal as classes under `f`'s laws: its premises prove each
+differing pair of arguments equal (plain and commutative operators), or send
+each flattened argument to one node of its class, the unit's node for the
+unit's class and the splice witness for a spliced class (associative
+operators). `none` when a premise has no proof or the kernel's reading of the
+two sides would differ. -/
+def congStep (S : St) (f : String) (a b : Nat) : St × Pf := Id.run do
+  if a == b then return (S, some none)
+  let mut S := S
+  let kind := S.P.kind f
+  if !kind.isAssoc then
+    let (some (.app g as), some (.app h bs)) := (S.defOf a, S.defOf b) | return (S, none)
+    if g != f || h != f || as.length != bs.length then return (S, none)
+    let straight := (as.zip bs).all fun (c, d) => S.fd c == S.fd d
+    let bs' := if !straight && kind == .comm then bs.reverse else bs
+    let mut prems : Array Nat := #[]
+    for (c, d) in as.zip bs' do
+      if c != d then
+        let (S', p) := eqP S c d
+        S := S'
+        match p with
+        | some (some s) => prems := prems.push s
+        | _ => return (S, none)
+    let (S', s) := emit S (.cong f a b prems.toList) a b
+    return (S', some (some s))
+  -- An associative operator: each flattened argument goes to its class's node.
+  let va := kview S f a
+  let vb := kview S f b
+  let u := S.unit f
+  let mut target : Std.HashMap Nat Nat := {}
+  if let some u := u then target := target.insert (S.fd u) u
+  for (c, m) in S.splices do
+    match S.defOf m with
+    | some (.app g cs) =>
+      if g == f && !cs.isEmpty && S.fd m == S.fd c && !target.contains (S.fd c) then
+        target := target.insert (S.fd c) m
+    | _ => pure ()
+  for y in va ++ vb do
+    if !target.contains (S.fd y) then target := target.insert (S.fd y) y
+  -- The kernel's two sides: each argument's node, flattened, without the unit.
+  let sideOf (v : List Nat) : List Nat :=
+    (v.flatMap fun y => kview S f (target.getD (S.fd y) y)).filter fun y => some y != u
+  let (la, lb) := (sideOf va, sideOf vb)
+  let same := match kind with
+    | .assoc => la == lb
+    | .ac => la.mergeSort (· ≤ ·) == lb.mergeSort (· ≤ ·)
+    | _ => la.all (lb.contains ·) && lb.all (la.contains ·)
+  if !same then return (S, none)
+  let mut prems : Array Nat := #[]
+  let mut seen : Std.HashSet Nat := {}
+  for y in va ++ vb do
+    let t := target.getD (S.fd y) y
+    if y != t && !seen.contains y then
+      seen := seen.insert y
+      let (S', p) := eqP S y t
+      S := S'
+      match p with
+      | some (some s) => prems := prems.push s
+      | _ => return (S, none)
+  let (S', s) := emit S (.cong f a b prems.toList) a b
+  return (S', some (some s))
 
-def key (p : Pat) : String := toString (repr p)
+/-- The table id of a program term as the kernel interns it: child for child. -/
+partial def internT (S : St) : Term → Option Nat
+  | .lit s v => S.index[Def.lit s v]?
+  | .app f args => (args.mapM (internT S)).bind fun cs => S.index[Def.app f cs]?
 
-partial def Pat.toTerm? : Pat → Option Term
-  | .var _ => none
-  | .lit s v => some (.lit s v)
-  | .app f ps => (ps.mapM Pat.toTerm?).map (.app f)
-
-/-- The node the pattern `p` matched, consuming the firing's `e` lines:
-arguments first, then the application's own line. -/
-partial def walkQ (S : St) (p : Pat) : WalkM Nat := do
-  match p with
-  | .var x =>
-    match (← get).σ.lookup x with
-    | some n => pure n
-    | none => throw "rule: unbound variable"
-  | .lit s v =>
-    let w ← get
-    match w.atoms with
-    | (n, "#lit", _) :: rest =>
-      match S.defOf n with
-      | some (.lit s' v') =>
-        if s' == s && v' == v then set { w with atoms := rest }; pure n
-        else throw "rule: literal differs"
-      | _ => throw "rule: literal differs"
-    | _ => throw "rule: no line for a literal"
-  | .app f ps =>
-    -- A ground argument the next line does not match is a `let` name's term:
-    -- the engine bound it to the name's node and wrote no line for it.
-    let groundNode (q : Pat) : WalkM (Option Nat) := do
-      match q, (← get).atoms with
-      | .app g qs, (_, h, cs) :: _ =>
-        if g == h && cs.length == qs.length then pure none
-        else pure ((Pat.toTerm? q).bind (eval S))
-      | .app _ _, [] => pure ((Pat.toTerm? q).bind (eval S))
-      | _, _ => pure none
-    let mut sub : Array (Option Nat) := #[]
-    for q in ps do
-      match q with
-      | .var _ => sub := sub.push none
-      | _ =>
-        match ← groundNode q with
-        | some n => sub := sub.push (some n)
-        | none => sub := sub.push (some (← walkQ S q))
-    let w ← get
-    match w.atoms with
-    | (n, g, cs) :: rest =>
-      if g != f || cs.length != ps.length then throw "rule: line for another application"
-      let mut σ := w.σ
-      for (q, o, c) in ps.zip (sub.toList.zip cs) do
-        match q, o with
-        | .var x, _ =>
-          match σ.lookup x with
-          | some y => if S.fd y != S.fd c then throw "rule: variable bound twice"
-          | none => σ := (x, c) :: σ
-        | _, some id => if S.fd id != S.fd c then throw "rule: argument differs"
-        | _, none => throw "rule: argument differs"
-      match S.defOf n with
-      | some (.app h ds) =>
-        if h != f || (let (x, y) := nf2 S f ds cs; x != y) then throw "rule: matched node differs"
-      | _ => throw "rule: matched node differs"
-      set { w with atoms := rest, σ := σ, memo := (key p, n) :: w.memo }
-      pure n
-    | [] => throw "rule: no line for an application"
-
-/-- The node the pattern `p` was built as, consuming the firing's `b` nodes. -/
-partial def walkB (S : St) (p : Pat) : WalkM Nat := do
-  match p with
-  | .var x =>
-    match (← get).σ.lookup x with
-    | some n => pure n
-    | none => throw "rule: unbound variable"
-  | _ =>
-    let w ← get
-    -- A `let` name's term: the engine fetched the name's node.
-    if let (n, true) :: rest := w.rhs then
-      match (Pat.toTerm? p).bind (eval S) with
-      | some m =>
-        if S.fd m == S.fd n then set { w with rhs := rest }; return n
-        else throw "rule: let name differs"
-      | none => throw "rule: let name differs"
-    match p with
-    | .lit s v =>
-      match w.rhs with
-      | (n, _) :: rest =>
-        match S.defOf n with
-        | some (.lit s' v') =>
-          if s' == s && v' == v then set { w with rhs := rest }; pure n
-          else throw "rule: built literal differs"
-        | _ => throw "rule: built literal differs"
-      | [] => throw "rule: no node for a built literal"
-    | .app f ps =>
-      let cs ← ps.mapM (walkB S)
-      let w ← get
-      match w.rhs with
-      | (n, _) :: rest =>
-        if spells S n f cs then set { w with rhs := rest }; pure n
-        else throw "rule: built node differs"
-      | [] => throw "rule: no node for a built application"
-    | .var _ => throw "rule: unbound variable"
-
-/-- One side of a body equality: a bound variable's node, a matched pattern's
-node, or `none` for a variable not bound yet. -/
-def side (S : St) (p : Pat) : WalkM (Option Nat) := do
-  match p with
-  | .var x => pure ((← get).σ.lookup x)
-  | _ =>
-    match (← get).memo.lookup (key p) with
-    | some n => pure (some n)
-    | none => some <$> walkQ S p
-
-def bindVar (p : Pat) (n : Nat) : WalkM Unit := do
-  match p with
-  | .var x => modify fun w => { w with σ := (x, n) :: w.σ }
-  | _ => throw "rule: equality without a node"
-
-def nodeSort (S : St) (n : Nat) : Option String :=
-  match S.defOf n with
-  | some (.lit s _) => some s
-  | some (.app f _) => (S.P.opDecl? f).map (·.res)
-  | none => none
-
-/-- The nodes of the two sides of rule `r`, instantiated by the firing. -/
-def fireRule (S : St) (r : Rule) (rewrite : Bool) : WalkM (Nat × Nat) := do
-  let nl? ← if rewrite then some <$> walkQ S r.lhs else pure none
-  for (p, q) in r.eqs do
-    match ← side S p, ← side S q with
-    | some a, some b => if S.fd a != S.fd b then throw "rule: body equality does not hold"
-    | none, some b => bindVar p b
-    | some a, none => bindVar q a
-    | none, none => throw "rule: equality without a node"
-  let nl ← match nl? with
-    | some n => pure n
-    | none => walkB S r.lhs
-  let nr ← walkB S r.rhs
-  let w ← get
-  for x in r.vars do
-    match w.σ.lookup x, r.sorts.lookup x with
-    | some n, some s => if nodeSort S n != some s then throw "rule: variable of another sort"
-    | _, _ => throw "rule: unbound variable"
-  pure (nl, nr)
+/-- The proof that the program term `t`, of table id `w`, is node `a`: the
+one its `t` line recorded, when the term evaluated to `a`. -/
+def termP (S : St) (w a : Nat) : St × Pf :=
+  if w == a then (S, some none)
+  else match S.byTerm[w]? with
+    | some (n, p) =>
+      let (S, q) := eqP S n a
+      transP S w a p q
+    | none => (S, none)
 
 /-! ## One line -/
 
@@ -685,6 +725,265 @@ def intern (S : St) (d : Def) : St × Nat :=
     let t := S.defs.size
     ({ S with defs := S.defs.push (some d), index := S.index.insert d t }, t)
 
+/-- The kernel steps of a `t` line, whose check passed: the term as the
+program writes it (its arguments' own terms as arguments) is node `i`. -/
+def termLine (S : St) (i : Nat) (f : String) (cs : List Nat) : St := Id.run do
+  let done (S : St) : St := { S with splices := [], inverses := [] }
+  let ws := cs.map fun c => ((S.lastTerm[c]?).map (·.1)).getD c
+  let (dW, dT) := (Def.app f ws, Def.app f cs)
+  if !(wellSorted S dW && wellSorted S dT) then return done S
+  let (S, w) := intern S dW
+  let (S, t2) := intern S dT
+  let mut S := S
+  -- The written term is `f` of the argument nodes: argument by argument.
+  let mut p1 : Pf := some none
+  if w != t2 then
+    let mut prems : Array Nat := #[]
+    let mut ok := true
+    for (wc, c) in ws.zip cs do
+      if wc != c then
+        match (S.lastTerm[c]?).map (·.2) with
+        | some (some (some s)) => prems := prems.push s
+        | _ => ok := false
+    if ok then
+      let (S', s) := emit S (.cong f w t2 prems.toList) w t2
+      S := S'
+      p1 := some (some s)
+    else p1 := none
+  -- `f` of the argument nodes is the node, by the operator's laws.
+  let (S', p2) := congStep S f t2 i
+  S := (S'.mergeBy t2 i p2).mergeBy w t2 p1
+  let (S', p) := transP S w i p1 p2
+  return { S' with lastTerm := S'.lastTerm.insert i (w, p), byTerm := S'.byTerm.insert w (i, p) }
+
+
+
+/-! ## A rule firing
+
+The walk matches the rule's patterns against the firing's lines, as before,
+and builds what the kernel's `rule` step needs: the node of each pattern
+instantiated by the assignment, and the proof that this instance is the node
+the pattern matched or was built as. An instance joins that node's class. -/
+
+structure Walk where
+  S : St
+  σ : List (String × Nat) := []
+  atoms : List (Nat × String × List Nat)
+  rhs : List (Nat × Bool)
+  /-- The matched node and the instance of each matched pattern, by the
+  pattern's printed form. -/
+  memo : List (String × Nat × Nat) := []
+
+/-- The walk keeps its state when it fails: the replayer's state is in it,
+and is held by one reference at a time so that its arrays are updated in
+place. -/
+abbrev WalkM := ExceptT String (StateM Walk)
+
+def St.empty : St := { P := { ops := [], litSorts := [], decls := [] }, declAt := {} }
+
+/-- Runs `k` on the replayer's state, taken out of the walk while `k` runs. -/
+def withS {α : Type} (k : St → St × α) : WalkM α :=
+  modifyGet fun w =>
+    let S := w.S
+    let w := { w with S := St.empty }
+    let (S, a) := k S
+    (a, { w with S := S })
+
+def key (p : Pat) : String := toString (repr p)
+
+partial def Pat.toTerm? : Pat → Option Term
+  | .var _ => none
+  | .lit s v => some (.lit s v)
+  | .app f ps => (ps.mapM Pat.toTerm?).map (.app f)
+
+/-- The instance `f(ic)` of an application pattern, joined to node `n`. -/
+def instOf (f : String) (ic : List Nat) (n : Nat) : WalkM Nat := do
+  let d := Def.app f ic
+  unless wellSorted (← get).S d do throw "rule: instance ill-sorted"
+  withS fun S =>
+    let (S, i) := intern S d
+    let (S, p) := congStep S f i n
+    (S.mergeBy i n p, i)
+
+/-- A ground pattern that stands for a `let` name's term: its instance is
+the term as the kernel interns it, joined to the name's node `n`. -/
+def letInstance (p : Pat) (n : Nat) : WalkM Nat := do
+  match (Pat.toTerm? p).bind (internT (← get).S) with
+  | some t =>
+    withS fun S =>
+      let (S, pf) := termP S t n
+      (S.mergeBy t n pf, t)
+  | none => pure n
+
+/-- The node the pattern `p` matched and its instance, consuming the firing's
+`e` lines: arguments first, then the application's own line. -/
+partial def walkQ (p : Pat) : WalkM (Nat × Nat) := do
+  match p with
+  | .var x =>
+    match (← get).σ.lookup x with
+    | some n => pure (n, n)
+    | none => throw "rule: unbound variable"
+  | .lit s v =>
+    let w ← get
+    match w.atoms with
+    | (n, "#lit", _) :: rest =>
+      match w.S.defOf n with
+      | some (.lit s' v') =>
+        if s' == s && v' == v then set { w with atoms := rest }; pure (n, n)
+        else throw "rule: literal differs"
+      | _ => throw "rule: literal differs"
+    | _ => throw "rule: no line for a literal"
+  | .app f ps =>
+    -- A ground argument the next line does not match is a `let` name's term:
+    -- the engine bound it to the name's node and wrote no line for it.
+    let groundNode (q : Pat) : WalkM (Option Nat) := do
+      let w ← get
+      match q, w.atoms with
+      | .app g qs, (_, h, cs) :: _ =>
+        if g == h && cs.length == qs.length then pure none
+        else pure ((Pat.toTerm? q).bind (eval w.S))
+      | .app _ _, [] => pure ((Pat.toTerm? q).bind (eval w.S))
+      | _, _ => pure none
+    let mut sub : Array (Option (Nat × Nat)) := #[]
+    for q in ps do
+      match q with
+      | .var _ => sub := sub.push none
+      | _ =>
+        match ← groundNode q with
+        | some n => sub := sub.push (some (n, ← letInstance q n))
+        | none => sub := sub.push (some (← walkQ q))
+    let w ← get
+    match w.atoms with
+    | (n, g, cs) :: rest =>
+      let S := w.S
+      if g != f || cs.length != ps.length then throw "rule: line for another application"
+      let mut σ := w.σ
+      let mut ic : Array Nat := #[]
+      for (q, o, c) in ps.zip (sub.toList.zip cs) do
+        match q, o with
+        | .var x, _ =>
+          match σ.lookup x with
+          | some y =>
+            if S.fd y != S.fd c then throw "rule: variable bound twice"
+            ic := ic.push y
+          | none =>
+            σ := (x, c) :: σ
+            ic := ic.push c
+        | _, some (m, i) =>
+          if S.fd m != S.fd c then throw "rule: argument differs"
+          ic := ic.push i
+        | _, none => throw "rule: argument differs"
+      match S.defOf n with
+      | some (.app h ds) =>
+        if h != f || (let (x, y) := nf2 S f ds cs; x != y) then throw "rule: matched node differs"
+      | _ => throw "rule: matched node differs"
+      set { w with atoms := rest, σ := σ }
+      let i ← instOf f ic.toList n
+      modify fun w => { w with memo := (key p, n, i) :: w.memo }
+      pure (n, i)
+    | [] => throw "rule: no line for an application"
+
+/-- The node the pattern `p` was built as and its instance, consuming the
+firing's `b` nodes. -/
+partial def walkB (p : Pat) : WalkM (Nat × Nat) := do
+  match p with
+  | .var x =>
+    match (← get).σ.lookup x with
+    | some n => pure (n, n)
+    | none => throw "rule: unbound variable"
+  | _ =>
+    let w ← get
+    -- A `let` name's term: the engine fetched the name's node.
+    if let (n, true) :: rest := w.rhs then
+      match (Pat.toTerm? p).bind (eval w.S) with
+      | some m =>
+        if w.S.fd m == w.S.fd n then
+          set { w with rhs := rest }
+          return (n, ← letInstance p n)
+        else throw "rule: let name differs"
+      | none => throw "rule: let name differs"
+    match p with
+    | .lit s v =>
+      match w.rhs with
+      | (n, _) :: rest =>
+        match w.S.defOf n with
+        | some (.lit s' v') =>
+          if s' == s && v' == v then set { w with rhs := rest }; pure (n, n)
+          else throw "rule: built literal differs"
+        | _ => throw "rule: built literal differs"
+      | [] => throw "rule: no node for a built literal"
+    | .app f ps =>
+      let cs ← ps.mapM walkB
+      let w ← get
+      match w.rhs with
+      | (n, _) :: rest =>
+        if spells w.S n f (cs.map (·.1)) then
+          set { w with rhs := rest }
+          let i ← instOf f (cs.map (·.2)) n
+          pure (n, i)
+        else throw "rule: built node differs"
+      | [] => throw "rule: no node for a built application"
+    | .var _ => throw "rule: unbound variable"
+
+/-- One side of a body equality: a bound variable's node, a matched pattern's
+node and instance, or `none` for a variable not bound yet. -/
+def side (p : Pat) : WalkM (Option (Nat × Nat)) := do
+  match p with
+  | .var x => pure (((← get).σ.lookup x).map fun n => (n, n))
+  | _ =>
+    match (← get).memo.lookup (key p) with
+    | some r => pure (some r)
+    | none => some <$> walkQ p
+
+def bindVar (p : Pat) (n : Nat) : WalkM Unit := do
+  match p with
+  | .var x => modify fun w => { w with σ := (x, n) :: w.σ }
+  | _ => throw "rule: equality without a node"
+
+/-- What a firing of rule `r` gives the kernel's `rule` step: the instances
+of its two sides, the nodes they are, the assignment, and a step for each
+body equality between the instances of its sides. -/
+structure Fired where
+  nl : Nat
+  il : Nat
+  nr : Nat
+  ir : Nat
+  σ : List (String × Nat)
+  prems : Option (List Nat)
+
+def fireRule (r : Rule) (rewrite : Bool) : WalkM Fired := do
+  let l? ← if rewrite then some <$> walkQ r.lhs else pure none
+  for (p, q) in r.eqs do
+    match ← side p, ← side q with
+    | some (a, _), some (b, _) =>
+      let S := (← get).S
+      if S.fd a != S.fd b then throw "rule: body equality does not hold"
+    | none, some (b, _) => bindVar p b
+    | some (a, _), none => bindVar q a
+    | none, none => throw "rule: equality without a node"
+  let (nl, il) ← match l? with
+    | some x => pure x
+    | none => walkB r.lhs
+  let (nr, ir) ← walkB r.rhs
+  let w ← get
+  for x in r.vars do
+    match w.σ.lookup x, r.sorts.lookup x with
+    | some n, some s => if sortOf w.S n != some s then throw "rule: variable of another sort"
+    | _, _ => throw "rule: unbound variable"
+  -- The body equalities, between instances: every pattern is matched by now.
+  let mut prems : Option (Array Nat) := some #[]
+  for (p, q) in r.eqs do
+    match ← side p, ← side q with
+    | some (_, ip), some (_, iq) =>
+      let st ← withS fun S =>
+        let (S, pf) := eqP S ip iq
+        stepOf S ip pf
+      prems := match prems, st with
+        | some ps, some st => some (ps.push st)
+        | _, _ => none
+    | _, _ => prems := none
+  pure { nl, il, nr, ir, σ := (← get).σ, prems := prems.map (·.toList) }
+
 /-- The engine's node `i` is definition `d`. An id is defined once between
 restores. -/
 def define (S : St) (i : Nat) (d : Def) : St :=
@@ -712,7 +1011,7 @@ def step (S : St) (line : String) : St :=
   | "t" :: id :: f :: kids =>
     match S.node? id, ids S kids with
     | some i, some cs =>
-      if spells S i f cs then { S with spell := S.spell.insert (f, cs) i, splices := [], inverses := [] }
+      if spells S i f cs then termLine { S with spell := S.spell.insert (f, cs) i } i f cs
       else S.fail "term: its node differs"
     | _, _ => S.fail "term: unreadable"
   | ["s", c, m] =>
@@ -725,7 +1024,7 @@ def step (S : St) (line : String) : St :=
       if denotes S u t then { S with units := S.units.insert f u, events := S.events - 1 }
       else S.fail "unit: its node differs"
     | _, _ => S.fail "unit: no such unit"
-  | ["o"] => { S with roundParent := S.parent, events := S.events - 1 }
+  | ["o"] => { S with roundParent := S.parent, roundProof := S.proof, events := S.events - 1 }
   | ["j", m] =>
     match S.node? m with
     | some m => { S with inverses := m :: S.inverses, events := S.events - 1 }
@@ -735,7 +1034,19 @@ def step (S : St) (line : String) : St :=
     | some o, some a, some b =>
       match S.declAt[o]? with
       | some (.axiom l r) =>
-        if eval S l == some a && eval S r == some b then S.merge a b
+        if eval S l == some a && eval S r == some b then
+          match internT S l, internT S r with
+          | some tl, some tr =>
+            -- `a` is the left term, which the `union` equates to the right
+            -- term, which is `b`.
+            let (S, ax) := emit S (.axiom o tl tr) tl tr
+            let (S, pl) := termP S tl a
+            let (S, pr) := termP S tr b
+            let (S, q) := symmP S tl a pl
+            let (S, q) := transP S a tr q (some (some ax))
+            let (S, q) := transP S a b q pr
+            S.mergeBy a b q
+          | _, _ => S.merge a b
         else S.fail "union: its terms differ"
       | _ => S.fail "union: no such command"
     | _, _, _ => S.fail "union: unreadable"
@@ -744,7 +1055,9 @@ def step (S : St) (line : String) : St :=
     | some a, some b =>
       match S.defOf a, S.defOf b with
       | some (.app f as), some (.app g bs) =>
-        if f == g && (let (x, y) := nf2 S f as bs; x == y) then S.merge a b
+        if f == g && (let (x, y) := nf2 S f as bs; x == y) then
+          let (S, p) := congStep S f a b
+          S.mergeBy a b p
         else S.fail "congruence: arguments differ"
       | _, _ => S.fail "congruence: not two applications"
     | _, _ => S.fail "congruence: unreadable"
@@ -756,7 +1069,14 @@ def step (S : St) (line : String) : St :=
         match S.defOf x with
         | some (.app f as) => spells S y f as
         | _ => false
-      if one a b || one b a then S.merge a b
+      if one a b || one b a then
+        let f := match S.defOf a, S.defOf b with
+          | some (.app f as), _ => if spells S b f as then f else
+              (match S.defOf b with | some (.app g _) => g | _ => f)
+          | _, some (.app g _) => g
+          | _, _ => ""
+        let (S, p) := congStep S f a b
+        S.mergeBy a b p
       else match S.defOf a, S.defOf b with
         | some (.app _ _), _ | _, some (.app _ _) => S.fail "law: arguments differ"
         | _, _ => S.fail "law: not an application"
@@ -786,14 +1106,32 @@ def step (S : St) (line : String) : St :=
     match j.toNat?, S.node? a, S.node? b, S.fire with
     | some j, some a, some b, some (o, rw) =>
       -- The engine cites a rule by an offset inside its command.
-      match ((S.P.decls.filter (·.1 ≤ o)).getLast?.map (·.2) : Option Decl) with
-      | some (Decl.rules rs) =>
+      match ((S.P.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl)) with
+      | some (od, Decl.rules rs) =>
         match rs[j]? with
         | some (some r) =>
-          match (fireRule S r rw).run { atoms := S.atoms.toList, rhs := S.rhs } with
-          | .ok ((nl, nr), _) =>
-            if (S.fd nl == S.fd a && S.fd nr == S.fd b) || (S.fd nl == S.fd b && S.fd nr == S.fd a)
-            then S.merge a b
+          -- The walk takes the state and gives it back, whether it succeeds or not.
+          let (atoms, rhs) := (S.atoms.toList, S.rhs)
+          let (res, w) := ((fireRule r rw).run).run { S := S, atoms, rhs }
+          let S := w.S
+          match res with
+          | .ok fr =>
+            -- The instances have joined their nodes' classes, each with its
+            -- own proof, and stay there if the merge fails.
+            if (S.fd fr.nl == S.fd a && S.fd fr.nr == S.fd b) || (S.fd fr.nl == S.fd b && S.fd fr.nr == S.fd a)
+            then
+              -- `a` is the left instance, which the rule equates to the right
+              -- instance, which is `b` (or the same with `a`, `b` exchanged).
+              let (x, y) := if S.fd fr.nl == S.fd a then (a, b) else (b, a)
+              let (S, pf) := match fr.prems with
+                | some prems =>
+                  let (S, st) := emit S (.rule od j fr.σ prems fr.il fr.ir) fr.il fr.ir
+                  let (S, p1) := eqP S x fr.il
+                  let (S, p2) := eqP S fr.ir y
+                  let (S, q) := transP S x fr.ir p1 (some (some st))
+                  transP S x y q p2
+                | none => (S, none)
+              S.mergeBy x y pf
             else S.fail "rule: merged nodes differ"
           | .error e => S.fail e
         | _ => S.fail "rule: outside the reader's language"
@@ -805,7 +1143,21 @@ def step (S : St) (line : String) : St :=
       match S.declAt[o]? with
       | some (.goal l r) =>
         if eval S l == some a && eval S r == some b then
-          if S.fd a == S.fd b then { S with proved := o :: S.proved }
+          if S.fd a == S.fd b then
+            let S := { S with proved := o :: S.proved }
+            -- The kernel's goal step: left term = `a` = `b` = right term.
+            match internT S l, internT S r with
+            | some tl, some tr =>
+              let (S, pl) := termP S tl a
+              let (S, pab) := eqP S a b
+              let (S, pr) := termP S tr b
+              let (S, qr) := symmP S tr b pr
+              let (S, q) := transP S tl b pl pab
+              let (S, q) := transP S tl tr q qr
+              match stepOf S tl q with
+              | (S, some st) => { S with goalSteps := (o, st) :: S.goalSteps }
+              | (S, none) => S
+            | _, _ => S
           else S.fail "goal: not in one class"
         else S.fail "goal: its terms differ"
       | _ => S.fail "goal: no such command"
@@ -833,15 +1185,17 @@ def step (S : St) (line : String) : St :=
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
     match d.toNat? with
-    | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.parent, S.spell) }
+    | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.parent, S.proof, S.spell) }
     | _ => S.fail "mark: unreadable"
   | ["restore", d] =>
     match d.toNat? with
     | some (d + 1) =>
       match S.snaps[d]? with
-      | some (n, p, sp) =>
-        -- The engine's ids past the mark are free again; the table keeps its nodes.
-        { S with cid := S.cid.extract 0 n, parent := p, spell := sp, roundParent := p,
+      | some (n, p, pf, sp) =>
+        -- The engine's ids past the mark are free again; the table keeps its
+        -- nodes, and the kernel steps emitted since stay true.
+        { S with cid := S.cid.extract 0 n, parent := p, proof := pf, spell := sp, roundParent := p,
+                 roundProof := pf,
                  snaps := S.snaps.extract 0 (d + 1), fire := none }
       | none => S.fail "restore: no such mark"
     | _ => S.fail "restore: unreadable"
@@ -849,8 +1203,9 @@ def step (S : St) (line : String) : St :=
     match d.toNat? with
     | some d =>
       match S.snaps[d]? with
-      | some (n, p, sp) =>
-        { S with cid := S.cid.extract 0 n, parent := p, spell := sp, roundParent := p,
+      | some (n, p, pf, sp) =>
+        { S with cid := S.cid.extract 0 n, parent := p, proof := pf, spell := sp, roundParent := p,
+                 roundProof := pf,
                  snaps := S.snaps.extract 0 d, fire := none }
       | none => S.fail "restore: no such mark"
     | none => S.fail "restore: unreadable"
