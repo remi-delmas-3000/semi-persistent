@@ -462,6 +462,8 @@ structure Rewrote where
   q : Nat
   rest : List Nat
   after : List Nat
+  /-- The right side is `r` as one argument. -/
+  atom : Bool := false
 
 /-- Rewrites `m` by the rules `rules`, in order: the result and each rewrite. -/
 def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false)
@@ -474,7 +476,7 @@ def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (o
       if g != f then throw "completion: rule of another operator"
       let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)))
       match applyRule S f m lc (if atom then [r] else monomial S f W r) once with
-      | some (q, left, m') => rewrite S f W m' once (done.push { l, r, q, rest := left, after := m' }) rest
+      | some (q, left, m') => rewrite S f W m' once (done.push { l, r, q, rest := left, after := m', atom }) rest
       | none => throw "completion: rule does not apply"
     | _ => throw "completion: rule of another operator"
 
@@ -1123,21 +1125,24 @@ def emitChain (S : St) (c : Chain) : St × Option (Nat × Nat × Pf) := Id.run d
     S := S'; cur := t; pf := pf'
   | (S', none) => return (S', none)
   for st in c.steps do
+    -- A right side that is one argument is named by a plain member of its
+    -- class, which the kernel reads as one argument.
+    let r := if st.atom then (S.plain.getD (S.fd st.r) none).getD st.r else st.r
     let (S1, t1) := monoNode S f (List.replicate st.q st.l ++ st.rest) st.q
-    let (S2, t2) := monoNode S1 f (List.replicate st.q st.r ++ st.rest) st.q
+    let (S2, t2) := monoNode S1 f (List.replicate st.q r ++ st.rest) st.q
     let (S3, t3) := monoNode S2 f st.after
     S := S3
     let (some t1, some t2, some t3) := (t1, t2, t3) | return (S, none)
     let (S', pf') := hop S cur t1 pf
     S := S'; pf := pf'
     -- `f(l, .., rest) = f(r, .., rest)`: each differing argument is `l = r`.
-    let (S', lr) := eqP S st.l st.r
+    let (S', lr) := eqP S st.l r
     let (S', lrStep) := stepOf S' st.l lr
     S := S'
     let p2 : Pf ← if t1 == t2 then pure (some none) else
       match lrStep with
       | some e =>
-        let (S', s2) := emit S (.cong f t1 t2 (if st.l == st.r then [] else [e])) t1 t2
+        let (S', s2) := emit S (.cong f t1 t2 (if st.l == r then [] else [e])) t1 t2
         S := S'
         pure (some (some s2))
       | none => pure none
