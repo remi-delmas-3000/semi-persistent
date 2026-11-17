@@ -64,7 +64,9 @@ structure St where
   units : Std.HashMap String Nat := {}
   /-- Each literal's node, checked against its definition on use. -/
   lits : Std.HashMap (String × String) Nat := {}
-  snaps : Array (Array Nat × Spell) := #[]
+  /-- Each mark: the number of definitions, the classes and the spelling
+  table at the mark. -/
+  snaps : Array (Nat × Array Nat × Spell) := #[]
   /-- Splice witnesses for the next `t`, `c` or `w` line. -/
   splices : List (Nat × Nat) := []
   /-- Inverse witnesses (`j` lines) for the next line: inverse applications,
@@ -121,6 +123,22 @@ partial def eval (S : St) : Term → Option Nat
     let args := if S.P.kind f == .assoc then flattenSyn f args else args
     let ids ← args.mapM (eval S)
     S.spell[(f, ids)]?
+
+/-- Node `n`'s definition is the term `t`, argument for argument. -/
+partial def denotes (S : St) (n : Nat) : Term → Bool
+  | .lit s v => match S.defOf n with
+    | some (.lit s' v') => s' == s && v' == v
+    | _ => false
+  | .app f ts => match S.defOf n with
+    | some (.app g cs) => g == f && cs.length == ts.length && (cs.zip ts).all fun (c, t) => denotes S c t
+    | _ => false
+
+/-- The node of `f`'s unit: the one a `z` line named, if its definition still
+is the declared unit (a restore can have discarded it). -/
+def St.unit (S : St) (f : String) : Option Nat :=
+  match S.units[f]?, (S.P.opDecl? f).bind (·.unit) with
+  | some u, some t => if denotes S u t then some u else none
+  | _, _ => none
 
 /-- The applications of `f` among `xs` and, literally nested, below them:
 each is a splice witness for its own class. -/
@@ -188,7 +206,7 @@ def nf2 (S : St) (f : String) (as bs : List Nat) (invUnit : Bool := false) : Lis
       | _ => none
     let own := ((as ++ bs).flatMap (nested S.defs f)).map fun (x, cs) => (S.fd x, cs)
     let W := given ++ own
-    let u := (S.units[f]?).map S.fd
+    let u := (S.unit f).map S.fd
     let d := S.P.opDecl? f
     let one (xs : List Nat) : List Nat :=
       -- The unit's arguments go first, as in the engine: `f(e, inv(e))` is
@@ -221,16 +239,7 @@ def spells (S : St) (n : Nat) (f : String) (cs : List Nat) : Bool :=
     || ((S.P.kind f).isAssoc &&
         (let t := (nf2 S f cs [] invUnit).1
          -- One class left: the application is that class. None left: it is the unit.
-         t == [S.fd n] || (t.isEmpty && (S.units[f]?).map S.fd == some (S.fd n))))
-
-/-- Node `n`'s definition is the term `t`, argument for argument. -/
-partial def denotes (S : St) (n : Nat) : Term → Bool
-  | .lit s v => match S.defOf n with
-    | some (.lit s' v') => s' == s && v' == v
-    | _ => false
-  | .app f ts => match S.defOf n with
-    | some (.app g cs) => g == f && cs.length == ts.length && (cs.zip ts).all fun (c, t) => denotes S c t
-    | _ => false
+         t == [S.fd n] || (t.isEmpty && (S.unit f).map S.fd == some (S.fd n))))
 
 /-! ## Completion merges
 
@@ -246,7 +255,7 @@ removed, and each class kept once (ACI) or its count modulo `n`
 def lawReduce (S : St) (f : String) (atoms : List Nat) (inverse : Bool := true)
     (inverseFirst : Bool := false) : List Nat :=
   let d := S.P.opDecl? f
-  let u := (S.units[f]?).map S.fd
+  let u := (S.unit f).map S.fd
   let dropUnit (xs : List Nat) : List Nat := xs.filter fun a => some (S.fd a) != u
   -- The engine drops the unit's arguments before it cancels inverse pairs,
   -- except in a group-law critical pair, whose peak holds the pair it cancels
@@ -421,7 +430,7 @@ def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) : E
         (c, min (countOf c ca) (countOf c cb) - (if some c == keep then 1 else 0))
       let drop (m : List Nat) := common.foldl (fun m (c, k) => dropClass S c k m) m
       let (mA, mB) := (drop mA, drop mB)
-      unless (!mA.isEmpty && !mB.isEmpty) || (S.units[f]?).isSome do
+      unless (!mA.isEmpty && !mB.isEmpty) || (S.unit f).isSome do
         throw "completion: cancellation empties a side"
       pure (mA, mB)
     else pure (mA, mB)
@@ -446,7 +455,7 @@ def groupLaw (S : St) (a b n1 n2 : Nat) : Except String Unit := do
   let f := d.name
   let fd := S.fd
   let is (p q : Nat) : Bool := (fd a == fd p && fd b == fd q) || (fd a == fd q && fd b == fd p)
-  let unit := (S.units[f]?).map fd
+  let unit := (S.unit f).map fd
   -- `x` is what `k - 1` arguments in `y`'s class normalize to; `n1` stands
   -- for one of them when it is in that class, so that a self-inverse cancels.
   let power (x y : Nat) : Bool :=
@@ -633,6 +642,8 @@ def fireRule (S : St) (r : Rule) (rewrite : Bool) : WalkM (Nat × Nat) := do
 
 /-! ## One line -/
 
+/-- Records the definition of node `i`, which has none: a node is defined
+once, so that its value never changes while a class holds it. -/
 def setDef (S : St) (i : Nat) (d : Def) : St :=
   let defs := if S.defs.size ≤ i then S.defs ++ Array.replicate (i + 1 - S.defs.size) none
     else S.defs
@@ -644,14 +655,18 @@ def step (S : St) (line : String) : St :=
   | "n" :: id :: f :: kids =>
     match id.toNat?, ids kids with
     | some i, some cs =>
-      if cs.all (· < i) then setDef S i (.app f cs) else S.fail "definition: argument after its node"
+      if (S.defOf i).isSome then S.fail "definition: node already defined"
+      else if cs.all (· < i) then setDef S i (.app f cs)
+      else S.fail "definition: argument after its node"
     | _, _ => S.fail "definition: unreadable"
   | "l" :: id :: s :: rest =>
     match id.toNat? with
     | some i =>
-      let v := " ".intercalate rest
-      let S := setDef S i (.lit s v)
-      { S with lits := S.lits.insert (s, v) i }
+      if (S.defOf i).isSome then S.fail "definition: node already defined"
+      else
+        let v := " ".intercalate rest
+        let S := setDef S i (.lit s v)
+        { S with lits := S.lits.insert (s, v) i }
     | none => S.fail "definition: unreadable"
   | "t" :: id :: f :: kids =>
     match id.toNat?, ids kids with
@@ -777,20 +792,25 @@ def step (S : St) (line : String) : St :=
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
     match d.toNat? with
-    | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.parent, S.spell) }
+    | some (d + 1) => { S with snaps := (S.snaps.extract 0 d).push (S.defs.size, S.parent, S.spell) }
     | _ => S.fail "mark: unreadable"
   | ["restore", d] =>
     match d.toNat? with
     | some (d + 1) =>
       match S.snaps[d]? with
-      | some (p, sp) => { S with parent := p, spell := sp, snaps := S.snaps.extract 0 (d + 1), fire := none }
+      | some (n, p, sp) =>
+        -- The nodes defined since the mark are discarded with their ids.
+        { S with defs := S.defs.extract 0 n, parent := p, spell := sp, roundParent := p,
+                 snaps := S.snaps.extract 0 (d + 1), fire := none }
       | none => S.fail "restore: no such mark"
     | _ => S.fail "restore: unreadable"
   | ["rpop", d] =>
     match d.toNat? with
     | some d =>
       match S.snaps[d]? with
-      | some (p, sp) => { S with parent := p, spell := sp, snaps := S.snaps.extract 0 d, fire := none }
+      | some (n, p, sp) =>
+        { S with defs := S.defs.extract 0 n, parent := p, spell := sp, roundParent := p,
+                 snaps := S.snaps.extract 0 d, fire := none }
       | none => S.fail "restore: no such mark"
     | none => S.fail "restore: unreadable"
   | "u" :: kind :: rest =>
