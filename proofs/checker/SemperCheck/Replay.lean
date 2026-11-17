@@ -1379,7 +1379,16 @@ def side (p : Pat) : WalkM (Option (Nat × Nat)) := do
   | _ =>
     match (← get).memo.lookup (key p) with
     | some r => pure (some r)
-    | none => some <$> walkQ p
+    | none =>
+      -- A ground side with no line of its own is a `let` name's term.
+      let w ← get
+      let (g, k) := firstLine p
+      let hasLine := match w.atoms with
+        | (_, h, cs) :: _ => g == h && cs.length == k
+        | [] => false
+      match hasLine, (Pat.toTerm? p).bind (eval w.S) with
+      | false, some n => pure (some (n, ← letInstance p n))
+      | _, _ => some <$> walkQ p
 
 def bindVar (p : Pat) (n : Nat) : WalkM Unit := do
   match p with
