@@ -78,6 +78,9 @@ structure St (P : Program) where
   failed : Std.HashMap String Nat := {}
   nFailed : Nat := 0
   lastCause : String := ""
+  /-- With `logFailed`, every failed event: its number, cause and line. -/
+  logFailed : Bool := false
+  failedLog : Array String := #[]
   unchecked : Std.HashMap String Nat := {}
 
 variable {P : Program}
@@ -1925,7 +1928,12 @@ def stepCore (S : St P) (line : String) : St P :=
 /-- Replays one line. The witness lines (`s`, `j`) hold until the next line
 of another kind has been replayed. -/
 def step (S : St P) (line : String) : St P :=
+  let before := S.nFailed
   let S := stepCore S line
+  let S := if S.logFailed && S.nFailed > before then
+      let entry := toString S.events ++ "\t" ++ (S.lastCause.splitOn " | ").headD "" ++ "\t" ++ line ++ "\n"
+      { S with failedLog := S.failedLog.push entry }
+    else S
   if line.startsWith "s " || line.startsWith "j " then S
   else { S with splices := [], inverses := [] }
 

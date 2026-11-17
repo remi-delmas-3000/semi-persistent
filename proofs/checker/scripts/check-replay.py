@@ -149,13 +149,21 @@ def check_one(path, args):
         # `time` reports the replay's peak memory, where it is installed.
         timed = ["/usr/bin/time", "-l" if sys.platform == "darwin" else "-v"] \
             if os.path.exists("/usr/bin/time") else []
+        env = dict(os.environ)
+        if args.failed:
+            env["SEMPER_REPLAY_FAILED"] = trace + ".failed"
         p = subprocess.run(timed + [args.checker, "--replay", os.path.join(ROOT, path), trace],
-                           capture_output=True, text=True, timeout=args.timeout)
+                           capture_output=True, text=True, timeout=args.timeout, env=env)
     except subprocess.TimeoutExpired:
         os.remove(trace)
         return path, {"status": "replay-timeout", "bytes": size}
     secs = time.time() - start
     os.remove(trace)
+    failed_events = []
+    if args.failed and os.path.exists(trace + ".failed"):
+        with open(trace + ".failed", encoding="utf-8") as f:
+            failed_events = [line.rstrip("\n") for line in f]
+        os.remove(trace + ".failed")
     if "program:" in p.stderr:
         return path, {"status": "unread", "bytes": size}
     if "node table is rejected" in p.stdout:
@@ -182,7 +190,7 @@ def check_one(path, args):
         "rejected": int((re.search(r"kernel: (\d+) steps rejected", p.stdout) or [0, 0])[1]),
         "bytes": size, "secs": secs, "rss_mb": rss_mb,
         "failed_by": by("failed"), "unchecked_by": by("unchecked"),
-        "nostep_by": by("no kernel step"),
+        "nostep_by": by("no kernel step"), "failed_events": failed_events,
     }
 
 
@@ -221,6 +229,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=60, help="seconds per run")
     ap.add_argument("--memory", type=int, default=4000, help="MB per engine run (Linux)")
     ap.add_argument("--update", action="store_true", help="rewrite coverage.tsv")
+    ap.add_argument("--failed", default=None,
+                    help="list every failed event here: program, event, cause, line")
     ap.add_argument("--json", default=None, help="write the per-program results here")
     ap.add_argument("files", nargs="*", help="programs, relative to the repository root")
     args = ap.parse_args()
@@ -231,6 +241,23 @@ def main():
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
         for path, r in ex.map(lambda p: check_one(p, args), args.files or programs()):
             results[path] = r
+    # Every failed event, and the cause of each program's first one: the later
+    # ones of a program can follow from a merge the first one did not apply.
+    first = collections.Counter()
+    first_goals = collections.Counter()
+    if args.failed:
+        with open(args.failed, "w", encoding="utf-8") as f:
+            f.write("# program\tevent\tcause\tline\n")
+            for path, r in sorted(results.items()):
+                evs = r.pop("failed_events", [])
+                for e in evs:
+                    f.write(f"{path}\t{e}\n")
+                if evs and not r.get("unchecked"):
+                    cause = evs[0].split("\t")[1]
+                    first[cause] += 1
+                    first_goals[cause] += r["total"] - r["proved"]
+    for r in results.values():
+        r.pop("failed_events", None)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump(results, f)
@@ -278,6 +305,12 @@ def main():
             print(title)
             for what, n in count.most_common():
                 print(f"  {n:8d}  {what}")
+    if first:
+        print(f"every failed event is listed in {args.failed}")
+        print("programs with every rule read, by the cause of their first failed event "
+              "(programs, check-eq not proved):")
+        for what, n in first.most_common():
+            print(f"  {n:8d}  {first_goals[what]:6d}  {what}")
     if args.update:
         write_baseline(results, base)
         print(f"wrote {os.path.relpath(BASELINE, ROOT)}")

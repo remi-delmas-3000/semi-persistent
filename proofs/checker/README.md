@@ -160,11 +160,28 @@ The 4,173 `check-eq` not proved:
   which the reader does not read (292,218 such merges, 287,931 of them in
   `bench/math-microbenchmark.native.egg`). Later events of these programs fail
   because the merge was not applied.
-- 910 are in 92 programs where a check fails: the replayer computes a
-  completion merge's derivation, a law step's normal form or a rule's matched
-  node, and gets a result other than the engine's (288 completion events,
-  4,269 congruences, and the law steps and goals that follow from them). Each
-  is counted by cause in the sweep's output.
+- 910 are in 92 programs with no such firing. `check-replay.py --failed FILE`
+  lists every failed event (program, event number, cause, line: 212,670
+  lines) and counts these programs by the cause of their first failed event,
+  since a program's later failures can follow from the merge the first one did
+  not apply:
+
+  | first failed event | programs | `check-eq` not proved |
+  | --- | --- | --- |
+  | completion: normal form differs | 17 | 432 |
+  | rule: outside the reader's language | 43 | 162 |
+  | completion: rule does not apply | 11 | 141 |
+  | rule: matched node differs | 8 | 69 |
+  | goal: not in one class | 3 | 64 |
+  | law: arguments differ | 8 | 29 |
+  | seven other causes | 13 | 13 |
+
+  In the completion cases the replayer computes the derivation from the
+  line's witnesses and reaches a monomial other than the engine's merged node:
+  the examples read so far differ in how the engine builds the node of a
+  result whose argument is a class that holds its own application
+  (`conform-cc-cert/cs1_0059.egg`), and in which side of a cancellation in a
+  group keeps the remainder (`conform-cc-cert/cs1_0075.egg`).
 
 The certificates this replaces proved 5,702 `check-eq`, and the replay before
 the replayer was proved 21,066. No program proves fewer than under either.

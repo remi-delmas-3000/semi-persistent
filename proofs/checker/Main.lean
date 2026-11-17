@@ -25,6 +25,9 @@ def replay (progPath tracePath : String) : IO UInt32 := do
   -- `SEMPER_REPLAY_SHOW=n` prints the first `n` failed lines.
   let shown := ((← IO.getEnv "SEMPER_REPLAY_SHOW").bind (·.toNat?)).getD 0
   let nodes := (← IO.getEnv "SEMPER_REPLAY_NODES").isSome
+  -- `SEMPER_REPLAY_FAILED=FILE` lists every failed event: number, cause, line.
+  let failedOut ← IO.getEnv "SEMPER_REPLAY_FAILED"
+  if failedOut.isSome then S := { S with logFailed := true }
   repeat
     let line ← h.getLine
     if line.isEmpty then break
@@ -45,6 +48,7 @@ def replay (progPath tracePath : String) : IO UInt32 := do
             | none => "?"
           IO.eprintln s!"  {x}: table {t}, root {S.fd t}, {d}"
     if S.core.rejected > beforeR && beforeR < shown then IO.eprintln s!"kernel rejects a step at event {S.events}: {line}"
+  if let some f := failedOut then IO.FS.writeFile f (String.join S.failedLog.toList)
   let total := (P.decls.filter fun (_, d) => match d with | .goal .. => true | _ => false).length
   let joined := (P.decls.filter fun (o, d) =>
     match d with | .goal .. => S.proved.contains o | _ => false).length
