@@ -55,6 +55,9 @@ structure St where
   declAt : Std.HashMap Nat Decl
   defs : Array (Option Def) := #[]
   parent : Array Nat := #[]
+  /-- The classes at the start of the completion round (`o` line): the round's
+  merges are computed on them. They refine the current classes. -/
+  roundParent : Array Nat := #[]
   /-- `(f, c1 .. ck) -> id`: the program term `f(c1 .. ck)` evaluated to `id`. -/
   spell : Spell := {}
   /-- The node of each operator's unit (`z` lines). -/
@@ -666,6 +669,7 @@ def step (S : St) (line : String) : St :=
       if denotes S u t then { S with units := S.units.insert f u, events := S.events - 1 }
       else S.fail "unit: its node differs"
     | _, _ => S.fail "unit: no such unit"
+  | ["o"] => { S with roundParent := S.parent, events := S.events - 1 }
   | ["j", m] =>
     match m.toNat? with
     | some m => { S with inverses := m :: S.inverses, events := S.events - 1 }
@@ -753,16 +757,23 @@ def step (S : St) (line : String) : St :=
   | "i" :: a :: b :: n :: rest =>
     match a.toNat?, b.toNat?, n.toNat?, rest.mapM (·.toNat?) with
     | some a, some b, some n, some rs =>
-      match interReduce S a b n (pairs rs) with
-      | .ok () => S.merge a b
-      | .error e => S.fail e
+      -- On the current classes, else on the classes at the round's start: the
+      -- engine reads a round's monomials through the latter, and builds the
+      -- nodes it merges through the former. Either check is sound.
+      match interReduce S a b n (pairs rs), interReduce { S with parent := S.roundParent } a b n (pairs rs) with
+      | .ok (), _ | _, .ok () => S.merge a b
+      | .error e, _ => S.fail e
     | _, _, _, _ => S.fail "completion: unreadable"
   | "p" :: a :: b :: rest =>
     match a.toNat?, b.toNat?, (rest.mapM (fun (x : String) => x.toNat?)).bind Peak.read with
     | some a, some b, some w =>
-      match peakMerge S a b w, peakMerge S a b w (inverseFirst := true) with
-      | .ok (), _ | _, .ok () => S.merge a b
-      | .error e, _ => S.fail e
+      let R := { S with parent := S.roundParent }
+      let tries := [peakMerge S a b w, peakMerge S a b w (inverseFirst := true),
+                    peakMerge R a b w, peakMerge R a b w (inverseFirst := true)]
+      if tries.any (fun t => t.isOk) then S.merge a b
+      else match tries.head? with
+        | some (.error e) => S.fail e
+        | _ => S.fail "completion: unreadable"
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
     match d.toNat? with
