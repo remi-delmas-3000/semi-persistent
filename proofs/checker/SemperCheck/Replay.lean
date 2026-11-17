@@ -46,7 +46,12 @@ structure St (P : Program) where
   lits : Std.HashMap (String × String) Nat := {}
   /-- Each mark: the number of engine ids, the plain members and the spelling
   table at the mark. The classes at the mark are in `core`. -/
-  snaps : Array (Nat × Array (Option Nat) × Spell) := #[]
+  snaps : Array (Nat × Array (Option Nat) × Spell × Std.HashMap Nat (List Nat)) := #[]
+  /-- The operators that are some operator's `:inverse`. -/
+  invOps : List String := []
+  /-- For a class's root, the applications of an inverse operator the class
+  holds: a class with `g(x)` in it cancels against the class of `x`. -/
+  invIn : Std.HashMap Nat (List Nat) := {}
   /-- For a class's root, a member that is no application of an associative
   operator, when the class has one. A monomial's term names a class by such a
   member: the kernel reads through an application of the operator, and would
@@ -224,6 +229,9 @@ def St.mergeBy (S : St P) (a b : Nat) (pf : Pf) : St P :=
     | some (some s) =>
       match S.link hi lo s with
       | (S, true) =>
+        let S := match S.invIn[hi]? with
+          | some xs => { S with invIn := (S.invIn.erase hi).insert lo (xs ++ S.invIn.getD lo []) }
+          | none => S
         -- The merged class keeps a plain member of either side.
         match S.plain.getD lo none, S.plain.getD hi none with
         | none, some m =>
@@ -327,7 +335,8 @@ def cancelInverse (S : St P) (inv : String) (unit : Option Nat) (xs : List Nat) 
       match S.defOf m with
       | some (.app g [y]) => if g == inv then some y else none
       | _ => none
-    (arg a).toList ++ S.inverses.filterMap fun m => if S.fd m == S.fd a then arg m else none
+    (arg a).toList ++ (S.inverses.filterMap fun m => if S.fd m == S.fd a then arg m else none)
+      ++ (S.invIn.getD (S.fd a) []).filterMap arg
   let mut out := xs.toArray
   for a in xs do
     if let some i := out.findIdx? (· == a) then
@@ -501,7 +510,9 @@ def rewrite (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List N
     match S.defOf l with
     | some (.app g ls) =>
       if g != f then throw "completion: rule of another operator"
-      let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)))
+      -- A rule's left side keeps its inverse pairs: the engine cancels them on
+      -- a normal form only.
+      let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)) (inverse := false))
       match applyRule S f m lc (if atom then [r] else monomial S f W r) once with
       | some (q, left, m') => rewrite now S f W m' once (done.push { l, r, q, rest := left, after := m', atom }) rest
       | none => throw s!"completion: rule does not apply | rule {done.size}: left side {ls} as classes {lc}, monomial {m} as classes {classesOf S m}"
@@ -845,7 +856,8 @@ def inverseNode (S : St P) (inv : String) (a : Nat) (unit : Nat) (others : List 
     match S.defOf m with
     | some (.app g [y]) => if g == inv then some (m, y) else none
     | _ => none
-  let all := (arg a).toList ++ S.inverses.filterMap fun m => if S.fd m == S.fd a then arg m else none
+  let all := (arg a).toList ++ (S.inverses.filterMap fun m => if S.fd m == S.fd a then arg m else none)
+    ++ (S.invIn.getD (S.fd a) []).filterMap arg
   -- The first that has what it cancels with, else the first.
   (all.find? fun (_, y) => S.fd y == S.fd unit || others.any fun b => S.fd b == S.fd y).orElse
     fun _ => all.head?
@@ -1226,6 +1238,9 @@ def intern (S : St P) (d : Def) : St P × Option Nat :=
       let isPlain := match d with
         | .lit _ _ => true
         | .app f _ => !(S.prog.kind f).isAssoc
+      let S := match d with
+        | .app g [_] => if S.invOps.contains g then { S with invIn := S.invIn.insert t [t] } else S
+        | _ => S
       ({ S with plain := (if S.plain.size ≤ t then S.plain ++ Array.replicate (t + 1 - S.plain.size) none
                 else S.plain).setIfInBounds t (if isPlain then some t else none) }, some t)
     | (S, none) => (S, none)
@@ -1997,16 +2012,16 @@ def stepCore (S : St P) (line : String) : St P :=
     match d.toNat? with
     | some (d + 1) =>
       let S := (S.withCore fun c => (c.mark d, ())).1
-      { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.plain, S.spell) }
+      { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.plain, S.spell, S.invIn) }
     | _ => S.fail "mark: unreadable"
   | ["restore", d] =>
     match d.toNat? with
     | some (d + 1) =>
       match S.snaps[d]?, S.withCore fun c => c.restore d (d + 1) with
-      | some (n, pl, sp), (S, true) =>
+      | some (n, pl, sp, iv), (S, true) =>
         -- The engine's ids past the mark are free again; the table keeps its
         -- nodes, and the kernel steps checked since stay true.
-        { S with cid := S.cid.extract 0 n, plain := pl, spell := sp,
+        { S with cid := S.cid.extract 0 n, plain := pl, spell := sp, invIn := iv,
                  snaps := S.snaps.extract 0 (d + 1), fire := none }
       | _, (S, _) => S.fail "restore: no such mark"
     | _ => S.fail "restore: unreadable"
@@ -2014,8 +2029,8 @@ def stepCore (S : St P) (line : String) : St P :=
     match d.toNat? with
     | some d =>
       match S.snaps[d]?, S.withCore fun c => c.restore d d with
-      | some (n, pl, sp), (S, true) =>
-        { S with cid := S.cid.extract 0 n, plain := pl, spell := sp,
+      | some (n, pl, sp, iv), (S, true) =>
+        { S with cid := S.cid.extract 0 n, plain := pl, spell := sp, invIn := iv,
                  snaps := S.snaps.extract 0 d, fire := none }
       | _, (S, _) => S.fail "restore: no such mark"
     | none => S.fail "restore: unreadable"
@@ -2039,6 +2054,7 @@ def step (S : St P) (line : String) : St P :=
   else { S with splices := [], inverses := [] }
 
 def start (P : Program) : St P :=
-  { declAt := P.decls.foldl (fun m (o, d) => m.insert o d) {} }
+  { declAt := P.decls.foldl (fun m (o, d) => m.insert o d) {},
+    invOps := P.ops.filterMap (·.inverse) }
 
 end SemperCheck.Replay
