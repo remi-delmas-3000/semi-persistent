@@ -1,0 +1,13 @@
+n 0 a
+t 0 a
+n 1 b
+t 1 b
+t 0 a
+n 2 Or 0 1
+n 3 Or 0 1 0
+w 3 2
+t 3 Or 0 1 0
+t 1 b
+t 0 a
+t 2 Or 1 0
+g 191 3 2

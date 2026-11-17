@@ -1,0 +1,9 @@
+n 0 a
+t 0 a
+n 1 b
+t 1 b
+mark 1
+x 154 0 1
+t 0 a
+t 1 b
+g 170 0 1

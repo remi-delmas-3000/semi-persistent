@@ -10,13 +10,13 @@ For each `.egg` program the regression tests run and expect `ok` (the files
 machine types as `egraph/tests/cost_models.rs` runs them), the engine runs with
 `--proofs --trace` under the program's `TYPES` and `UNION_BY` directives, and
 `semper-check --replay` replays the stream (`proofs/checker/REPLAY.md`). The
-replay emits kernel steps; the kernel checks them, and `replay_sound`
-(`SemperCheck/ReplaySound.lean`) covers the `check-eq` it accepts. The run
-fails when:
+replayer has the kernel check the steps for each merge as it makes it, and
+`replay_sound` (`SemperCheck/ReplaySound.lean`) covers the `check-eq` it
+reports as proved. The run fails when:
 
 - the engine fails on a program that expects `ok`, or the engine or the replay
   exceeds its time limit where the baseline does not record that it does;
-- the replay does not finish, or the kernel rejects the node table;
+- the replay does not finish, or the kernel rejects a step the replayer built;
 - a program proves fewer `check-eq` through the kernel than
   `proofs/checker/coverage.tsv` records.
 

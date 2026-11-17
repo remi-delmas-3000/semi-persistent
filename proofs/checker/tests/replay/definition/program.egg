@@ -1,0 +1,8 @@
+;; Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+;; SPDX-License-Identifier: Apache-2.0
+(sort E)
+(function a () E)
+(function b () E)
+(function F (E) E)
+(union (a) (b))
+(check-eq (F (a)) (F (b)))

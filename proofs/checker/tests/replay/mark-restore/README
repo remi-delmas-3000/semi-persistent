@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`, with a `mark 1` line before the `union`.
+`bad.trace` adds line 7, `restore 1`: the classes are those of the mark, without the `union`, when the `g` line is read.

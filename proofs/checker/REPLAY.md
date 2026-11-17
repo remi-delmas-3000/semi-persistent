@@ -10,13 +10,21 @@ files do and what `scripts/check-replay.py` measures.
 
 The replayer holds the program (read from the `.egg` file), a table of node
 definitions, and a union-find over node ids. It reads the stream in order and
-checks each event against its own classes. Its invariant: two nodes in one class
-have equal values in every model of the program.
+checks each event against its own classes. Its invariant, proved of the
+executable (`replay_classes`, see Soundness): two nodes in one class have equal
+values in every model of the program.
 
 An event carries a witness for every existential in its check and nothing the
 replayer can compute from the program, the earlier events and its classes. No
 check searches: each one is a fixed number of class lookups, a sort of a node's
-arguments by class, or the instantiation of a pattern.
+arguments by class, or the instantiation of a pattern, followed by the kernel
+steps for the merge. The steps that equate two nodes under an operator's laws
+are chosen by a decision list of at most seven constructions, in a fixed order,
+each linear in the arguments of the two nodes (`congStepL`): arguments equal
+one by one; the two flattened argument lists equal as classes; all of one
+node's arguments in the other's class; a node's arguments each named by a
+member of its class that is no application of the operator; and the first four
+again after the inverse and nilpotent laws reduce both nodes.
 
 Consequence: the replayer's classes equal the engine's at each event only if the
 stream holds every merge, in order. A merge the replayer rejects is counted,
@@ -40,7 +48,7 @@ program.
 | `w a b` | one of `a`, `b` is an application of an operator with laws, merged with the other, the node or class its arguments normalize to |
 | `s c m` | splice witness for the next `c` or `w` line: node `m` is in the class of argument `c` and is an application of the same associative operator |
 | `r off k` | a rule of the command at `off` fired; `k` is `w` for a `rewrite` (its left side is matched) and `r` for a `rule` (both sides of its `union` actions are built) |
-| `e id f c1 .. ck` | within a firing: the pattern application `f` matched node `id`, with its argument patterns bound to `c1 .. ck`; one line per application of the matched patterns, arguments before the application (`f` is `#lit` for a literal pattern) |
+| `e id f c1 .. ck` | within a firing: the pattern application `f` matched node `id`, with its argument patterns bound to `c1 .. ck` (`c:m` for an argument pattern of multiplicity `m`); one line per application of the matched patterns, arguments before the application (`f` is `#lit` for a literal pattern) |
 | `b id1 .. idk` | within a firing: the nodes the built patterns' applications evaluated to, arguments before the application (`g` before an id marks the node of a `let` name, which stands for the name's whole term) |
 | `m j a b` | within a firing: rule `j` of the command merged `a` and `b`, the nodes of its two sides |
 | `g off a b` | the `check-eq` at `off` compared `a` and `b`, the nodes of its two terms |
@@ -149,56 +157,70 @@ reach one merged node and the other is in the class of `n1`, or the same with
 
 The engine reads a round's monomials through the classes as they are when the
 round starts (`o`), and builds the nodes it merges through the classes as they
-are at the merge. The replayer checks an `i` or `p` line on its current
-classes and, if that fails, on its classes at the last `o` line. Both are
-sound: the classes at `o` refine the current ones.
+are at the merge. The replayer does the same: it reads the derivation of an
+`i` or `p` line (the monomials, each rewrite, the common part of a
+cancellation) on its classes at the last `o` line, and it reads the two ends
+(the start is in a merged class, the result is the other merged node, a rule's
+two nodes are in one class) on its current classes. The classes at `o` refine
+the current ones.
 
-A `w`, `c`, `t` or `e` check compares normal forms with and without the rule
-that an inverse application of a node of the unit's class is dropped by
-itself, because the engine applies that rule at some law steps and not at
-others; a `p` check with `d = 1` reduces the peak with the unit dropped first
-and with the inverse pairs cancelled first. Each is a fixed pair of attempts.
+Each check is one construction. Where the engine has two orders, the line's
+fields decide: a `w`, `c`, `t` or `e` check drops an inverse application of a
+node of the unit's class by itself; a `p` check with `d = 1` (the peak of a
+critical pair with a law) cancels the peak's inverse pair before it drops the
+unit's arguments; every other reduction drops the unit's arguments first, and
+the two sides of a cancellation keep their inverse pairs.
 
 ## Soundness
 
-The replayer's checks are not proved correct one by one. The replayer
-justifies every merge to the kernel, which is proved (`goal_sound`,
-`Sound.lean`):
+The replayer's table, classes and proved `check-eq` are a `Core P`
+(`Core.lean`): a state that carries its invariant and that only proved
+operations build.
 
-- each link of the union-find carries a kernel step that proves its two nodes
-  equal, so the equality of two nodes of one class is a `trans` chain of
-  checked steps;
-- each check emits the kernel steps that derive its merge: `axiom` for `x`;
-  `cong` with class premises for `c`, `w`, `t`; `rule` on the instance the
-  walk built, joined to the matched and built nodes by `cong` steps, for a
-  firing; for `i` and `p`, three `cong` steps per rewrite, through the terms of
-  the monomials on the way;
-- a clamp is derived from three kernel steps, each with its law in the models
-  (`OpSat`) and a direct soundness proof: `inv` (`f(x, g(x))` is the unit),
-  `nil` (`f` of `n` copies of `x` is the unit), `cancel` (from `f(a, z) = f(b,
-  z)`, `a = b`, for `:cancellative` and, as a consequence of the group laws,
-  for `:inverse` with a unit). An inverse pair or `n` arguments of one class
-  inside a monomial become the unit by `cong` steps around one of the first
-  two; a critical pair's cancellation and the group consequences of `v` lines
-  use the third;
-- the kernel checks every step, and a `check-eq` is proved when the kernel
-  accepts the step that joins its two terms.
+- **The invariant** (`Raw.Ok`): the table is well-formed and well-sorted; every
+  recorded conclusion holds in every model of the commands it cites; every
+  link of the union-find, in the current classes, at each mark and at the
+  round's start, is the conclusion of a recorded step; every recorded
+  `check-eq` holds in every model of the commands before it.
+- **The operations**, each with its proof that the invariant is kept:
+  `addNode` (a well-sorted node whose children are in the table), `emit` (the
+  kernel's `checkStep` accepts a step against the conclusions so far, and its
+  conclusion is recorded), `link` (a node points at a smaller one, given a
+  recorded conclusion that the two are equal), `mark`, `restore`,
+  `roundStart`, `atRound` (classes whose links are recorded conclusions), and
+  `goal` (a recorded conclusion is the `check-eq`, from commands before it).
+- **An event's check** is the construction of the kernel steps that justify
+  its merge, from the line's witnesses and the classes, followed by `link`:
+  `axiom` for `x`; `cong` with class premises for `c`, `w`, `t`; `rule` on the
+  instance the walk built, joined to the matched and built nodes by `cong`
+  steps, for a firing; for `i` and `p`, `cong` steps per rewrite through the
+  terms of the monomials on the way; `inv` (`f(x, g(x))` is the unit), `nil`
+  (`f` of `n` copies of `x` is the unit) and `cancel` (from `f(a, z) = f(b,
+  z)`, `a = b`) for the inverse, nilpotent and cancellation events, each with
+  its law in the models (`OpSat`) and its soundness proof (`Sound.lean`). A
+  merge whose steps the kernel does not accept is not applied; `semper-check`
+  counts it by line kind.
 
-`replay_sound` (`ReplaySound.lean`) is `goal_sound` applied to the steps the
-replayer emitted: a `check-eq` the kernel accepts from a replay holds in every
-model of the commands before it. It assumes nothing about the stream or the
-replayer. A wrong check in the replayer emits a step the kernel rejects: it
-loses a goal and cannot prove a false one. A merge whose check passes but for which the replayer
-has no kernel step is not applied (`semper-check` counts them by line kind), so
-every two nodes of one class are joined by a chain of steps, and
-`scripts/check-replay.py` fails if the kernel rejects a step the replayer
-emitted.
+The theorems (`ReplaySound.lean`) are about `Replay.step`, the function the
+executable runs on each line, and hold for every state and every line:
+
+- `step_classes`, `replay_classes`: two nodes the replayer holds in one class
+  have one value in every model of the program;
+- `step_goals`, `replay_sound`: a `check-eq` recorded as proved holds in every
+  model of the commands before it.
+
+They depend on `propext`, `Classical.choice` and `Quot.sound`, and assume
+nothing about the stream. The part of the replayer outside `Core.lean` chooses
+which operations to call; it cannot build a `Core P` any other way, so a wrong
+choice loses a goal and cannot prove a false one. Every definition of the
+replayer terminates by a structural or well-founded measure; none is `partial`.
 
 ## Not in this version
 
 A firing of a rule with a rest variable, a multiplicity variable or a primitive
 is written as `u rewrite`: the reader reads no rule from such a command.
 
-The replayer uses `partial` definitions (`expand`, `eval`, the pattern walks,
-the proof paths). No theorem depends on them: the kernel checks what they
-emit.
+The table holds an application's arguments as a list, so a multiplicity is that
+many arguments. The reader does not read a program that writes a count above
+65,536 (5 of the 1,684 programs), and the replayer does not read a line that
+does.

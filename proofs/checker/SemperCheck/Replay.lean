@@ -1121,11 +1121,7 @@ def intern (S : St P) (d : Def) : St P × Option Nat :=
                 else S.plain).setIfInBounds t (if isPlain then some t else none) }, some t)
     | (S, none) => (S, none)
 
-/-- A program term as the kernel interns it, the node it evaluated to, and
-the proof that the two are equal: each argument's term is its node, and `f` of
-the argument terms is the node by `f`'s laws (a nested application of an
-associative operator, which the engine's term builder splices, among them).
-The terms join their nodes' classes. -/
+/-- `writtenP` for an application whose arguments' terms are `ws`. -/
 def writtenApp (S : St P) (f : String) (noArgs : Bool) (node : Option Nat) (ws : Array Nat) :
     St P × Option (Nat × Nat × Pf) := Id.run do
   let mut S := S
@@ -1153,6 +1149,11 @@ def writtenApp (S : St P) (f : String) (noArgs : Bool) (node : Option Nat) (ws :
 
 mutual
 
+/-- A program term as the kernel interns it, the node it evaluated to, and
+the proof that the two are equal: each argument's term is its node, and `f` of
+the argument terms is the node by `f`'s laws (a nested application of an
+associative operator, which the engine's term builder splices, among them).
+The terms join their nodes' classes. -/
 def writtenP (S : St P) (t : Term) : St P × Option (Nat × Nat × Pf) :=
   match t with
   | .lit s v =>
