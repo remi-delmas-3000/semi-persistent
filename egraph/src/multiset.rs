@@ -380,10 +380,13 @@ pub struct NfRules<'r, 'i, G, M> {
     /// ([`with_work`](Self::with_work)). The completion round reads it to stop a round
     /// whose normalizations cost more than its work budget.
     work: Option<&'i std::cell::Cell<u64>>,
-    /// Positions (in `rules`) of the rules applied, in order
+    /// The rules applied, in order, each as its position in `rules` and the number of
+    /// copies of its left side one batch rewrote
     /// ([`with_applied`](Self::with_applied)): proof mode records them as the
-    /// premises of the merge the normal form feeds.
-    applied: Option<&'i std::cell::RefCell<Vec<u32>>>,
+    /// premises of the merge the normal form feeds, and as its law trace, which a
+    /// replay can follow only with the batch counts (classes merged later can raise a
+    /// multiplicity, so the count is not recoverable from the final classes).
+    applied: Option<&'i std::cell::RefCell<Vec<(u32, u64)>>>,
 }
 
 impl<'r, 'i, G: Copy + Ord, M: MultiplicityLike> NfRules<'r, 'i, G, M> {
@@ -422,8 +425,8 @@ impl<'r, 'i, G: Copy + Ord, M: MultiplicityLike> NfRules<'r, 'i, G, M> {
         }
     }
 
-    /// Record the position of every rule applied in `applied`.
-    pub fn with_applied(self, applied: &'i std::cell::RefCell<Vec<u32>>) -> Self {
+    /// Record every rule applied, with its batch count, in `applied`.
+    pub fn with_applied(self, applied: &'i std::cell::RefCell<Vec<(u32, u64)>>) -> Self {
         Self {
             applied: Some(applied),
             ..self
@@ -461,13 +464,24 @@ impl<'r, 'i, G: Copy + Ord, M: MultiplicityLike> NfRules<'r, 'i, G, M> {
             }
         };
         if let (Some(i), Some(log)) = (found, self.applied) {
-            log.borrow_mut().push(i);
+            log.borrow_mut().push((i, 1));
         }
         let found = found.map(|i| self.rules[i as usize]);
         if let Some(w) = self.work {
             w.set(w.get().saturating_add(tested as u64));
         }
         found
+    }
+
+    /// Set the batch count of the rule [`find_applicable`](Self::find_applicable) just
+    /// returned.
+    #[inline]
+    fn note_batch(&self, q: M) {
+        if let Some(log) = self.applied
+            && let Some(last) = log.borrow_mut().last_mut()
+        {
+            last.1 = q.to_u64().unwrap_or(u64::MAX);
+        }
     }
 }
 
@@ -684,6 +698,7 @@ fn normalize_ms_into_with_limit<G: Copy + Ord, M: MultiplicityLike>(
         // rewrites. The guard counts batches: a child of multiplicity k is one batch, not k
         // rewrites (a count of 2,000,000 used to exhaust the 1,000,000-rewrite guard).
         let q = times_contained(out, rule.lhs);
+        rules.note_batch(q);
         if q == M::ONE {
             // out := (out − lhs) ⊎ rhs, ping-ponging through `scratch`.
             multiset_subtract_into(scratch, out, rule.lhs);

@@ -50,6 +50,7 @@ pub struct EGraphToken {
 /// The lengths of the append-only proof-mode tables at a mark.
 #[derive(Clone, Copy, Debug, Default)]
 struct ProofLens {
+    law_traces: usize,
     rule_starts: usize,
     rule_premises: usize,
     creation_log: usize,
@@ -57,6 +58,40 @@ struct ProofLens {
     build_premises: usize,
     merge_premise_pairs: usize,
     merge_premise_log: usize,
+}
+
+/// Proof mode: the derivation behind an AC completion merge, which the merge's
+/// premise list (an unordered set of equalities) does not keep. Both merged nodes
+/// are normal forms of one start monomial: each side rewrites it by rules, in
+/// order, where a rule is a `(left node, right node)` pair of one class and a
+/// batch rewrites `count` copies of the left side's children at once. A replay
+/// that knows the start, the rules in order and the counts rebuilds every
+/// intermediate monomial; without the counts it cannot, because classes merged
+/// later can raise a multiplicity past what the rule rewrote.
+#[derive(Clone, Debug)]
+pub struct LawTrace<G> {
+    pub start: LawStart<G>,
+    /// The merged node each side reaches, and its rewrites.
+    pub a: (G, Vec<LawRewrite<G>>),
+    pub b: (G, Vec<LawRewrite<G>>),
+}
+
+/// Where a [`LawTrace`] starts.
+#[derive(Clone, Copy, Debug)]
+pub enum LawStart<G> {
+    /// The children of this node (inter-reduction: the node being normalized).
+    Node(G),
+    /// The least common multiple of the two rules' left sides (superposition).
+    Overlap(G, G),
+}
+
+/// One batch of a [`LawTrace`] side: `count` copies of `lhs`'s children
+/// replaced by as many of `rhs`'s.
+#[derive(Clone, Copy, Debug)]
+pub struct LawRewrite<G> {
+    pub lhs: G,
+    pub rhs: G,
+    pub count: u64,
 }
 
 /// Live-node threshold under which mark/restore stay sequential (see
@@ -280,6 +315,11 @@ pub struct EGraph<
     /// Proof mode: the premises the next merge records instead of computing grouped
     /// ones, set by a completion step that knows the rules it used.
     pending_premises: Option<Vec<(Cfg::G, Cfg::G)>>,
+    /// Proof mode: the [`LawTrace`] of the completion merge about to happen,
+    /// recorded under the merged pair when the merge takes place.
+    pending_law_trace: Option<LawTrace<Cfg::G>>,
+    law_trace_index: std::collections::HashMap<(usize, usize), usize>,
+    law_traces: Vec<((usize, usize), LawTrace<Cfg::G>)>,
     /// Gate for `merged_log`. Off by default, so EUF-only runs record nothing;
     /// the adapter enables it via `set_record_merges`.
     record_merges: bool,
@@ -607,6 +647,9 @@ where
             merge_premise_pairs: Vec::new(),
             merge_premise_log: Vec::new(),
             pending_premises: None,
+            pending_law_trace: None,
+            law_trace_index: std::collections::HashMap::new(),
+            law_traces: Vec::new(),
             record_merges: false,
             g_buf: Vec::new(),
             mset_buf: Vec::new(),
@@ -2354,6 +2397,11 @@ where
         if self.record_merges {
             self.merged_log.push((m.survivor, m.absorbed));
         }
+        if PROOFS && let Some(t) = self.pending_law_trace.take() {
+            let key = Self::pair_key(a, b);
+            self.law_trace_index.insert(key, self.law_traces.len());
+            self.law_traces.push((key, t));
+        }
         if let Some(pairs) = grouped {
             let key = Self::pair_key(a, b);
             let start = self.merge_premise_pairs.len();
@@ -3018,6 +3066,12 @@ where
         self.merge_premises(a, b)
     }
 
+    /// The [`LawTrace`] of the completion merge of `a` and `b`, if it recorded one.
+    pub fn law_trace(&self, a: Cfg::G, b: Cfg::G) -> Option<&LawTrace<Cfg::G>> {
+        let &i = self.law_trace_index.get(&Self::pair_key(a, b))?;
+        Some(&self.law_traces[i].1)
+    }
+
     /// The merge-time premises recorded for the grouped step that merged `a`
     /// and `b` (`grouped_premises_now`).
     fn merge_premises(&self, a: Cfg::G, b: Cfg::G) -> Option<&[(Cfg::G, Cfg::G)]> {
@@ -3201,6 +3255,12 @@ where
     /// recorded after the given lengths: their nodes belong to a discarded
     /// scope.
     fn truncate_rule_instances(&mut self, len: ProofLens) {
+        let keep = len.law_traces.min(self.law_traces.len());
+        for (i, (key, _)) in self.law_traces.drain(keep..).enumerate() {
+            if self.law_trace_index.get(&key) == Some(&(keep + i)) {
+                self.law_trace_index.remove(&key);
+            }
+        }
         self.rule_starts.truncate(len.rule_starts);
         self.rule_partial.truncate(len.rule_starts);
         self.rule_premises.truncate(len.rule_premises);
@@ -5379,12 +5439,31 @@ where
                     // The node is its class's member; the rules the normal form used; the
                     // inverse pairs that cancelled.
                     let mut prem = vec![(node, class)];
-                    prem.extend(applied.borrow().iter().map(|&k| target_pairs[k as usize]));
+                    prem.extend(
+                        applied
+                            .borrow()
+                            .iter()
+                            .map(|&(k, _)| target_pairs[k as usize]),
+                    );
                     prem.extend(inverse_prem);
                     self.pending_premises = Some(prem);
+                    let rewrites = applied
+                        .borrow()
+                        .iter()
+                        .map(|&(k, count)| {
+                            let (lhs, rhs) = target_pairs[k as usize];
+                            LawRewrite { lhs, rhs, count }
+                        })
+                        .collect();
+                    self.pending_law_trace = Some(LawTrace {
+                        start: LawStart::Node(node),
+                        a: (c_prime, rewrites),
+                        b: (class, Vec::new()),
+                    });
                 }
                 do_merge(self, c_prime, class, just);
                 self.pending_premises = None;
+                self.pending_law_trace = None;
                 #[cfg(debug_assertions)]
                 self.cc_mirror_untag();
                 // Collapse: the node was reducible by another rule (proper containment),
@@ -5480,15 +5559,23 @@ where
             };
             // Normalize both reducts in the op's count domain (idempotent → set, nilpotent →
             // mod-n, plain AC → ℕ) before comparing/merging.
+            // Where the rules applied to the first reduct end in `applied` and those
+            // applied to the second begin (the law trace keeps the two sides apart).
+            let split = std::cell::Cell::new(0usize);
+            let mark = || split.set(applied.borrow().len());
             let normalized = match self.op_clamp(op) {
                 CompletionClamp::Idempotent => {
                     try_normalize_set_into(&mut n1_buf, &mut nf_ping, &r1, nf_rules).and_then(
-                        |()| try_normalize_set_into(&mut n2_buf, &mut nf_ping, &r2, nf_rules),
+                        |()| {
+                            mark();
+                            try_normalize_set_into(&mut n2_buf, &mut nf_ping, &r2, nf_rules)
+                        },
                     )
                 }
                 CompletionClamp::Nilpotent { order } => {
                     try_normalize_nilpotent_into(&mut n1_buf, &mut nf_ping, &r1, nf_rules, order)
                         .and_then(|()| {
+                            mark();
                             try_normalize_nilpotent_into(
                                 &mut n2_buf,
                                 &mut nf_ping,
@@ -5500,6 +5587,7 @@ where
                 }
                 CompletionClamp::Multiset => {
                     try_normalize_ms_into(&mut n1_buf, &mut nf_ping, &r1, nf_rules).and_then(|()| {
+                        mark();
                         try_normalize_ms_into(&mut n2_buf, &mut nf_ping, &r2, nf_rules)
                     })
                 }
@@ -5560,19 +5648,53 @@ where
             });
             if PROOFS {
                 let mut prem = crit_prem.get(ci).cloned().unwrap_or_default();
+                let mut rw: [Vec<LawRewrite<Cfg::G>>; 2] = [Vec::new(), Vec::new()];
                 if let Some(t) = table {
                     prem.extend(
                         applied
                             .borrow()
                             .iter()
-                            .map(|&k| nf_pairs_by_op[t][k as usize]),
+                            .map(|&(k, _)| nf_pairs_by_op[t][k as usize]),
                     );
+                    for (i, &(k, count)) in applied.borrow().iter().enumerate() {
+                        let (lhs, rhs) = nf_pairs_by_op[t][k as usize];
+                        rw[usize::from(i >= split.get())].push(LawRewrite { lhs, rhs, count });
+                    }
+                }
+                // A superposition's premises open with the two overlapping rules
+                // (`crit_prem`), each rewriting the overlap once.
+                if matches!(origin, CpOrigin::Superposition)
+                    && let [(l1, r1), (l2, r2), ..] = prem[..]
+                {
+                    let [mut a, mut b] = rw;
+                    a.insert(
+                        0,
+                        LawRewrite {
+                            lhs: l1,
+                            rhs: r1,
+                            count: 1,
+                        },
+                    );
+                    b.insert(
+                        0,
+                        LawRewrite {
+                            lhs: l2,
+                            rhs: r2,
+                            count: 1,
+                        },
+                    );
+                    self.pending_law_trace = Some(LawTrace {
+                        start: LawStart::Overlap(l1, l2),
+                        a: (c1, a),
+                        b: (c2, b),
+                    });
                 }
                 prem.extend(inverse_prem);
                 self.pending_premises = Some(prem);
             }
             changed |= do_merge(self, c1, c2, just);
             self.pending_premises = None;
+            self.pending_law_trace = None;
             #[cfg(debug_assertions)]
             self.cc_mirror_untag();
         }
@@ -5692,6 +5814,7 @@ where
             .mark_member(&mut members, shrink)
             .expect("mark: every member has headroom and the members are in step");
         let rule_len = ProofLens {
+            law_traces: self.law_traces.len(),
             rule_starts: self.rule_starts.len(),
             rule_premises: self.rule_premises.len(),
             creation_log: self.creation_log.len(),

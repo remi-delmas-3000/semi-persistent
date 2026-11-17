@@ -735,6 +735,11 @@ where
                 }
             }
             Justification::Congruence { .. } => self.congruence(x, y),
+            Justification::ACSuperposition { .. } | Justification::ACInterReduction { .. }
+                if let Some(s) = self.law_replay(x, y) =>
+            {
+                Some(s)
+            }
             Justification::Build { .. }
             | Justification::Normalize { .. }
             | Justification::ACSuperposition { .. }
@@ -1243,6 +1248,213 @@ where
             out.push(n);
         }
         Some(())
+    }
+
+    /// `x = y` for an AC completion merge, from the engine's [`LawTrace`]: the
+    /// start monomial as a term, each side's batches replayed on it (a batch is an
+    /// AC `cong` to `f(l, .., l, rest)` and a plain `cong` to `f(r, .., r, rest)`
+    /// citing `l = r`), and an AC `cong` from each side's last term to the node it
+    /// merged. `None` when the trace is missing or does not replay on the final
+    /// classes (a nilpotent clamp, an inverse cancellation), so the caller falls
+    /// back to [`assoc_cong`](Self::assoc_cong).
+    fn law_replay(&mut self, x: Cfg::G, y: Cfg::G) -> Option<usize> {
+        fn trace_miss<T>(why: &str) -> Option<T> {
+            if std::env::var_os("SEMPER_CERT_DEBUG").is_some() {
+                eprintln!("tracemiss {why}");
+            }
+            None
+        }
+        let Some(t) = self.eg.law_trace(x, y).cloned() else {
+            return trace_miss("no trace");
+        };
+        let anchor = match t.start {
+            LawStart::Node(n) | LawStart::Overlap(n, _) => n,
+        };
+        if self.eg.get_lit_val(anchor).is_some() {
+            return trace_miss("literal start");
+        }
+        let op = self.eg.node_op(anchor);
+        let kind = self.kind(op);
+        if !matches!(kind, LeanKind::Ac | LeanKind::Aci) {
+            return trace_miss("not ac");
+        }
+        let unit = self.eg.unit_node(op);
+        let ucls = unit.map(|u| self.eg.find_const(u));
+        let atoms = |w: &Self, n: Cfg::G| -> Option<Vec<Cfg::G>> {
+            let (mut out, mut inner) = (Vec::new(), Vec::new());
+            w.view(op, n, true, &mut out, &mut inner)?;
+            Some(out)
+        };
+        // The start term and its atoms.
+        let (start, start_atoms) = match t.start {
+            LawStart::Node(n) => (self.node(n), atoms(self, n)?),
+            LawStart::Overlap(l1, l2) => {
+                let mut v = atoms(self, l1)?;
+                let mut have: HashMap<Cfg::G, usize> = HashMap::new();
+                for &a in &v {
+                    *have.entry(self.eg.find_const(a)).or_default() += 1;
+                }
+                for a in atoms(self, l2)? {
+                    let c = self.eg.find_const(a);
+                    let k = have.entry(c).or_default();
+                    if *k == 0 {
+                        v.push(a);
+                    } else {
+                        *k -= 1;
+                    }
+                }
+                let t = self.op_term(op, &v);
+                (t, v)
+            }
+        };
+        let side = |w: &mut Self, end: Cfg::G, rws: &[LawRewrite<Cfg::G>]| -> Option<usize> {
+            if rws.is_empty()
+                && let LawStart::Node(n) = t.start
+            {
+                return w.prove(n, end);
+            }
+            let (mut cur, mut cur_atoms) = (start, start_atoms.clone());
+            let mut parts: Vec<Option<usize>> = Vec::new();
+            for rw in rws {
+                // A guard on the certificate's size, not on a search: a batch
+                // spells `count` copies of each side.
+                if rw.count == 0 || rw.count > 64 {
+                    return trace_miss("count");
+                }
+                let q = rw.count as usize;
+                let (l, r) = (atoms(w, rw.lhs)?, atoms(w, rw.rhs)?);
+                // The unit's class is no argument: the rule's left side does not
+                // count it, and the kernel drops the unit after substitution.
+                let lc: Vec<Cfg::G> = l
+                    .iter()
+                    .map(|&a| w.eg.find_const(a))
+                    .filter(|&c| Some(c) != ucls)
+                    .collect();
+                let mut rest = cur_atoms.clone();
+                if kind == LeanKind::Aci {
+                    if !lc
+                        .iter()
+                        .all(|c| rest.iter().any(|&a| w.eg.find_const(a) == *c))
+                    {
+                        return trace_miss("lhs not contained");
+                    }
+                    rest.retain(|&a| !lc.contains(&w.eg.find_const(a)));
+                } else {
+                    for _ in 0..q {
+                        for &c in &lc {
+                            let Some(i) = rest.iter().position(|&b| w.eg.find_const(b) == c) else {
+                                return trace_miss("lhs not contained");
+                            };
+                            rest.remove(i);
+                        }
+                    }
+                }
+                let mut with_l = vec![rw.lhs; q];
+                with_l.extend(&rest);
+                let mut with_r = vec![rw.rhs; q];
+                with_r.extend(&rest);
+                let (tl, tr) = (w.op_term(op, &with_l), w.op_term(op, &with_r));
+                let mut l_atoms: Vec<Cfg::G> = Vec::new();
+                for _ in 0..q {
+                    l_atoms.extend(&l);
+                }
+                l_atoms.extend(&rest);
+                let Some(st) = w.ac_step(op, kind, (cur, &cur_atoms), (tl, &l_atoms)) else {
+                    return trace_miss("split");
+                };
+                parts.push(st);
+                if tl != tr {
+                    let p = w.prove(rw.lhs, rw.rhs)?;
+                    let f = w.eg.ops.info(op).name.clone();
+                    parts.push(Some(w.step(format!("cong {f} {tl} {tr} {p}"))));
+                }
+                cur = tr;
+                cur_atoms = Vec::new();
+                for _ in 0..q {
+                    cur_atoms.extend(&r);
+                }
+                cur_atoms.extend(&rest);
+            }
+            let ne = w.node(end);
+            let end_atoms = atoms(w, end)?;
+            let Some(st) = w.ac_step(op, kind, (cur, &cur_atoms), (ne, &end_atoms)) else {
+                return trace_miss(if rws.is_empty() {
+                    "end, no rewrite"
+                } else {
+                    "end"
+                });
+            };
+            parts.push(st);
+            Some(w.chain(&parts, ne))
+        };
+        let pa = side(self, t.a.0, &t.a.1)?;
+        let pb = side(self, t.b.0, &t.b.1)?;
+        // pa: start = a's node; pb: start = b's node.
+        let (from, to) = if t.a.0 == x { (pa, pb) } else { (pb, pa) };
+        let back = self.step(format!("symm {from}"));
+        Some(self.step(format!("trans {back} {to}")))
+    }
+
+    /// The certificate node `f(args)`, which no e-node need spell.
+    fn op_term(&mut self, op: Cfg::O, args: &[Cfg::G]) -> usize {
+        let kids: Vec<usize> = args.iter().map(|&a| self.node(a)).collect();
+        let f = self.eg.ops.info(op).name.clone();
+        let mut line = format!("a {f}");
+        for c in &kids {
+            let _ = write!(line, " {c}");
+        }
+        self.add_node((f, kids), line)
+    }
+
+    /// An AC `cong` between certificate nodes `a` and `b` whose flattened
+    /// arguments are `atoms_a` and `atoms_b` (unit dropped): each atom is replaced
+    /// by one member of its class, cited by a premise. `Some(None)` when `a` and
+    /// `b` are one node; `None` when the arguments differ as classes.
+    fn ac_step(
+        &mut self,
+        op: Cfg::O,
+        kind: LeanKind,
+        (a, atoms_a): (usize, &[Cfg::G]),
+        (b, atoms_b): (usize, &[Cfg::G]),
+    ) -> Option<Option<usize>> {
+        if a == b {
+            return Some(None);
+        }
+        let ucls = self.eg.unit_node(op).map(|u| self.eg.find_const(u));
+        let classes = |w: &Self, v: &[Cfg::G]| -> Vec<usize> {
+            let mut c: Vec<usize> = v
+                .iter()
+                .map(|&g| w.eg.find_const(g))
+                .filter(|&c| Some(c) != ucls)
+                .map(|c| c.to_usize())
+                .collect();
+            c.sort_unstable();
+            if kind == LeanKind::Aci {
+                c.dedup();
+            }
+            c
+        };
+        if classes(self, atoms_a) != classes(self, atoms_b) {
+            return None;
+        }
+        let mut rep: HashMap<Cfg::G, Cfg::G> = HashMap::new();
+        if let Some(u) = self.eg.unit_node(op) {
+            rep.insert(self.eg.find_const(u), u);
+        }
+        let mut prems = Vec::new();
+        let mut seen: HashSet<Cfg::G> = HashSet::new();
+        for &g in atoms_a.iter().chain(atoms_b) {
+            let r = *rep.entry(self.eg.find_const(g)).or_insert(g);
+            if g != r && seen.insert(g) {
+                prems.push(self.prove(g, r)?);
+            }
+        }
+        let f = self.eg.ops.info(op).name.clone();
+        let mut s = format!("cong {f} {a} {b}");
+        for p in prems {
+            let _ = write!(s, " {p}");
+        }
+        Some(Some(self.step(s)))
     }
 
     /// `x = y` modulo the laws of the associative operator of either node.
