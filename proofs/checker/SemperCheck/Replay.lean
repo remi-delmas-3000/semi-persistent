@@ -265,8 +265,7 @@ def applyRule (S : St) (f : String) (m : List Nat) (l : List Nat) (r : List Nat)
     let bounded := S.P.kind f == .aci || ((S.P.opDecl? f).bind (·.nilpotent)).isSome
     let q := if bounded then 1
       else distinct.foldl (fun q c => min q (countOf c mc / countOf c l)) (mc.length + 1)
-    let rest := distinct.foldl (fun m c =>
-      dropClass S c (if S.P.kind f == .aci then countOf c mc else q * countOf c l) m) m
+    let rest := distinct.foldl (fun m c => dropClass S c (q * countOf c l) m) m
     some (lawReduce S f (rest ++ (List.replicate q r).flatten))
 
 /-- The arguments of `x` as a monomial of `f`: its own, if it is an
@@ -280,18 +279,25 @@ def monomial (S : St) (f : String) (W : List (Nat × List Nat)) (x : Nat) : List
 
 /-- Rewrites `m` by the rules `rules`, in order. -/
 def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) :
-    List (Nat × Nat) → Except String (List Nat)
+    List (Nat × Nat × Bool) → Except String (List Nat)
   | [] => pure m
-  | (l, r) :: rest => do
+  | (l, r, atom) :: rest => do
     if S.fd l != S.fd r then throw "completion: rule sides in two classes"
     match S.defOf l with
     | some (.app g ls) =>
       if g != f then throw "completion: rule of another operator"
       let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)))
-      match applyRule S f m lc (monomial S f W r) with
+      match applyRule S f m lc (if atom then [r] else monomial S f W r) with
       | some m' => rewrite S f W m' rest
       | none => throw "completion: rule does not apply"
     | _ => throw "completion: rule of another operator"
+
+/-- The monomial `m` has the value of node `t`: it is `t`'s arguments, or it
+is the one class of `t` (a result of one argument is that argument's class,
+whose root can itself be an application of `f`). -/
+def reaches (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (t : Nat) : Bool :=
+  let c := classesOf S (lawReduce S f m)
+  c == classesOf S (lawReduce S f (monomial S f W t)) || c == [S.fd t]
 
 /-- The splice witnesses a completion event shares: the applications of `f`
 nested in the arguments of the nodes it names. -/
@@ -301,21 +307,23 @@ def lawWitnesses (S : St) (f : String) (nodes : List Nat) : List (Nat × List Na
     | some (.app g cs) => if g == f then cs.flatMap (nested S.defs f) else []
     | _ => []).map fun (x, cs) => (S.fd x, cs)
 
-def pairs : List Nat → List (Nat × Nat)
-  | l :: r :: rest => (l, r) :: pairs rest
+/-- Rules as the stream writes them: `l r k`, with `k = 1` when the right
+side is `r` as one argument and `0` when it is `r`'s own arguments. -/
+def pairs : List Nat → List (Nat × Nat × Bool)
+  | l :: r :: k :: rest => (l, r, k == 1) :: pairs rest
   | _ => []
 
 /-- `i a b n l1 r1 ..`: node `n`, a member of one merged class, rewrites by
 the rules to the other merged node. -/
-def interReduce (S : St) (a b n : Nat) (rules : List (Nat × Nat)) : Except String Unit := do
+def interReduce (S : St) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Except String Unit := do
   let some (.app f as) := S.defOf n | throw "completion: start is not an application"
   unless (S.P.kind f).isAssoc && S.P.kind f != .assoc do throw "completion: not an AC operator"
   let t ← if S.fd n == S.fd b then pure a else if S.fd n == S.fd a then pure b
     else throw "completion: start in neither class"
-  let W := lawWitnesses S f (n :: t :: rules.flatMap fun (l, r) => [l, r])
+  -- A monomial is a node's arguments, each one class, as the engine reads it.
+  let W : List (Nat × List Nat) := []
   let m ← rewrite S f W (lawReduce S f (as.flatMap (expand S W))) rules
-  if classesOf S m != classesOf S (lawReduce S f (monomial S f W t)) then
-    throw "completion: normal form differs"
+  unless reaches S f W m t do throw "completion: normal form differs"
 
 /-- The witnesses of a critical-pair merge (`p` line). -/
 structure Peak where
@@ -323,10 +331,10 @@ structure Peak where
   reduceB : Bool
   keep : Option Nat
   peak : List Nat
-  preA : List (Nat × Nat)
-  preB : List (Nat × Nat)
-  postA : List (Nat × Nat)
-  postB : List (Nat × Nat)
+  preA : List (Nat × Nat × Bool)
+  preB : List (Nat × Nat × Bool)
+  postA : List (Nat × Nat × Bool)
+  postB : List (Nat × Nat × Bool)
 
 /-- Reads the fields after `p a b`: `cancel reduceB hasKeep [keep] k peak..
 na (l r).. nb (l r).. npa (l r).. (l r)..`. -/
@@ -339,15 +347,15 @@ def Peak.read (xs : List Nat) : Option Peak := do
   if xs.length < k then none
   let (peak, xs) := (xs.take k, xs.drop k)
   let (na, xs) ← xs.head?.map (·, xs.tail)
-  if xs.length < 2 * na then none
-  let (preA, xs) := (pairs (xs.take (2 * na)), xs.drop (2 * na))
+  if xs.length < 3 * na then none
+  let (preA, xs) := (pairs (xs.take (3 * na)), xs.drop (3 * na))
   let (nb, xs) ← xs.head?.map (·, xs.tail)
-  if xs.length < 2 * nb then none
-  let (preB, xs) := (pairs (xs.take (2 * nb)), xs.drop (2 * nb))
+  if xs.length < 3 * nb then none
+  let (preB, xs) := (pairs (xs.take (3 * nb)), xs.drop (3 * nb))
   let (npa, xs) ← xs.head?.map (·, xs.tail)
-  if xs.length < 2 * npa then none
+  if xs.length < 3 * npa then none
   return { cancel := cancel == 1, reduceB := reduceB == 1, keep, peak, preA, preB,
-           postA := pairs (xs.take (2 * npa)), postB := pairs (xs.drop (2 * npa)) }
+           postA := pairs (xs.take (3 * npa)), postB := pairs (xs.drop (3 * npa)) }
 
 /-- `p a b ..`: the merged nodes `a` and `b` are what the two sides of a
 critical pair rewrite to. Both sides start from the peak (side B from the
@@ -357,14 +365,15 @@ occurrence of `keep`'s class), which the operator's `:cancellative` law
 allows when both sides stay non-empty or the operator has a unit; each side
 then rewrites by its remaining rules. -/
 def peakMerge (S : St) (a b : Nat) (w : Peak) : Except String Unit := do
-  let named := a :: b :: (w.preA ++ w.preB ++ w.postA ++ w.postB).flatMap fun (l, r) => [l, r]
+  let named := a :: b :: (w.preA ++ w.preB ++ w.postA ++ w.postB).flatMap fun (l, r, _) => [l, r]
   -- The operator: that of the first rule, else of a merged node.
   let some f := (named.reverse.findSome? fun x =>
       match S.defOf x with
       | some (.app g _) => if (S.P.kind g).isAssoc && S.P.kind g != .assoc then some g else none
       | _ => none)
     | throw "completion: no AC operator"
-  let W := lawWitnesses S f named ++ ((w.peak.flatMap (nested S.defs f)).map fun (x, cs) => (S.fd x, cs))
+  -- A monomial is a node's arguments, each one class, as the engine reads it.
+  let W : List (Nat × List Nat) := []
   let peak := w.peak.flatMap (expand S W)
   let mA ← rewrite S f W peak w.preA
   let mB ← rewrite S f W (if w.reduceB then lawReduce S f peak else peak) w.preB
@@ -386,9 +395,7 @@ def peakMerge (S : St) (a b : Nat) (w : Peak) : Except String Unit := do
     else pure (mA, mB)
   let mA ← rewrite S f W mA w.postA
   let mB ← rewrite S f W mB w.postB
-  let same (m : List Nat) (t : Nat) :=
-    classesOf S (lawReduce S f m) == classesOf S (lawReduce S f (monomial S f W t))
-  unless same mA a && same mB b do throw "completion: normal form differs"
+  unless reaches S f W mA a && reaches S f W mB b do throw "completion: normal form differs"
 
 /-- `c` and `c:k` fields as node ids, a counted one repeated. -/
 def ids (xs : List String) : Option (List Nat) := do

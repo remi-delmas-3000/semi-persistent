@@ -388,14 +388,15 @@ where
         let _ = self.trace_flush(false);
     }
 
-    /// A completion rule `l = r` as the stream names it. When `r`'s class is
-    /// one argument of `l`'s operator (an atomic class, which holds a member
-    /// that is no application of that operator), the engine's `r` is the class
-    /// root, which can itself be such an application; the stream names the
-    /// other kind of member, so that the replayer reads one argument.
-    pub(crate) fn trace_rule(&self, (l, r): (Cfg::G, Cfg::G)) -> [Cfg::G; 2] {
+    /// A completion rule `l = r` as the stream names it: `l`, `r`, and 1 when
+    /// `r`'s class is one argument of `l`'s operator (an atomic class: the
+    /// rule's right side is the class itself), 0 when the right side is `r`'s
+    /// own arguments (the class's minimal monomial, or the unit). The replayer
+    /// cannot tell the two apart when `r` is an application of the operator.
+    pub(crate) fn trace_rule(&self, (l, r): (Cfg::G, Cfg::G)) -> [Cfg::G; 3] {
+        let flag = |b: bool| -> Cfg::G { crate::id::id_at(usize::from(b)) };
         if self.get_lit_val(l).is_some() || self.get_lit_val(r).is_some() {
-            return [l, r];
+            return [l, r, flag(true)];
         }
         let op = self.node_op(l);
         let root = self.classes.find_const(r);
@@ -406,13 +407,7 @@ where
             .classes
             .repr_id(root)
             .is_some_and(|repr| self.classes.atomic(repr));
-        if unit || !atomic || self.node_op(r) != op {
-            return [l, r];
-        }
-        let other = self
-            .class_members(r)
-            .find(|&m| self.get_lit_val(m).is_some() || self.node_op(m) != op);
-        [l, other.unwrap_or(r)]
+        [l, r, flag(!unit && (atomic || self.node_op(r) != op))]
     }
 
     /// The next merge is a completion merge with these witnesses: the line

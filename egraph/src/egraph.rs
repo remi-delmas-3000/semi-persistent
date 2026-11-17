@@ -5787,7 +5787,7 @@ where
                         ids.push(num(side.len()));
                         ids.extend(side.iter().flat_map(|&p| self.trace_rule(p)));
                     }
-                    ids.push(num(post_a.len() / 2));
+                    ids.push(num(post_a.len() / 3));
                     ids.extend(post_a);
                     ids.extend(post_b);
                     self.trace_law('p', ids);
