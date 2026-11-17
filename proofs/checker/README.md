@@ -191,8 +191,9 @@ Cost: the 1,442 streams total 235 MB; the median is 1.3 kB and the largest
 `bench/math-microbenchmark.rules.egg`); `bench/acgen.rules.egg` (1,120,646
 events, a 50 MB stream, 6,647,265 kernel steps, every event checked) takes
 11.4 s and 539 MB. With the stream on, the engine runs that benchmark in
-11.7 s and 706 MB against 10.6 s and 704 MB in proof mode without it (two
-runs each).
+11.7 s and 706 MB against 10.6 s and 704 MB in proof mode without it, and
+`bench/search-dfs-small.rules.egg` in 2.2 s and 11.6 MB against 2.1 s and
+11.4 MB, with a 47 kB stream (two runs each).
 
 `SEMPER_REPLAY_SHOW=n` prints the first `n` failed events (a failed completion
 event with the monomials it reached), merges without kernel steps and
