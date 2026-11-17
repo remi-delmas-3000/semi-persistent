@@ -4,3 +4,4 @@ import SemperCheck.Kernel
 import SemperCheck.Sound
 import SemperCheck.Parse
 import SemperCheck.Replay
+import SemperCheck.ReplaySound

@@ -41,23 +41,13 @@ def replay (progPath tracePath : String) : IO UInt32 := do
   for (c, k) in S.failed.toList do IO.println s!"failed: {k} {c}"
   for (c, k) in S.unchecked.toList do IO.println s!"unchecked: {k} {c}"
   for (c, k) in S.unjustified.toList do IO.println s!"no kernel step: {k} {c}"
-  -- The kernel checks the steps the replay emitted; `goal_sound` covers the
-  -- goals it accepts.
-  let nodes : Array Node := S.defs.map fun d =>
-    match d with
-    | some (.app f cs) => Node.app f cs
-    | some (.lit s v) => Node.lit s v
-    | none => Node.lit "" ""
-  let cert : Cert := { nodes, steps := S.steps, goals := S.goalSteps }
-  let kernel := match runCert P cert with
-    | some (C, acc) => some (P.decls.filter fun (od : Nat × Decl) =>
-        match od.2 with
-        | Decl.goal l r => C.checkGoal acc cert.goals od.1 l r
-        | _ => false).length
-    | none => none
-  match kernel with
-  | some k => IO.println s!"kernel: {S.steps.size} steps, {k} of {total} check-eq proved"
-  | none => IO.println s!"kernel: the node table is rejected"
+  -- The kernel checks the steps the replay emitted.
+  let cert := Replay.certOf S
+  let nSteps := cert.steps.size
+  if (runCert P cert).isNone then IO.println "kernel: the node table is rejected"
+  -- `Replay.replay_sound` is about exactly these.
+  let kernel := (Replay.provedBy P cert).length
+  IO.println s!"kernel: {nSteps} steps, {kernel} of {total} check-eq proved"
   IO.println s!"{S.events} events replayed, {nFailed} failed, {nUnchecked} unchecked; {proved} of {total} check-eq proved"
   return if proved == total && nFailed == 0 && nUnchecked == 0 then 0 else 1
 
