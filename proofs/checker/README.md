@@ -144,50 +144,40 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 25,635 |
-| programs with every `check-eq` proved, of 1,066 | 732 |
-| kernel steps checked | 12,633,983 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 25,802 |
+| programs with every `check-eq` proved, of 1,066 | 740 |
+| kernel steps checked | 12,632,286 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,098 |
-| events whose check fails | 212,670 |
+| events whose check fails | 212,324 |
 | events the stream gives no witness for | 292,222 |
-| merges whose kernel steps are not found | 22 |
+| merges whose kernel steps are not found | 19 |
 
-The 4,173 `check-eq` not proved:
+The 4,006 `check-eq` not proved:
 
 - 3,263 are in the 245 programs with a rule firing the stream writes as
   opaque: a rule with a primitive, a rest variable or a multiplicity variable,
   which the reader does not read (292,218 such merges, 287,931 of them in
   `bench/math-microbenchmark.native.egg`). Later events of these programs fail
   because the merge was not applied.
-- 910 are in 92 programs with no such firing. `check-replay.py --failed FILE`
-  lists every failed event (program, event number, cause, line: 212,670
+- 743 are in 84 programs with no such firing. `check-replay.py --failed FILE`
+  lists every failed event (program, event number, cause, line: 212,324
   lines) and counts these programs by the cause of their first failed event,
   since a program's later failures can follow from the merge the first one did
-  not apply:
-
-  | first failed event | programs with a failed event | `check-eq` not proved |
-  | --- | --- | --- |
-  | completion: normal form differs | 17 | 432 |
-  | rule: outside the reader's language | 43 | 162 |
-  | completion: rule does not apply | 11 | 141 |
-  | rule: matched node differs | 8 | 69 |
-  | goal: not in one class | 3 | 64 |
-  | law: arguments differ | 8 | 29 |
-  | six other causes | 11 | 13 |
-
-  In the completion cases the replayer computes the derivation from the
-  line's witnesses and reaches a monomial other than the engine's merged node:
-  the examples read so far differ in how the engine builds the node of a
-  result whose argument is a class that holds its own application
-  (`conform-cc-cert/cs1_0059.egg`), and in which side of a cancellation in a
-  group keeps the remainder (`conform-cc-cert/cs1_0075.egg`).
+  not apply. The two largest groups are a completion merge whose derivation
+  reaches a monomial other than the engine's merged node (15 programs, 300
+  `check-eq`) and one where a rule of the line does not apply to the monomial
+  the replayer has (9 programs, 127); 162 more are behind a rule the reader
+  does not read. In the cases read so far the replayer's classes at the event
+  differ from the engine's: the replayer holds a merge the engine has not made
+  yet, or reads a rule's node through classes the engine merged inside the
+  round (`conform-cc-cert/cs1_0059.egg`, `conform-cc-cert/cs1_0155.egg`).
 
 The certificates this replaces proved 5,702 `check-eq`, and the replay before
 the replayer was proved 21,066. No program proves fewer than under either.
 
 Cost: the 1,442 streams total 235 MB; the median is 1.3 kB and the largest
-94 MB. The slowest replay takes 14.0 s and the largest 614 MB (both
+94 MB. The slowest replay takes 14.2 s and the largest 614 MB (both
 `bench/math-microbenchmark.rules.egg`); `bench/acgen.rules.egg` (1,120,646
 events, a 50 MB stream, 6,647,265 kernel steps, every event checked) takes
 11.4 s and 539 MB. With the stream on, the engine runs that benchmark in
