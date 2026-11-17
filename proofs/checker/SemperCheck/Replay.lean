@@ -363,7 +363,10 @@ def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false) : L
     let one (xs : List Nat) : List Nat :=
       -- The unit's arguments go first, as in the engine: `f(e, inv(e))` is
       -- `inv(e)`, which is in `e`'s class only once that is derived.
-      let atoms := (xs.flatMap (expand S W)).filter fun a => some (S.fd a) != u
+      -- An argument of the unit's class goes before it is read as its own
+      -- arguments.
+      let atoms := ((xs.filter fun a => some (S.fd a) != u).flatMap (expand S W)).filter
+        fun a => some (S.fd a) != u
       let atoms := match k, d.bind (·.inverse) with
         | .assoc, _ => atoms
         | _, some inv => cancelInverse S inv (if invUnit then u else none) atoms

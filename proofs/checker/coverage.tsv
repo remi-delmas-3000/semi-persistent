@@ -610,7 +610,7 @@ egraph/tests/egg/conform-cc-cert/cs1_0157.egg	35	35	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0158.egg	40	43	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0159.egg	64	64	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0160.egg	17	17	replayed
-egraph/tests/egg/conform-cc-cert/cs1_0161.egg	73	76	replayed
+egraph/tests/egg/conform-cc-cert/cs1_0161.egg	76	76	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0162.egg	24	31	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0163.egg	56	56	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0164.egg	103	103	replayed
@@ -1561,7 +1561,7 @@ egraph/tests/egg/nilpotent3_mult2_axiom_cp.egg	1	1	replayed
 egraph/tests/egg/nilpotent3_rule_axiom_cp.egg	2	2	replayed
 egraph/tests/egg/nilpotent3_semantic_cp.egg	2	2	replayed
 egraph/tests/egg/nilpotent3_singleton_lhs_axiom.egg	1	1	replayed
-egraph/tests/egg/nilpotent_group_lattice.egg	182	454	replayed
+egraph/tests/egg/nilpotent_group_lattice.egg	454	454	replayed
 egraph/tests/egg/nilpotent_no_dedup.egg	0	0	skipped
 egraph/tests/egg/nilpotent_order_255_ok.egg	1	1	replayed
 egraph/tests/egg/nilpotent_order_256_rejected.egg	0	0	skipped
@@ -1615,7 +1615,7 @@ egraph/tests/egg/semi_naive_atomic_eager.egg	0	0	replayed
 egraph/tests/egg/semi_naive_atomic_naive.egg	0	0	replayed
 egraph/tests/egg/semi_naive_atomic_semi.egg	0	0	replayed
 egraph/tests/egg/semi_naive_minmono.egg	0	0	replayed
-egraph/tests/egg/semi_recanon_completion_on.egg	1	3	replayed
+egraph/tests/egg/semi_recanon_completion_on.egg	3	3	replayed
 egraph/tests/egg/semi_recanon_idem_collapse.egg	4	4	replayed
 egraph/tests/egg/semi_recanon_inverse_cancel.egg	4	4	replayed
 egraph/tests/egg/semi_recanon_parent_delta.egg	0	1	replayed
