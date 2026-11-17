@@ -166,7 +166,7 @@ The 4,173 `check-eq` not proved:
   since a program's later failures can follow from the merge the first one did
   not apply:
 
-  | first failed event | programs | `check-eq` not proved |
+  | first failed event | programs with a failed event | `check-eq` not proved |
   | --- | --- | --- |
   | completion: normal form differs | 17 | 432 |
   | rule: outside the reader's language | 43 | 162 |
@@ -174,7 +174,7 @@ The 4,173 `check-eq` not proved:
   | rule: matched node differs | 8 | 69 |
   | goal: not in one class | 3 | 64 |
   | law: arguments differ | 8 | 29 |
-  | seven other causes | 13 | 13 |
+  | six other causes | 11 | 13 |
 
   In the completion cases the replayer computes the derivation from the
   line's witnesses and reaches a monomial other than the engine's merged node:
