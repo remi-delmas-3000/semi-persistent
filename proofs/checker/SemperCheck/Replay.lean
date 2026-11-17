@@ -710,6 +710,23 @@ def congStep (S : St) (f : String) (a b : Nat) : St × Pf := Id.run do
         | _ => return (S, none)
     let (S', s) := emit S (.cong f a b prems.toList) a b
     return (S', some (some s))
+  -- Two applications whose arguments are equal one by one: the kernel takes
+  -- them argument by argument, with no flattening, which is what an argument
+  -- that is itself an application of `f`, standing for its class, needs.
+  if let (some (.app g as), some (.app h bs)) := (S.defOf a, S.defOf b) then
+    if g == f && h == f && as.length == bs.length && (as.zip bs).all (fun (c, d) => S.fd c == S.fd d) then
+      let mut prems : Array Nat := #[]
+      let mut ok := true
+      for (c, d) in as.zip bs do
+        if c != d && ok then
+          let (S', p) := eqP S c d
+          S := S'
+          match p with
+          | some (some st) => prems := prems.push st
+          | _ => ok := false
+      if ok then
+        let (S', st) := emit S (.cong f a b prems.toList) a b
+        return (S', some (some st))
   -- An associative operator: each flattened argument goes to its class's node.
   let va := kview S f a
   let vb := kview S f b
