@@ -854,83 +854,94 @@ def appNode (S : St P) (f : String) (m : List Nat) : St P × Option Nat :=
       -- The table takes the node only if it is well-sorted.
       S.withCore fun c => c.addNode d
 
+/-- One pass of `lawNormP` from `cur`, which `pf` proves equal to `x`: the
+result when no inverse pair and no `n` arguments of one class are left, or
+the next node, its proof, and the number of arguments it keeps. -/
+def lawPass (S : St P) (f : String) (d : OpDecl) (u x cur : Nat) (pf : Pf) (peak : Bool) :
+    St P × (Option (Nat × Pf) ⊕ (Nat × Pf × Nat)) := Id.run do
+  let mut S := S
+  -- In a critical pair's peak, an inverse pair is cancelled even when one of
+  -- the two is in the unit's class: the unit's arguments stay.
+  let atoms := (kview S f cur).filter fun a => peak || S.fd a != S.fd u
+  -- What the next pass replaces by the unit: a node `f(..)` that a step
+  -- proves is the unit, and the arguments it stands for.
+  let mut found : Option (Nat × Nat × List Nat) := none
+  if let some g := d.inverse then
+    for a in atoms do
+      if found.isNone then
+        if let some (q, y) := inverseNode S g a then
+          if S.fd y == S.fd u then
+            -- `f(y, g(y))` is the unit and, `y` being the unit, is `g(y)`.
+            let (S1, pn) := appNode S f [y, q]
+            S := S1
+            if let some pn := pn then
+              let (S1, s1) := emit S (.inv f pn y q u) pn u
+              let (S1, p2) := congStep S1 f pn q
+              let (S1, p3) := symmP S1 pn q p2
+              let (S1, p4) := transP S1 q u p3 (some (some s1))
+              S := S1.mergeBy q u p4
+          else if let some b := (atoms.erase a).find? (fun b => S.fd b == S.fd y) then
+            let (S1, pn) := appNode S f [y, q]
+            S := S1
+            if let some pn := pn then
+              let (S1, s1) := emit S (.inv f pn y q u) pn u
+              S := S1
+              found := some (pn, s1, (atoms.erase a).erase b)
+  if found.isNone then
+    if let some (n + 1) := d.nilpotent then
+      for a in atoms do
+        if found.isNone then
+          let same := atoms.filter fun b => S.fd b == S.fd a
+          if same.length ≥ n + 1 then
+            let (S1, pn) := appNode S f (a :: List.replicate n a)
+            S := S1
+            if let some pn := pn then
+              let (S1, s1) := emit S (.nil f pn a n u) pn u
+              S := S1
+              let gone := same.take (n + 1)
+              found := some (pn, s1, gone.foldl (fun m b => m.erase b) atoms)
+  match found with
+  | none => return (S, .inl (some (cur, pf)))
+  | some (pn, s1, rest) =>
+    let (S1, t1) := appNode S f (pn :: rest)
+    let (S1, t2) := appNode S1 f (u :: rest)
+    S := S1
+    let (some t1, some t2) := (t1, t2) | return (S, .inl none)
+    let (S1, t3) := if rest.isEmpty then (S, some u) else appNode S f rest
+    S := S1
+    let some t3 := t3 | return (S, .inl none)
+    let (S1, p1) := congStep S f cur t1
+    let (S1, s2) := emit S1 (.cong f t1 t2 [s1]) t1 t2
+    let (S1, p3) := congStep S1 f t2 t3
+    let (S1, q) := transP S1 cur t2 p1 (some (some s2))
+    let (S1, q) := transP S1 cur t3 q p3
+    let (S1, q') := transP S1 x t3 pf q
+    S := (S1.mergeBy cur t3 q)
+    if q'.isNone then return (S, .inl none)
+    return (S, .inr (t3, q', rest.length))
+
+/-- The passes of `lawNormP`: each keeps fewer arguments than the one before,
+and the recursion goes on only while that number decreases. -/
+def lawNormGo (S : St P) (f : String) (d : OpDecl) (u x cur : Nat) (pf : Pf) (peak : Bool)
+    (n : Nat) : St P × Option (Nat × Pf) :=
+  match lawPass S f d u x cur pf peak with
+  | (S, .inl r) => (S, r)
+  | (S, .inr (cur', pf', k)) =>
+    if _h : k < n then lawNormGo S f d u x cur' pf' peak k else (S, some (cur', pf'))
+termination_by n
+
 /-- Node `x` reduced by `f`'s inverse and nilpotent laws, and the proof that
 `x` is the result. Each inverse pair `y, g(y)` becomes `f(f(y, g(y)), rest)`
 by `f`'s laws, then `f(e, rest)` by the `inv` step, then `f(rest)`; each `n`
 arguments of one class under `:nilpotent n` likewise, by the `nil` step. An
 inverse of a node of the unit's class is first proved to be the unit. -/
 def lawNormP (S : St P) (f : String) (x : Nat) (peak : Bool := false) :
-    St P × Option (Nat × Pf) := Id.run do
-  let some d := S.prog.opDecl? f | return (S, some (x, some none))
-  let some u := S.unit f | return (S, some (x, some none))
-  if d.inverse.isNone && d.nilpotent.isNone then return (S, some (x, some none))
-  let mut S := S
-  let mut cur := x
-  let mut pf : Pf := some none
-  -- A bound on the passes: each removes at least one argument.
-  -- In a critical pair's peak, an inverse pair is cancelled even when one of
-  -- the two is in the unit's class: the unit's arguments stay.
-  let mut atoms := (kview S f cur).filter fun a => peak || S.fd a != S.fd u
-  for _ in [0:atoms.length + 1] do
-    atoms := (kview S f cur).filter fun a => peak || S.fd a != S.fd u
-    -- What the next pass replaces by the unit: a node `f(..)` that a step
-    -- proves is the unit, and the arguments it stands for.
-    let mut found : Option (Nat × Nat × List Nat) := none
-    if let some g := d.inverse then
-      for a in atoms do
-        if found.isNone then
-          if let some (q, y) := inverseNode S g a then
-            if S.fd y == S.fd u then
-              -- `f(y, g(y))` is the unit and, `y` being the unit, is `g(y)`.
-              let (S1, pn) := appNode S f [y, q]
-              S := S1
-              if let some pn := pn then
-                let (S1, s1) := emit S (.inv f pn y q u) pn u
-                let (S1, p2) := congStep S1 f pn q
-                let (S1, p3) := symmP S1 pn q p2
-                let (S1, p4) := transP S1 q u p3 (some (some s1))
-                S := S1.mergeBy q u p4
-            else if let some b := (atoms.erase a).find? (fun b => S.fd b == S.fd y) then
-              let (S1, pn) := appNode S f [y, q]
-              S := S1
-              if let some pn := pn then
-                let (S1, s1) := emit S (.inv f pn y q u) pn u
-                S := S1
-                found := some (pn, s1, (atoms.erase a).erase b)
-    if found.isNone then
-      if let some (n + 1) := d.nilpotent then
-        for a in atoms do
-          if found.isNone then
-            let same := atoms.filter fun b => S.fd b == S.fd a
-            if same.length ≥ n + 1 then
-              let (S1, pn) := appNode S f (a :: List.replicate n a)
-              S := S1
-              if let some pn := pn then
-                let (S1, s1) := emit S (.nil f pn a n u) pn u
-                S := S1
-                let gone := same.take (n + 1)
-                found := some (pn, s1, gone.foldl (fun m b => m.erase b) atoms)
-    match found with
-    | none => return (S, some (cur, pf))
-    | some (pn, s1, rest) =>
-      let (S1, t1) := appNode S f (pn :: rest)
-      let (S1, t2) := appNode S1 f (u :: rest)
-      S := S1
-      let (some t1, some t2) := (t1, t2) | return (S, none)
-      let (S1, t3) := if rest.isEmpty then (S, some u) else appNode S f rest
-      S := S1
-      let some t3 := t3 | return (S, none)
-      let (S1, p1) := congStep S f cur t1
-      let (S1, s2) := emit S1 (.cong f t1 t2 [s1]) t1 t2
-      let (S1, p3) := congStep S1 f t2 t3
-      let (S1, q) := transP S1 cur t2 p1 (some (some s2))
-      let (S1, q) := transP S1 cur t3 q p3
-      let (S1, q') := transP S1 x t3 pf q
-      S := (S1.mergeBy cur t3 q)
-      pf := q'
-      cur := t3
-      if q'.isNone then return (S, none)
-  return (S, some (cur, pf))
+    St P × Option (Nat × Pf) :=
+  match S.prog.opDecl? f, S.unit f with
+  | some d, some u =>
+    if d.inverse.isNone && d.nilpotent.isNone then (S, some (x, some none))
+    else lawNormGo S f d u x x (some none) peak ((kview S f x).length + 1)
+  | _, _ => (S, some (x, some none))
 
 /-- A step for `a = b` under `f`'s associativity, commutativity, idempotence
 and unit, by the first of these that applies: `congStep`; all of one node's

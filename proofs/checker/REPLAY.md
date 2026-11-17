@@ -24,7 +24,9 @@ each linear in the arguments of the two nodes (`congStepL`): arguments equal
 one by one; the two flattened argument lists equal as classes; all of one
 node's arguments in the other's class; a node's arguments each named by a
 member of its class that is no application of the operator; and the first four
-again after the inverse and nilpotent laws reduce both nodes.
+again after the inverse and nilpotent laws reduce both nodes. That reduction
+recurses only while the number of arguments it keeps strictly decreases; no
+loop has a pass bound.
 
 Consequence: the replayer's classes equal the engine's at each event only if the
 stream holds every merge, in order. A merge the replayer rejects is counted,
