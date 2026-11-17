@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`.
+`bad.trace` differs in line 14: the `b` line names node 1, an application of F, as the node H(x) was built as.

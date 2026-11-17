@@ -1,0 +1,18 @@
+n 0 a
+t 0 a
+n 1 b
+t 1 b
+n 2 c
+t 2 c
+n 3 Add 1 2
+t 3 Add 1 2
+n 4 Add 0 1 2
+n 5 Add 0 3
+s 3 3
+w 5 4
+t 5 Add 0 3
+t 2 c
+t 0 a
+t 1 b
+t 4 Add 2 0 1
+g 373 5 4

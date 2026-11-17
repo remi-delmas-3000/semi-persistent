@@ -1,0 +1,7 @@
+(datatype E (A) (B) (F E) (H E))
+(let t (F (A)))
+(let u (H (B)))
+(union (A) (B))
+(rewrite (F x) (H x))
+(run 1)
+(check-eq t u)

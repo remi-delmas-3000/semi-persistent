@@ -4,7 +4,7 @@ This document specifies the event stream the engine writes under `--trace FILE`
 and the check the Lean replayer runs on each event. It is the contract between
 `egraph/src/egraph/trace.rs` (the writer) and `proofs/checker/SemperCheck/Replay.lean`
 (the replayer). It is not a status page: what is implemented is what the two
-files do and what the sweep measures.
+files do and what `scripts/check-replay.py` measures.
 
 ## Principle
 
@@ -159,11 +159,11 @@ itself, because the engine applies that rule at some law steps and not at
 others; a `p` check with `d = 1` reduces the peak with the unit dropped first
 and with the inverse pairs cancelled first. Each is a fixed pair of attempts.
 
-## Soundness: the plan
+## Soundness
 
-The replayer's checks are not proved correct one by one. Instead the replayer
-justifies every merge to the certificate kernel, which is proved
-(`goal_sound`, `Sound.lean`):
+The replayer's checks are not proved correct one by one. The replayer
+justifies every merge to the kernel, which is proved (`goal_sound`,
+`Sound.lean`):
 
 - each link of the union-find carries a kernel step that proves its two nodes
   equal, so the equality of two nodes of one class is a `trans` chain of
@@ -171,46 +171,32 @@ justifies every merge to the certificate kernel, which is proved
 - each check emits the kernel steps that derive its merge: `axiom` for `x`;
   `cong` with class premises for `c`, `w`, `t`; `rule` on the instance the
   walk built, joined to the matched and built nodes by `cong` steps, for a
-  firing; a chain of `cong` steps through the intermediate monomials for `i`
-  and `p`;
+  firing; for `i` and `p`, three `cong` steps per rewrite, through the terms of
+  the monomials on the way;
+- a clamp is derived from three kernel steps, each with its law in the models
+  (`OpSat`) and a direct soundness proof: `inv` (`f(x, g(x))` is the unit),
+  `nil` (`f` of `n` copies of `x` is the unit), `cancel` (from `f(a, z) = f(b,
+  z)`, `a = b`, for `:cancellative` and, as a consequence of the group laws,
+  for `:inverse` with a unit). An inverse pair or `n` arguments of one class
+  inside a monomial become the unit by `cong` steps around one of the first
+  two; a critical pair's cancellation and the group consequences of `v` lines
+  use the third;
 - the kernel checks every step, and a `check-eq` is proved when the kernel
   accepts the step that joins its two terms.
 
-The theorem for the replay is then `goal_sound` applied to the steps the
-replayer emitted. A wrong check in the replayer emits a step the kernel
-rejects: it loses a goal and cannot prove a false one. The kernel needs new
-steps, each with its law in the models and its soundness lemma, for what it
-does not have: counts modulo `n` (`:nilpotent`), inverse pairs and the group
-consequences of `v` lines (`:inverse`), and cancellation (`:cancellative`).
-
-State of this plan (`scripts/check-replay.py` prints both counts):
-
-- Done: the union-find links carry kernel steps; `x`, `c`, `w`, `t`, rule
-  firings, `i`, and `p` without cancellation emit their steps; `semper-check
-  --replay` runs the kernel on them and reports the `check-eq` it accepts.
-  9,963 of 29,808 `check-eq` are accepted by the kernel, against 25,259 the
-  replay joins. The slowest replay with the kernel run takes 16 s and the
-  largest 1.0 GB (`bench/acgen.rules.egg`: 6.6 million steps).
-- Not done: the kernel has no step for `:nilpotent`, `:inverse` and
-  `:cancellative`, so a merge that uses one gets no kernel step (about 12,500
-  `check-eq` are in programs with these laws). The plan: three small steps,
-  each with its law in `OpSat` and a direct soundness proof: `inv` (`f(x,
-  g(x))` is the unit), `nil` (`f` of `n` copies of `x` is the unit), `cancel`
-  (from `f(a, c) = f(b, c)`, `a = b`; allowed for `:cancellative` and, as a
-  consequence of the group laws, for `:inverse`). The replayer then derives a
-  clamp inside a monomial by `cong` steps around one of these, and the group
-  consequences of `v` lines from `inv` and `cancel`.
-- Not done: about 2,800 `check-eq` in programs without these laws whose
-  merges get no kernel step (the step builder fails on them).
-- Not done: the statement of the replay's theorem as a corollary of
-  `goal_sound`; the tests of acceptance A4; the removal of the certificate
-  writer and the move of the sweep and CI to the stream (step 5).
+`replay_sound` (`ReplaySound.lean`) is `goal_sound` applied to the steps the
+replayer emitted: a `check-eq` the kernel accepts from a replay holds in every
+model of the commands before it. It assumes nothing about the stream or the
+replayer. A wrong check in the replayer emits a step the kernel rejects: it
+loses a goal and cannot prove a false one. A merge the replayer joins without
+a kernel step (`semper-check` counts them by line kind) proves nothing: the
+proof of a class equality stops at such a link.
 
 ## Not in this version
 
 A firing of a rule with a rest variable, a multiplicity variable or a primitive
 is written as `u rewrite`: the reader reads no rule from such a command.
 
-The replayer is executable and not yet covered by a soundness theorem. It uses
-`partial` definitions where the proof will need structural ones (`expand`,
-`eval`, the pattern walks).
+The replayer uses `partial` definitions (`expand`, `eval`, the pattern walks,
+the proof paths). No theorem depends on them: the kernel checks what they
+emit.

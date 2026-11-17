@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`.
+`bad.trace` differs in line 5: the `x` line names node 0 for the union's right term, which is node 1.

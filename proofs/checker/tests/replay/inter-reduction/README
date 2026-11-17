@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`.
+`bad.trace` differs in line 35: the `i` line names node 0, which is no application of Add, as a rule's left side.

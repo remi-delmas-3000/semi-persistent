@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`.
+`bad.trace` differs in line 11: the `w` line names node 0 as what Add(A, A, Neg(A)) normalizes to.

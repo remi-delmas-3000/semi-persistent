@@ -1,0 +1,13 @@
+n 0 A
+t 0 A
+n 1 B
+t 1 B
+x 27 0 1
+t 0 A
+n 2 F 0
+t 2 F 0
+t 1 B
+n 3 F 1
+c 3 2
+t 3 F 1
+g 43 2 3

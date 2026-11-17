@@ -151,8 +151,10 @@ def check_one(path, args):
     size = os.path.getsize(trace)
     start = time.time()
     try:
-        p = subprocess.run(["/usr/bin/time", "-l" if sys.platform == "darwin" else "-v",
-                            args.checker, "--replay", os.path.join(ROOT, path), trace],
+        # `time` reports the replay's peak memory, where it is installed.
+        timed = ["/usr/bin/time", "-l" if sys.platform == "darwin" else "-v"] \
+            if os.path.exists("/usr/bin/time") else []
+        p = subprocess.run(timed + [args.checker, "--replay", os.path.join(ROOT, path), trace],
                            capture_output=True, text=True, timeout=args.timeout)
     except subprocess.TimeoutExpired:
         os.remove(trace)

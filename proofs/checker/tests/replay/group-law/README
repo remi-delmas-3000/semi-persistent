@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types machine --trace` writes for `program.egg`.
+`bad.trace` differs in line 22: the first `v` line names node 1, which is no inverse application, as its inverse node.

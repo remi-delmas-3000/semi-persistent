@@ -1,17 +1,29 @@
-# semper-check: a Lean checker for equality certificates
+# semper-check: a Lean checker for the engine's equalities
 
-`semper-check PROGRAM.egg CERT` reads a program and a certificate the engine
-wrote (`semi-persistent --proofs --cert CERT PROGRAM.egg`), checks every step
-of the certificate, and reports which `check-eq` commands of the program the
-certificate proves. The checker is a Lean 4 program with no dependency beyond
-Lean's core library; `lake build` builds it in under a minute.
+`semper-check --replay PROGRAM.egg TRACE` reads a program and the stream of
+events the engine wrote while it ran it (`semi-persistent --proofs --trace
+TRACE PROGRAM.egg`), replays the stream, and reports which `check-eq` commands
+of the program it proves. `semper-check PROGRAM.egg CERT` checks a certificate
+(nodes and steps, `Parse.lean`) directly. The checker is a Lean 4 program with
+no dependency beyond the Lean toolchain's own libraries; `lake build` builds
+it in under a minute.
+
+The replay has two parts. The replayer (`Replay.lean`, specified in
+`REPLAY.md`) follows the stream with its own classes and, for each merge,
+emits steps for the kernel. The kernel (`Kernel.lean`) checks the steps. Only
+the kernel is proved: `replay_sound` (`ReplaySound.lean`) states that a
+`check-eq` the kernel accepts from a replay holds in every model of the
+commands before it, whatever the stream and whatever the replayer did. It is
+`goal_sound` applied to the steps the replayer emitted.
 
 ## What a proved `check-eq` means
 
 `goal_sound` (`SemperCheck/Sound.lean`) states it: if every step checks and
 the certificate lists a step for the `check-eq l r` at byte offset `o`, then
 `l = r` holds in every model of the program's operator signatures and laws
-and of the `union` commands and rules that start before `o`.
+and of the `union` commands and rules that start before `o`. `replay_sound`
+(`SemperCheck/ReplaySound.lean`) is the same statement for the `check-eq` that
+`semper-check --replay` reports as proved by the kernel.
 
 A model (`SemperCheck/Semantics.lean`) is many-sorted: it has one carrier and
 a predicate `dom s` for the elements of each sort `s`. Each operator sends
@@ -21,16 +33,20 @@ The laws are required only on elements of the operator's sort: an `assoc`,
 `ac` or `aci` operator folds a binary operation that is closed on its sort
 and associative there (commutative for `ac` and `aci`, idempotent for `aci`),
 with the declared identity as its unit and as the value of the empty
-application; a `comm` operator is symmetric on well-sorted arguments. A rule
+application; with `:inverse g` and a unit, `g` gives an inverse for every
+element of the sort; with `:nilpotent n` and a unit, `n` copies of an element
+make the unit; with `:cancellative`, `b x z = b y z` gives `x = y`. A `comm`
+operator is symmetric on well-sorted arguments. A rule
 holds when its two sides are equal under every assignment of its variables to
 elements of their sorts that makes its equality premises hold. A many-sorted
 algebra of the program gives such a model by taking the disjoint union of its
 carriers; the plan in `MANY-SORTED.md` adds that construction as a theorem.
 
-The theorem depends on Lean's three standard axioms (`propext`,
+Both theorems depend on Lean's three standard axioms (`propext`,
 `Classical.choice`, `Quot.sound`) and on no `sorry`. The trusted part is the
 statement (`Syntax.lean`, `Semantics.lean`), the `.egg` reader
 (`Parse.lean`), Lean's kernel, and Lean's compiler, which runs the checker.
+The replayer and the engine are not trusted.
 
 **Why the sorts matter.** `tests/empty_sort.egg` declares a sort `A` with no
 constructor, `f : A -> C`, and the rules `(f x) -> (c)` and `(f y) -> (d)`.
@@ -53,6 +69,9 @@ nodes, and a list of steps, each concluding that two nodes are equal
 | `axiom o a b` | the `union` at offset `o` has the terms `a` and `b` |
 | `rule o j σ prems a b` | rule `j` of the command at `o`, instantiated by `σ`, has sides `a` and `b`; `prems` prove its equality premises |
 | `cong f a b prems` | `a` and `b` are equal modulo the laws of `f`, after replacing each premise's left node by its right node |
+| `inv f a x q e` | `a = f(x, q)` with `q = g(x)` is the unit `e` of `f`, whose `:inverse` is `g` |
+| `nil f a x k e` | `a = f(x, .., x)`, with `k + 1` arguments, is the unit `e` of `f`, which is `:nilpotent (k + 1)` |
+| `cancel f s a b z` | step `s` concludes `f(a, z) = f(b, z)`, so `a = b`: `f` is `:cancellative`, or has `:inverse` and a unit |
 
 `cong` covers congruence (children pairwise equal), a commutative operator's
 swapped children, and the associative operators: both sides flatten to their
@@ -84,108 +103,67 @@ ill-sorted, or that applies an `:assoc-left` or `:assoc-right` operator to
 more arguments than its signature takes, is rejected; the latter is a
 limitation of the reader (8 fixtures), not of the semantics.
 
-## Checking every regression program
+## Replaying every regression program
 
-`scripts/check-certificates.py` has the engine write a certificate for every
-program the regression tests run and expect `ok`, and checks each one: the
-files `egraph/tests/egg_tests.rs` registers, the CBMC and conformance corpora,
-and the book examples. CI runs it (`.github/workflows/checker.yml`). It fails
-on a step that does not check, a rejected certificate, an engine failure
-under `--proofs`, or a program proving fewer `check-eq` than
-`coverage.tsv` records; `--update` rewrites `coverage.tsv` after a change
-that proves more.
+`scripts/check-replay.py` has the engine write the stream of every program the
+regression tests run and expect `ok` (the files `egraph/tests/egg_tests.rs`
+registers, the CBMC and conformance corpora, and the book examples), and
+replays each one. CI runs it (`.github/workflows/checker.yml`). It fails on an
+engine failure under `--proofs`, a replay that does not finish, a rejected node
+table, or a program that proves fewer `check-eq` through the kernel than
+`coverage.tsv` records; `--update` rewrites `coverage.tsv` after a change that
+proves more. `scripts/test-replay.py` replays the fixtures of `tests/replay`:
+for each kind of line, a stream the kernel accepts and the same stream with one
+witness changed, which costs the goal that depends on it.
 
-Over the 1,684 programs (release build, 60 s and 4 GB per run, about 60 s
-wall time with six jobs): 1,442 certificates check with no failed step, 5,702
-of the 29,808 `check-eq` they cover are proved, and every `check-eq` of 202
-of the 1,066 programs with one. 125 programs expect an outcome other than
-`ok`. The reader rejects 117 programs: 101 apply an `:assoc-left` or
-`:assoc-right` operator to more arguments than its signature takes (93 of
-them in the `conform-flatten` corpus), 8 use `push` and `pop`, 5 write a
-count above 65,536, and 2 use an unannotated literal where its default sort
-is not the one the position takes.
+Over the 1,684 programs (release build, 60 s per run, six jobs, about two
+minutes of wall time): 1,442 are replayed, 125 expect an outcome other than
+`ok`, and the reader rejects 117 (101 apply an `:assoc-left` or `:assoc-right`
+operator to more arguments than its signature takes, 8 use `push` and `pop`, 5
+write a count above 65,536, and 2 use an unannotated literal where its default
+sort is not the one the position takes).
 
-## The replay stream (MEASURED, not proved)
+| | count |
+| --- | --- |
+| `check-eq` the kernel proves (`replay_sound` covers them), of 29,808 | 20,729 |
+| programs with every `check-eq` proved, of 1,066 | 603 |
+| kernel steps checked | 12,523,913 |
+| `check-eq` the replayer joins | 25,416 |
+| events replayed | 7,396,094 |
+| events whose check fails | 213,130 |
+| merges the replayer does not check | 292,225 |
 
-A second design is being built next to the certificates: the engine writes one
-line per event as it runs (`--trace`), and `semper-check --replay` replays the
-lines in order against its own classes. `REPLAY.md` specifies the lines and
-the check each one gets. The replayer has no soundness theorem yet, so every
-number in this section measures the design and none is a checked proof.
+The 9,079 `check-eq` the kernel does not prove:
 
-`scripts/check-replay.py` runs it over the same 1,684 programs (release build,
-60 s per run, six jobs, about 70 s wall time). Regenerate with
-`python3 -B proofs/checker/scripts/check-replay.py`, and with `--assume` for
-the second column.
+- 3,252 are in the 267 programs with a rule firing the stream writes as opaque:
+  a rule with a primitive, a rest variable or a multiplicity variable, which
+  the reader does not read (292,221 such merges, 287,931 of them in
+  `bench/math-microbenchmark.native.egg`). Later events of these programs fail
+  because the merge was not applied.
+- 4,687 are joined by the replayer through a merge it has no kernel step for:
+  11,744 merges, of which 4,810 inter-reductions, 3,575 law steps and 3,233
+  critical pairs. The step builder does not finish them; the largest groups are
+  merges through a class that holds its own application, and cancellation
+  without a unit.
+- The rest are in programs where a check fails first: a law step whose
+  arguments differ (most after an opaque firing), a rule firing the walk does
+  not follow, a completion merge.
 
-| | checked merges only | unchecked merges applied (`--assume`) |
-| --- | --- | --- |
-| `check-eq` in one class, of 29,808 | 25,145 | 28,505 |
-| programs with every `check-eq` in one class, of 1,066 | 689 | 929 |
-| events | 7,396,091 | 7,396,091 |
-| events that fail their check | 213,865 | 3,206 |
-| merges not checked | 292,771 | 292,771 |
-
-The first column counts a `check-eq` only when the merges that join its two
-terms all passed their checks. The certificate writer reaches 7,664 with the
-parked law-trace work (branch `wip/law-trace`) and 5,702 on this branch. The
-second column applies the merges the replayer does not check, to separate a
-check that fails by itself from one that fails because an earlier merge was
-not applied.
-
-The merges not checked are rule firings the stream writes as opaque (292,767,
-of which 287,931 in one benchmark, `bench/math-microbenchmark.native.egg`):
-rules with a primitive, a rest variable or a multiplicity variable, which the
-reader does not read. Of the 4,663 `check-eq` not proved in the first column,
-3,398 are in the 267 programs with such firings. The rest are in programs
-whose first failing event is a completion merge (633 `check-eq`), a rule
-firing the walk does not follow (about 300), or a law or congruence step.
+The certificates this replaces proved 5,702 `check-eq`. `coverage.tsv` is
+higher for 565 programs (15,041 `check-eq`) and lower for 6 (14 `check-eq`),
+each with the cause in its row.
 
 Cost: the 1,442 streams total 235 MB; the median is 1.2 kB and the largest
-94 MB (`bench/math-microbenchmark.rules.egg`, 1,958,093 events, replayed in
-8.0 s and 183 MB). The slowest replay takes 8.4 s and the largest 248 MB. With
-the stream on, the engine runs `bench/acgen.rules.egg` (1,120,646 events, a
-50 MB stream, every event checked) in 11.3 s and 706 MB against 10.4 s and
-700 MB in proof mode without it, and `bench/search-dfs-small.rules.egg` in
-2.4 s either way (a 47 kB stream; the reader does not read that program, so
-it has no replay).
+94 MB. The slowest replay, kernel run included, takes 21 s
+(`conform-cc-cert/cs1_0013.egg`) and the largest 1.05 GB
+(`bench/math-microbenchmark.rules.egg`); `bench/acgen.rules.egg` (1,120,646
+events, a 50 MB stream, 6,647,265 kernel steps, every event checked) takes
+16 s. With the stream on, the engine runs that benchmark in 11.3 s and 706 MB
+against 10.4 s and 700 MB in proof mode without it, and
+`bench/search-dfs-small.rules.egg` in 2.4 s either way (a 47 kB stream; the
+reader does not read that program, so it has no replay).
 
-## Coverage over the fixtures
-
-Over the fixtures of `egraph/tests/egg`, each run with `--proofs --cert`
-(release build, 20 s and 2 GB per run) and then checked: the checker proves
-157 of the 1,579 `check-eq` that hold in the programs it reads, and every
-`check-eq` of 62 of the 228 such fixtures that have one. No step the writer emits fails to check.
-
-A step that does not check concludes only `0 = 0` (`Ctx.failed` in
-`Kernel.lean`), and the checker reports it: a mistake in the writer costs the
-goals whose derivations cite the step, not the whole certificate.
-
-The writer leaves a goal unproved when an edge on its explanation is one it
-cannot express. Counted by edge (an edge can block several goals, and a goal
-stops at its first such edge):
-
-| edge | count |
-| --- | --- |
-| a law or completion step whose two sides the writer cannot relate by flattening and by rewriting arguments to class members (nilpotent and inverse laws, inter-reduction) | 809 |
-| a rule the checker's reader reads no rule from: a primitive operation or guard, a rest variable, a multiplicity, a `:let` | 202 |
-| cancellation | 127 |
-| a rule application whose pattern the writer cannot match to the two nodes by position (most in the `flatten` fixtures, where the engine matched modulo associativity) | 35 |
-| a sequence rule, which carries no source position | 19 |
-| a law step between two nodes of no associative operator | 13 |
-
-A lazy `check-eq` runs completion in a transaction that the next command
-discards; the interpreter proves the pending goals into the certificate
-(`EGraph::cert_prove_goals`) before it restores, and the writer then drops
-its memo entries for the discarded node ids (`EGraph::cert_forget`).
-
-For a rule application, the writer reads the rule's command as the checker
-reads it, matches the rule's sides to the edge's two nodes modulo their
-classes (either child order for a commutative operator) to recover the variable bindings, and joins the instance to the two
-nodes by `cong` steps whose premises are forest paths.
-
-An empty application `(Add)` is the unit in the engine; the semantics does
-not state that law, so the fixtures that check it stay unproved. Fourteen
-fixtures do not parse: two use `push` and `pop`, four write a count above
-65,536, and eight apply an `:assoc-left` or `:assoc-right` operator to more
-arguments than its signature takes.
+`check-replay.py --assume` makes the replayer join the classes of the merges
+it does not check, which separates a check that fails by itself from one that
+fails because an earlier merge was not applied. It does not change what the
+kernel proves.

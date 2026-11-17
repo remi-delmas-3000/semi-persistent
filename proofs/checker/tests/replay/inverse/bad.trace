@@ -1,0 +1,14 @@
+n 0 Zero
+z Add 0
+n 1 A
+t 1 A
+t 1 A
+t 1 A
+n 2 Neg 1
+t 2 Neg 1
+n 3 Add 1 1 2
+j 2
+w 3 0
+t 3 Add 1 1 2
+t 1 A
+g 368 3 1

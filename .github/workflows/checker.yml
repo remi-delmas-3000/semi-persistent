@@ -1,4 +1,4 @@
-name: Proof Certificates
+name: Proof Replay
 on:
   pull_request:
     paths:
@@ -23,16 +23,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Builds the Lean checker under proofs/checker (no dependency beyond Lean's
-  # core library, so nothing is downloaded but the toolchain), gates its
-  # soundness theorem on the three standard axioms, then has the engine write
-  # an equality certificate for every regression program that expects `ok`
-  # and checks each with the checker
-  # (proofs/checker/scripts/check-certificates.py, which runs locally the same
-  # way). The job fails on a step that does not check, a rejected
-  # certificate, an engine failure under --proofs, or a program proving fewer
-  # check-eq than proofs/checker/coverage.tsv records.
-  certificates:
+  # Builds the Lean checker under proofs/checker (no dependency beyond the
+  # Lean toolchain's own libraries), gates its two soundness theorems on the
+  # three standard axioms, replays the stream fixtures, then has the engine
+  # write the replay stream of every regression program that expects `ok` and
+  # replays each one, the kernel checking the steps the replay emits
+  # (proofs/checker/scripts/check-replay.py, which runs locally the same
+  # way). The job fails on an engine failure under --proofs, a replay that
+  # does not finish, a rejected node table, or a program proving fewer
+  # check-eq through the kernel than proofs/checker/coverage.tsv records.
+  replay:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     defaults:
@@ -63,6 +63,10 @@ jobs:
             echo "a declaration uses sorry"; exit 1
           fi
           grep -q "'SemperCheck.goal_sound' depends on axioms: \[propext, Classical.choice, Quot.sound\]" /tmp/lake.log
+          grep -q "'SemperCheck.Replay.replay_sound' depends on axioms: \[propext, Classical.choice, Quot.sound\]" /tmp/lake.log
+
+      - name: Replay the stream fixtures
+        run: python3 -B proofs/checker/scripts/test-replay.py
 
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -70,5 +74,5 @@ jobs:
       - name: Build the engine
         run: cargo build --release -p semi-persistent-egraph --bin semi-persistent
 
-      - name: Write and check the certificates
-        run: python3 -B proofs/checker/scripts/check-certificates.py --jobs 4
+      - name: Write and replay the streams
+        run: python3 -B proofs/checker/scripts/check-replay.py --jobs 4

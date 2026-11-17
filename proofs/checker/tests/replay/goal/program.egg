@@ -1,0 +1,3 @@
+(datatype E (A) (B) (F E))
+(union (A) (B))
+(check-eq (F (A)) (F (B)))
