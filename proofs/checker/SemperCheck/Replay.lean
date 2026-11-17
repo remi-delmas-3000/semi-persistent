@@ -91,6 +91,10 @@ structure St where
   byTerm : Std.HashMap Nat (Nat × Option (Option Nat)) := {}
   /-- `(o, s)`: step `s` proves the `check-eq` at offset `o`. -/
   goalSteps : List (Nat × Nat) := []
+  /-- The kind of the line being replayed, and the merges that got no kernel
+  step, by kind. -/
+  cur : String := ""
+  unjustified : Std.HashMap String Nat := {}
   /-- Splice witnesses for the next `t`, `c` or `w` line. -/
   splices : List (Nat × Nat) := []
   /-- Inverse witnesses (`j` lines) for the next line: inverse applications,
@@ -216,6 +220,9 @@ def St.mergeBy (S : St) (a b : Nat) (pf : Pf) : St :=
         { S with proof := S.proof ++ Array.replicate (hi + 1 - S.proof.size) none }
       else S
     let S := { S with parent := (grow S.parent (hi + 1)).setIfInBounds hi lo }
+    let S := if (link.bind id).isNone then
+        { S with unjustified := S.unjustified.insert S.cur (S.unjustified.getD S.cur 0 + 1) }
+      else S
     { S with proof := S.proof.setIfInBounds hi (link.bind id) }
 
 /-- A merge the replayer has no kernel step for. -/
@@ -411,7 +418,7 @@ def dropClass (S : St) (c : Nat) : Nat → List Nat → List Nat
 times as `m` holds `l` (once under ACI or a nilpotent law, where a class's
 count is bounded, and once when `once` is set). `none` when `m` does not hold `l`. -/
 def applyRule (S : St) (f : String) (m : List Nat) (l : List Nat) (r : List Nat) (once : Bool := false) :
-    Option (List Nat) :=
+    Option (Nat × List Nat × List Nat) :=
   let mc := classesOf S m
   let distinct := l.eraseDups
   if l.isEmpty || !distinct.all (fun c => countOf c mc ≥ countOf c l) then none
@@ -422,7 +429,7 @@ def applyRule (S : St) (f : String) (m : List Nat) (l : List Nat) (r : List Nat)
     let rest := distinct.foldl (fun m c => dropClass S c (q * countOf c l) m) m
     -- Between rewrites the engine clamps counts and drops the unit; it cancels
     -- inverse pairs on the normal form only.
-    some (lawReduce S f (rest ++ (List.replicate q r).flatten) (inverse := false))
+    some (q, rest, lawReduce S f (rest ++ (List.replicate q r).flatten) (inverse := false))
 
 /-- The arguments of `x` as a monomial of `f`: its own, if it is an
 application of `f`, else `x` itself. -/
@@ -433,10 +440,20 @@ def monomial (S : St) (f : String) (W : List (Nat × List Nat)) (x : Nat) : List
   | some (.app g cs) => if g == f && !cs.isEmpty then cs.flatMap (expand S W) else expand S W x
   | _ => expand S W x
 
-/-- Rewrites `m` by the rules `rules`, in order. -/
-def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false) :
-    List (Nat × Nat × Bool) → Except String (List Nat)
-  | [] => pure m
+/-- One rewrite of a monomial, for the kernel steps that follow it: the rule's
+two nodes, the number of copies rewritten, the arguments left untouched, and
+the monomial after. -/
+structure Rewrote where
+  l : Nat
+  r : Nat
+  q : Nat
+  rest : List Nat
+  after : List Nat
+
+/-- Rewrites `m` by the rules `rules`, in order: the result and each rewrite. -/
+def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false)
+    (done : Array Rewrote := #[]) : List (Nat × Nat × Bool) → Except String (List Nat × Array Rewrote)
+  | [] => pure (m, done)
   | (l, r, atom) :: rest => do
     if S.fd l != S.fd r then throw "completion: rule sides in two classes"
     match S.defOf l with
@@ -444,7 +461,7 @@ def rewrite (S : St) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (o
       if g != f then throw "completion: rule of another operator"
       let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)))
       match applyRule S f m lc (if atom then [r] else monomial S f W r) once with
-      | some m' => rewrite S f W m' once rest
+      | some (q, left, m') => rewrite S f W m' once (done.push { l, r, q, rest := left, after := m' }) rest
       | none => throw "completion: rule does not apply"
     | _ => throw "completion: rule of another operator"
 
@@ -473,17 +490,28 @@ def pairs : List Nat → List (Nat × Nat × Bool)
 def rules (S : St) (xs : List Nat) : Option (List (Nat × Nat × Bool)) :=
   (pairs xs).mapM fun (l, r, k) => do pure (← S.tr l, ← S.tr r, k)
 
+/-- A derivation the kernel steps follow: from a node, or from the term of a
+monomial, through the monomial it reduces to and each rewrite, to a node. -/
+structure Chain where
+  f : String
+  start : Nat ⊕ List Nat
+  first : List Nat
+  steps : Array Rewrote
+  target : Nat
+
 /-- `i a b n l1 r1 ..`: node `n`, a member of one merged class, rewrites by
 the rules to the other merged node. -/
-def interReduce (S : St) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Except String Unit := do
+def interReduce (S : St) (a b n : Nat) (rules : List (Nat × Nat × Bool)) : Except String Chain := do
   let some (.app f as) := S.defOf n | throw "completion: start is not an application"
   unless (S.P.kind f).isAssoc && S.P.kind f != .assoc do throw "completion: not an AC operator"
   let t ← if S.fd n == S.fd b then pure a else if S.fd n == S.fd a then pure b
     else throw "completion: start in neither class"
   -- A monomial is a node's arguments, each one class, as the engine reads it.
   let W : List (Nat × List Nat) := []
-  let m ← rewrite S f W (lawReduce S f (as.flatMap (expand S W))) false rules
+  let first := lawReduce S f (as.flatMap (expand S W))
+  let (m, steps) ← rewrite S f W first false #[] rules
   unless reaches S f W m t do throw "completion: normal form differs"
+  pure { f, start := .inl n, first, steps, target := t }
 
 /-- The witnesses of a critical-pair merge (`p` line). -/
 structure Peak where
@@ -525,7 +553,8 @@ peak reduced by the laws, with `reduceB`) and rewrite it by their rules; with
 occurrence of `keep`'s class), which the operator's `:cancellative` law
 allows when both sides stay non-empty or the operator has a unit; each side
 then rewrites by its remaining rules. -/
-def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) : Except String Unit := do
+def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) :
+    Except String (Option (Chain × Chain)) := do
   let named := a :: b :: (w.preA ++ w.preB ++ w.postA ++ w.postB).flatMap fun (l, r, _) => [l, r]
   -- The operator: that of the first rule, else of a merged node.
   let some f := (named.reverse.findSome? fun x =>
@@ -538,9 +567,9 @@ def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) : E
   let peak := w.peak.flatMap (expand S W)
   -- A critical pair's own rules rewrite the peak once each; the normal form's
   -- rules, after it, rewrite every copy.
-  let mA ← rewrite S f W peak true w.preA
-  let mB ← rewrite S f W (if w.reduceB then lawReduce S f peak (inverseFirst := inverseFirst) else peak)
-    true w.preB
+  let firstB := if w.reduceB then lawReduce S f peak (inverseFirst := inverseFirst) else peak
+  let (mA, sA) ← rewrite S f W peak true #[] w.preA
+  let (mB, sB) ← rewrite S f W firstB true #[] w.preB
   let (mA, mB) ← if w.cancel then do
       -- Declared, or a consequence of the group laws (`:inverse`).
       unless ((S.P.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
@@ -557,9 +586,13 @@ def peakMerge (S : St) (a b : Nat) (w : Peak) (inverseFirst : Bool := false) : E
         throw "completion: cancellation empties a side"
       pure (mA, mB)
     else pure (mA, mB)
-  let mA ← rewrite S f W mA false w.postA
-  let mB ← rewrite S f W mB false w.postB
+  let (mA, sA) ← rewrite S f W mA false sA w.postA
+  let (mB, sB) ← rewrite S f W mB false sB w.postB
   unless reaches S f W mA a && reaches S f W mB b do throw "completion: normal form differs"
+  -- The kernel has no cancellation step: such a merge gets no kernel steps.
+  if w.cancel then pure none
+  else pure (some ({ f, start := .inr peak, first := peak, steps := sA, target := a },
+                   { f, start := .inr peak, first := firstB, steps := sB, target := b }))
 
 /-- `v a b n1 n2`: a consequence of the group law of an operator `f` with
 `:inverse g`, where `n1 = g(x1)` and `n2 = g(x2)` (`n2` is `n1` when one node
@@ -724,6 +757,67 @@ def intern (S : St) (d : Def) : St × Nat :=
   | none =>
     let t := S.defs.size
     ({ S with defs := S.defs.push (some d), index := S.index.insert d t }, t)
+
+/-- The node of a monomial: `f` applied to its arguments, or the unit for
+none. -/
+def monoNode (S : St) (f : String) (m : List Nat) : St × Option Nat :=
+  if m.isEmpty then (S, S.unit f)
+  else
+    let d := Def.app f m
+    if wellSorted S d then let (S, t) := intern S d; (S, some t) else (S, none)
+
+/-- The kernel steps of a derivation: the proof that its start is its
+target, and the start's node. Each rewrite of `q` copies of `l` by `r` is
+three `cong` steps: the monomial is `f(l, .., l, rest)` by `f`'s laws, which
+is `f(r, .., r, rest)` argument by argument from `l = r`, which is the next
+monomial by `f`'s laws. The nodes on the way join the start's class. -/
+def emitChain (S : St) (c : Chain) : St × Option (Nat × Pf) := Id.run do
+  let f := c.f
+  let mut S := S
+  let start ← match c.start with
+    | .inl n => pure n
+    | .inr m =>
+      match monoNode S f m with
+      | (S', some t) => S := S'; pure t
+      | (S', none) => return (S', none)
+  let mut cur := start
+  let mut pf : Pf := some none
+  -- One `cong` by `f`'s laws from the current node to `next`.
+  let hop (S : St) (cur next : Nat) (pf : Pf) : St × Pf :=
+    let (S, p) := congStep S f cur next
+    let S := S.mergeBy cur next p
+    transP S start next pf p
+  match monoNode S f c.first with
+  | (S', some t) =>
+    let (S', pf') := hop S' cur t pf
+    S := S'; cur := t; pf := pf'
+  | (S', none) => return (S', none)
+  for st in c.steps do
+    let (S1, t1) := monoNode S f (List.replicate st.q st.l ++ st.rest)
+    let (S2, t2) := monoNode S1 f (List.replicate st.q st.r ++ st.rest)
+    let (S3, t3) := monoNode S2 f st.after
+    S := S3
+    let (some t1, some t2, some t3) := (t1, t2, t3) | return (S, none)
+    let (S', pf') := hop S cur t1 pf
+    S := S'; pf := pf'
+    -- `f(l, .., rest) = f(r, .., rest)`: each differing argument is `l = r`.
+    let (S', lr) := eqP S st.l st.r
+    let (S', lrStep) := stepOf S' st.l lr
+    S := S'
+    let p2 : Pf ← if t1 == t2 then pure (some none) else
+      match lrStep with
+      | some e =>
+        let (S', s2) := emit S (.cong f t1 t2 (if st.l == st.r then [] else [e])) t1 t2
+        S := S'
+        pure (some (some s2))
+      | none => pure none
+    S := S.mergeBy t1 t2 p2
+    let (S', pf') := transP S start t2 pf p2
+    S := S'; pf := pf'
+    let (S', pf') := hop S t2 t3 pf
+    S := S'; cur := t3; pf := pf'
+  let (S', pf') := hop S cur c.target pf
+  return (S', some (start, pf'))
 
 /-- The kernel steps of a `t` line, whose check passed: the term as the
 program writes it (its arguments' own terms as arguments) is node `i`. -/
@@ -998,7 +1092,7 @@ def define (S : St) (i : Nat) (d : Def) : St :=
     | _ => S
 
 def step (S : St) (line : String) : St :=
-  let S := { S with events := S.events + 1 }
+  let S := { S with events := S.events + 1, cur := (line.splitOn " ").headD "" }
   match line.splitOn " " with
   | "n" :: id :: f :: kids =>
     match id.toNat?, ids S kids with
@@ -1168,20 +1262,51 @@ def step (S : St) (line : String) : St :=
       -- On the current classes, else on the classes at the round's start: the
       -- engine reads a round's monomials through the latter, and builds the
       -- nodes it merges through the former. Either check is sound.
-      match interReduce S a b n rs, interReduce { S with parent := S.roundParent } a b n rs with
-      | .ok (), _ | _, .ok () => S.merge a b
-      | .error e, _ => S.fail e
+      -- The derivation is computed first, on classes the state shares; the
+      -- kernel steps are emitted after, when the state is held once again.
+      let plan := match interReduce S a b n rs with
+        | .ok c => Except.ok c
+        | .error e =>
+          match interReduce { S with parent := S.roundParent } a b n rs with
+          | .ok c => .ok c
+          | .error _ => .error e
+      match plan with
+      | .ok c =>
+        let (S, r) := emitChain S c
+        match r with
+        | some (start, pf) =>
+          -- `n` is the target; `n` is in the class of the other merged node.
+          let other := if c.target == a then b else a
+          let (S, q) := eqP S other start
+          let (S, q) := transP S other c.target q pf
+          S.mergeBy other c.target q
+        | none => S.merge a b
+      | .error e => S.fail e
     | _, _, _, _ => S.fail "completion: unreadable"
   | "p" :: a :: b :: rest =>
     match S.node? a, S.node? b, (rest.mapM (fun (x : String) => x.toNat?)).bind (Peak.read S) with
     | some a, some b, some w =>
-      let R := { S with parent := S.roundParent }
-      let tries := [peakMerge S a b w, peakMerge S a b w (inverseFirst := true),
-                    peakMerge R a b w, peakMerge R a b w (inverseFirst := true)]
-      if tries.any (fun t => t.isOk) then S.merge a b
-      else match tries.head? with
-        | some (.error e) => S.fail e
-        | _ => S.fail "completion: unreadable"
+      let plan :=
+        let R := { S with parent := S.roundParent }
+        let tries := [peakMerge S a b w, peakMerge S a b w (inverseFirst := true),
+                      peakMerge R a b w, peakMerge R a b w (inverseFirst := true)]
+        match tries.find? (·.isOk), tries.head? with
+        | some ok, _ => ok
+        | none, some e => e
+        | none, none => .error "completion: unreadable"
+      match plan with
+      | .ok (some (ca, cb)) =>
+        -- Both sides start at the peak's term: `a` is it, and it is `b`.
+        let (S, ra) := emitChain S ca
+        let (S, rb) := emitChain S cb
+        match ra, rb with
+        | some (start, pa), some (_, pb) =>
+          let (S, q) := symmP S start a pa
+          let (S, q) := transP S a b q pb
+          S.mergeBy a b q
+        | _, _ => S.merge a b
+      | .ok none => S.merge a b
+      | .error e => S.fail e
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
     match d.toNat? with

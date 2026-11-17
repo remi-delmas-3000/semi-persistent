@@ -38,6 +38,7 @@ def replay (progPath tracePath : String) : IO UInt32 := do
   let nUnchecked := S.unchecked.fold (fun n _ k => n + k) 0
   for (c, k) in S.failed.toList do IO.println s!"failed: {k} {c}"
   for (c, k) in S.unchecked.toList do IO.println s!"unchecked: {k} {c}"
+  for (c, k) in S.unjustified.toList do IO.println s!"no kernel step: {k} {c}"
   -- The kernel checks the steps the replay emitted; `goal_sound` covers the
   -- goals it accepts.
   let nodes : Array Node := S.defs.map fun d =>

@@ -88,6 +88,7 @@ def check_one(path, args):
         "rejected": "node table is rejected" in p.stdout, "bytes": size, "secs": secs, "rss_mb": rss_mb,
         "failed_by": {c: int(n) for n, c in re.findall(r"failed: (\d+) (.+)", p.stdout)},
         "unchecked_by": {c: int(n) for n, c in re.findall(r"unchecked: (\d+) (.+)", p.stdout)},
+        "nostep_by": {c: int(n) for n, c in re.findall(r"no kernel step: (\d+) (.+)", p.stdout)},
     }
 
 
@@ -151,6 +152,13 @@ def main():
     if unchecked_by:
         print("unchecked merges by kind:")
         for kind, n in unchecked_by.most_common():
+            print(f"  {n:8d}  {kind}")
+    nostep = collections.Counter()
+    for r in done:
+        nostep.update(r["nostep_by"])
+    if nostep:
+        print("merges with no kernel step, by line kind:")
+        for kind, n in nostep.most_common():
             print(f"  {n:8d}  {kind}")
     bad = [(p, r) for p, r in sorted(results.items())
            if r["status"] in ("engine-error", "engine-timeout", "replay-error", "replay-timeout")]
