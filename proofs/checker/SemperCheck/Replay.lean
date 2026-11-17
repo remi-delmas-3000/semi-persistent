@@ -359,10 +359,10 @@ def modCount (n : Nat) (xs : List Nat) : List Nat :=
   groups.reverse.flatMap fun (c, k) => List.replicate (k % n) c
 
 /-- The normal forms, as classes, of the argument lists `as` and `bs` of `f`.
-An associative operator's argument is one class unless a witness splices it:
-the engine's (`s` lines, checked here), or an application of `f` that appears
-among the arguments, which witnesses its own class. Both lists use the same
-witnesses. -/
+An associative operator's argument is one class unless a witness of the
+stream splices it (`s` lines, checked here): an application of `f` among the
+arguments stands for its class when no line says the engine read through it.
+Both lists use the same witnesses. -/
 def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false)
     (self : Option Nat := none) : List Nat × List Nat :=
   match S.prog.kind f with
@@ -373,10 +373,9 @@ def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false)
       match S.defOf m with
       | some (.app g cs) => if g == f && !cs.isEmpty && S.fd m == S.fd c then some (S.fd c, cs) else none
       | _ => none
-    let own := ((as ++ bs).flatMap (nested S.defs f)).map fun (x, cs) => (S.fd x, cs)
     -- The node whose arguments are `as` witnesses its own class: a rule with
     -- `:flatten` matches it through an argument of that class.
-    let W := given ++ own ++ (match self with | some n => [(S.fd n, as)] | none => [])
+    let W := given ++ (match self with | some n => [(S.fd n, as)] | none => [])
     let u := (S.unit f).map S.fd
     let d := S.prog.opDecl? f
     let one (xs : List Nat) : List Nat :=

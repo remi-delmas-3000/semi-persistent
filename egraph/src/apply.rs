@@ -1551,13 +1551,11 @@ fn trace_splices<Cfg, L, const T: bool, const P: bool>(
     eg.for_each_child(node, |c, _| kids.push(c));
     for &p in bound {
         let mut budget = VIEW_BUDGET;
-        let Some(pairs) = view_premises(eg, op, &kids, p, VIEW_DEPTH, &mut budget) else {
+        let Some(pairs) = view_splices(eg, op, &kids, p, VIEW_DEPTH, &mut budget) else {
             continue;
         };
         for (a, b) in pairs {
-            if a != b && eg.get_lit_val(b).is_none() && eg.node_op(b) == op {
-                eg.trace_splice(a, b);
-            }
+            eg.trace_splice(a, b);
         }
     }
 }
@@ -1662,6 +1660,96 @@ where
         let mut pairs = vec![(p, g)];
         for k in kids {
             match view_premises(eg, op, children, k, depth - 1, budget) {
+                Some(more) => pairs.extend(more),
+                None => continue 'groups,
+            }
+        }
+        return Some(pairs);
+    }
+    None
+}
+
+/// The splices of `view_premises`'s derivation, without the pairs that only
+/// place an element in a class: each `(element, member)` link of a flattened
+/// view, and each `(p, group)` of a regrouped one. The replay stream writes
+/// them as `s` lines.
+fn view_splices<Cfg, L, const T: bool, const P: bool>(
+    eg: &EGraph<Cfg, L, T, P>,
+    op: Cfg::O,
+    children: &[Cfg::G],
+    p: Cfg::G,
+    depth: usize,
+    budget: &mut usize,
+) -> Option<Vec<(Cfg::G, Cfg::G)>>
+where
+    Cfg: EGraphConfig,
+    L: LitVal,
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
+{
+    let rp = eg.find_const(p);
+    if children.iter().any(|&c| eg.find_const(c) == rp) {
+        return Some(Vec::new());
+    }
+    // Flattened: breadth-first over same-operator members, with parent links
+    // `(element, member, parent link)`.
+    let mut level: Vec<(Cfg::G, Option<usize>)> = children.iter().map(|&c| (c, None)).collect();
+    let mut links: Vec<(Cfg::G, Cfg::G, Option<usize>)> = Vec::new();
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for _ in 0..depth {
+        let mut next: Vec<(Cfg::G, Option<usize>)> = Vec::new();
+        for &(x, parent) in &level {
+            if !seen.insert(eg.find_const(x).to_usize()) {
+                continue;
+            }
+            for m in eg.class_members(x) {
+                if *budget == 0 {
+                    return None;
+                }
+                *budget -= 1;
+                if eg.node_op(m) != op || eg.is_evidence_node_pub(m) {
+                    continue;
+                }
+                links.push((x, m, parent));
+                let link = links.len() - 1;
+                let mut hit = None;
+                eg.for_each_child(m, |y, _| {
+                    if hit.is_none() && eg.find_const(y) == rp {
+                        hit = Some(y);
+                    }
+                    next.push((y, Some(link)));
+                });
+                if hit.is_some() {
+                    let mut pairs = Vec::new();
+                    let mut at = Some(link);
+                    while let Some(i) = at {
+                        let (a, b, up) = links[i];
+                        pairs.push((a, b));
+                        at = up;
+                    }
+                    return Some(pairs);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        level = next;
+    }
+    // Regrouped: a same-operator node in p's class whose children are elements.
+    if depth == 0 {
+        return None;
+    }
+    let groups: Vec<Cfg::G> = eg
+        .class_members(p)
+        .filter(|&g| eg.node_op(g) == op && !eg.is_evidence_node_pub(g))
+        .collect();
+    'groups: for g in groups {
+        let mut kids = Vec::new();
+        eg.for_each_child(g, |c, _| kids.push(c));
+        let mut pairs = vec![(p, g)];
+        for k in kids {
+            match view_splices(eg, op, children, k, depth - 1, budget) {
                 Some(more) => pairs.extend(more),
                 None => continue 'groups,
             }

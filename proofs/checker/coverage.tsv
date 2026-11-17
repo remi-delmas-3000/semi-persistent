@@ -129,7 +129,7 @@ egraph/tests/egg/ac_minmono_cc1_0344.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_0425.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_0798.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_0856.egg	1	1	replayed
-egraph/tests/egg/ac_minmono_cc1_0897.egg	1	1	replayed
+egraph/tests/egg/ac_minmono_cc1_0897.egg	0	1	replayed	1 before the checker stopped reading a nested application as its arguments without a splice witness: the stream has none for this merge
 egraph/tests/egg/ac_minmono_cc1_1299.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_1550.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_1904.egg	1	1	replayed
@@ -744,7 +744,7 @@ egraph/tests/egg/conform-cc/cc1_0091.egg	15	15	replayed
 egraph/tests/egg/conform-cc/cc1_0092.egg	99	99	replayed
 egraph/tests/egg/conform-cc/cc1_0093.egg	27	27	replayed
 egraph/tests/egg/conform-cc/cc1_0094.egg	34	34	replayed
-egraph/tests/egg/conform-cc/cc1_0095.egg	100	106	replayed
+egraph/tests/egg/conform-cc/cc1_0095.egg	106	106	replayed
 egraph/tests/egg/conform-cc/cc1_0096.egg	53	53	replayed
 egraph/tests/egg/conform-cc/cc1_0097.egg	19	19	replayed
 egraph/tests/egg/conform-cc/cc1_0098.egg	39	39	replayed
@@ -1490,7 +1490,7 @@ egraph/tests/egg/flatten_regroup_assoc.egg	4	4	replayed
 egraph/tests/egg/flatten_regroup_assoc_left.egg	0	0	unread
 egraph/tests/egg/flatten_regroup_assoc_right.egg	0	0	unread
 egraph/tests/egg/flatten_regroup_control.egg	0	0	unread
-egraph/tests/egg/flatten_regroup_laws_drop_need.egg	1	4	replayed
+egraph/tests/egg/flatten_regroup_laws_drop_need.egg	0	4	replayed	1 before the checker stopped reading a nested application as its arguments without a splice witness: the stream has none for this merge
 egraph/tests/egg/flatten_regroup_laws_idem.egg	4	4	replayed
 egraph/tests/egg/flatten_regroup_laws_insert.egg	0	0	replayed
 egraph/tests/egg/flatten_regroup_laws_no_item.egg	0	3	replayed
