@@ -401,6 +401,11 @@ def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false)
       | _ => (cls.mergeSort (· ≤ ·)).eraseDups
     (one as, one bs)
 
+/-- The table's application of `f` to the arguments `m`, in the table's
+order, if it holds one. -/
+def nodeOfArgs (S : St P) (f : String) (m : List Nat) : Option Nat :=
+  if m.isEmpty then none else S.index[Node.app f (m.mergeSort (· ≤ ·))]?
+
 /-- Node `n` has the value of `f(cs)`: it is an application of `f` whose
 arguments have the same normal form, or the normal form is the one class of
 `n`, or it is empty and `n` is in the unit's class. -/
@@ -413,7 +418,11 @@ def spells (S : St P) (n : Nat) (f : String) (cs : List Nat) : Bool :=
     || ((S.prog.kind f).isAssoc &&
         (let t := (nf2 S f cs [] invUnit).1
          -- One class left: the application is that class. None left: it is the unit.
-         t == [S.fd n] || (t.isEmpty && (S.unit f).map S.fd == some (S.fd n))))
+         t == [S.fd n] || (t.isEmpty && (S.unit f).map S.fd == some (S.fd n)) ||
+         -- The normal form is the argument list of a node of `n`'s class.
+         (match nodeOfArgs S f t with
+           | some x => S.fd x == S.fd n
+           | none => false)))
 
 /-! ## Completion merges
 
@@ -520,11 +529,6 @@ def rewrite (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List N
       | some (q, left, m') => rewrite now S f W m' once (done.push { l, r, q, rest := left, after := m', atom }) rest
       | none => throw s!"completion: rule does not apply | rule {done.size}: left side {ls} as classes {lc}, monomial {m} as classes {classesOf S m}"
     | _ => throw "completion: rule of another operator"
-
-/-- The table's application of `f` to the arguments `m`, in the table's
-order, if it holds one. -/
-def nodeOfArgs (S : St P) (f : String) (m : List Nat) : Option Nat :=
-  if m.isEmpty then none else S.index[Node.app f (m.mergeSort (· ≤ ·))]?
 
 /-- `y` is the unit's node, or an application of `f` in the unit's class. -/
 def unitLike (S : St P) (f : String) (y : Nat) : Bool :=
@@ -975,6 +979,9 @@ and unit, by the first of these that applies: `congStep`; all of one node's
 arguments in the other's class; one node's arguments each standing for a
 class, named by a plain member. -/
 def congStepC (S : St P) (f : String) (a b : Nat) : St P × Pf :=
+  -- Two nodes already in one class: the proof is read from the classes.
+  if a != b && S.fd a == S.fd b then eqP S a b
+  else
   let (S, p) := congStep S f a b
   if p.isSome then (S, p)
   else
