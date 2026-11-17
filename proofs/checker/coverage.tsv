@@ -126,7 +126,7 @@ egraph/tests/egg/ac_minmono_cc1_0007.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_0039.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_0073.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_0344.egg	1	1	replayed
-egraph/tests/egg/ac_minmono_cc1_0425.egg	0	1	replayed
+egraph/tests/egg/ac_minmono_cc1_0425.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_0798.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_0856.egg	1	1	replayed
 egraph/tests/egg/ac_minmono_cc1_0897.egg	0	1	replayed
@@ -456,7 +456,7 @@ egraph/tests/egg/conform-cc-cert/cs1_0003.egg	38	38	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0004.egg	118	118	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0005.egg	50	50	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0006.egg	16	16	replayed
-egraph/tests/egg/conform-cc-cert/cs1_0007.egg	6	40	replayed
+egraph/tests/egg/conform-cc-cert/cs1_0007.egg	40	40	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0008.egg	41	41	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0009.egg	33	33	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0010.egg	101	101	replayed
@@ -510,7 +510,7 @@ egraph/tests/egg/conform-cc-cert/cs1_0057.egg	46	46	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0058.egg	121	121	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0059.egg	2	209	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0060.egg	50	50	replayed
-egraph/tests/egg/conform-cc-cert/cs1_0061.egg	122	174	replayed	104 before merges without a kernel step were rejected: later merges of this program depended on one
+egraph/tests/egg/conform-cc-cert/cs1_0061.egg	123	174	replayed	104 before merges without a kernel step were rejected: later merges of this program depended on one
 egraph/tests/egg/conform-cc-cert/cs1_0062.egg	1	1	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0063.egg	124	124	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0064.egg	19	19	replayed
@@ -622,7 +622,7 @@ egraph/tests/egg/conform-cc-cert/cs1_0169.egg	244	244	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0170.egg	58	62	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0171.egg	44	44	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0172.egg	70	70	replayed
-egraph/tests/egg/conform-cc-cert/cs1_0173.egg	0	19	replayed
+egraph/tests/egg/conform-cc-cert/cs1_0173.egg	19	19	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0174.egg	40	40	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0175.egg	85	85	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0176.egg	56	56	replayed
@@ -644,7 +644,7 @@ egraph/tests/egg/conform-cc-cert/cs1_0191.egg	232	232	replayed	74 before merges 
 egraph/tests/egg/conform-cc-cert/cs1_0192.egg	22	22	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0193.egg	53	53	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0194.egg	23	25	replayed
-egraph/tests/egg/conform-cc-cert/cs1_0195.egg	13	122	replayed	24 before merges without a kernel step were rejected: later merges of this program depended on one
+egraph/tests/egg/conform-cc-cert/cs1_0195.egg	122	122	replayed	24 before merges without a kernel step were rejected: later merges of this program depended on one
 egraph/tests/egg/conform-cc-cert/cs1_0196.egg	57	57	replayed	37 before merges without a kernel step were rejected: later merges of this program depended on one
 egraph/tests/egg/conform-cc-cert/cs1_0197.egg	108	110	replayed
 egraph/tests/egg/conform-cc-cert/cs1_0198.egg	30	34	replayed

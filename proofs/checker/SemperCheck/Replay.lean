@@ -401,13 +401,18 @@ recognizable, and reduces it by the operator's laws after each rewrite. -/
 removed, and each class kept once (ACI) or its count modulo `n`
 (`:nilpotent n`). -/
 def lawReduce (S : St P) (f : String) (atoms : List Nat) (inverse : Bool := true)
- : List Nat :=
+    (peak : Bool := false) : List Nat :=
   let d := S.prog.opDecl? f
   let u := (S.unit f).map S.fd
   let dropUnit (xs : List Nat) : List Nat := xs.filter fun a => some (S.fd a) != u
-  -- The unit's arguments go before the inverse pairs are cancelled.
+  -- The unit's arguments go before the inverse pairs are cancelled, except in
+  -- the peak of a critical pair with the inverse law (`peak`), which is a
+  -- rule's left side and the inverse of one of its arguments: that pair is
+  -- cancelled even when one of the two is in the unit's class.
   let live : List Nat := match inverse, d.bind (fun d => d.inverse) with
-    | true, some inv => cancelInverse S inv u (dropUnit atoms)
+    | true, some inv =>
+      if peak then dropUnit (cancelInverse S inv none atoms)
+      else cancelInverse S inv u (dropUnit atoms)
     | _, _ => dropUnit atoms
   -- Each class with its atoms, in order of first occurrence.
   let groups : Array (Nat × Array Nat) := live.foldl (fun groups a =>
@@ -516,6 +521,9 @@ monomial, through the monomial it reduces to and each rewrite, to a node. -/
 structure Chain where
   f : String
   start : Nat ⊕ List Nat
+  /-- The start is the peak of a critical pair with a law, and `first` is the
+  peak reduced by that law. -/
+  peak : Bool := false
   first : List Nat
   steps : Array Rewrote
   target : Nat ⊕ List Nat
@@ -597,7 +605,7 @@ def peakMerge (S : St P) (a b : Nat) (w : Peak) :
   let peak := w.peak.flatMap (expand S W)
   -- A critical pair's own rules rewrite the peak once each; the normal form's
   -- rules, after it, rewrite every copy.
-  let firstB := if w.reduceB then lawReduce S f peak else peak
+  let firstB := if w.reduceB then lawReduce S f peak (peak := true) else peak
   let (mA, sA) ← rewrite S f W peak true #[] w.preA
   let (mB, sB) ← rewrite S f W firstB true #[] w.preB
   if w.cancel then
@@ -620,7 +628,7 @@ def peakMerge (S : St P) (a b : Nat) (w : Peak) :
     -- What side A loses: its arguments that are not in `left`.
     let gone := left.foldl (fun m x => m.erase x) mA
     pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inr mA },
-           b := { f, start := .inr peak, first := firstB, steps := sB, target := .inr mB },
+           b := { f, start := .inr peak, peak := w.reduceB, first := firstB, steps := sB, target := .inr mB },
            cancel := some (left, right, gone,
              { f, start := .inr left, first := left, steps := tA, target := .inl a },
              { f, start := .inr right, first := right, steps := tB, target := .inl b }) }
@@ -629,7 +637,7 @@ def peakMerge (S : St P) (a b : Nat) (w : Peak) :
     let (mB, sB) ← rewrite S f W mB false sB w.postB
     unless reaches S f W mA a && reaches S f W mB b do throw "completion: normal form differs"
     pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inl a },
-           b := { f, start := .inr peak, first := firstB, steps := sB, target := .inl b } }
+           b := { f, start := .inr peak, peak := w.reduceB, first := firstB, steps := sB, target := .inl b } }
 
 /-- `v a b n1 n2`: a consequence of the group law of an operator `f` with
 `:inverse g`, where `n1 = g(x1)` and `n2 = g(x2)` (`n2` is `n1` when one node
@@ -805,7 +813,8 @@ def appNode (S : St P) (f : String) (m : List Nat) : St P × Option Nat :=
 by `f`'s laws, then `f(e, rest)` by the `inv` step, then `f(rest)`; each `n`
 arguments of one class under `:nilpotent n` likewise, by the `nil` step. An
 inverse of a node of the unit's class is first proved to be the unit. -/
-def lawNormP (S : St P) (f : String) (x : Nat) : St P × Option (Nat × Pf) := Id.run do
+def lawNormP (S : St P) (f : String) (x : Nat) (peak : Bool := false) :
+    St P × Option (Nat × Pf) := Id.run do
   let some d := S.prog.opDecl? f | return (S, some (x, some none))
   let some u := S.unit f | return (S, some (x, some none))
   if d.inverse.isNone && d.nilpotent.isNone then return (S, some (x, some none))
@@ -813,9 +822,11 @@ def lawNormP (S : St P) (f : String) (x : Nat) : St P × Option (Nat × Pf) := I
   let mut cur := x
   let mut pf : Pf := some none
   -- A bound on the passes: each removes at least one argument.
-  let mut atoms := (kview S f cur).filter fun a => S.fd a != S.fd u
+  -- In a critical pair's peak, an inverse pair is cancelled even when one of
+  -- the two is in the unit's class: the unit's arguments stay.
+  let mut atoms := (kview S f cur).filter fun a => peak || S.fd a != S.fd u
   for _ in [0:atoms.length + 1] do
-    atoms := (kview S f cur).filter fun a => S.fd a != S.fd u
+    atoms := (kview S f cur).filter fun a => peak || S.fd a != S.fd u
     -- What the next pass replaces by the unit: a node `f(..)` that a step
     -- proves is the unit, and the arguments it stands for.
     let mut found : Option (Nat × Nat × List Nat) := none
@@ -877,7 +888,7 @@ def lawNormP (S : St P) (f : String) (x : Nat) : St P × Option (Nat × Pf) := I
 
 /-- `congStep`, and when it gives no step for an operator with an inverse or
 a nilpotent law: both nodes reduced by those laws, then `congStep`. -/
-def congStepL (S : St P) (f : String) (a b : Nat) : St P × Pf :=
+def congStepL (S : St P) (f : String) (a b : Nat) (peak : Bool := false) : St P × Pf :=
   let (S, p) := congStep S f a b
   if p.isSome then (S, p)
   else
@@ -933,7 +944,7 @@ def congStepL (S : St P) (f : String) (a b : Nat) : St P × Pf :=
       | none => false
     if !laws then (S, none)
     else
-      match lawNormP S f a with
+      match lawNormP S f a peak with
       | (S, some (ta, pa)) =>
         match lawNormP S f b with
         | (S, some (tb, pb)) =>
@@ -1183,13 +1194,13 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
   let mut cur := start
   let mut pf : Pf := some none
   -- One `cong` by `f`'s laws from the current node to `next`.
-  let hop (S : St P) (cur next : Nat) (pf : Pf) : St P × Pf :=
-    let (S, p) := congStepL S f cur next
+  let hop (S : St P) (cur next : Nat) (pf : Pf) (peak : Bool := false) : St P × Pf :=
+    let (S, p) := congStepL S f cur next peak
     let S := S.mergeBy cur next p
     transP S start next pf p
   match monoNode S f c.first with
   | (S', some t) =>
-    let (S', pf') := hop S' cur t pf
+    let (S', pf') := hop S' cur t pf c.peak
     S := S'; cur := t; pf := pf'
   | (S', none) => return (S', none)
   for st in c.steps do
