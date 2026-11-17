@@ -322,21 +322,23 @@ argument in that node's class; with `unit` given, also each argument that is
 def cancelInverse (S : St P) (inv : String) (unit : Option Nat) (xs : List Nat) : List Nat := Id.run do
   -- What `a` is the inverse of: its own argument, or that of a witness (`j`
   -- line) in its class.
-  let inverseOf (a : Nat) : Option Nat :=
+  let inverseOf (a : Nat) : List Nat :=
     let arg (m : Nat) : Option Nat :=
       match S.defOf m with
       | some (.app g [y]) => if g == inv then some y else none
       | _ => none
-    (arg a).orElse fun _ => S.inverses.findSome? fun m => if S.fd m == S.fd a then arg m else none
+    (arg a).toList ++ S.inverses.filterMap fun m => if S.fd m == S.fd a then arg m else none
   let mut out := xs.toArray
   for a in xs do
-    if let some y := inverseOf a then
-      if let some i := out.findIdx? (· == a) then
-        let rest := out.eraseIdxIfInBounds i
-        -- `inv(e)` is `e`: with `unit` given, it goes by itself.
-        if unit == some (S.fd y) then out := rest
-        else if let some j := rest.findIdx? (fun b => S.fd b == S.fd y) then
-          out := rest.eraseIdxIfInBounds j
+    if let some i := out.findIdx? (· == a) then
+      let rest := out.eraseIdxIfInBounds i
+      -- The first of these that has what it cancels with: `inv(e)` is `e`
+      -- and, with `unit` given, goes by itself; else an argument of the
+      -- class it is the inverse of.
+      let pick := (inverseOf a).findSome? fun y =>
+        if unit == some (S.fd y) then some rest
+        else (rest.findIdx? (fun b => S.fd b == S.fd y)).map rest.eraseIdxIfInBounds
+      if let some r := pick then out := r
   return out.toList
 
 /-- Sorted classes with each class's count reduced modulo `n`. -/
@@ -837,12 +839,16 @@ def congStep (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
 
 /-- What `a` is the inverse of under `inv`, and the inverse application that
 says so: `a` itself, or a witness (`j` line) in its class. -/
-def inverseNode (S : St P) (inv : String) (a : Nat) : Option (Nat × Nat) :=
+def inverseNode (S : St P) (inv : String) (a : Nat) (unit : Nat) (others : List Nat) :
+    Option (Nat × Nat) :=
   let arg (m : Nat) : Option (Nat × Nat) :=
     match S.defOf m with
     | some (.app g [y]) => if g == inv then some (m, y) else none
     | _ => none
-  (arg a).orElse fun _ => S.inverses.findSome? fun m => if S.fd m == S.fd a then arg m else none
+  let all := (arg a).toList ++ S.inverses.filterMap fun m => if S.fd m == S.fd a then arg m else none
+  -- The first that has what it cancels with, else the first.
+  (all.find? fun (_, y) => S.fd y == S.fd unit || others.any fun b => S.fd b == S.fd y).orElse
+    fun _ => all.head?
 
 /-- `f` applied to `m`, a node the kernel accepts, or `none`. -/
 def appNode (S : St P) (f : String) (m : List Nat) : St P × Option Nat :=
@@ -869,7 +875,7 @@ def lawPass (S : St P) (f : String) (d : OpDecl) (u x cur : Nat) (pf : Pf) (peak
   if let some g := d.inverse then
     for a in atoms do
       if found.isNone then
-        if let some (q, y) := inverseNode S g a then
+        if let some (q, y) := inverseNode S g a u (atoms.erase a) then
           if S.fd y == S.fd u then
             -- `f(y, g(y))` is the unit and, `y` being the unit, is `g(y)`.
             let (S1, pn) := appNode S f [y, q]
