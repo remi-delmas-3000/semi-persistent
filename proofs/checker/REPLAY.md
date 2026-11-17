@@ -183,9 +183,28 @@ steps, each with its law in the models and its soundness lemma, for what it
 does not have: counts modulo `n` (`:nilpotent`), inverse pairs and the group
 consequences of `v` lines (`:inverse`), and cancellation (`:cancellative`).
 
-State of this plan: `Replay.lean` decides each check without emitting steps.
-The proof-producing union-find, the emission of steps, and the kernel's new
-steps are not written.
+State of this plan (`scripts/check-replay.py` prints both counts):
+
+- Done: the union-find links carry kernel steps; `x`, `c`, `w`, `t`, rule
+  firings, `i`, and `p` without cancellation emit their steps; `semper-check
+  --replay` runs the kernel on them and reports the `check-eq` it accepts.
+  9,963 of 29,808 `check-eq` are accepted by the kernel, against 25,259 the
+  replay joins. The slowest replay with the kernel run takes 16 s and the
+  largest 1.0 GB (`bench/acgen.rules.egg`: 6.6 million steps).
+- Not done: the kernel has no step for `:nilpotent`, `:inverse` and
+  `:cancellative`, so a merge that uses one gets no kernel step (about 12,500
+  `check-eq` are in programs with these laws). The plan: three small steps,
+  each with its law in `OpSat` and a direct soundness proof: `inv` (`f(x,
+  g(x))` is the unit), `nil` (`f` of `n` copies of `x` is the unit), `cancel`
+  (from `f(a, c) = f(b, c)`, `a = b`; allowed for `:cancellative` and, as a
+  consequence of the group laws, for `:inverse`). The replayer then derives a
+  clamp inside a monomial by `cong` steps around one of these, and the group
+  consequences of `v` lines from `inv` and `cancel`.
+- Not done: about 2,800 `check-eq` in programs without these laws whose
+  merges get no kernel step (the step builder fails on them).
+- Not done: the statement of the replay's theorem as a corollary of
+  `goal_sound`; the tests of acceptance A4; the removal of the certificate
+  writer and the move of the sweep and CI to the stream (step 5).
 
 ## Not in this version
 
