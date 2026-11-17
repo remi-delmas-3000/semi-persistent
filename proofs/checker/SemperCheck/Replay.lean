@@ -901,6 +901,34 @@ def congStepL (S : St) (f : String) (a b : Nat) : St × Pf :=
   let (S, p) := collapse S b a
   if p.isSome then (let (S, q) := symmP S b a p; (S, q))
   else
+  -- `other`'s arguments stand for their classes, some of them applications of
+  -- `f`: `x` is `f` of a plain member of each, by `f`'s laws, which is `other`
+  -- argument by argument.
+  let viaPlain (S : St) (x other : Nat) : St × Pf :=
+    match S.defOf other with
+    | some (.app g bs) =>
+      if g != f || bs.isEmpty then (S, none)
+      else
+        let ps := bs.map fun y =>
+          match S.defOf y with
+          | some (.app h _) => if h == f then (S.plain.getD (S.fd y) none).getD y else y
+          | _ => y
+        if ps == bs then (S, none)
+        else match appNode S f ps with
+          | (S, some pn) =>
+            let (S, p1) := congStep S f x pn
+            if p1.isNone then (S, none)
+            else
+              let (S, p2) := congStep S f pn other
+              transP S x other p1 p2
+          | (S, none) => (S, none)
+    | _ => (S, none)
+  let (S, p) := viaPlain S a b
+  if p.isSome then (S, p)
+  else
+  let (S, p) := viaPlain S b a
+  if p.isSome then (let (S, q) := symmP S b a p; (S, q))
+  else
     let laws := match S.P.opDecl? f with
       | some d => d.inverse.isSome || d.nilpotent.isSome
       | none => false

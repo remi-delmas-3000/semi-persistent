@@ -38,11 +38,6 @@ struct Cli {
     #[arg(long, value_name = "FILE", requires = "proofs")]
     dump_proofs: Option<std::path::PathBuf>,
 
-    /// Write an equality certificate for the `check-eq` commands to FILE after
-    /// the program finishes, for `proofs/checker` (`semper-check`). Requires --proofs.
-    #[arg(long, value_name = "FILE", requires = "proofs")]
-    cert: Option<std::path::PathBuf>,
-
     /// Write the replay stream to FILE as the program runs, for the replayer of
     /// `proofs/checker` (`proofs/checker/REPLAY.md`). Requires --proofs.
     #[arg(long, value_name = "FILE", requires = "proofs")]
@@ -263,7 +258,6 @@ fn main() {
         sched_mode,
         union_by: cli.union_by,
         dump_proofs: cli.dump_proofs.clone(),
-        cert: cli.cert.clone(),
         trace: cli.trace.clone(),
     };
 
@@ -322,7 +316,6 @@ struct EngineOptions {
     sched_mode: semi_persistent_egraph::ematch::SchedulingMode,
     union_by: semi_persistent_egraph::UnionBy,
     dump_proofs: Option<std::path::PathBuf>,
-    cert: Option<std::path::PathBuf>,
     trace: Option<std::path::PathBuf>,
 }
 
@@ -355,9 +348,6 @@ fn run<Cfg, L, M, const PROOFS: bool>(
     interp.set_basis_checks(opts.basis_checks);
     interp.eg.flatten_rhs = opts.flatten_rhs;
     interp.set_cost_bits(opts.cost_bits);
-    if opts.cert.is_some() {
-        interp.cert = Some(semi_persistent_egraph::cert::CertState::new(src));
-    }
     if let Some(path) = &opts.trace {
         match std::fs::File::create(path) {
             Ok(file) => interp.eg.trace_start(src, file),
@@ -432,49 +422,6 @@ fn run<Cfg, L, M, const PROOFS: bool>(
             stats.steps,
             path.display()
         );
-    }
-    if let Some(path) = &opts.cert {
-        let file = match std::fs::File::create(path) {
-            Ok(file) => file,
-            Err(e) => {
-                eprintln!("error creating certificate '{}': {e}", path.display());
-                process::exit(1);
-            }
-        };
-        let writer = std::io::BufWriter::new(file);
-        let mut st = interp
-            .cert
-            .take()
-            .unwrap_or_else(|| semi_persistent_egraph::cert::CertState::new(src));
-        interp.eg.cert_prove_goals(
-            &mut st,
-            &semi_persistent_egraph::cert::CertInputs {
-                src,
-                goals: &interp.proved_eqs,
-                unions: &interp.union_terms,
-                rule_spans: &interp.rule_spans,
-                globals: &interp.let_terms,
-            },
-        );
-        match st.finish(writer) {
-            Ok(stats) => {
-                eprintln!(
-                    "wrote certificate: {} of {} check-eq proved, {} nodes, {} steps to {}",
-                    stats.proved,
-                    stats.goals,
-                    stats.nodes,
-                    stats.steps,
-                    path.display()
-                );
-                for (why, n) in &stats.unsupported {
-                    eprintln!("  unsupported: {why}: {n}");
-                }
-            }
-            Err(e) => {
-                eprintln!("error writing certificate '{}': {e}", path.display());
-                process::exit(1);
-            }
-        }
     }
     eprintln!("ok — {} nodes", interp.eg.len());
     if opts.count_match_steps {

@@ -18,7 +18,6 @@ use crate::union_find::{Justification, ProofBuf};
 
 #[cfg(debug_assertions)]
 pub mod cc_mirror;
-pub mod cert;
 pub mod trace;
 
 /// How a completion op's monomial counts are bounded during normalization (design "three
@@ -272,8 +271,8 @@ pub struct EGraph<
     /// (rule `F(x) -> H(x)` with `x = A` lands on `H(B)` after `A = B`). The log
     /// is the record a replaying checker follows, not a complete derivation: the
     /// node's history and the union-find edges, which are never compressed,
-    /// contain the equalities between the two child lists, and the certificate
-    /// writer (`egraph/cert.rs`) adds the congruence step that uses them.
+    /// contain the equalities between the two child lists, and the replayer of
+    /// the stream (`proofs/checker`) derives the congruence step that uses them.
     /// Without this, a saturating run adds a
     /// duplicate for every such rebuild and e-matching enumerates them all:
     /// `bench/search-dfs-small.rules.egg` grew to 2.69 billion match steps and

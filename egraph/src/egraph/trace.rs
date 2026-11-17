@@ -14,6 +14,57 @@
 use super::*;
 use std::fmt::Write as _;
 
+/// A literal as the program spells it: a string in quotes, any other literal
+/// as it displays.
+pub fn lit_spelling<V: std::fmt::Display + std::fmt::Debug>(v: &V) -> String {
+    let d = format!("{v:?}");
+    if d.starts_with('"') { d } else { v.to_string() }
+}
+
+/// Byte offsets of the top-level forms of `src` whose head is `head`.
+pub fn form_offsets(src: &str, head: &str) -> Vec<usize> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b';' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => {
+                if depth == 0 {
+                    let rest = &src[i + 1..];
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| !c.is_whitespace() && *c != '(' && *c != ')')
+                        .collect();
+                    if name == head {
+                        out.push(i);
+                    }
+                }
+                depth += 1;
+            }
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
 /// One rule firing, buffered until its first merge: a firing that merges
 /// nothing proves nothing, and most firings merge nothing.
 struct Firing {
@@ -72,8 +123,8 @@ where
     pub fn trace_start(&mut self, src: &str, file: std::fs::File) {
         self.trace = Some(Box::new(Trace {
             file: Some(std::io::BufWriter::new(file)),
-            union_offsets: cert::form_offsets(src, "union"),
-            goal_offsets: cert::form_offsets(src, "check-eq"),
+            union_offsets: form_offsets(src, "union"),
+            goal_offsets: form_offsets(src, "check-eq"),
             ..Trace::default()
         }));
     }
@@ -112,7 +163,7 @@ where
         let i = id.to_usize();
         if let Some(v) = self.get_lit_val(id) {
             let srt = self.sort_name(self.node_sort(id));
-            let _ = writeln!(t.out, "l {i} {srt} {}", cert::lit_spelling(v));
+            let _ = writeln!(t.out, "l {i} {srt} {}", lit_spelling(v));
         } else {
             let _ = write!(t.out, "n {i} {}", self.node_op_name(id));
             let one = <Cfg::M as crate::multiplicity::MultiplicityLike>::ONE;
