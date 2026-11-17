@@ -623,7 +623,9 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
     -- Declared, or a consequence of the group laws (`:inverse`).
     unless ((S.prog.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
       throw "completion: operator is not cancellative"
-    let (mA, mB) := (lawReduce R f mA, lawReduce R f mB)
+    -- The two sides as the rewrites leave them: inverse pairs are cancelled
+    -- on a normal form only.
+    let (mA, mB) := (lawReduce R f mA (inverse := false), lawReduce R f mB (inverse := false))
     let (ca, cb) := (classesOf R mA, classesOf R mB)
     let keep := w.keep.map R.fd
     -- The common part: each class, as many times as both sides hold it.
