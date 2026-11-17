@@ -72,6 +72,7 @@ nodes, and a list of steps, each concluding that two nodes are equal
 | `inv f a x q e` | `a = f(x, q)` with `q = g(x)` is the unit `e` of `f`, whose `:inverse` is `g` |
 | `nil f a x k e` | `a = f(x, .., x)`, with `k + 1` arguments, is the unit `e` of `f`, which is `:nilpotent (k + 1)` |
 | `cancel f s a b z` | step `s` concludes `f(a, z) = f(b, z)`, so `a = b`: `f` is `:cancellative`, or has `:inverse` and a unit |
+| `unit f a e` | `a = f()`, the application to no argument, is the unit `e` of `f` |
 
 `cong` covers congruence (children pairwise equal), a commutative operator's
 swapped children, and the associative operators: both sides flatten to their
@@ -125,9 +126,9 @@ sort is not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` the kernel proves (`replay_sound` covers them), of 29,808 | 21,064 |
-| programs with every `check-eq` proved, of 1,066 | 609 |
-| kernel steps the replayer emits | 12,519,568 |
+| `check-eq` the kernel proves (`replay_sound` covers them), of 29,808 | 21,066 |
+| programs with every `check-eq` proved, of 1,066 | 611 |
+| kernel steps the replayer emits | 12,519,570 |
 | emitted steps the kernel rejects | 0 |
 | events replayed | 7,396,094 |
 | events whose check fails | 221,582 |
@@ -135,11 +136,10 @@ sort is not the one the position takes).
 
 A merge is applied only when the replayer has a kernel step for it, so every
 two nodes of one class are joined by a chain of steps; the sweep fails if the
-kernel rejects a step the replayer emitted. The replayer finds the two terms
-of 21,066 `check-eq` in one class; for 2 of them it cannot spell a term as the
-kernel interns it.
+kernel rejects a step the replayer emitted. The `check-eq` whose two terms the
+replayer finds in one class are the ones the kernel proves.
 
-The 8,744 `check-eq` the kernel does not prove:
+The 8,742 `check-eq` the kernel does not prove:
 
 - 3,252 are in the 267 programs with a rule firing the stream writes as opaque:
   a rule with a primitive, a rest variable or a multiplicity variable, which

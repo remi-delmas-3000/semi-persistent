@@ -57,6 +57,8 @@ inductive Step where
   /-- Step `s` concludes `f(a, z) = f(b, z)`, so `a = b`: `f` is
   `:cancellative`, or has `:inverse` and a unit. -/
   | cancel (f : String) (s a b z : Nat)
+  /-- `a = f()`, the application of `f` to no argument, is the unit `e`. -/
+  | unit (f : String) (a e : Nat)
   deriving Repr, Inhabited
 
 structure Cert where
@@ -242,6 +244,12 @@ def nilOk (f : String) (a x k e : Nat) : Bool :=
     decide (d.nilpotent = some (k + 1)) && decide (C.unitOf f = some e)
   | none => false
 
+def unitOk (f : String) (a e : Nat) : Bool :=
+  match C.P.opDecl? f with
+  | some d =>
+    d.kind.isAssoc && decide (C.nodes[a]? = some (.app f [])) && decide (C.unitOf f = some e)
+  | none => false
+
 def cancelOk (f : String) (p q a b z : Nat) : Bool :=
   match C.P.opDecl? f with
   | some d =>
@@ -306,6 +314,7 @@ def inferStep (acc : Array Concl) : Step → Option Concl
     | none => none
   | .inv f a x q e => if C.invOk f a x q e then some ⟨a, e, 0⟩ else none
   | .nil f a x k e => if C.nilOk f a x k e then some ⟨a, e, 0⟩ else none
+  | .unit f a e => if C.unitOk f a e then some ⟨a, e, 0⟩ else none
   | .cancel f s a b z =>
     match acc[s]? with
     | some c => if C.cancelOk f c.a c.b a b z then some ⟨a, b, c.pos⟩ else none

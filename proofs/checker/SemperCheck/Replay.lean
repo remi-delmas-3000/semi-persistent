@@ -1136,6 +1136,13 @@ partial def writtenP (S : St) (t : Term) : St × Option (Nat × Nat × Pf) :=
         else return (S, none)
     match node with
     | some n =>
+      -- `f()` is the unit, by the kernel's `unit` step.
+      if args.isEmpty && (S.P.kind f).isAssoc then
+        if let some u := S.unit f then
+          let (S', st) := emit S (.unit f w u) w u
+          let S' := S'.mergeBy w u (some (some st))
+          let (S', p) := eqP S' w n
+          return (S'.mergeBy w n p, some (w, n, p))
       let (S', p) := congStepL S f w n
       return (S'.mergeBy w n p, some (w, n, p))
     | none => return (S, some (w, w, some none))

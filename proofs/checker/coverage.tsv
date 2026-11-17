@@ -9,7 +9,7 @@ doc/book/examples/04-illegal-clamp.egg	0	0	skipped
 doc/book/examples/04-illegal-seq-identity.egg	0	0	skipped
 doc/book/examples/04-illegal-variadic-sort.egg	0	0	skipped
 doc/book/examples/04-inverse-cancellation.egg	1	1	replayed
-doc/book/examples/04-nilpotent-identity.egg	1	2	replayed
+doc/book/examples/04-nilpotent-identity.egg	2	2	replayed
 doc/book/examples/05-collection-rules.egg	0	2	replayed
 doc/book/examples/05-flatten-control.egg	0	0	skipped
 doc/book/examples/05-flatten.egg	0	1	replayed
@@ -1683,4 +1683,4 @@ egraph/tests/egg/when_prim_predicate_two_vars.egg	0	1	replayed
 egraph/tests/egg/wrapping_add.egg	0	1	replayed
 egraph/tests/egg/zero_arity_mset_without_identity_rejected.egg	0	0	skipped
 egraph/tests/egg/zero_arity_set_without_identity_rejected.egg	0	0	skipped
-egraph/tests/egg/zero_arity_with_identity_is_unit.egg	0	1	replayed
+egraph/tests/egg/zero_arity_with_identity_is_unit.egg	1	1	replayed

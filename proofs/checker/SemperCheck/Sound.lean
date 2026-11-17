@@ -664,6 +664,24 @@ theorem nilOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = 
       exact hx)]
     exact hNil k u hnil hdu _ hx
 
+/-- `f()` is the unit. -/
+theorem unitOk_sound (hwf : wfNodes C.nodes = true) (hT : Typed M C.P) {f : String} {a e : Nat}
+    (h : C.unitOk f a e = true) : nval M C.nodes a = nval M C.nodes e := by
+  unfold unitOk at h
+  cases hd : C.P.opDecl? f with
+  | none => simp [hd] at h
+  | some d =>
+    rw [hd] at h
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at h
+    obtain ⟨⟨hk, hn⟩, hu⟩ := h
+    obtain ⟨u, hdu, hev⟩ := unitOf_sound (M := M) hwf hd hu
+    obtain ⟨hmem, hname⟩ := opDecl_spec hd
+    obtain ⟨b, -, hU, -, -, -⟩ := assoc_laws_ext (hT.1 d hmem).2 hk
+    rw [nval_app hwf hn, hev]
+    simp only [List.map_nil]
+    rw [← hname]
+    exact (hU u hdu).2.1
+
 /-- From `f(a, z) = f(b, z)`, `a = b`. -/
 theorem cancelOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
     (hT : Typed M C.P) {f : String} {p q a b z : Nat} (h : C.cancelOk f p q a b z = true)
@@ -871,6 +889,13 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
     · rename_i hok
       cases h
       exact nilOk_sound hwf hws hT hok
+    · cases h
+  | unit f a e =>
+    simp only [inferStep] at h
+    split at h
+    · rename_i hok
+      cases h
+      exact unitOk_sound hwf hT hok
     · cases h
   | cancel f s a b z =>
     simp only [inferStep] at h
