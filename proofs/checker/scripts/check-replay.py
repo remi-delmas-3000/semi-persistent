@@ -319,6 +319,10 @@ def main():
         for f in failures:
             print(f"  {f}")
         sys.exit(1)
+    compared = sum(1 for path in results if path in base)
+    print(f"baseline: {compared} programs compared with {os.path.relpath(BASELINE, ROOT)}, "
+          "none proves fewer check-eq, none has an engine error, a new timeout or a "
+          "rejected step")
 
 
 if __name__ == "__main__":
