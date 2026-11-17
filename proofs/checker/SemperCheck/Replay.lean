@@ -849,6 +849,104 @@ def congStepL (S : St) (f : String) (a b : Nat) : St × Pf :=
         | (S, none) => (S, none)
       | (S, none) => (S, none)
 
+/-- The kernel steps of a `v` line, whose check passed: the fact the line's
+case rests on is derived from `inv` steps (`f(x, g(x))` is the unit), a `nil`
+step for the powers, and a `cancel` step, and joins the classes; the proof of
+the merge is then read from the classes. With `n1 = g(x1)`, `n2 = g(x2)`:
+- `g(x1) = g(x2)` gives `f(x1, n1) = e = f(x2, n2) = f(x2, n1)`, so `x1 = x2`;
+- `x1 = g(x2)` gives `f(n1, x1) = e = f(x2, n2) = f(x2, x1)`, so `n1 = x2`;
+- `n1` or `x1` in the unit's class gives `f(x1, n1) = e` with one argument
+  dropped, so the other is the unit;
+- under `:nilpotent (k + 1)`, `f(x1^k, x1) = e = f(n1, x1)`, so `x1^k = n1`,
+  and the same with `n1` and `x1` exchanged. -/
+def groupLawP (S : St) (a b n1 n2 : Nat) : St × Pf := Id.run do
+  let (some (.app g [x1]), some (.app _ [x2])) := (S.defOf n1, S.defOf n2) | return (S, none)
+  let some d := S.P.ops.find? (fun d => d.inverse == some g && (d.kind == .ac || d.kind == .aci))
+    | return (S, none)
+  let f := d.name
+  let some u := S.unit f | return (S, none)
+  let mut S := S
+  -- `f(x, q) = e` for an inverse application `q = g(x)`: the node and the step.
+  let invFact (S : St) (x q : Nat) : St × Option (Nat × Nat) :=
+    match appNode S f [x, q] with
+    | (S, some p) => let (S, s) := emit S (.inv f p x q u) p u; (S, some (p, s))
+    | (S, none) => (S, none)
+  let (S1, i1) := invFact S x1 n1
+  let (S1, i2) := invFact S1 x2 n2
+  S := S1
+  let (some (p1, s1), some (p2, s2)) := (i1, i2) | return (S, none)
+  -- `l = r` for two binary nodes proved equal to the unit by `sl`, `sr`.
+  let viaUnit (S : St) (l r : Nat) (sl sr : Pf) : St × Pf :=
+    let (S, q) := symmP S r u sr
+    transP S l r sl q
+  -- From `f(x, z) = f(y, z)`, proved by `pf` between nodes `l`, `r`: `x = y`.
+  let cancel (S : St) (l x y z : Nat) (pf : Pf) : St :=
+    match stepOf S l pf with
+    | (S, some st) =>
+      let (S, c) := emit S (.cancel f st x y z) x y
+      S.mergeBy x y (some (some c))
+    | (S, none) => S
+  if S.fd n1 == S.fd u || S.fd x1 == S.fd u then
+    -- One argument of `f(x1, n1)` is the unit: the node is the other one.
+    let other := if S.fd x1 == S.fd u then n1 else x1
+    let (S1, p) := congStep S f p1 other
+    let (S1, q) := symmP S1 p1 other p
+    let (S1, q) := transP S1 other u q (some (some s1))
+    S := S1.mergeBy other u q
+  if S.fd n1 == S.fd n2 && S.fd x1 != S.fd x2 then
+    let (S1, qn) := appNode S f [x2, n1]
+    S := S1
+    if let some qn := qn then
+      let (S1, e) := eqP S n1 n2
+      let (S1, e) := stepOf S1 n1 e
+      S := S1
+      if let some e := e then
+        let (S1, c) := emit S (.cong f qn p2 (if n1 == n2 then [] else [e])) qn p2
+        let (S1, r) := transP S1 qn u (some (some c)) (some (some s2))
+        let (S1, pf) := viaUnit S1 p1 qn (some (some s1)) r
+        S := cancel S1 p1 x1 x2 n1 pf
+  if S.fd x1 == S.fd n2 && S.fd n1 != S.fd x2 then
+    let (S1, l) := appNode S f [n1, x1]
+    let (S1, r) := appNode S1 f [x2, x1]
+    S := S1
+    if let (some l, some r) := (l, r) then
+      let (S1, pl) := congStep S f l p1
+      let (S1, pl) := transP S1 l u pl (some (some s1))
+      let (S1, e) := eqP S1 x1 n2
+      let (S1, e) := stepOf S1 x1 e
+      S := S1
+      if let some e := e then
+        let (S1, c) := emit S (.cong f r p2 (if x1 == n2 then [] else [e])) r p2
+        let (S1, pr) := transP S1 r u (some (some c)) (some (some s2))
+        let (S1, pf) := viaUnit S1 l r pl pr
+        S := cancel S1 l n1 x2 x1 pf
+  if let some (k + 1) := d.nilpotent then
+    if S.fd a != S.fd b then
+      -- `y^k = w`, where `f(w, y) = e` is `f(x1, n1) = e` up to the order.
+      for (y, w) in [(x1, n1), (n1, x1)] do
+        if S.fd a != S.fd b then
+          let (S1, t) := if k == 1 then (S, some y) else appNode S f (List.replicate k y)
+          let (S1, n) := appNode S1 f (y :: List.replicate k y)
+          S := S1
+          if let (some t, some n) := (t, n) then
+            let (S1, sn) := emit S (.nil f n y k u) n u
+            let (S1, l) := appNode S1 f [t, y]
+            let (S1, r) := appNode S1 f [w, y]
+            S := S1
+            if let (some l, some r) := (l, r) then
+              let (S1, pl) := congStep S f l n
+              let (S1, pl) := transP S1 l u pl (some (some sn))
+              let (S1, pr) := congStep S1 f r p1
+              let (S1, pr) := transP S1 r u pr (some (some s1))
+              let (S1, pf) := viaUnit S1 l r pl pr
+              S := cancel S1 l t w y pf
+              -- The power's node is what the line merged with `w`.
+              let other := if S.fd a == S.fd w then b else a
+              if S.fd other != S.fd t then
+                let (S1, p) := congStepL S f t other
+                if p.isSome then S := S1.mergeBy t other p else S := S1
+  return eqP S a b
+
 /-- The table id of a program term as the kernel interns it: child for child. -/
 partial def internT (S : St) : Term → Option Nat
   | .lit s v => S.index[Def.lit s v]?
@@ -1312,7 +1410,9 @@ def stepCore (S : St) (line : String) : St :=
     match S.node? a, S.node? b, S.node? n1, S.node? n2 with
     | some a, some b, some n1, some n2 =>
       match groupLaw S a b n1 n2 with
-      | .ok () => S.merge a b
+      | .ok () =>
+        let (S, pf) := groupLawP S a b n1 n2
+        S.mergeBy a b pf
       | .error e => S.fail e
     | _, _, _, _ => S.fail "group law: unreadable"
   | ["r", off, kind] =>
