@@ -106,6 +106,9 @@ pub struct Trace {
     /// The firing's splice witnesses: `(argument, member)`, written as `s`
     /// lines before each of its `m` lines.
     splices: Vec<(usize, usize)>,
+    /// Why the open firing is opaque, for its `u` lines: the part of its rule
+    /// the stream cannot spell.
+    opaque: &'static str,
     /// The witnesses of the completion merge about to happen: its line's
     /// letter and the node ids after the merged pair.
     law: Option<(char, Vec<usize>)>,
@@ -268,6 +271,7 @@ where
             t.atoms.clear();
             t.rhs.clear();
             t.splices.clear();
+            t.opaque = "no-source";
             t.firing = t
                 .rule_src
                 .get(rule)
@@ -332,9 +336,10 @@ where
 
     /// The firing has a part the stream cannot spell (a rest variable, a
     /// counted element): its merges are written as unchecked.
-    pub(crate) fn trace_atom_opaque(&mut self) {
+    pub(crate) fn trace_atom_opaque(&mut self, reason: &'static str) {
         if let Some(t) = self.trace.as_mut() {
             t.firing = None;
+            t.opaque = reason;
         }
     }
 
@@ -362,6 +367,7 @@ where
     pub(crate) fn trace_fire_end(&mut self) {
         if let Some(t) = self.trace.as_mut() {
             t.firing = None;
+            t.opaque = "outside-a-firing";
         }
     }
 
@@ -458,7 +464,7 @@ where
                     t.firing = Some(f);
                 }
                 None => {
-                    let _ = writeln!(t.out, "u rewrite {x} {y}");
+                    let _ = writeln!(t.out, "u rewrite:{} {x} {y}", t.opaque);
                 }
             },
             Some(

@@ -17,10 +17,13 @@ open SemperCheck
 stream (`REPLAY.md`) line by line with `Replay.step`. The `check-eq` reported
 as proved are the ones `Replay.replay_sound` is about. -/
 def replay (progPath tracePath : String) : IO UInt32 := do
-  let P ← match parseProgram (← IO.FS.readFile progPath) with
-    | .ok P => pure P
+  let (P, skipped) ← match parseProgramWhy (← IO.FS.readFile progPath) with
+    | .ok r => pure r
     | .error e => IO.eprintln s!"program: {e}"; return 2
   let h ← IO.FS.Handle.mk tracePath .read
+  -- The cause of the first event that fails, has no witness or gets no kernel
+  -- step: the later ones of a program can follow from it.
+  let mut first : Option String := none
   let mut S := Replay.start P
   -- `SEMPER_REPLAY_SHOW=n` prints the first `n` failed lines.
   let shown := ((← IO.getEnv "SEMPER_REPLAY_SHOW").bind (·.toNat?)).getD 0
@@ -34,6 +37,7 @@ def replay (progPath tracePath : String) : IO UInt32 := do
     let beforeU := S.nUnjustified
     let before := S.nFailed
     let beforeR := S.core.rejected
+    let beforeN := S.unchecked.fold (fun n _ k => n + k) 0
     S := Replay.step S ((line.splitOn "\n").headD "")
     if S.nUnjustified > beforeU && beforeU < shown then IO.eprintln s!"no kernel step at event {S.events}: {line}"
     if S.nFailed > before && S.nFailed ≤ shown then IO.eprintln s!"failed event {S.events} [{S.lastCause}]: {line}"
@@ -47,6 +51,25 @@ def replay (progPath tracePath : String) : IO UInt32 := do
             | some (.lit s v) => s!"{s} {v}"
             | none => "?"
           IO.eprintln s!"  {x}: table {t}, root {S.fd t}, {d}"
+    if first.isNone then
+      let kind := (line.splitOn " ").headD ""
+      if S.nFailed > before then
+        let parts := S.lastCause.splitOn " | "
+        let cause := parts.headD ""
+        -- A rule the reader did not read: its reason.
+        let why := if cause == "rule: outside the reader's language" then
+            match ((parts.getD 1 "").splitOn " ").map (·.toNat?) with
+            | [some o, some j] =>
+              (skipped.find? fun (o', j', _) => o' == o && j' == j).map fun (_, _, e) => e
+            | _ => none
+          else none
+        first := some (match why with
+          | some e => s!"unread rule: {e}"
+          | none => cause)
+      else if S.unchecked.fold (fun n _ k => n + k) 0 > beforeN then
+        first := some s!"no witness: {((line.splitOn " ").getD 1 "").trimAscii}"
+      else if S.nUnjustified > beforeU then
+        first := some s!"no kernel steps: {kind} line"
     if S.core.rejected > beforeR && beforeR < shown then IO.eprintln s!"kernel rejects a step at event {S.events}: {line}"
   if let some f := failedOut then IO.FS.writeFile f (String.join S.failedLog.toList)
   let total := (P.decls.filter fun (_, d) => match d with | .goal .. => true | _ => false).length
@@ -54,6 +77,9 @@ def replay (progPath tracePath : String) : IO UInt32 := do
     match d with | .goal .. => S.proved.contains o | _ => false).length
   let nFailed := S.nFailed
   let nUnchecked := S.unchecked.fold (fun n _ k => n + k) 0
+  if let some c := first then IO.println s!"first: {c}"
+  for (c, k) in (skipped.foldl (fun (m : Std.HashMap String Nat) (_, _, e) => m.insert e (m.getD e 0 + 1)) {}).toList do
+    IO.println s!"unread rule: {k} {c}"
   for (c, k) in S.failed.toList do IO.println s!"failed: {k} {c}"
   for (c, k) in S.unchecked.toList do IO.println s!"unchecked: {k} {c}"
   for (c, k) in S.unjustified.toList do IO.println s!"no kernel step: {k} {c}"

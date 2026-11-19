@@ -165,7 +165,8 @@ def check_one(path, args):
             failed_events = [line.rstrip("\n") for line in f]
         os.remove(trace + ".failed")
     if "program:" in p.stderr:
-        return path, {"status": "unread", "bytes": size}
+        why = re.search(r"program: (.*)", p.stderr)
+        return path, {"status": "unread", "bytes": size, "why": why.group(1) if why else ""}
     if "node table is rejected" in p.stdout:
         return path, {"status": "rejected", "bytes": size}
     m = re.search(r"(\d+) events replayed, (\d+) failed, (\d+) unchecked; "
@@ -191,7 +192,51 @@ def check_one(path, args):
         "bytes": size, "secs": secs, "rss_mb": rss_mb,
         "failed_by": by("failed"), "unchecked_by": by("unchecked"),
         "nostep_by": by("no kernel step"), "failed_events": failed_events,
+        "first": (re.search(r"^first: (.*)$", p.stdout, re.M) or [None, None])[1],
+        "unread_rules": by("unread rule"),
     }
+
+
+def cause_of(r):
+    """The cause a program's unproved check-eq are assigned to: that of its first
+    event that fails, has no witness or gets no kernel step. A detail in
+    parentheses (an operator's name) is not part of the cause."""
+    cause = re.sub(r" \(.*\)$", "", r.get("first") or "no failed event")
+    # A merge by a rule whose firing the engine does not trace has no reason.
+    return "no witness: rewrite:untraced-firing" if cause == "no witness: rewrite:" else cause
+
+
+def write_gap(path, results):
+    done = {p: r for p, r in results.items() if r["status"] == "replayed"}
+    by_cause = collections.defaultdict(list)
+    for p, r in done.items():
+        if r["total"] > r["proved"]:
+            by_cause[cause_of(r)].append((r["total"] - r["proved"], p, r.get("first") or ""))
+    total = sum(r["total"] for r in done.values())
+    proved = sum(r["proved"] for r in done.values())
+    rows = sorted(by_cause.items(), key=lambda kv: -sum(n for n, _, _ in kv[1]))
+    unread = collections.defaultdict(list)
+    for p, r in results.items():
+        if r["status"] == "unread":
+            unread[re.sub(r"\d+", "N", re.sub(r"^\S+ takes", "an operator takes", r.get("why", "")))].append(p)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# The replay gap\n\n")
+        f.write("Written by `proofs/checker/scripts/check-replay.py --gap`. Each program's unproved\n"
+                "`check-eq` are assigned to one cause: that of its first event that fails, has no\n"
+                "witness in the stream, or gets no kernel step. A program's later failures can\n"
+                "follow from the merge that event did not apply.\n\n")
+        f.write(f"{proved} of {total} `check-eq` proved; {total - proved} not proved, in "
+                f"{sum(len(v) for v in by_cause.values())} programs.\n\n")
+        f.write("| cause | programs | `check-eq` not proved | example |\n| --- | --- | --- | --- |\n")
+        for cause, items in rows:
+            items.sort(reverse=True)
+            f.write(f"| {cause} | {len(items)} | {sum(n for n, _, _ in items)} | `{items[0][1]}` |\n")
+        f.write(f"| total | {sum(len(v) for v in by_cause.values())} | {total - proved} | |\n")
+        f.write("\n## Programs the reader does not read\n\n"
+                "Their `check-eq` are not in the total above.\n\n"
+                "| reason | programs | example |\n| --- | --- | --- |\n")
+        for why, ps in sorted(unread.items(), key=lambda kv: -len(kv[1])):
+            f.write(f"| {why} | {len(ps)} | `{sorted(ps)[0]}` |\n")
 
 
 def read_baseline():
@@ -229,6 +274,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=60, help="seconds per run")
     ap.add_argument("--memory", type=int, default=4000, help="MB per engine run (Linux)")
     ap.add_argument("--update", action="store_true", help="rewrite coverage.tsv")
+    ap.add_argument("--gap", default=None,
+                    help="write the table of unproved check-eq by cause here (Markdown)")
     ap.add_argument("--failed", default=None,
                     help="list every failed event here: program, event, cause, line")
     ap.add_argument("--json", default=None, help="write the per-program results here")
@@ -258,6 +305,8 @@ def main():
                     first_goals[cause] += r["total"] - r["proved"]
     for r in results.values():
         r.pop("failed_events", None)
+    if args.gap:
+        write_gap(args.gap, results)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump(results, f)

@@ -1506,7 +1506,7 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 for (v, k) in elems {
                     // A multiplicity variable is not spelled out: the firing is opaque.
                     let RMult::Exact(k) = k else {
-                        return eg.trace_atom_opaque();
+                        return eg.trace_atom_opaque("multiplicity-variable");
                     };
                     eg.trace_atom_arg_n(bind(v), *k);
                 }
@@ -1528,7 +1528,15 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
             RAtom::Lit { node, .. } => eg.trace_atom(m.get(*node), None),
             // A literal-value binding reads a node the atoms already name.
             RAtom::Eq(..) | RAtom::EqGlobal(..) | RAtom::LitBind { .. } => {}
-            _ => return eg.trace_atom_opaque(),
+            RAtom::APrefix { .. } | RAtom::ASuffix { .. } | RAtom::ABoth { .. } => {
+                return eg.trace_atom_opaque("sequence-rest-variable");
+            }
+            RAtom::ACSub { .. } | RAtom::ACISub { .. } => {
+                return eg.trace_atom_opaque("multiset-rest-variable");
+            }
+            RAtom::Collect { .. } => return eg.trace_atom_opaque("collected-sequence"),
+            RAtom::Neq(..) => return eg.trace_atom_opaque("disequality-guard"),
+            RAtom::Pred { .. } => return eg.trace_atom_opaque("primitive-guard"),
         }
     }
 }

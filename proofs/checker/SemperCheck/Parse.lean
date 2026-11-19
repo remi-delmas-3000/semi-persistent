@@ -133,6 +133,9 @@ structure Env where
   globals : List (String × (Term × String)) := []
   /-- The operators declared so far, in order. -/
   ops : List OpDecl := []
+  /-- Each rule not read: its command's offset, its position in the command
+  and the reason. -/
+  skipped : List (Nat × Nat × String) := []
 
 def Env.op? (E : Env) (f : String) : Option OpDecl := E.ops.find? (·.name == f)
 
@@ -197,12 +200,14 @@ structure VarSorts where
   sorts : List (String × String) := []
   pending : List (String × String) := []
 
-abbrev PatM := StateT VarSorts Option
+/-- A rule the reader does not read fails with the reason, which
+`parseProgramWhy` reports. -/
+abbrev PatM := StateT VarSorts (Except String)
 
 def setSort (x s : String) : PatM Unit := do
   let st ← get
   match st.sorts.lookup x with
-  | some t => if t == s then pure () else failure
+  | some t => if t == s then pure () else throw "a variable of two sorts"
   | none => set { st with sorts := (x, s) :: st.sorts }
 
 def ofTerm : Term → Pat
@@ -216,33 +221,34 @@ partial def Env.pat (E : Env) (exp : Option String) : SExp → PatM (Pat × Opti
     if isLiteral a then
       match litSort exp a with
       | some s => pure (.lit s a, some s)
-      | none => failure
-    else if a.startsWith ".." || a.startsWith ":" || (a.splitOn ":").length > 1 then failure
+      | none => throw "a literal of another sort than its position"
+    else if a.startsWith ".." then throw "a rest variable"
+    else if a.startsWith ":" || (a.splitOn ":").length > 1 then throw "a multiplicity"
     else match E.globals.lookup a with
       | some (t, s) => do
-        if exp.isSome && exp != some s then failure
+        if exp.isSome && exp != some s then throw "a let name of another sort than its position"
         pure (ofTerm t, some s)
       | none =>
         match E.op? a with
         | some d => do
-          unless d.kind.isAssoc || d.args.isEmpty do failure
-          if exp.isSome && exp != some d.res then failure
+          unless d.kind.isAssoc || d.args.isEmpty do throw "an operator without its arguments"
+          if exp.isSome && exp != some d.res then throw "an operator of another sort than its position"
           pure (.app a [], some d.res)
         | none => do
           match exp with
           | some s => setSort a s; pure (.var a, some s)
           | none => pure (.var a, (← get).sorts.lookup a)
   | .list (.atom f :: args) => do
-    if f == "=" then failure
-    let some d := E.op? f | failure
-    if exp.isSome && exp != some d.res then failure
-    unless d.kind.isAssoc || args.length == d.args.length do failure
+    if f == "=" then throw "an equality inside a pattern"
+    let some d := E.op? f | throw s!"a primitive or undeclared operator ({f})"
+    if exp.isSome && exp != some d.res then throw "an operator of another sort than its position"
+    unless d.kind.isAssoc || args.length == d.args.length do throw "an operator with another number of arguments"
     let mut ps : Array Pat := #[]
     for x in args do
       let (p, _) ← E.pat (argSort d ps.size) x
       ps := ps.push p
     pure (.app f ps.toList, some d.res)
-  | _ => failure
+  | _ => throw "a pattern that is no application"
 
 /-- An equality between two patterns: the second is read at the first's
 sort, and a variable on the left takes the right's sort. -/
@@ -277,7 +283,7 @@ def settle : Nat → PatM Unit
       match (← get).sorts.lookup x, (← get).sorts.lookup y with
       | some s, none => setSort y s; changed := true
       | none, some s => setSort x s; changed := true
-      | some s, some t => if s != t then failure
+      | some s, some t => if s != t then throw "a variable of two sorts"
       | none, none => pure ()
     if changed then settle n
 
@@ -286,7 +292,7 @@ def finish (lhs rhs : Pat) (eqs : List (Pat × Pat)) : PatM Rule := do
   settle 64
   let st ← get
   let r : Rule := { lhs, rhs, eqs, sorts := st.sorts }
-  unless r.vars.all fun x => (st.sorts.lookup x).isSome do failure
+  unless r.vars.all fun x => (st.sorts.lookup x).isSome do throw "a variable of no sort"
   pure r
 
 def kindOf (tags : List String) : Kind :=
@@ -318,8 +324,8 @@ def tagArg (k : String) : List SExp → Option SExp
 
 /-- The rule of a `rewrite`: `lhs` (whose root binding `(= v p)` becomes an
 equality premise) to `rhs`, under the `:when` guards. -/
-def Env.rewriteRule (E : Env) (lhs rhs : SExp) (tags : List SExp) : Option Rule :=
-  if tags.any (fun t => match t with | .atom ":let" => true | _ => false) then none
+def Env.rewriteRule (E : Env) (lhs rhs : SExp) (tags : List SExp) : Except String Rule :=
+  if tags.any (fun t => match t with | .atom ":let" => true | _ => false) then .error "a :let tag"
   else (go.run {}).map (·.1)
 where
   go : PatM Rule := do
@@ -334,7 +340,7 @@ where
         let mut out := []
         for g in gs do out := out ++ (← E.guard g)
         pure out
-      | some _ => failure
+      | some _ => throw "a :when that is no list"
       | none => pure []
     let sl := (← E.pat none (match lhs with | .list [.atom "=", _, p] => p | _ => lhs)).2
     let (r, _) ← E.pat sl rhs
@@ -342,20 +348,20 @@ where
 
 /-- The rules of a `rule`: one per `union` action, under the body's
 equalities, with the action's `let` names expanded. -/
-def Env.ruleRules (E : Env) (body actions : List SExp) : List (Option Rule) :=
+def Env.ruleRules (E : Env) (body actions : List SExp) : List (Except String Rule) :=
   let unions := actions.filter fun a => match a with
     | .list [.atom "union", _, _] => true
     | _ => false
   match (go actions [] []).run {} with
-  | some (rs, _) => rs
-  | none => unions.map fun _ => none
+  | .ok (rs, _) => rs
+  | .error e => unions.map fun _ => .error e
 where
   bodyEqs : PatM (List (Pat × Pat)) := do
     let mut out := []
     for g in body do out := out ++ (← E.guard g)
     pure out
-  /-- One entry per `union` action; a failed action is `none`. -/
-  go : List SExp → List (String × SExp) → List (Option Rule) → PatM (List (Option Rule))
+  /-- One entry per `union` action; a failed action is its reason. -/
+  go : List SExp → List (String × SExp) → List (Except String Rule) → PatM (List (Except String Rule))
     | .list [.atom "union", p, q] :: rest, lets, acc => do
       let st ← get
       let one : PatM Rule := do
@@ -400,6 +406,15 @@ def sortNames : SExp → List String
   | .list xs => atoms xs
   | .atom a => [a]
 
+/-- The rules of the command at `o`: a rule not read is `none` in the program,
+and its reason is kept in the environment. -/
+def rules (E : Env) (P : Program) (o : Nat) (rs : List (Except String Rule)) : Env × Program :=
+  let why := rs.zipIdx.filterMap fun (r, j) => match r with
+    | .error e => some (o, j, e)
+    | .ok _ => none
+  ({ E with skipped := E.skipped ++ why },
+   { P with decls := P.decls ++ [(o, .rules (rs.map fun r => r.toOption))] })
+
 /-- Reads one command. -/
 def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Program)
   | .list (.atom "function" :: .atom f :: args :: .atom res :: tags)
@@ -431,24 +446,26 @@ def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Prog
     let (ta, sa) ← E.term none a
     let (tb, _) ← E.term (some sa) b
     return (E, { P with decls := P.decls ++ [(o, .goal ta tb)] })
-  | .list (.atom "rewrite" :: l :: r :: tags) =>
-    return (E, { P with decls := P.decls ++ [(o, .rules [E.rewriteRule l r tags])] })
+  | .list (.atom "rewrite" :: l :: r :: tags) => return rules E P o [E.rewriteRule l r tags]
   | .list (.atom "birewrite" :: l :: r :: tags) =>
-    return (E, { P with decls := P.decls ++
-      [(o, .rules [E.rewriteRule l r tags, E.rewriteRule r l tags])] })
+    return rules E P o [E.rewriteRule l r tags, E.rewriteRule r l tags]
   | .list (.atom "rule" :: .list body :: .list actions :: _) =>
-    return (E, { P with decls := P.decls ++ [(o, .rules (E.ruleRules body actions))] })
+    return rules E P o (E.ruleRules body actions)
   | .list (.atom "push" :: _) | .list (.atom "pop" :: _) | .list (.atom "include" :: _) =>
     .error "push, pop and include are not supported"
   | _ => return (E, P)
 
-def parseProgram (src : String) : Except String Program := do
+/-- The program, and each rule the reader did not read: its command's offset,
+its position in the command, and the reason. -/
+def parseProgramWhy (src : String) : Except String (Program × List (Nat × Nat × String)) := do
   let forms ← readTop src
   let mut E : Env := {}
   let mut P : Program := { ops := [], litSorts, decls := [] }
   for (o, x) in forms do
     (E, P) ← step E P o x
-  return P
+  return (P, E.skipped)
+
+def parseProgram (src : String) : Except String Program := (·.1) <$> parseProgramWhy src
 
 /-! ## The certificate
 

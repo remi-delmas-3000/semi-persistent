@@ -1931,7 +1931,7 @@ def stepCore (S : St P) (line : String) : St P :=
               S.mergeBy x y pf
             else S.fail "rule: merged nodes differ"
           | .error e => S.fail e
-        | _ => S.fail "rule: outside the reader's language"
+        | _ => S.fail s!"rule: outside the reader's language | {od} {j}"
       | _ => S.fail "rule: no such command"
     | _, _, _, _ => S.fail "rule: unreadable"
   | ["g", off, a, b] =>
