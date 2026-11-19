@@ -41,10 +41,26 @@ def eval : Term → M.α
   | .lit s v => M.lit s v
   | .app f args => M.app f (args.map eval)
 
-def evalP (σ : String → M.α) : Pat → M.α
+mutual
+
+/-- The value of a pattern under an assignment `σ` of its variables and an
+assignment `ρ` of its rest variables to lists of elements. A rest variable is
+no term by itself: it only contributes arguments (`evalArgs`). -/
+def evalP (σ : String → M.α) (ρ : String → List M.α) : Pat → M.α
   | .var x => σ x
   | .lit s v => M.lit s v
-  | .app f args => M.app f (args.map (evalP σ))
+  | .rest _ => M.lit "" ""
+  | .app f args => M.app f (evalArgs σ ρ args)
+
+/-- The values of an argument list: a rest variable gives its whole list. -/
+def evalArgs (σ : String → M.α) (ρ : String → List M.α) : List Pat → List M.α
+  | [] => []
+  | .rest x :: ps => ρ x ++ evalArgs σ ρ ps
+  | .var x :: ps => σ x :: evalArgs σ ρ ps
+  | .lit s v :: ps => M.lit s v :: evalArgs σ ρ ps
+  | .app f args :: ps => M.app f (evalArgs σ ρ args) :: evalArgs σ ρ ps
+
+end
 
 /-- Each element of `xs` is in the sort at its position. -/
 def ArgsIn : List String → List M.α → Prop
@@ -84,9 +100,10 @@ def OpSat (d : OpDecl) : Prop :=
         b x z = b y z → x = y)
 
 def RuleSat (r : Rule) : Prop :=
-  ∀ σ : String → M.α,
+  ∀ (σ : String → M.α) (ρ : String → List M.α),
     (∀ x ∈ r.vars, ∃ s, r.sorts.lookup x = some s ∧ M.dom s (σ x)) →
-    (∀ e ∈ r.eqs, M.evalP σ e.1 = M.evalP σ e.2) → M.evalP σ r.lhs = M.evalP σ r.rhs
+    (∀ x ∈ r.rests, ∃ s, r.sorts.lookup x = some s ∧ ∀ y ∈ ρ x, M.dom s y) →
+    (∀ e ∈ r.eqs, M.evalP σ ρ e.1 = M.evalP σ ρ e.2) → M.evalP σ ρ r.lhs = M.evalP σ ρ r.rhs
 
 def DeclSat : Decl → Prop
   | .axiom l r => M.eval l = M.eval r

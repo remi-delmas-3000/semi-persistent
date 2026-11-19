@@ -1528,11 +1528,106 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
             RAtom::Lit { node, .. } => eg.trace_atom(m.get(*node), None),
             // A literal-value binding reads a node the atoms already name.
             RAtom::Eq(..) | RAtom::EqGlobal(..) | RAtom::LitBind { .. } => {}
-            RAtom::APrefix { .. } | RAtom::ASuffix { .. } | RAtom::ABoth { .. } => {
-                return eg.trace_atom_opaque("sequence-rest-variable");
+            // A rest variable's nodes go between `[` and `]`, in the
+            // pattern's order.
+            RAtom::APrefix {
+                node,
+                op,
+                pre,
+                fixed,
+            } => {
+                eg.trace_atom(m.get(*node), Some(*op));
+                eg.trace_atom_group(true);
+                for i in 0..m.seq_slice(*pre).len() {
+                    let c = m.seq_slice(*pre)[i];
+                    eg.trace_atom_arg(c);
+                }
+                eg.trace_atom_group(false);
+                for c in fixed {
+                    eg.trace_atom_arg(bind(c));
+                }
             }
-            RAtom::ACSub { .. } | RAtom::ACISub { .. } => {
-                return eg.trace_atom_opaque("multiset-rest-variable");
+            RAtom::ASuffix {
+                node,
+                op,
+                fixed,
+                suf,
+            } => {
+                eg.trace_atom(m.get(*node), Some(*op));
+                for c in fixed {
+                    eg.trace_atom_arg(bind(c));
+                }
+                eg.trace_atom_group(true);
+                for i in 0..m.seq_slice(*suf).len() {
+                    let c = m.seq_slice(*suf)[i];
+                    eg.trace_atom_arg(c);
+                }
+                eg.trace_atom_group(false);
+            }
+            RAtom::ABoth {
+                node,
+                op,
+                pre,
+                fixed,
+                suf,
+            } => {
+                eg.trace_atom(m.get(*node), Some(*op));
+                eg.trace_atom_group(true);
+                for i in 0..m.seq_slice(*pre).len() {
+                    let c = m.seq_slice(*pre)[i];
+                    eg.trace_atom_arg(c);
+                }
+                eg.trace_atom_group(false);
+                for c in fixed {
+                    eg.trace_atom_arg(bind(c));
+                }
+                eg.trace_atom_group(true);
+                for i in 0..m.seq_slice(*suf).len() {
+                    let c = m.seq_slice(*suf)[i];
+                    eg.trace_atom_arg(c);
+                }
+                eg.trace_atom_group(false);
+            }
+            RAtom::ACSub {
+                node,
+                op,
+                elems,
+                rest,
+            } => {
+                eg.trace_atom(m.get(*node), Some(*op));
+                for (v, k) in elems {
+                    let RMult::Exact(k) = k else {
+                        return eg.trace_atom_opaque("multiplicity-variable");
+                    };
+                    eg.trace_atom_arg_n(bind(v), *k);
+                }
+                eg.trace_atom_group(true);
+                for i in 0..m.mset_slice(*rest).len() {
+                    let c = &m.mset_slice(*rest)[i];
+                    let (g, k) = (Cfg::mset_child_id(c), Cfg::mset_child_mult(c));
+                    let Some(k) = k.to_u64() else {
+                        return eg.trace_atom_opaque("multiplicity-overflow");
+                    };
+                    eg.trace_atom_arg_n(g, k);
+                }
+                eg.trace_atom_group(false);
+            }
+            RAtom::ACISub {
+                node,
+                op,
+                elems,
+                rest,
+            } => {
+                eg.trace_atom(m.get(*node), Some(*op));
+                for c in elems {
+                    eg.trace_atom_arg(bind(c));
+                }
+                eg.trace_atom_group(true);
+                for i in 0..m.set_slice(*rest).len() {
+                    let c = m.set_slice(*rest)[i];
+                    eg.trace_atom_arg(c);
+                }
+                eg.trace_atom_group(false);
             }
             RAtom::Collect { .. } => return eg.trace_atom_opaque("collected-sequence"),
             RAtom::Neq(..) => return eg.trace_atom_opaque("disequality-guard"),

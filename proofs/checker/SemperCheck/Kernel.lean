@@ -47,7 +47,8 @@ inductive Step where
   | symm (s : Nat)
   | trans (s t : Nat)
   | axiom (o a b : Nat)
-  | rule (o j : Nat) (σ : List (String × Nat)) (prems : List Nat) (a b : Nat)
+  | rule (o j : Nat) (σ : List (String × Nat)) (ρ : List (String × List Nat)) (prems : List Nat)
+      (a b : Nat)
   | cong (f : String) (a b : Nat) (prems : List Nat)
   /-- `a = f(x, g(x))` is the unit `e` of `f`, whose `:inverse` is `g`. -/
   | inv (f : String) (a x q e : Nat)
@@ -134,11 +135,27 @@ def intern : Term → Option Nat
   | .lit s v => C.lookup (.lit s v)
   | .app f args => (args.mapM intern).bind fun ids => C.lookup (.app f ids)
 
+mutual
+
 /-- The node that is pattern `p` with each variable read from `σ`. -/
-def instP (σ : List (String × Nat)) : Pat → Option Nat
+def instP (σ : List (String × Nat)) (ρ : List (String × List Nat)) : Pat → Option Nat
   | .var x => σ.lookup x
   | .lit s v => C.lookup (.lit s v)
-  | .app f ps => (ps.mapM (instP σ)).bind fun ids => C.lookup (.app f ids)
+  | .rest _ => none
+  | .app f ps => (instArgs σ ρ ps).bind fun ids => C.lookup (.app f ids)
+
+/-- The nodes of an argument list: a rest variable gives the nodes `ρ` binds
+it to. -/
+def instArgs (σ : List (String × Nat)) (ρ : List (String × List Nat)) : List Pat → Option (List Nat)
+  | [] => some []
+  | .rest x :: ps => (ρ.lookup x).bind fun r => (instArgs σ ρ ps).map (r ++ ·)
+  | .var x :: ps => (σ.lookup x).bind fun i => (instArgs σ ρ ps).map (i :: ·)
+  | .lit s v :: ps => (C.lookup (.lit s v)).bind fun i => (instArgs σ ρ ps).map (i :: ·)
+  | .app f as :: ps =>
+    ((instArgs σ ρ as).bind fun ids => C.lookup (.app f ids)).bind fun i =>
+      (instArgs σ ρ ps).map (i :: ·)
+
+end
 
 /-- The arguments node `x` flattens to under `f`: the arguments of each
 application of `f`, recursively, and `[x]` for any other node. An application
@@ -262,10 +279,11 @@ def cancelOk (f : String) (p q a b z : Nat) : Bool :=
 def decl? (o : Nat) : Option Decl :=
   (C.P.decls.find? (·.1 == o)).map (·.2)
 
-def eqsOk (σ : List (String × Nat)) : List (Pat × Pat) → List (Nat × Nat) → Bool
+def eqsOk (σ : List (String × Nat)) (ρ : List (String × List Nat)) :
+    List (Pat × Pat) → List (Nat × Nat) → Bool
   | [], [] => true
   | (p, q) :: es, (x, y) :: ps =>
-    C.instP σ p == some x && C.instP σ q == some y && eqsOk σ es ps
+    C.instP σ ρ p == some x && C.instP σ ρ q == some y && eqsOk σ ρ es ps
   | _, _ => false
 
 /-- Each variable of the rule is bound by `σ` to a node of its sort. -/
@@ -273,6 +291,13 @@ def sortsOk (σ : List (String × Nat)) (r : Rule) : Bool :=
   r.vars.all fun x =>
     match σ.lookup x, r.sorts.lookup x with
     | some n, some s => C.sortOf n == some s
+    | _, _ => false
+
+/-- Each rest variable of the rule is bound by `ρ` to nodes of its sort. -/
+def restsOk (ρ : List (String × List Nat)) (r : Rule) : Bool :=
+  r.rests.all fun x =>
+    match ρ.lookup x, r.sorts.lookup x with
+    | some ns, some s => ns.all fun n => C.sortOf n == some s
     | _, _ => false
 
 end Ctx
@@ -297,13 +322,13 @@ def inferStep (acc : Array Concl) : Step → Option Concl
     | some (.axiom l r) =>
       if C.intern l = some a ∧ C.intern r = some b then some ⟨a, b, o + 1⟩ else none
     | _ => none
-  | .rule o j σ prems a b =>
+  | .rule o j σ ρ prems a b =>
     match C.decl? o with
     | some (.rules rs) =>
       match rs[j]?, premConcls acc prems with
       | some (some r), some (ps, pos) =>
-        if C.instP σ r.lhs = some a ∧ C.instP σ r.rhs = some b ∧ C.eqsOk σ r.eqs ps = true ∧
-            C.sortsOk σ r = true then
+        if C.instP σ ρ r.lhs = some a ∧ C.instP σ ρ r.rhs = some b ∧
+            C.eqsOk σ ρ r.eqs ps = true ∧ C.sortsOk σ r = true ∧ C.restsOk ρ r = true then
           some ⟨a, b, max (o + 1) pos⟩
         else none
       | _, _ => none

@@ -1,0 +1,21 @@
+n 0 a
+t 0 a
+n 1 b
+t 1 b
+n 2 c
+t 2 c
+n 3 Add 0 1 2
+t 3 Add 0 1 2
+n 4 g 0
+n 5 Add 1 2 4
+r 233 w
+e 0 a
+e 3 Add 0 [ 1 2 ]
+b 0 4 5
+m 0 3 5
+t 0 a
+t 4 g 0
+t 1 b
+t 2 c
+t 5 Add 4 1 2
+g 300 3 5

@@ -245,6 +245,13 @@ partial def Env.pat (E : Env) (exp : Option String) : SExp → PatM (Pat × Opti
     unless d.kind.isAssoc || args.length == d.args.length do throw "an operator with another number of arguments"
     let mut ps : Array Pat := #[]
     for x in args do
+      -- A rest variable `..r`, as an argument of an associative operator: any
+      -- number of arguments of the operator's sort.
+      if let .atom a := x then
+        if a.startsWith ".." && d.kind.isAssoc && !(a.drop 2).toString.any (fun c => c == ':' || c == '.') then
+          setSort a d.res
+          ps := ps.push (.rest a)
+          continue
       let (p, _) ← E.pat (argSort d ps.size) x
       ps := ps.push p
     pure (.app f ps.toList, some d.res)
@@ -293,6 +300,7 @@ def finish (lhs rhs : Pat) (eqs : List (Pat × Pat)) : PatM Rule := do
   let st ← get
   let r : Rule := { lhs, rhs, eqs, sorts := st.sorts }
   unless r.vars.all fun x => (st.sorts.lookup x).isSome do throw "a variable of no sort"
+  unless r.rests.all fun x => (st.sorts.lookup x).isSome do throw "a rest variable of no sort"
   pure r
 
 def kindOf (tags : List String) : Kind :=
@@ -517,7 +525,7 @@ def parseCert (src : String) : Except String Cert := do
           let mut σ : Array (String × Nat) := #[]
           for k in [0:n] do
             σ := σ.push (sig[2 * k]!, ← nat sig[2 * k + 1]!)
-          pure (.rule (← nat o) (← nat j) σ.toList (← (rest.drop (2 * n)).mapM nat) (← nat a) (← nat b))
+          pure (.rule (← nat o) (← nat j) σ.toList [] (← (rest.drop (2 * n)).mapM nat) (← nat a) (← nat b))
         | "cong", f :: a :: b :: ps => pure (.cong f (← nat a) (← nat b) (← ps.mapM nat))
         | _, _ => throw s!"bad step: {l}"
       steps := steps.push st

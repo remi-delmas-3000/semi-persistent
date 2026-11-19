@@ -105,8 +105,10 @@ and the two results are compared as lists (`assoc`), multisets (`ac`) or sets
 
 The reader (`Parse.lean`) keeps the theory it returns implied by the
 program's: it reads no rule from a command whose
-pattern or guard uses a rest variable, a multiplicity, a filter, a primitive
-predicate or a comprehension. Dropping a law or a rule makes some
+pattern or guard uses a multiplicity, a filter, a primitive predicate or a
+comprehension. A rest variable `..r` is read as an argument of an `assoc`,
+`ac` or `aci` operator: in a model the rule holds for every list of elements
+of the operator's sort in its place, the empty one included. Dropping a law or a rule makes some
 certificates fail to check; it never makes a false equality check. A program
 with `push`, `pop` or `include` is rejected.
 
@@ -144,38 +146,24 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 26,354 |
-| programs with every `check-eq` proved, of 1,066 | 765 |
-| kernel steps checked | 12,486,207 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 26,852 |
+| programs with every `check-eq` proved, of 1,066 | 865 |
+| kernel steps checked | 16,387,263 |
 | steps the kernel rejects | 0 |
-| events replayed | 7,396,098 |
-| events whose check fails | 211,225 |
-| events the stream gives no witness for | 292,222 |
-| merges whose kernel steps are not found | 22 |
+| events replayed | 7,396,100 |
+| events whose check fails | 13,441 |
+| events the stream gives no witness for | 1,550 |
 
-The 3,454 `check-eq` not proved:
-
-- 3,263 are in the 245 programs with a rule firing the stream writes as
-  opaque: a rule with a primitive, a rest variable or a multiplicity variable,
-  which the reader does not read (292,218 such merges, 287,931 of them in
-  `bench/math-microbenchmark.native.egg`). Later events of these programs fail
-  because the merge was not applied.
-- 191 are in 59 programs with no such firing. `check-replay.py --failed FILE`
-  lists every failed event (program, event number, cause, line: 211,225
-  lines) and counts these programs by the cause of their first failed event,
-  since a program's later failures can follow from the merge the first one did
-  not apply. 164 of the 191 are in 43 programs whose first failure is a rule
-  the reader does not read. The other 27 are in 16 programs, at most 6 in
-  one: a rule with `:flatten` matched through a nested application (4
-  programs), a law step whose normal form the replayer computes differently
-  (4), and single cases.
+`GAP.md`, which `check-replay.py --gap` writes, assigns each `check-eq` not
+proved to one cause: that of its program's first event that fails, has no
+witness, or gets no kernel step. `check-replay.py --failed FILE` lists every
+failed event.
 
 The certificates this replaces proved 5,702 `check-eq`, and the replay before
 the replayer was proved 21,066. No program proves fewer than under either.
 
 Cost: the 1,442 streams total 235 MB; the median is 1.3 kB and the largest
-94 MB. The slowest replay takes 14.2 s and the largest 614 MB (both
-`bench/math-microbenchmark.rules.egg`); `bench/acgen.rules.egg` (1,120,646
+94 MB. The slowest replay takes 16.0 s and the largest 745 MB; `bench/acgen.rules.egg` (1,120,646
 events, a 50 MB stream, 6,647,265 kernel steps, every event checked) takes
 11.4 s and 539 MB. With the stream on, the engine runs that benchmark in
 11.7 s and 706 MB against 10.6 s and 704 MB in proof mode without it, and

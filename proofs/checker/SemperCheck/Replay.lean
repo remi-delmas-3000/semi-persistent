@@ -74,7 +74,9 @@ structure St (P : Program) where
   inverses : List Nat := []
   /-- The open firing: its command's offset, and whether it is a `rewrite`. -/
   fire : Option (Nat × Bool) := none
-  atoms : Array (Nat × String × List Nat) := #[]
+  /-- The firing's `e` lines: the matched node, the operator, the nodes the
+  argument patterns are bound to and, for each rest variable, its nodes. -/
+  atoms : Array (Nat × String × List Nat × List (List Nat)) := #[]
   /-- The right-hand side's nodes; `true` marks a `let` name's node. -/
   rhs : List (Nat × Bool) := []
   /-- The `check-eq` whose two nodes were in one class at their `g` line. -/
@@ -753,6 +755,26 @@ def ids (S : St P) (xs : List String) : Option (List Nat) := do
       for _ in [0:k] do out := out.push n
     | _ => none
   return out.toList
+
+/-- The fields of an `e` line after the operator: the nodes of the argument
+patterns, and between `[` and `]` the nodes of each rest variable, in the
+pattern's order. -/
+def atomArgs (S : St P) (xs : List String) : Option (List Nat × List (List Nat)) := do
+  let mut fixed : List String := []
+  let mut groups : Array (List Nat) := #[]
+  let mut open? : Option (List String) := none
+  for x in xs do
+    match x, open? with
+    | "[", none => open? := some []
+    | "]", some g =>
+      groups := groups.push (← ids S g.reverse)
+      open? := none
+    | "[", some _ => none
+    | "]", none => none
+    | _, some g => open? := some (x :: g)
+    | _, none => fixed := x :: fixed
+  if open?.isSome then none
+  return (← ids S fixed.reverse, groups.toList)
 
 /-! ## Kernel steps for the checks -/
 
@@ -1487,7 +1509,9 @@ the pattern matched or was built as. An instance joins that node's class. -/
 structure Walk (P : Program) where
   S : St P
   σ : List (String × Nat) := []
-  atoms : List (Nat × String × List Nat)
+  /-- The nodes each rest variable is bound to. -/
+  ρ : List (String × List Nat) := []
+  atoms : List (Nat × String × List Nat × List (List Nat))
   rhs : List (Nat × Bool)
   /-- The matched node and the instance of each matched pattern, by the
   pattern's printed form. -/
@@ -1514,6 +1538,7 @@ mutual
 
 def Pat.toTerm? : Pat → Option Term
   | .var _ => none
+  | .rest _ => none
   | .lit s v => some (.lit s v)
   | .app f ps => (Pat.toTerms? ps).map (.app f)
 
@@ -1523,19 +1548,25 @@ def Pat.toTerms? : List Pat → Option (List Term)
 
 end
 
+/-- The number of argument patterns that are no rest variable. -/
+def fixedArgs (ps : List Pat) : Nat :=
+  (ps.filter fun p => match p with | .rest _ => false | _ => true).length
+
 mutual
 
 /-- The operator and the number of arguments of the first line a pattern's
 match writes: that of its first innermost application or literal. -/
 def firstLine : Pat → String × Nat
   | .var _ => ("", 0)
+  | .rest _ => ("", 0)
   | .lit _ _ => ("#lit", 0)
-  | .app f ps => (firstOf ps).getD (f, ps.length)
+  | .app f ps => (firstOf ps).getD (f, fixedArgs ps)
 
 /-- The first line of the first pattern that is no variable. -/
 def firstOf : List Pat → Option (String × Nat)
   | [] => none
   | .var _ :: ps => firstOf ps
+  | .rest _ :: ps => firstOf ps
   | .lit s v :: _ => some (firstLine (.lit s v))
   | .app f qs :: _ => some (firstLine (.app f qs))
 
@@ -1569,7 +1600,7 @@ def groundNode (q : Pat) : WalkM P (Option Nat) := do
   -- The lines come arguments first: the next one is for `q`'s first
   -- innermost application or literal.
   match q, w.atoms with
-  | .app _ _, (_, h, cs) :: _ =>
+  | .app _ _, (_, h, cs, _) :: _ =>
     let (g, k) := firstLine q
     if g == h && cs.length == k then pure none
     else pure ((Pat.toTerm? q).bind (eval w.S))
@@ -1582,14 +1613,36 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
     WalkM P (Nat × Nat) := do
   let w ← get
   match w.atoms with
-  | (n, g, cs) :: rest =>
+  | (n, g, fixed, groups) :: rest =>
     let S := w.S
-    if g != f || cs.length != ps.length then throw "rule: line for another application"
+    if g != f || fixed.length != fixedArgs ps || groups.length + fixed.length != ps.length then
+      throw "rule: line for another application"
     let mut σ := w.σ
+    let mut ρ := w.ρ
     let mut ic : Array Nat := #[]
-    for (q, o, c) in ps.zip (sub.zip cs) do
+    -- The nodes the line binds, in the pattern's order: an argument's node,
+    -- or a rest variable's nodes.
+    let mut bound : Array Nat := #[]
+    let mut fixed := fixed
+    let mut groups := groups
+    for (q, o) in ps.zip sub do
       match q, o with
+      | .rest x, _ =>
+        let grp := groups.headD []
+        groups := groups.tail
+        bound := bound ++ grp.toArray
+        match ρ.lookup x with
+        | some ys =>
+          if ys.length != grp.length || (ys.zip grp).any (fun (y, c) => S.fd y != S.fd c) then
+            throw "rule: rest variable bound twice"
+          ic := ic ++ ys.toArray
+        | none =>
+          ρ := (x, grp) :: ρ
+          ic := ic ++ grp.toArray
       | .var x, _ =>
+        let c := fixed.headD 0
+        fixed := fixed.tail
+        bound := bound.push c
         match σ.lookup x with
         | some y =>
           if S.fd y != S.fd c then throw "rule: variable bound twice"
@@ -1598,15 +1651,19 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
           σ := (x, c) :: σ
           ic := ic.push c
       | _, some (m, i) =>
+        let c := fixed.headD 0
+        fixed := fixed.tail
+        bound := bound.push c
         if S.fd m != S.fd c then throw "rule: argument differs"
         ic := ic.push i
       | _, none => throw "rule: argument differs"
+    let cs := bound.toList
     match S.defOf n with
     | some (.app h ds) =>
       if h != f || (let (x, y) := nf2 S f ds cs; x != y) then
         throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} as classes {(nf2 S f ds cs).1}, pattern {f} bound to {cs} as classes {(nf2 S f ds cs).2}, splices {S.splices}"
     | _ => throw "rule: matched node differs"
-    set { w with atoms := rest, σ := σ }
+    set { w with atoms := rest, σ := σ, ρ := ρ }
     let i ← instOf f ic.toList n
     modify fun w => { w with memo := (key, n, i) :: w.memo }
     pure (n, i)
@@ -1622,10 +1679,11 @@ def walkQ (p : Pat) : WalkM P (Nat × Nat) :=
     match (← get).σ.lookup x with
     | some n => pure (n, n)
     | none => throw "rule: unbound variable"
+  | .rest _ => throw "rule: a rest variable that is no argument"
   | .lit s v => do
     let w ← get
     match w.atoms with
-    | (n, "#lit", _) :: rest =>
+    | (n, "#lit", _, _) :: rest =>
       match w.S.defOf n with
       | some (.lit s' v') =>
         if s' == s && v' == v then set { w with atoms := rest }; pure (n, n)
@@ -1638,6 +1696,7 @@ def walkQ (p : Pat) : WalkM P (Nat × Nat) :=
 def walkQs : List Pat → WalkM P (List (Option (Nat × Nat)))
   | [] => pure []
   | .var _ :: rest => walkQs rest >>= fun r => pure (none :: r)
+  | .rest _ :: rest => walkQs rest >>= fun r => pure (none :: r)
   | .lit s v :: rest =>
     walkQ (.lit s v) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
   | .app f qs :: rest =>
@@ -1683,6 +1742,7 @@ def walkB (p : Pat) : WalkM P (Nat × Nat) :=
     match (← get).σ.lookup x with
     | some n => pure (n, n)
     | none => throw "rule: unbound variable"
+  | .rest _ => throw "rule: a rest variable that is no argument"
   | .lit s v => do
     if let some r ← letName? (.lit s v) then return r
     let w ← get
@@ -1702,7 +1762,14 @@ def walkB (p : Pat) : WalkM P (Nat × Nat) :=
 
 def walkBs : List Pat → WalkM P (List (Nat × Nat))
   | [] => pure []
-  | p :: ps => walkB p >>= fun x => walkBs ps >>= fun r => pure (x :: r)
+  -- A rest variable gives the nodes it is bound to, each its own instance.
+  | .rest x :: ps => do
+    match (← get).ρ.lookup x with
+    | some ys => walkBs ps >>= fun r => pure (ys.map (fun y => (y, y)) ++ r)
+    | none => throw "rule: unbound rest variable"
+  | .var x :: ps => walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
+  | .lit s v :: ps => walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
+  | .app f qs :: ps => walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
 
 end
 
@@ -1719,7 +1786,7 @@ def side (p : Pat) : WalkM P (Option (Nat × Nat)) := do
       let w ← get
       let (g, k) := firstLine p
       let hasLine := match w.atoms with
-        | (_, h, cs) :: _ => g == h && cs.length == k
+        | (_, h, cs, _) :: _ => g == h && cs.length == k
         | [] => false
       match hasLine, (Pat.toTerm? p).bind (eval w.S) with
       | false, some n => pure (some (n, ← letInstance p n))
@@ -1739,6 +1806,7 @@ structure Fired where
   nr : Nat
   ir : Nat
   σ : List (String × Nat)
+  ρ : List (String × List Nat)
   prems : Option (List Nat)
 
 def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
@@ -1760,6 +1828,11 @@ def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
     match w.σ.lookup x, r.sorts.lookup x with
     | some n, some s => if sortOf w.S n != some s then throw "rule: variable of another sort"
     | _, _ => throw "rule: unbound variable"
+  for x in r.rests do
+    match w.ρ.lookup x, r.sorts.lookup x with
+    | some ns, some s =>
+      if ns.any (fun n => sortOf w.S n != some s) then throw "rule: rest variable of another sort"
+    | _, _ => throw "rule: unbound rest variable"
   -- The body equalities, between instances: every pattern is matched by now.
   let mut prems : Option (Array Nat) := some #[]
   for (p, q) in r.eqs do
@@ -1772,7 +1845,7 @@ def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
         | some ps, some st => some (ps.push st)
         | _, _ => none
     | _, _ => prems := none
-  pure { nl, il, nr, ir, σ := (← get).σ, prems := prems.map (·.toList) }
+  pure { nl, il, nr, ir, σ := (← get).σ, ρ := (← get).ρ, prems := prems.map (·.toList) }
 
 /-- The engine's node `i` is definition `d`. An id is defined once between
 restores. -/
@@ -1890,8 +1963,9 @@ def stepCore (S : St P) (line : String) : St P :=
     | some o => { S with fire := some (o, kind == "w"), atoms := #[], rhs := [], events := S.events - 1 }
     | none => S.fail "rule: unreadable"
   | "e" :: id :: f :: kids =>
-    match S.node? id, ids S kids with
-    | some i, some cs => { S with atoms := S.atoms.push (i, f, cs), events := S.events - 1 }
+    match S.node? id, atomArgs S kids with
+    | some i, some (fixed, groups) =>
+      { S with atoms := S.atoms.push (i, f, fixed, groups), events := S.events - 1 }
     | _, _ => S.fail "rule: unreadable"
   | "b" :: xs =>
     let one (x : String) : Option (Nat × Bool) :=
@@ -1922,7 +1996,7 @@ def stepCore (S : St P) (line : String) : St P :=
               let (x, y) := if S.fd fr.nl == S.fd a then (a, b) else (b, a)
               let (S, pf) := match fr.prems with
                 | some prems =>
-                  let (S, st) := emit S (.rule od j fr.σ prems fr.il fr.ir) fr.il fr.ir
+                  let (S, st) := emit S (.rule od j fr.σ fr.ρ prems fr.il fr.ir) fr.il fr.ir
                   let (S, p1) := eqP S x fr.il
                   let (S, p2) := eqP S fr.ir y
                   let (S, q) := transP S x fr.ir p1 (some (some st))

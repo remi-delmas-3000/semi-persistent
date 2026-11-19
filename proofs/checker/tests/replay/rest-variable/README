@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`.
+`bad.trace` differs in line 13: the `e` line binds the rest variable to nodes 1 and 0 instead of 1 and 2.

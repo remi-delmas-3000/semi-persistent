@@ -21,6 +21,9 @@ inductive Pat where
   | var (x : String)
   | lit (s v : String)
   | app (f : String) (args : List Pat)
+  /-- A rest variable, as an argument of an `assoc`, `ac` or `aci` operator:
+  it stands for any number of arguments, none included. -/
+  | rest (x : String)
   deriving Repr, Inhabited
 
 /-- The variables of a pattern. -/
@@ -28,6 +31,14 @@ def Pat.vars : Pat → List String
   | .var x => [x]
   | .lit _ _ => []
   | .app _ ps => (ps.attach.map fun ⟨p, _⟩ => p.vars).flatten
+  | .rest _ => []
+
+/-- The rest variables of a pattern. -/
+def Pat.rests : Pat → List String
+  | .var _ => []
+  | .lit _ _ => []
+  | .app _ ps => (ps.attach.map fun ⟨p, _⟩ => p.rests).flatten
+  | .rest x => [x]
 
 /-- The algebraic laws of an operator. `assoc`, `ac` and `aci` operators are
 n-ary over their result sort: an application folds a binary operation over
@@ -75,6 +86,10 @@ structure Rule where
 /-- The variables of a rule. -/
 def Rule.vars (r : Rule) : List String :=
   r.lhs.vars ++ r.rhs.vars ++ (r.eqs.map fun e => e.1.vars ++ e.2.vars).flatten
+
+/-- The rest variables of a rule. -/
+def Rule.rests (r : Rule) : List String :=
+  r.lhs.rests ++ r.rhs.rests ++ (r.eqs.map fun e => e.1.rests ++ e.2.rests).flatten
 
 /-- A command that states or asks for an equality. -/
 inductive Decl where

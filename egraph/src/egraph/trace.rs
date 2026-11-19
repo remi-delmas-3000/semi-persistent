@@ -76,6 +76,10 @@ struct Firing {
     /// Rule index of the firing's first action within its command.
     base: usize,
 }
+/// In the buffered `e` lines, the two marks around a rest variable's nodes:
+/// no node id reaches these values.
+const GROUP_OPEN: usize = usize::MAX - 1;
+const GROUP_CLOSE: usize = usize::MAX - 2;
 
 #[derive(Default)]
 pub struct Trace {
@@ -321,6 +325,20 @@ where
         }
     }
 
+    /// The last `e` line's next fields are the nodes a rest variable is
+    /// bound to (`open`), or that list ends: written `[` and `]`.
+    #[inline]
+    pub(crate) fn trace_atom_group(&mut self, open: bool) {
+        if let Some(t) = self.trace.as_mut()
+            && t.firing.is_some()
+        {
+            t.atoms.push(if open { GROUP_OPEN } else { GROUP_CLOSE });
+            t.atoms.push(0);
+            let at = t.atom_at;
+            t.atoms[at] += 1;
+        }
+    }
+
     /// Within the firing, a `:flatten` match read argument `c` through
     /// `member`, an application of the matched operator in `c`'s class.
     pub(crate) fn trace_splice(&mut self, c: Cfg::G, member: Cfg::G) {
@@ -439,6 +457,14 @@ where
                             let _ = write!(t.out, "e {node} {name}");
                             for j in 0..k {
                                 let (c, n) = (t.atoms[i + 3 + 2 * j], t.atoms[i + 4 + 2 * j]);
+                                if c == GROUP_OPEN {
+                                    t.out.push_str(" [");
+                                    continue;
+                                }
+                                if c == GROUP_CLOSE {
+                                    t.out.push_str(" ]");
+                                    continue;
+                                }
                                 let _ = write!(t.out, " {c}");
                                 if n != 1 {
                                     let _ = write!(t.out, ":{n}");
