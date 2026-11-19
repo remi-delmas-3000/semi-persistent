@@ -1546,6 +1546,15 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 for c in fixed {
                     eg.trace_atom_arg(bind(c));
                 }
+                if query.flatten {
+                    let bound: Vec<Cfg::G> = m
+                        .seq_slice(*pre)
+                        .iter()
+                        .copied()
+                        .chain(fixed.iter().map(&bind))
+                        .collect();
+                    trace_splices(eg, *op, m.get(*node), &bound);
+                }
             }
             RAtom::ASuffix {
                 node,
@@ -1563,6 +1572,14 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     eg.trace_atom_arg(c);
                 }
                 eg.trace_atom_group(false);
+                if query.flatten {
+                    let bound: Vec<Cfg::G> = fixed
+                        .iter()
+                        .map(&bind)
+                        .chain(m.seq_slice(*suf).iter().copied())
+                        .collect();
+                    trace_splices(eg, *op, m.get(*node), &bound);
+                }
             }
             RAtom::ABoth {
                 node,
@@ -1587,6 +1604,16 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     eg.trace_atom_arg(c);
                 }
                 eg.trace_atom_group(false);
+                if query.flatten {
+                    let bound: Vec<Cfg::G> = m
+                        .seq_slice(*pre)
+                        .iter()
+                        .copied()
+                        .chain(fixed.iter().map(&bind))
+                        .chain(m.seq_slice(*suf).iter().copied())
+                        .collect();
+                    trace_splices(eg, *op, m.get(*node), &bound);
+                }
             }
             RAtom::ACSub {
                 node,
@@ -1611,6 +1638,14 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     eg.trace_atom_arg_n(g, k);
                 }
                 eg.trace_atom_group(false);
+                if query.flatten {
+                    let bound: Vec<Cfg::G> = elems
+                        .iter()
+                        .map(|(v, _)| bind(v))
+                        .chain(m.mset_slice(*rest).iter().map(Cfg::mset_child_id))
+                        .collect();
+                    trace_splices(eg, *op, m.get(*node), &bound);
+                }
             }
             RAtom::ACISub {
                 node,
@@ -1628,6 +1663,14 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     eg.trace_atom_arg(c);
                 }
                 eg.trace_atom_group(false);
+                if query.flatten {
+                    let bound: Vec<Cfg::G> = elems
+                        .iter()
+                        .map(&bind)
+                        .chain(m.set_slice(*rest).iter().copied())
+                        .collect();
+                    trace_splices(eg, *op, m.get(*node), &bound);
+                }
             }
             RAtom::Collect { .. } => return eg.trace_atom_opaque("collected-sequence"),
             RAtom::Neq(..) => return eg.trace_atom_opaque("disequality-guard"),

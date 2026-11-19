@@ -5,14 +5,15 @@ Written by `proofs/checker/scripts/check-replay.py --gap`. Each program's unprov
 witness in the stream, or gets no kernel step. A program's later failures can
 follow from the merge that event did not apply.
 
-26852 of 29808 `check-eq` proved; 2956 not proved, in 201 programs.
+26935 of 29808 `check-eq` proved; 2873 not proved, in 193 programs.
 
 | cause | programs | `check-eq` not proved | example |
 | --- | --- | --- | --- |
-| rule: matched node differs | 45 | 1329 | `egraph/tests/egg/conform-flatten/f2_0050.egg` |
+| rule: matched node differs | 29 | 1221 | `egraph/tests/egg/conform-flatten/f2_0050.egg` |
 | no witness: rewrite:multiplicity-variable | 38 | 1208 | `egraph/tests/egg/conform/c1_0059.egg` |
 | unread rule: a multiplicity | 40 | 189 | `egraph/tests/egg/conform-flatten/f2_0095.egg` |
 | unread rule: a primitive or undeclared operator | 23 | 129 | `egraph/tests/egg/bignum_all_ops.egg` |
+| no kernel steps: m line | 10 | 28 | `egraph/tests/egg/conform/c1_0090.egg` |
 | no witness: rewrite:untraced-firing | 20 | 27 | `egraph/tests/egg/collection_rules.egg` |
 | rule: unbound rest variable | 2 | 22 | `egraph/tests/egg/rhs_comprehensions.egg` |
 | no witness: rewrite:primitive-guard | 7 | 11 | `egraph/tests/egg/bench/typecheck.rules.egg` |
@@ -22,13 +23,12 @@ follow from the merge that event did not apply.
 | no witness: rewrite:outside-a-firing | 2 | 4 | `doc/book/examples/05-seq-except.egg` |
 | goal: its terms differ | 3 | 3 | `egraph/tests/egg/bench/until.native.egg` |
 | rule: line for another application | 3 | 3 | `egraph/tests/egg/birewrite_both_directions.egg` |
-| no kernel steps: m line | 2 | 3 | `egraph/tests/egg/rhs_empty_application_identity.egg` |
 | definition: unreadable | 3 | 3 | `egraph/tests/egg/mult_rhs_splice_rest.egg` |
 | no witness: ACInterReduction | 2 | 2 | `egraph/tests/egg/a_interreduction_lazy.egg` |
 | no kernel steps: i line | 2 | 2 | `egraph/tests/egg/group_inverse_virtual_sum.egg` |
 | no kernel steps: p line | 1 | 1 | `egraph/tests/egg/conform-cc-cert/cs1_0043.egg` |
 | rule: no line for a literal | 1 | 1 | `doc/book/examples/05-rewrite-rules.egg` |
-| total | 201 | 2956 | |
+| total | 193 | 2873 | |
 
 ## Programs the reader does not read
 
