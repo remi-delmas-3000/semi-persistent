@@ -2541,6 +2541,162 @@ def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
     | _, _ => prems := none
   pure { nl, il, nr, ir, σ := (← get).σ, ρ := (← get).ρ, μ := (← get).μ, prems := prems.map (·.toList) }
 
+mutual
+
+/-- The node that is the term `t` over atoms, added to the table when it is
+not there. -/
+def addS (S : St P) : STm → St P × Option Nat
+  | .atom (.node n) => (S, some n)
+  | .atom (.lit s v) => intern S (.lit s v)
+  | .app f args =>
+    match addSs S args with
+    | (S, some ids) => intern S (.app f ids)
+    | (S, none) => (S, none)
+
+def addSs (S : St P) : List STm → St P × Option (List Nat)
+  | [] => (S, some [])
+  | t :: ts =>
+    match addS S t with
+    | (S, some i) =>
+      match addSs S ts with
+      | (S, some is) => (S, some (i :: is))
+      | (S, none) => (S, none)
+    | (S, none) => (S, none)
+
+end
+
+mutual
+
+/-- The applications in `t` of a sequence operator to one argument, each with
+that argument: the engine builds the argument in the application's place. -/
+def singlesS (isSeq : String → Bool) : STm → List (STm × STm)
+  | .atom _ => []
+  | .app f args =>
+    (match args with
+      | [x] => if isSeq f then [(STm.app f [x], x)] else []
+      | _ => []) ++ singlesSs isSeq args
+
+def singlesSs (isSeq : String → Bool) : List STm → List (STm × STm)
+  | [] => []
+  | t :: ts => singlesS isSeq t ++ singlesSs isSeq ts
+
+end
+
+/-- What the `q` lines of a sequence rule's firing give: the root node, the
+binding, and per filter the member of each element's class that matched. -/
+structure SeqRead where
+  root : Option Nat := none
+  B : SBind := {}
+  members : List (String × List Nat) := []
+  /-- The name the next `qv` lines belong to: a column or a scalar. -/
+  lits : Option (String × Bool) := none
+  ok : Bool := true
+
+/-- Reads the binding lines of rule `r`'s firing. A class with a count `c:k`
+is `k` arguments of a rest sequence, and the count `k` of a filter's element. -/
+def readSeq (S : St P) (r : SeqRule) (lines : List (List String)) : SeqRead :=
+  let rests := r.items.filterMap fun it => match it with | .rest x => some x | _ => none
+  let entry (w : String) : Option (Nat × Nat) :=
+    match w.splitOn ":" with
+    | [c] => (S.node? c).map (·, 1)
+    | [c, k] => (S.node? c).bind fun c => k.toNat?.map (c, ·)
+    | _ => none
+  let push (xs : List (String × List SAtom)) (x : String) (a : SAtom) : List (String × List SAtom) :=
+    match xs.lookup x with
+    | some l => (xs.filter (·.1 != x)) ++ [(x, l ++ [a])]
+    | none => xs ++ [(x, [a])]
+  lines.foldl (fun (R : SeqRead) ws =>
+    match ws with
+    | ["q", n] => { R with root := S.node? n, ok := R.ok && (S.node? n).isSome }
+    | "qf" :: name :: es =>
+      match es.mapM entry with
+      | some xs => { R with B := { R.B with counts := R.B.counts ++ [(name, xs.map (·.2))] } }
+      | none => { R with ok := false }
+    | "qe" :: name :: ms =>
+      match ms.mapM S.node? with
+      | some xs => { R with members := R.members ++ [(name, xs)] }
+      | none => { R with ok := false }
+    | "qn" :: name :: vs =>
+      match vs.mapM entry with
+      | some xs =>
+        if rests.contains name then
+          { R with B := { R.B with seqs := R.B.seqs ++
+              [(name, xs.flatMap fun (c, k) => List.replicate k (SAtom.node c))] } }
+        else { R with B := { R.B with cols := R.B.cols ++ [(name, xs.map fun (c, _) => SAtom.node c)] } }
+      | none => { R with ok := false }
+    | ["ql", name] => { R with lits := some (name, false), B := { R.B with cols := R.B.cols ++ [(name, [])] } }
+    | ["qt", name] => { R with lits := some (name, true) }
+    | "qv" :: v =>
+      match R.lits with
+      | some (name, scalar) =>
+        match r.sorts.lookup name with
+        | some sort =>
+          let a := SAtom.lit sort (" ".intercalate v)
+          if scalar then { R with B := { R.B with scalars := R.B.scalars ++ [(name, a)] } }
+          else { R with B := { R.B with cols := push R.B.cols name a } }
+        | none => { R with ok := false }
+      | none => { R with ok := false }
+    | ["qs", name, v] =>
+      match S.node? v with
+      | some n => { R with B := { R.B with scalars := R.B.scalars ++ [(name, .node n)] } }
+      | none => { R with ok := false }
+    -- A multiplicity column or scalar: not read yet.
+    | _ => { R with ok := false }) {}
+
+/-- A sequence rule's firing, which merged `new`, the node it built, with the
+root node. The `seq` step proves the rule's two terms under the binding
+equal; each element's pattern instance is its member argument by argument;
+the left term is then the root and the right term the built node under the
+operators' laws. -/
+def seqFire (S : St P) (o : Nat) (x y : Nat) : St P := Id.run do
+  let lines := S.seqLines
+  let S := { S with seqLines := [] }
+  let skip (S : St P) : St P :=
+    let kind := "rewrite:sequence-rule"
+    { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1) }
+  let some (od, .seq (some r)) := ((S.prog.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl))
+    | return skip S
+  let R := readSeq S r lines
+  let some root := R.root | return S.fail "sequence rule: binding unreadable"
+  if !R.ok then return skip S
+  let new := if x == root then y else x
+  let some (L, T) := seqApply r R.B | return S.fail "sequence rule: no instance under the binding"
+  let (S, a) := addS S L
+  let (S, b) := addS S T
+  let (some a, some b) := (a, b) | return S.fail "sequence rule: instance ill-sorted"
+  let (S, st) := emit S (.seq od R.B a b) a b
+  let mut S := S
+  -- Each element's instance is its member.
+  for it in r.items do
+    if let .filter name p := it then
+      if let (some ms, .app g _) := (R.members.lookup name, p) then
+        for (m, i) in ms.zipIdx do
+          if let some t := patS (R.B.look (some i)) p then
+            let (S1, ti) := addS S t
+            S := S1
+            if let some ti := ti then
+              if S.fd ti != S.fd m then
+                let (S1, pf) := congStep S g ti m
+                S := S1.mergeBy ti m pf
+  -- An application to one argument is that argument.
+  for (t, x) in (singlesS (fun f => (S.prog.kind f).isAssoc) T).reverse do
+    let (S1, ti) := addS S t
+    let (S1, xi) := addS S1 x
+    S := S1
+    if let (some ti, some xi, .app f _) := (ti, xi, t) then
+      if S.fd ti != S.fd xi then
+        let (S1, pf) := congStepL S f ti xi
+        S := S1.mergeBy ti xi pf
+  let (S1, p1) := congStepL S r.op root a
+  let (S1, p2) : St P × Pf := match T with
+    | .app g _ => congStepL S1 g b new
+    | .atom _ => eqP S1 b new
+  if p1.isNone then return S1.fail "sequence rule: left side is not the root node"
+  if p2.isNone then return S1.fail "sequence rule: right side is not the built node"
+  let (S1, q) := transP S1 root b p1 (some (some st))
+  let (S1, q) := transP S1 root new q p2
+  return S1.mergeBy root new q
+
 /-- The engine's node `i` is definition `d`. An id is defined once between
 restores. -/
 def define (S : St P) (i : Nat) (d : Def) : St P :=
@@ -2687,9 +2843,11 @@ def stepCore (S : St P) (line : String) : St P :=
   | ["m", j, a, b] =>
     -- A sequence rule's firing: its binding is read, and not checked yet.
     if !S.seqLines.isEmpty then
-      let kind := "rewrite:sequence-rule"
-      { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), seqLines := [],
-               splices := [], opens := [], regroups := [], inverses := [] }
+      match S.node? a, S.node? b, S.fire with
+      | some a, some b, some (o, _) =>
+        let S := seqFire S o a b
+        { S with splices := [], opens := [], regroups := [], inverses := [] }
+      | _, _, _ => S.fail "sequence rule: unreadable"
     else
     match j.toNat?, S.node? a, S.node? b, S.fire with
     | some j, some a, some b, some (o, rw) =>
@@ -2888,7 +3046,7 @@ def stepCore (S : St P) (line : String) : St P :=
   | [""] => { S with events := S.events - 1 }
   | q :: rest =>
     -- The binding of a sequence rule's firing: kept for its `m` line.
-    if ["q", "qf", "qn", "ql", "qv", "qk", "qs", "qt", "qm"].contains q then
+    if ["q", "qf", "qe", "qn", "ql", "qv", "qk", "qs", "qt", "qm"].contains q then
       { S with seqLines := S.seqLines ++ [q :: rest], events := S.events - 1 }
     else S.fail "unreadable line"
   | _ => S.fail "unreadable line"

@@ -1561,7 +1561,59 @@ where
             && let Some(rule_id) = r.rule_id
         {
             eg.trace_fire(rule_id.to_usize());
-            eg.trace_seq(binding_lines(r, root, &m, eg));
+            let mut lines = binding_lines(r, root, &m, eg);
+            // `qe name m..`: per filter, the member of each element's class that
+            // matched the filter's pattern with the element's column values. The
+            // matcher keeps the values and not the member, so the filter's own
+            // sub-query is run again at the element's class, on the same snapshot.
+            if let Some(asm) = r.query_assembly() {
+                use crate::containers::DenseId;
+                use crate::seq_query::RowVal;
+                use std::fmt::Write;
+                let plan = crate::schedule::schedule_with_stats(&r.query, stats);
+                if let Some(cp) = collect_plan_of::<Cfg, L>(&plan) {
+                    for (fi, (f, (es, cols))) in
+                        asm.spec.filters.iter().zip(&asm.layout.filters).enumerate()
+                    {
+                        let classes: Vec<Cfg::G> = match es {
+                            RestRef::Seq(v) => m.seq_slice(*v).to_vec(),
+                            RestRef::Set(v) => m.set_slice(*v).to_vec(),
+                            RestRef::Mset(v) => {
+                                m.mset_slice(*v).iter().map(Cfg::mset_child_id).collect()
+                            }
+                        };
+                        let mut line = format!("qe {}", f.name);
+                        let mut ok = cp.filters.get(fi).is_some();
+                        for (j, &c) in classes.iter().enumerate() {
+                            let Some(fp) = cp.filters.get(fi) else { break };
+                            let rows = fp.probe(&*eg, &vindex, globals, pool, c);
+                            let hit = rows.iter().find(|row| {
+                                row.vals.iter().zip(cols).all(|(v, col)| match (v, col) {
+                                    (RowVal::Class(g), ColRef::Node(sv)) => {
+                                        m.seq_slice(*sv).get(j) == Some(g)
+                                    }
+                                    (RowVal::Lit(l), ColRef::Lit(lv)) => {
+                                        m.lit_seq_slice(*lv).get(j).map(|x| x.to_usize())
+                                            == Some(l.to_usize())
+                                    }
+                                    _ => true,
+                                })
+                            });
+                            match hit {
+                                Some(row) => {
+                                    let _ = write!(line, " {}", row.member.to_usize());
+                                }
+                                None => ok = false,
+                            }
+                        }
+                        if ok {
+                            lines.push_str(&line);
+                            lines.push('\n');
+                        }
+                    }
+                }
+            }
+            eg.trace_seq(lines);
         }
         let new =
             match crate::seq_rhs::build(&r.seq_rhs, lets, &r.seq_shape, &m, eg, model, globals) {

@@ -5,11 +5,11 @@ Written by `proofs/checker/scripts/check-replay.py --gap`. Each program's unprov
 witness in the stream, or gets no kernel step. A program's later failures can
 follow from the merge that event did not apply.
 
-29734 of 29808 `check-eq` proved; 74 not proved, in 39 programs.
+29743 of 29808 `check-eq` proved; 65 not proved, in 33 programs.
 
 | cause | programs | `check-eq` not proved | example |
 | --- | --- | --- | --- |
-| sequence rule: binding read, not checked | 25 | 38 | `egraph/tests/egg/collection_rules.egg` |
+| sequence rule: binding read, not checked | 19 | 29 | `egraph/tests/egg/collection_rules.egg` |
 | rule: unbound rest variable | 2 | 21 | `egraph/tests/egg/rhs_comprehensions.egg` |
 | definition: unreadable | 4 | 4 | `egraph/tests/egg/seq_rhs_too_wide.egg` |
 | rule: built node differs | 2 | 3 | `egraph/tests/egg/seq_flatten_rhs_nesting.egg` |
@@ -19,7 +19,7 @@ follow from the merge that event did not apply.
 | goal: its terms differ | 1 | 1 | `egraph/tests/egg/bench/until.native.egg` |
 | rule: argument differs | 1 | 1 | `egraph/tests/egg/bench/until.rules.egg` |
 | no kernel steps: p line | 1 | 1 | `egraph/tests/egg/conform-cc-cert/cs1_0043.egg` |
-| total | 39 | 74 | |
+| total | 33 | 65 | |
 
 ## Programs the reader does not read
 

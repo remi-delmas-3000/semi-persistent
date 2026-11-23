@@ -93,6 +93,7 @@ nodes, and a list of steps, each concluding that two nodes are equal
 | `cancel f s a b z` | step `s` concludes `f(a, z) = f(b, z)`, so `a = b`: `f` is `:cancellative`, or has `:inverse` and a unit |
 | `unit f a e` | `a = f()`, the application to no argument, is the unit `e` of `f` |
 | `prim f a e` | `a = f(c1, .., ck)`, a primitive applied to literals, is the literal `e` that `primOk` computes |
+| `seq o B a b` | the sequence rule of the command at `o`, under the binding `B`, yields the terms that are nodes `a` and `b` (`seqApply`) |
 
 `cong` covers congruence (children pairwise equal), a commutative operator's
 swapped children, and the associative operators: both sides flatten to their
@@ -124,6 +125,21 @@ premise `(i64::< a b) = true`. A multiplicity variable read as a value
 (`(RBig::scale a k)`) is the pattern `count k`, the `i64` literal that spells
 the count. The reader gives each literal of the program the spelling the
 stream uses for its value (`canonLit`: `0/1` is `0`, `4.0` is `4`).
+
+## Sequence rules
+
+A rule whose left side has a filter `(..g p)` is a sequence rule. Its meaning
+in the statement is given by an evaluator (`Seq.lean`, `seqApply`): under a
+binding (the rest sequences, each filter's elements with the values of the
+pattern's variables at each element, the scalars), the rule yields a left
+term (the root operator applied to the rest atoms and to one instance of `p`
+per element) and a right term built from the same elements. A model satisfies
+the rule when the two terms are equal under every binding and every valuation
+of the binding's atoms (`SeqSat`). The statement does not ask that a filter's
+elements be all the arguments that match `p`, and it does not restrict the
+atoms to their sorts: a model must satisfy more instances than the engine
+fires. The reader reads a sequence rule with no tag, no count on a filter,
+and a right side of variables, literals, applications and splices `..x`.
 
 ## What the reader reads
 
@@ -173,11 +189,11 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,734 |
-| programs with every `check-eq` proved, of 1,066 | 1,027 |
-| kernel steps checked | 16,547,782 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,743 |
+| programs with every `check-eq` proved, of 1,066 | 1,033 |
+| kernel steps checked | 16,547,839 |
 | steps the kernel rejects | 0 |
-| events replayed | 7,396,100 |
+| events replayed | 7,396,101 |
 | events whose check fails | 8,069 |
 | events the stream gives no witness for | 347 |
 

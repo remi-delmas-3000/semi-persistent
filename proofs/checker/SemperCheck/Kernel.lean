@@ -1,5 +1,6 @@
 import SemperCheck.Syntax
 import SemperCheck.Prim
+import SemperCheck.Seq
 import Std.Data.HashMap
 
 /-!
@@ -64,6 +65,9 @@ inductive Step where
   /-- `a = f(c1, .., ck)`, a primitive applied to literals, is the literal
   `e` it computes (`primOk`). -/
   | prim (f : String) (a e : Nat)
+  /-- The sequence rule of the command at `o`, under the binding `B` whose
+  atoms are nodes, yields the terms that are nodes `a` and `b`. -/
+  | seq (o : Nat) (B : SBind) (a b : Nat)
   deriving Repr, Inhabited
 
 structure Cert where
@@ -138,6 +142,12 @@ def lookup (n : Node) : Option Nat :=
 def intern : Term → Option Nat
   | .lit s v => C.lookup (.lit s v)
   | .app f args => (args.mapM intern).bind fun ids => C.lookup (.app f ids)
+
+/-- The node that is the term `t` over atoms, an atom `node n` being node `n`. -/
+def internS : STm → Option Nat
+  | .atom (.node n) => if n < C.nodes.size then some n else none
+  | .atom (.lit s v) => C.lookup (.lit s v)
+  | .app f args => (args.mapM internS).bind fun ids => C.lookup (.app f ids)
 
 mutual
 
@@ -381,6 +391,14 @@ def inferStep (acc : Array Concl) : Step → Option Concl
   | .nil f a x k e => if C.nilOk f a x k e then some ⟨a, e, 0⟩ else none
   | .unit f a e => if C.unitOk f a e then some ⟨a, e, 0⟩ else none
   | .prim f a e => if C.primStepOk f a e then some ⟨a, e, 0⟩ else none
+  | .seq o B a b =>
+    match C.decl? o with
+    | some (.seq (some r)) =>
+      match seqApply r B with
+      | some (L, R) =>
+        if C.internS L = some a ∧ C.internS R = some b then some ⟨a, b, o + 1⟩ else none
+      | none => none
+    | _ => none
   | .cancel f s a b z =>
     match acc[s]? with
     | some c => if C.cancelOk f c.a c.b a b z then some ⟨a, b, c.pos⟩ else none

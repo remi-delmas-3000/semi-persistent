@@ -1,0 +1,25 @@
+n 0 a
+t 0 a
+n 1 F 0
+t 1 F 0
+t 0 a
+t 1 F 0
+n 2 b
+t 2 b
+n 3 Cat 1 1 2
+t 3 Cat 1 1 2
+n 4 Plus 1:2
+r 499 w
+q 3
+qf fs 1 1
+qn x 0 0
+qn suf 0
+qe fs 1 1
+b 4
+m 0 4 3
+t 0 a
+t 1 F 0
+t 0 a
+t 1 F 0
+t 4 Plus 1 1
+g 554 3 4

@@ -484,6 +484,71 @@ def sortNames : SExp → List String
   | .list xs => atoms xs
   | .atom a => [a]
 
+/-- A sequence rule's right side at a position of sort `exp`: variables,
+literals, applications of declared operators, and splices `..x` as arguments. -/
+partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
+  | .atom a =>
+    if isLiteral a then
+      match litSort exp a with
+      | some s => pure (.lit s (canonLit s a))
+      | none => throw "a literal of another sort than its position"
+    else if a.startsWith ".." then throw "a splice that is no argument"
+    else if (E.globals.lookup a).isSome then throw "a let name in a sequence rule"
+    else match E.op? a with
+      | some _ => pure (.app a [])
+      | none => pure (.var a)
+  | .list (.atom f :: args) => do
+    let some d := E.op? f | throw s!"a sequence form ({f})"
+    let mut out : Array SArg := #[]
+    for (x, i) in args.zipIdx do
+      let exp := if d.kind.isAssoc then d.args.head? else d.args[i]?
+      match x with
+      | .atom a =>
+        if a.startsWith ".." then
+          if a.contains ':' || a.contains '{' || a.contains '[' then throw s!"a sequence form ({a})"
+          out := out.push (.splice (a.drop 2).toString)
+        else out := out.push (.tm (← E.seqRhs exp x))
+      | _ => out := out.push (.tm (← E.seqRhs exp x))
+    pure (.app f out.toList)
+  | _ => throw "a sequence form"
+
+/-- Whether a left side is a sequence rule's: one of its arguments is a
+filter `(..g p ..)`. -/
+def isSeqLhs : SExp → Bool
+  | .list (.atom _ :: items) => items.any fun it => match it with
+    | .list (.atom g :: _) => g.startsWith ".."
+    | _ => false
+  | _ => false
+
+/-- The sequence rule of a `rewrite` whose left side has a filter. -/
+def Env.seqRule (E : Env) (lhs rhs : SExp) (tags : List SExp) : Except String SeqRule :=
+  if !tags.isEmpty then .error "a sequence rule with a tag" else (go.run {}).map (·.1)
+where
+  go : PatM SeqRule := do
+    let .list (.atom f :: items) := lhs | throw "a sequence rule's left side"
+    let some d := E.op? f | throw s!"unknown operator {f}"
+    unless d.kind.isAssoc do throw "a filter under an operator that takes no sequence"
+    let exp := d.args.head?
+    let mut out : Array SItem := #[]
+    for it in items do
+      match it with
+      | .atom a =>
+        if a.startsWith ".." then
+          if a.contains ':' then throw s!"a sequence form ({a})"
+          out := out.push (.rest (a.drop 2).toString)
+        else out := out.push (.one (← E.pat exp it).1)
+      | .list [.atom g, p] =>
+        if g.startsWith ".." then
+          if g.contains ':' then throw s!"a sequence form ({g})"
+          out := out.push (.filter (g.drop 2).toString (← E.pat exp p).1)
+        else out := out.push (.one (← E.pat exp it).1)
+      | .list (.atom g :: _) =>
+        if g.startsWith ".." then throw s!"a sequence form ({g} with a tag)"
+        else out := out.push (.one (← E.pat exp it).1)
+      | _ => throw "a sequence rule's item"
+    let r ← E.seqRhs (some d.res) rhs
+    return { op := f, items := out.toList, rhs := r, sorts := (← get).sorts }
+
 /-- The operators applied in a pattern. -/
 def Pat.heads : Pat → List String
   | .var _ => []
@@ -542,7 +607,14 @@ def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Prog
     let (ta, sa) ← E.term none a
     let (tb, _) ← E.term (some sa) b
     return (E, { P with decls := P.decls ++ [(o, .goal ta tb)] })
-  | .list (.atom "rewrite" :: l :: r :: tags) => return rules E P o [E.rewriteRule l r tags]
+  | .list (.atom "rewrite" :: l :: r :: tags) =>
+    if isSeqLhs l then
+      match E.seqRule l r tags with
+      | .ok sr => return (E, { P with decls := P.decls ++ [(o, .seq (some sr))] })
+      | .error e =>
+        return ({ E with skipped := E.skipped ++ [(o, 0, e)] },
+                { P with decls := P.decls ++ [(o, .seq none)] })
+    else return rules E P o [E.rewriteRule l r tags]
   | .list (.atom "birewrite" :: l :: r :: tags) =>
     return rules E P o [E.rewriteRule l r tags, E.rewriteRule r l tags]
   | .list (.atom "rule" :: .list body :: .list actions :: _) =>

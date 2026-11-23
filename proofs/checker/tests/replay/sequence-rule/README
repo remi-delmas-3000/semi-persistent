@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types machine,bignum --trace` writes for `program.egg`.
+`bad.trace` differs in line 16: the `qn` line gives the rest sequence `suf` node 0 instead of node 2, so the rule's left term under the binding is not the root node.

@@ -1,5 +1,6 @@
 import SemperCheck.Syntax
 import SemperCheck.Prim
+import SemperCheck.Seq
 
 /-!
 # Models of a program
@@ -117,9 +118,24 @@ def RuleSat (r : Rule) : Prop :=
     (∀ e ∈ r.eqs, M.evalP σ ρ μ e.1 = M.evalP σ ρ μ e.2) →
     M.evalP σ ρ μ r.lhs = M.evalP σ ρ μ r.rhs
 
+/-- The value of a sequence rule's atom: `v` names the values. -/
+def evA (v : Nat → M.α) : SAtom → M.α
+  | .node n => v n
+  | .lit s t => M.lit s t
+
+def evS (v : Nat → M.α) : STm → M.α
+  | .atom a => M.evA v a
+  | .app f args => M.app f (args.map (evS v))
+
+/-- A sequence rule holds when the two terms it yields are equal, under every
+binding and every valuation of the binding's atoms (`Seq.lean`). -/
+def SeqSat (r : SeqRule) : Prop :=
+  ∀ (v : Nat → M.α) (B : SBind) (L R : STm), seqApply r B = some (L, R) → M.evS v L = M.evS v R
+
 def DeclSat : Decl → Prop
   | .axiom l r => M.eval l = M.eval r
   | .rules rs => ∀ r, some r ∈ rs → M.RuleSat r
+  | .seq r => ∀ sr, r = some sr → M.SeqSat sr
   | .goal _ _ => True
 
 /-- `M` satisfies the signatures and laws of `P`'s operators, interprets each

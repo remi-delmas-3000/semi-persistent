@@ -108,6 +108,70 @@ def Rule.vars (r : Rule) : List String :=
 def Rule.rests (r : Rule) : List String :=
   r.lhs.rests ++ r.rhs.rests ++ (r.eqs.map fun e => e.1.rests ++ e.2.rests).flatten
 
+/-! ## Sequence rules
+
+A sequence rule's left side is one application whose arguments are items: a
+rest sequence `..x`, a filter `(..g p)` that stands for any number of
+arguments each an instance of the pattern `p`, or one pattern. -/
+
+/-- An atom of a sequence rule's binding: a value named by a number, or a
+literal. -/
+inductive SAtom where
+  | node (n : Nat)
+  | lit (s v : String)
+  deriving Repr, Inhabited, DecidableEq
+
+/-- A term over atoms: what a sequence rule's side is under a binding. -/
+inductive STm where
+  | atom (a : SAtom)
+  | app (f : String) (args : List STm)
+  deriving Repr, Inhabited
+
+inductive SItem where
+  | rest (x : String)
+  | filter (name : String) (p : Pat)
+  | one (p : Pat)
+  deriving Repr, Inhabited
+
+mutual
+
+/-- A sequence rule's right side. -/
+inductive SRhs where
+  | var (x : String)
+  | lit (s v : String)
+  | app (f : String) (args : List SArg)
+  deriving Repr, Inhabited
+
+/-- An argument of a right-side application: one term, or the splice `..x`
+of a filter's elements or of a rest sequence. -/
+inductive SArg where
+  | tm (t : SRhs)
+  | splice (x : String)
+  deriving Repr, Inhabited
+
+end
+
+structure SeqRule where
+  /-- The root operator. -/
+  op : String
+  items : List SItem
+  rhs : SRhs
+  /-- The sort of each variable, for the reader of a binding's literals. -/
+  sorts : List (String × String) := []
+  deriving Repr, Inhabited
+
+/-- A binding of a sequence rule. -/
+structure SBind where
+  /-- Each rest sequence, an argument with count `k` given `k` times. -/
+  seqs : List (String × List SAtom) := []
+  /-- Per filter, the count of each element (1 outside a multiset). -/
+  counts : List (String × List Nat) := []
+  /-- Each variable of a filter's pattern: its value at each element. -/
+  cols : List (String × List SAtom) := []
+  /-- Each variable bound once. -/
+  scalars : List (String × SAtom) := []
+  deriving Repr, Inhabited
+
 /-- A command that states or asks for an equality. -/
 inductive Decl where
   /-- `(union l r)`. -/
@@ -116,6 +180,9 @@ inductive Decl where
   `none` stands for a rule the reader does not read, so the position of every
   other rule does not depend on which ones it drops. -/
   | rules (rs : List (Option Rule))
+  /-- A rule with a filter (`SeqRule`); `none` when the reader does not read
+  it. -/
+  | seq (r : Option SeqRule)
   /-- `(check-eq l r)`. -/
   | goal (l r : Term)
   deriving Repr, Inhabited

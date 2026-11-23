@@ -269,6 +269,24 @@ theorem intern_sound (hwf : wfNodes C.nodes = true) :
     congr 1
     exact mapM_some_map args ids hids fun a _ j hj => intern_sound hwf a j hj
 
+theorem internS_sound (hwf : wfNodes C.nodes = true) :
+    ∀ (t : STm) (i : Nat), C.internS t = some i → nval M C.nodes i = M.evS (nval M C.nodes) t
+  | .atom (.node n), i, h => by
+    rw [internS] at h
+    split at h
+    · cases h
+      rw [Model.evS, Model.evA]
+    · cases h
+  | .atom (.lit s v), i, h => by
+    rw [internS] at h
+    rw [nval_lit (lookup_some h), Model.evS, Model.evA]
+  | .app f args, i, h => by
+    rw [internS, Option.bind_eq_some_iff] at h
+    obtain ⟨ids, hids, hi⟩ := h
+    rw [nval_app hwf (lookup_some hi), Model.evS]
+    congr 1
+    exact mapM_some_map args ids hids fun a _ j hj => internS_sound hwf a j hj
+
 /-- The assignment `σ` names, through node values. -/
 def sval (M : Model) (nodes : Array Node) (σ : List (String × Nat)) (x : String) : M.α :=
   match σ.lookup x with
@@ -1015,6 +1033,23 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
           rw [instP_sound hwf σ ρ μ _ a hl, instP_sound hwf σ ρ μ _ b hrr]
           exact hrule _ _ _ (sortsOk_sound hwf hws hT hso) (restsOk_sound hwf hws hT hro)
             (multsOk_sound hmu) (eqsOk_sound hwf σ ρ μ r.eqs ps heqs hpv)
+        · cases h
+      · cases h
+    · cases h
+  | seq o B a b =>
+    simp only [inferStep] at h
+    split at h
+    · rename_i r hd
+      split at h
+      · rename_i L R hap
+        split at h
+        · rename_i hok
+          cases h
+          have hs := hM.2.2.1 o _ (decl_mem hd) (Nat.lt_succ_self o)
+          simp only [Model.DeclSat] at hs
+          simp only
+          rw [internS_sound hwf L a hok.1, internS_sound hwf R b hok.2]
+          exact hs r rfl _ B L R hap
         · cases h
       · cases h
     · cases h
