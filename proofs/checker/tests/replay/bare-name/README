@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`, whose rule `(f a)` matches `(f (b))`: a bare name in a matched pattern is a variable, also when a nullary operator has that name.
+`bad.trace` differs in line 7: the `e` line binds the variable to node 1 instead of node 0.

@@ -135,7 +135,7 @@ def SeqSat (r : SeqRule) : Prop :=
 def DeclSat : Decl → Prop
   | .axiom l r => M.eval l = M.eval r
   | .rules rs => ∀ r, some r ∈ rs → M.RuleSat r
-  | .seq r => ∀ sr, r = some sr → M.SeqSat sr
+  | .seq rs => ∀ sr, some sr ∈ rs → M.SeqSat sr
   | .goal _ _ => True
 
 /-- `M` satisfies the signatures and laws of `P`'s operators, interprets each

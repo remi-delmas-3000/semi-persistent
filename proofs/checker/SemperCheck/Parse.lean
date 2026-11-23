@@ -222,6 +222,10 @@ structure VarSorts where
   pending : List (String × String) := []
   /-- Each multiplicity variable with the least count it takes. -/
   mults : List (String × Nat) := []
+  /-- A built side is being read (a `rewrite`'s right side, a `union`
+  action): a bare name no pattern bound is the operator of that name. In a
+  matched pattern a bare name is a variable, also when an operator has it. -/
+  built : Bool := false
 
 /-- A rule the reader does not read fails with the reason, which
 `parseProgramWhy` reports. -/
@@ -273,13 +277,14 @@ partial def Env.pat (E : Env) (exp : Option String) : SExp → PatM (Pat × Opti
       | some (t, s) => do
         if exp.isSome && exp != some s then throw "a let name of another sort than its position"
         pure (ofTerm t, some s)
-      | none =>
-        match E.op? a with
-        | some d => do
+      | none => do
+        let st0 ← get
+        match st0.built && (st0.sorts.lookup a).isNone, E.op? a with
+        | true, some d => do
           unless d.kind.isAssoc || d.args.isEmpty do throw "an operator without its arguments"
           if exp.isSome && exp != some d.res then throw "an operator of another sort than its position"
           pure (.app a [], some d.res)
-        | none => do
+        | _, _ => do
           -- A multiplicity variable read as a value is its count, an `i64`.
           if ((← get).mults.lookup a).isSome then
             if exp.isSome && exp != some "i64" then throw "a multiplicity variable at another sort than i64"
@@ -421,6 +426,7 @@ where
       | some _ => throw "a :when that is no list"
       | none => pure []
     let sl := (← E.pat none (match lhs with | .list [.atom "=", _, p] => p | _ => lhs)).2
+    modify fun (st : VarSorts) => { st with built := true }
     let (r, _) ← E.pat sl rhs
     finish l r (root ++ gs)
 
@@ -444,6 +450,7 @@ where
       let st ← get
       let one : PatM Rule := do
         let eqs ← bodyEqs
+        modify fun (st : VarSorts) => { st with built := true }
         let (pp, qq) ← E.eqn (substS lets p) (substS lets q)
         finish pp qq eqs
       let r := (one.run st).map (·.1)
@@ -483,6 +490,11 @@ def Env.decl (E : Env) (f : String) (args : List String) (res : String) (tags : 
 def sortNames : SExp → List String
   | .list xs => atoms xs
   | .atom a => [a]
+
+/-- A ground term as a sequence rule's right side. -/
+partial def ofTermS : Term → SRhs
+  | .lit s v => .lit s v
+  | .app f args => .app f (args.map fun t => .tm (ofTermS t))
 
 /-- The sort of a computed value, as far as its form tells. -/
 def SNum.sort? (sorts : List (String × String)) : SNum → Option String
@@ -538,10 +550,12 @@ partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
       | some s => pure (.lit s (canonLit s a))
       | none => throw "a literal of another sort than its position"
     else if a.startsWith ".." then throw "a splice that is no argument"
-    else if (E.globals.lookup a).isSome then throw "a let name in a sequence rule"
-    else match E.op? a with
-      | some _ => pure (.app a [])
-      | none => do
+    else if let some (t, _) := E.globals.lookup a then pure (ofTermS t)
+    else do
+      let st0 ← get
+      match (st0.sorts.lookup a).isNone, E.op? a with
+      | true, some _ => pure (.app a [])
+      | _, _ => do
         let st ← get
         if (st.mults.lookup a).isSome || (st.pending.lookup s!"#cnt:{a}").isSome then
           pure (.val (.cnt a (exp.getD "i64")))
@@ -771,14 +785,39 @@ def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Prog
   | .list (.atom "rewrite" :: l :: r :: tags) =>
     if isSeqLhs l || hasComp r then
       match E.seqRule l r tags with
-      | .ok sr => return (E, { P with decls := P.decls ++ [(o, .seq (some sr))] })
+      | .ok sr => return (E, { P with decls := P.decls ++ [(o, .seq [some sr])] })
       | .error e =>
         return ({ E with skipped := E.skipped ++ [(o, 0, e)] },
-                { P with decls := P.decls ++ [(o, .seq none)] })
+                { P with decls := P.decls ++ [(o, .seq [none])] })
     else return rules E P o [E.rewriteRule l r tags]
   | .list (.atom "birewrite" :: l :: r :: tags) =>
     return rules E P o [E.rewriteRule l r tags, E.rewriteRule r l tags]
   | .list (.atom "rule" :: .list body :: .list actions :: _) =>
+    if actions.any hasComp then
+      -- A `rule` with a comprehension: one sequence rule per `union` action,
+      -- its left side the action's first term, matched through the body's
+      -- one pattern.
+      let unions := actions.filterMap fun a => match a with
+        | .list [.atom "union", p, q] => some (p, q)
+        | _ => none
+      let rs := unions.map fun (p, q) =>
+        match body with
+        | [b] =>
+          let go : PatM SeqRule := do
+            let (bp, _) ← E.pat none b
+            modify fun (st : VarSorts) => { st with built := true }
+            let (l, sl) ← E.pat none p
+            let r ← E.seqRhs sl q
+            return { op := "", items := [], lhs := some l, body := some bp, rhs := r,
+                     sorts := (← get).sorts }
+          ((go.run {}).map fun (x : SeqRule × VarSorts) => x.1 : Except String SeqRule)
+        | _ => .error "a rule with a comprehension and a body of several facts"
+      let why := rs.zipIdx.filterMap fun (r, j) => match r with
+        | .error e => some (o, j, e)
+        | .ok _ => none
+      return ({ E with skipped := E.skipped ++ why },
+              { P with decls := P.decls ++ [(o, .seq (rs.map fun r => r.toOption))] })
+    else
     return rules E P o (E.ruleRules body actions)
   | .list (.atom "push" :: _) | .list (.atom "pop" :: _) | .list (.atom "include" :: _) =>
     .error "push, pop and include are not supported"

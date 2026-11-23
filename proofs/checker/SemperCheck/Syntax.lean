@@ -192,6 +192,10 @@ structure SeqRule where
   /-- A left side that is a pattern with rest variables and counts and no
   filter: it replaces `op` and `items`. -/
   lhs : Option Pat := none
+  /-- For a `rule`: the pattern of its body, which the engine matches. It is
+  no part of what the rule yields: the replay reads the binding from its
+  match. -/
+  body : Option Pat := none
   rhs : SRhs
   /-- The `:when` conditions: each computes `true` for the rule to apply. -/
   guards : List SNum := []
@@ -224,9 +228,10 @@ inductive Decl where
   `none` stands for a rule the reader does not read, so the position of every
   other rule does not depend on which ones it drops. -/
   | rules (rs : List (Option Rule))
-  /-- A rule with a filter (`SeqRule`); `none` when the reader does not read
-  it. -/
-  | seq (r : Option SeqRule)
+  /-- The sequence rules of a command (`SeqRule`), in order: one for a
+  `rewrite`, one per `union` action for a `rule`; `none` for one the reader
+  does not read. -/
+  | seq (rs : List (Option SeqRule))
   /-- `(check-eq l r)`. -/
   | goal (l r : Term)
   deriving Repr, Inhabited

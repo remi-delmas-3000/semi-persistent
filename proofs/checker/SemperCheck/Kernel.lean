@@ -65,9 +65,9 @@ inductive Step where
   /-- `a = f(c1, .., ck)`, a primitive applied to literals, is the literal
   `e` it computes (`primOk`). -/
   | prim (f : String) (a e : Nat)
-  /-- The sequence rule of the command at `o`, under the binding `B` whose
+  /-- Sequence rule `j` of the command at `o`, under the binding `B` whose
   atoms are nodes, yields the terms that are nodes `a` and `b`. -/
-  | seq (o : Nat) (B : SBind) (a b : Nat)
+  | seq (o j : Nat) (B : SBind) (a b : Nat)
   deriving Repr, Inhabited
 
 structure Cert where
@@ -391,13 +391,16 @@ def inferStep (acc : Array Concl) : Step → Option Concl
   | .nil f a x k e => if C.nilOk f a x k e then some ⟨a, e, 0⟩ else none
   | .unit f a e => if C.unitOk f a e then some ⟨a, e, 0⟩ else none
   | .prim f a e => if C.primStepOk f a e then some ⟨a, e, 0⟩ else none
-  | .seq o B a b =>
+  | .seq o j B a b =>
     match C.decl? o with
-    | some (.seq (some r)) =>
-      match seqApply r B with
-      | some (L, R) =>
-        if C.internS L = some a ∧ C.internS R = some b then some ⟨a, b, o + 1⟩ else none
-      | none => none
+    | some (.seq rs) =>
+      match rs[j]? with
+      | some (some r) =>
+        match seqApply r B with
+        | some (L, R) =>
+          if C.internS L = some a ∧ C.internS R = some b then some ⟨a, b, o + 1⟩ else none
+        | none => none
+      | _ => none
     | _ => none
   | .cancel f s a b z =>
     match acc[s]? with

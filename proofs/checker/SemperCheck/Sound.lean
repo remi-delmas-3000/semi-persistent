@@ -1036,20 +1036,23 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
         · cases h
       · cases h
     · cases h
-  | seq o B a b =>
+  | seq o j B a b =>
     simp only [inferStep] at h
     split at h
-    · rename_i r hd
+    · rename_i rs hd
       split at h
-      · rename_i L R hap
+      · rename_i r hr
         split at h
-        · rename_i hok
-          cases h
-          have hs := hM.2.2.1 o _ (decl_mem hd) (Nat.lt_succ_self o)
-          simp only [Model.DeclSat] at hs
-          simp only
-          rw [internS_sound hwf L a hok.1, internS_sound hwf R b hok.2]
-          exact hs r rfl _ B L R hap
+        · rename_i L R hap
+          split at h
+          · rename_i hok
+            cases h
+            have hs := hM.2.2.1 o _ (decl_mem hd) (Nat.lt_succ_self o)
+            simp only [Model.DeclSat] at hs
+            simp only
+            rw [internS_sound hwf L a hok.1, internS_sound hwf R b hok.2]
+            exact hs r (List.mem_of_getElem? hr) _ B L R hap
+          · cases h
         · cases h
       · cases h
     · cases h

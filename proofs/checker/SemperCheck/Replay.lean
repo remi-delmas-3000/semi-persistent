@@ -2651,14 +2651,14 @@ two terms equal; each element's pattern instance is its member argument by
 argument; an application of a sequence operator to one argument is that
 argument; the left term is then `root` and the right term `new` under the
 operators' laws. -/
-def seqFinish (S : St P) (od : Nat) (r : SeqRule) (B : SBind) (members : List (String × List Nat))
+def seqFinish (S : St P) (od j : Nat) (r : SeqRule) (B : SBind) (members : List (String × List Nat))
     (root new : Nat) : St P := Id.run do
   let some (L, T) := seqApply r B
     | return S.fail s!"sequence rule: no instance under the binding | left {(match r.lhs with | some p => (patB B (B.look none) p).isSome | none => (itemsArgs B r.items).isSome)}, right {(rhsS r B {} r.rhs).isSome}, binding {repr B}, rule {repr r.rhs}"
   let (S, a) := addS S L
   let (S, b) := addS S T
   let (some a, some b) := (a, b) | return S.fail "sequence rule: instance ill-sorted"
-  let (S, st) := emit S (.seq od B a b) a b
+  let (S, st) := emit S (.seq od j B a b) a b
   let mut S := S
   -- Each element's instance is its member.
   for it in r.items do
@@ -2698,7 +2698,7 @@ def seqFinish (S : St P) (od : Nat) (r : SeqRule) (B : SBind) (members : List (S
 give the match, as for a rule, and the binding is read from it (a variable
 bound to a literal node is that literal; a rest variable's nodes in order; a
 multiplicity variable's count). -/
-def seqFireP (S : St P) (od : Nat) (r : SeqRule) (p : Pat) (x y : Nat) : St P :=
+def seqFireP (S : St P) (od j : Nat) (r : SeqRule) (p : Pat) (x y : Nat) : St P :=
   let (atoms, rhs) := (S.atoms.toList, S.rhs)
   let (res, w) := ((walkQ p).run).run { S := S, atoms, rhs }
   let S := w.S
@@ -2715,7 +2715,7 @@ def seqFireP (S : St P) (od : Nat) (r : SeqRule) (p : Pat) (x y : Nat) : St P :=
                          [(v, ns.map SAtom.node), ((v.drop 2).toString, ns.map SAtom.node)],
                        kcounts := w.μ }
     let new := if S.fd nl == S.fd x then y else x
-    seqFinish S od r B [] il new
+    seqFinish S od j r B [] il new
 
 /-- A sequence rule's firing, which merged `new`, the node it built, with the
 root node. The `seq` step proves the rule's two terms under the binding
@@ -2728,13 +2728,13 @@ def seqFire (S : St P) (o : Nat) (x y : Nat) : St P := Id.run do
   let skip (S : St P) : St P :=
     let kind := "rewrite:sequence-rule"
     { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1) }
-  let some (od, .seq (some r)) := ((S.prog.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl))
+  let some (od, .seq [some r]) := ((S.prog.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl))
     | return skip S
   let R := readSeq S r lines
   let some root := R.root | return S.fail "sequence rule: binding unreadable"
   if !R.ok then return skip S
   let new := if x == root then y else x
-  return seqFinish S od r R.B R.members root new
+  return seqFinish S od 0 r R.B R.members root new
 
 /-- The engine's node `i` is definition `d`. An id is defined once between
 restores. -/
@@ -2892,11 +2892,14 @@ def stepCore (S : St P) (line : String) : St P :=
     | some j, some a, some b, some (o, rw) =>
       -- The engine cites a rule by an offset inside its command.
       match ((S.prog.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl)) with
-      | some (od, Decl.seq (some sr)) =>
-        match sr.lhs with
-        | some p => seqFireP S od sr p a b
-        | none => S.fail "sequence rule: no binding"
-      | some (od, Decl.seq none) => S.fail s!"rule: outside the reader's language | {od} 0"
+      | some (od, Decl.seq rs) =>
+        match rs[j]? with
+        | some (some sr) =>
+          -- A `rule` is matched through its body, a `rewrite` through its left side.
+          match sr.body.orElse fun _ => sr.lhs with
+          | some p => seqFireP S od j sr p a b
+          | none => S.fail "sequence rule: no binding"
+        | _ => S.fail s!"rule: outside the reader's language | {od} {j}"
       | some (od, Decl.rules rs) =>
         match rs[j]? with
         | some (some r) =>

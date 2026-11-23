@@ -19,7 +19,7 @@ doc/book/examples/05-illegal-comprehension-filter.egg	0	0	skipped
 doc/book/examples/05-illegal-set-multiplicity.egg	0	0	skipped
 doc/book/examples/05-rewrite-directions.egg	3	3	replayed
 doc/book/examples/05-rewrite-rules.egg	6	6	replayed
-doc/book/examples/05-rhs-comprehensions.egg	5	7	replayed
+doc/book/examples/05-rhs-comprehensions.egg	7	7	replayed
 doc/book/examples/05-rule-actions.egg	2	2	replayed
 doc/book/examples/05-rules-over-mset.egg	5	5	replayed
 doc/book/examples/05-rules-over-seq.egg	9	9	replayed
@@ -1589,7 +1589,7 @@ egraph/tests/egg/reject_rest_var_shared_set.egg	0	0	skipped
 egraph/tests/egg/rewrite_commute.egg	1	1	replayed
 egraph/tests/egg/rewrite_constant_fold.egg	1	1	replayed
 egraph/tests/egg/rhs_comprehension_filter_reject_node.egg	0	0	skipped
-egraph/tests/egg/rhs_comprehensions.egg	13	15	replayed
+egraph/tests/egg/rhs_comprehensions.egg	15	15	replayed
 egraph/tests/egg/rhs_empty_application.egg	0	0	skipped
 egraph/tests/egg/rhs_empty_application_identity.egg	0	2	replayed
 egraph/tests/egg/rhs_mult_aci_refused.egg	0	0	skipped
@@ -1634,7 +1634,7 @@ egraph/tests/egg/seq_flatten_order_independent.egg	2	2	replayed
 egraph/tests/egg/seq_flatten_order_independent_control.egg	2	2	replayed
 egraph/tests/egg/seq_flatten_rhs_nesting.egg	0	2	replayed
 egraph/tests/egg/seq_global_filter.egg	1	1	replayed
-egraph/tests/egg/seq_global_rhs.egg	0	1	replayed
+egraph/tests/egg/seq_global_rhs.egg	1	1	replayed
 egraph/tests/egg/seq_hashcons_miss_min.egg	1	1	replayed
 egraph/tests/egg/seq_no_value.egg	0	0	replayed
 egraph/tests/egg/seq_reject_ac.egg	0	0	skipped

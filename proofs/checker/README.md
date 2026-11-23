@@ -155,6 +155,10 @@ equal neighbours of a rest sequence are one row with their number as count.
 
 ## What the reader reads
 
+In a matched pattern a bare name is a variable, also when a nullary operator
+has that name (`(rewrite (f a) (g a))` matches `(f (b))`); in a built side a
+bare name no pattern bound is the operator. The engine reads them so.
+
 The reader (`Parse.lean`) keeps the theory it returns implied by the
 program's: it reads no rule from a command whose
 pattern or guard uses a filter or a comprehension. A
@@ -201,9 +205,9 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,781 |
-| programs with every `check-eq` proved, of 1,066 | 1,048 |
-| kernel steps checked | 16,548,078 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,786 |
+| programs with every `check-eq` proved, of 1,066 | 1,051 |
+| kernel steps checked | 16,548,102 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,101 |
 | events whose check fails | 8,069 |
