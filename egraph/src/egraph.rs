@@ -4289,6 +4289,11 @@ where
                                 .map(|(&a, &b)| (a, b)),
                         );
                         self.pending_premises = Some(prem);
+                        // `i`: the node rewritten, then the rule applied.
+                        if self.tracing() {
+                            let w = self.trace_rule((*lhs_node, *rhs_node));
+                            self.trace_law('i', std::iter::once(g).chain(w));
+                        }
                         let m = self.merge_justified(
                             g,
                             nid,
@@ -4297,6 +4302,7 @@ where
                                 node_b: nid,
                             },
                         );
+                        self.trace_law_end();
                         self.pending_premises = None;
                         m
                     } else {

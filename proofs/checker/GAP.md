@@ -5,7 +5,7 @@ Written by `proofs/checker/scripts/check-replay.py --gap`. Each program's unprov
 witness in the stream, or gets no kernel step. A program's later failures can
 follow from the merge that event did not apply.
 
-29732 of 29808 `check-eq` proved; 76 not proved, in 41 programs.
+29734 of 29808 `check-eq` proved; 74 not proved, in 39 programs.
 
 | cause | programs | `check-eq` not proved | example |
 | --- | --- | --- | --- |
@@ -14,14 +14,13 @@ follow from the merge that event did not apply.
 | no witness: rewrite:outside-a-firing | 5 | 11 | `doc/book/examples/05-seq-except.egg` |
 | definition: unreadable | 4 | 4 | `egraph/tests/egg/seq_rhs_too_wide.egg` |
 | rule: built node differs | 2 | 3 | `egraph/tests/egg/seq_flatten_rhs_nesting.egg` |
-| no witness: ACInterReduction | 2 | 2 | `egraph/tests/egg/a_interreduction_lazy.egg` |
 | no kernel steps: m line | 1 | 2 | `egraph/tests/egg/rhs_empty_application_identity.egg` |
 | unread rule: a multiplicity constraint other than >= | 1 | 2 | `egraph/tests/egg/rhs_mult_expr.egg` |
 | no kernel steps: i line | 1 | 1 | `egraph/tests/egg/ac_minmono_cc1_0897.egg` |
 | goal: its terms differ | 1 | 1 | `egraph/tests/egg/bench/until.native.egg` |
 | rule: argument differs | 1 | 1 | `egraph/tests/egg/bench/until.rules.egg` |
 | no kernel steps: p line | 1 | 1 | `egraph/tests/egg/conform-cc-cert/cs1_0043.egg` |
-| total | 41 | 76 | |
+| total | 39 | 74 | |
 
 ## Programs the reader does not read
 

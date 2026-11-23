@@ -1448,6 +1448,31 @@ def invTry (S : St P) (a b : Nat) : St P :=
   let (S, p) := if p.isSome then (S, p) else (let (S, q) := try_ S b a; symmP S b a q)
   S.mergeBy a b p
 
+/-- `n = other` for a node `n` of the sequence operator `f` whose arguments,
+read through nested applications, hold those of `l` as a run: `n` is
+`f(before, l, after)` read through, which is `f(before, r, after)` argument by
+argument since `l = r` is one class, which is `other` under `f`'s laws. The
+run is the first one, as the engine takes it. -/
+def seqReduce (S : St P) (f : String) (n other l r : Nat) : St P × Option (Option Nat) := Id.run do
+  let args := kview S f n
+  let ls := kview S f l
+  if ls.isEmpty || S.fd l != S.fd r then return (S, none)
+  let at_ := (List.range (args.length + 1 - ls.length)).find? fun i =>
+    ((args.drop i).take ls.length).map S.fd == ls.map S.fd
+  let some i := at_ | return (S, none)
+  let pre := args.take i
+  let suf := args.drop (i + ls.length)
+  let (S, x1) := appNode S f (pre ++ [l] ++ suf)
+  let (S, x2) := appNode S f (pre ++ [r] ++ suf)
+  let (some x1, some x2) := (x1, x2) | return (S, none)
+  let (S, p1) := congStepL S f n x1
+  let (S, p2) := congStep S f x1 x2
+  let (S, p3) := congStepL S f x2 other
+  if p1.isNone || p2.isNone || p3.isNone then return (S, none)
+  let (S, p) := transP S n x2 p1 p2
+  let (S, p) := transP S n other p p3
+  return (S, p)
+
 /-- The kernel steps of a `v` line, whose check passed: the fact the line's
 case rests on is derived from `inv` steps (`f(x, g(x))` is the unit), a `nil`
 step for the powers, and a `cancel` step, and joins the classes; the proof of
@@ -2737,6 +2762,19 @@ def stepCore (S : St P) (line : String) : St P :=
     | some a, some b, some n, some rs =>
       -- The derivation is computed first, on classes the state shares; the
       -- kernel steps are emitted after, when the state is held once again.
+      -- A sequence operator: one rule, applied to a run of the node's arguments.
+      let seqOp : Option String := match S.defOf n with
+        | some (.app f _) => if S.prog.kind f == .assoc then some f else none
+        | _ => none
+      if let some f := seqOp then
+        match rs with
+        | [(l, r, _)] =>
+          let other := if n == a then b else a
+          match seqReduce S f n other l r with
+          | (S, some p) => S.mergeBy n other (some p)
+          | (S, none) => S.fail "completion: rule does not apply to the sequence"
+        | _ => S.fail "completion: a sequence rewrite takes one rule"
+      else
       match interReduce S S.atRound a b n rs with
       | .ok c =>
         let (S, r) := emitChain S c

@@ -1,0 +1,28 @@
+n 0 A
+t 0 A
+n 1 B
+t 1 B
+n 2 S 0 1
+t 2 S 0 1
+n 3 C
+t 3 C
+n 4 X
+t 4 X
+n 5 S 3 4
+t 5 S 3 4
+x 592 2 5
+t 0 A
+t 1 B
+t 4 X
+n 6 S 0 1 4
+t 6 S 0 1 4
+t 3 C
+t 4 X
+t 4 X
+n 7 S 3 4 4
+t 7 S 3 4 4
+mark 1
+o
+i 7 6 7 2 5 1
+g 624 6 7
+restore 1

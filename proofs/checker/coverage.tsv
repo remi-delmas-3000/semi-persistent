@@ -82,9 +82,9 @@ doc/book/examples/cost-models/28-dump-egraph.egg	0	0	replayed
 doc/book/examples/cost-models/28-file.egg	0	0	replayed
 doc/book/examples/cost-models/28-solvers.egg	0	0	replayed
 egraph/tests/egg/a_flatten_build.egg	7	7	replayed
-egraph/tests/egg/a_interreduction_eager.egg	0	1	replayed
+egraph/tests/egg/a_interreduction_eager.egg	1	1	replayed
 egraph/tests/egg/a_interreduction_gap.egg	0	0	skipped
-egraph/tests/egg/a_interreduction_lazy.egg	0	1	replayed
+egraph/tests/egg/a_interreduction_lazy.egg	1	1	replayed
 egraph/tests/egg/a_matrix_kron_fusion.egg	3	3	replayed
 egraph/tests/egg/a_prebound_fixed_child.egg	1	1	replayed
 egraph/tests/egg/a_singleton_collapse.egg	9	9	replayed
