@@ -247,7 +247,7 @@ the reader rejects 5, which write a count above 65,536.
 | --- | --- |
 | `check-eq` proved (`replay_sound` covers them), of 31,099 | 31,096 |
 | programs with every `check-eq` proved, of 1,161 | 1,158 |
-| kernel steps checked | 16,635,974 |
+| kernel steps checked | 16,635,987 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,438,518 |
 | events whose check fails | 8,069 |

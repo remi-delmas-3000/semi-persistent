@@ -1731,6 +1731,20 @@ def plainArgs (S : St P) (f : String) (x : Nat) : St P × Option Nat :=
   | some (.app g cs) => if g == f && !cs.isEmpty then monoNode S f cs else (S, some x)
   | _ => (S, some x)
 
+/-- `low = y`, for `low = f(unit, rest)`: under `f`'s laws; or, when `rest` is
+one argument, `low` is that argument by the unit law, which is in `y`'s
+class. -/
+def lowTo (S : St P) (f : String) (low : Nat) (rest : List Nat) (y : Nat) : St P × Pf :=
+  let (S, p) := congStepL S f low y
+  if p.isSome then (S, p)
+  else
+    match rest with
+    | [r0] =>
+      let (S, p1) := congStepL S f low r0
+      let (S, p2) := eqP S r0 y
+      if p1.isNone || p2.isNone then (S, none) else transP S low y p1 p2
+    | _ => (S, none)
+
 /-- `x = y` when node `x`, an application of `f`, holds `g(c)` and what `c` is
 read as (`c` itself, or the arguments of `c` when it is an application of
 `f`): `x` is `f(f(c, g(c)), rest)` read through, `f(c, g(c))` is the unit by
@@ -1767,7 +1781,7 @@ def invDirect (S : St P) (f : String) (x y : Nat) : St P × Pf := Id.run do
     let (S, p1) : St P × Pf := if mid == x then (S, some none) else
       (let (S, t) := emit S (.cong f x mid []) x mid; (S, some (some t)))
     let (S, t2) := emit S (.cong f mid low [s]) mid low
-    let (S, p3) := congStepL S f low y
+    let (S, p3) := lowTo S f low rest y
     if p3.isNone then return (S, none)
     let (S, p) := transP S x low p1 (some (some t2))
     return transP S x y p p3
@@ -1801,7 +1815,7 @@ def invDirect (S : St P) (f : String) (x y : Nat) : St P × Pf := Id.run do
             | (S, none) => (S, mid, mid, none)
           | (S, none) => (S, pn, pn, none)
       let (S, p1) := congStepL S f xp mid
-      let (S, p3) := congStepL S f low y
+      let (S, p3) := lowTo S f low rest y
       if p0.isNone || p1.isNone || pml.isNone || p3.isNone then return (S, none)
       let (S, p) := transP S x mid p0 p1
       let (S, p) := transP S x low p pml
@@ -1838,7 +1852,8 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
   -- One `cong` by `f`'s laws from the current node to `next`.
   let hop (S : St P) (cur next : Nat) (pf : Pf) (peak : Bool := false) : St P × Pf :=
     let (S, p) := congStepL S f cur next peak
-    let S := S.mergeBy cur next p
+    -- A hop with no step is not a merge: the chain then has no proof.
+    let S := if p.isSome then S.mergeBy cur next p else S
     transP S start next pf p
   match monoNode S f c.first with
   | (S', some t) =>
@@ -1863,7 +1878,7 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
     if let some l' := l' then
       if l' != st.l then
         let (S', pl) := congStep S f l' st.l
-        S := S'.mergeBy l' st.l pl
+        S := if pl.isSome then S'.mergeBy l' st.l pl else S'
         let (S', t1') := monoNode S f (List.replicate st.q l' ++ st.rest) st.q
         S := S'
         let some t1' := t1' | return (S, none)
@@ -1882,7 +1897,7 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
         S := S'
         pure (some (some s2))
       | none => pure none
-    S := S.mergeBy t1 t2 p2
+    S := if p2.isSome then S.mergeBy t1 t2 p2 else S
     let (S', pf') := transP S start t2 pf p2
     S := S'; pf := pf'
     cur := t2
@@ -1893,7 +1908,7 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
       if let some r' := r' then
         if r' != r then
           let (S', pr) := congStep S f r r'
-          S := S'.mergeBy r r' pr
+          S := if pr.isSome then S'.mergeBy r r' pr else S'
           let (S', t2') := monoNode S f (List.replicate st.q r' ++ st.rest) st.q
           S := S'
           let some t2' := t2' | return (S, none)
@@ -1916,7 +1931,7 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
     if let some t' := t' then
       if t' != target then
         let (S', pt) := congStep S f t' target
-        S := S'.mergeBy t' target pt
+        S := if pt.isSome then S'.mergeBy t' target pt else S'
         let (S', pf') := hop S cur t' pf
         S := S'; pf := pf'; cur := t'
   let (S', pf') := hop S cur target pf
@@ -3186,6 +3201,27 @@ def stepCore (S : St P) (line : String) : St P :=
         let (S, p) := if p.isSome then (S, p) else viaSplice S a b
         let (S, p) := if p.isSome then (S, p) else
           (let (S, q) := viaSplice S b a; symmP S b a q)
+        -- An argument that is an application of `f` and stands for the class
+        -- of one of the other node's arguments: the node with that argument
+        -- in its place, argument by argument, is the other node under `f`'s
+        -- laws.
+        let viaArgs (S : St P) (x y : Nat) : St P × Pf :=
+          match S.defOf x, S.defOf y with
+          | some (.app _ xs), some (.app g ys) =>
+            if g != f then (S, none)
+            else
+              match appNode S f (xs.map fun a => (ys.find? fun d => S.fd d == S.fd a).getD a) with
+              | (S, some x2) =>
+                if x2 == x then (S, none)
+                else
+                  let (S, p1) := congStep S f x x2
+                  let (S, p2) := congStepL S f x2 y
+                  if p1.isNone || p2.isNone then (S, none) else transP S x y p1 p2
+              | (S, none) => (S, none)
+          | _, _ => (S, none)
+        let (S, p) := if p.isSome then (S, p) else viaArgs S a b
+        let (S, p) := if p.isSome then (S, p) else
+          (let (S, q) := viaArgs S b a; symmP S b a q)
         S.mergeBy a b p
       else match S.defOf a, S.defOf b with
         | some (.app _ _), _ | _, some (.app _ _) => S.fail "law: arguments differ"
@@ -3379,8 +3415,11 @@ def stepCore (S : St P) (line : String) : St P :=
           let other := if target == a then b else a
           let (S, q) := eqP S other start
           let (S, q) := transP S other target q pf
-          if q.isSome then S.mergeBy other target q else invTry S a b
-        | none => invTry S a b
+          -- With no derivation step: the line's node, which is in one of the
+          -- two classes, holds an inverse pair and is the other node.
+          if q.isSome then S.mergeBy other target q
+          else invTry S n (if S.fd n == S.fd a then b else a)
+        | none => invTry S n (if S.fd n == S.fd a then b else a)
       | .error e => S.fail e
     | _, _, _, _ => S.fail "completion: unreadable"
   | "p" :: a :: b :: rest =>
