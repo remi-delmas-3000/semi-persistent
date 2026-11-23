@@ -984,7 +984,7 @@ egraph/tests/egg/conform-flatten/f2_0131.egg	1	1	replayed
 egraph/tests/egg/conform-flatten/f2_0132.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0133.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0134.egg	0	0	unread
-egraph/tests/egg/conform-flatten/f2_0135.egg	2	5	replayed
+egraph/tests/egg/conform-flatten/f2_0135.egg	5	5	replayed
 egraph/tests/egg/conform-flatten/f2_0136.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0137.egg	3	3	replayed
 egraph/tests/egg/conform-flatten/f2_0138.egg	0	0	replayed
@@ -1018,7 +1018,7 @@ egraph/tests/egg/conform-flatten/f2_0165.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0166.egg	10	10	replayed
 egraph/tests/egg/conform-flatten/f2_0167.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0168.egg	10	10	replayed
-egraph/tests/egg/conform-flatten/f2_0169.egg	243	270	replayed
+egraph/tests/egg/conform-flatten/f2_0169.egg	270	270	replayed
 egraph/tests/egg/conform-flatten/f2_0170.egg	8	8	replayed
 egraph/tests/egg/conform-flatten/f2_0171.egg	38	38	replayed
 egraph/tests/egg/conform-flatten/f2_0172.egg	0	0	unread
@@ -1279,7 +1279,7 @@ egraph/tests/egg/conform/c1_0026.egg	0	0	replayed
 egraph/tests/egg/conform/c1_0027.egg	2	2	replayed
 egraph/tests/egg/conform/c1_0028.egg	4	4	replayed
 egraph/tests/egg/conform/c1_0029.egg	1	1	replayed
-egraph/tests/egg/conform/c1_0030.egg	49	50	replayed
+egraph/tests/egg/conform/c1_0030.egg	50	50	replayed
 egraph/tests/egg/conform/c1_0031.egg	11	11	replayed
 egraph/tests/egg/conform/c1_0032.egg	4	4	replayed
 egraph/tests/egg/conform/c1_0033.egg	0	0	replayed

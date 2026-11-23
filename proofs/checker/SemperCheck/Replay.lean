@@ -832,6 +832,15 @@ def viewArgs (S : St P) (f : String) (tree : Bool) (W : List Wit) (todo : List (
     | none => viewArgs S f tree W rest (out.push a)
 termination_by (W.length, todo.length)
 
+/-- The regrouping of `W` that reads the bound argument `b`: one that names
+the node `b` itself when there is one; else the first that names its class and
+does not name another of the arguments `others`, which is then the one it
+reads. -/
+def Wit.regroupOf (S : St P) (f : String) (W : List Wit) (b : Nat) (others : List Nat) : Option Wit :=
+  match W.find? (fun w => w.2.1 == b && Wit.reads S f false none none b w) with
+  | some w => some w
+  | none => W.find? (fun w => Wit.reads S f false none none b w && !others.contains w.2.1)
+
 /-- For a sequence operator, the positions in the bound arguments `bound` that
 the regroupings `W` apply to, given the view `view` of the matched node: the
 two are read left to right; a bound argument in the class of the view's next
@@ -847,9 +856,12 @@ def regroupAt (S : St P) (f : String) (W : List Wit) (bound view : List Nat) (po
     match view with
     | [] => out.reverse
     | v :: vs =>
-      if S.fd b == S.fd v then regroupAt S f W rest vs (pos + 1) out
+      -- An argument a regrouping names, which is not the view's next node, is
+      -- regrouped even when the two are in one class.
+      let named := b != v && W.any fun w => w.2.1 == b && Wit.reads S f false none none b w
+      if !named && S.fd b == S.fd v then regroupAt S f W rest vs (pos + 1) out
       else
-        match W.find? (Wit.reads S f false none none b) with
+        match Wit.regroupOf S f W b rest with
         | some w =>
           let n := match S.defOf w.2.2.1 with
             | some (.app _ cs) => cs.length
@@ -858,44 +870,62 @@ def regroupAt (S : St P) (f : String) (W : List Wit) (bound view : List Nat) (po
         | none => regroupAt S f W rest vs (pos + 1) out
 
 /-- The bound arguments with the one at each position of `at` replaced by the
-arguments of the member of the regrouping that reads it. -/
+arguments of the member of the regrouping that reads it, and an argument of
+such a member that another regrouping reads replaced the same way: one pass
+per regrouping, each over the arguments the pass before put in. -/
 def viewAt (S : St P) (f : String) (W : List Wit) (at_ : List Nat) (bound : List Nat) : List Nat :=
   Id.run do
     let mut W := W
-    let mut out : Array Nat := #[]
-    for (b, i) in bound.zipIdx do
-      match (if at_.contains i then W.find? (Wit.reads S f false none none b) else none) with
-      | some w =>
-        W := W.erase w
-        match S.defOf w.2.2.1 with
-        | some (.app _ cs) => out := out ++ cs.toArray
-        | _ => out := out.push b
-      | none => out := out.push b
-    return out.toList
+    let mut cur : Array (Nat × Bool) := (bound.zipIdx.map fun (b, i) => (b, at_.contains i)).toArray
+    for _ in W do
+      let mut out : Array (Nat × Bool) := #[]
+      for ((b, fresh), i) in cur.toList.zipIdx do
+        let later := ((cur.toList.drop (i + 1)).filter (·.2)).map (·.1)
+        match (if fresh then Wit.regroupOf S f W b later else none) with
+        | some w =>
+          W := W.erase w
+          match S.defOf w.2.2.1 with
+          | some (.app _ cs) => out := out ++ (cs.map (·, true)).toArray
+          | _ => out := out.push (b, false)
+        | none => out := out.push (b, false)
+      cur := out
+    return (cur.map (·.1)).toList
 
 /-- The arguments the regroupings `W` read that the bound arguments `bound`
 do not hold, because the operator's laws dropped them from the match's view:
 - a regrouping in the unit's class reads the unit, which the unit law adds;
 - a regrouping in a class no bound argument is in, whose inverse the node's
   view `view` holds, reads a member of that class, which the inverse law adds
-  together with that inverse. -/
+  together with that inverse;
+- for an idempotent operator, a regrouping in a class the view holds an
+  argument of reads one copy of the bound argument, and the view's argument is
+  another. -/
 def droppedRegroups (S : St P) (f : String) (W : List Wit) (bound view : List Nat) : List Nat :=
   let u := S.unit f
   let inv := (S.prog.opDecl? f).bind (·.inverse)
-  W.flatMap fun w =>
-    if (u.map S.fd) == some (S.fd w.2.1) then u.toList
-    else if bound.any (fun b => S.fd b == S.fd w.2.1) then []
+  -- Each regrouping stands for one occurrence of its class: a bound argument
+  -- answers one regrouping, and `left` holds those not answered yet.
+  (W.foldl (fun (acc : List Nat × List Nat) w =>
+    let (out, left) := acc
+    if (u.map S.fd) == some (S.fd w.2.1) then (out ++ u.toList, left)
+    -- A set's argument the view holds as it is and a regrouping reads too:
+    -- the argument twice is the argument once.
+    else if S.prog.kind f == .aci && view.any (fun v => S.fd v == S.fd w.2.1) then
+      (out ++ (bound.find? (fun b => S.fd b == S.fd w.2.1)).toList, left)
     else
-      match inv with
-      | some g =>
-        match view.find? (fun e => match S.defOf e with
-            | some (.app h [y]) => h == g && S.fd y == S.fd w.2.1
-            | _ => false) with
-        -- The class is named by a plain member: the kernel reads through an
-        -- application of `f`.
-        | some e => [(S.plain.getD (S.fd w.2.1) none).getD w.2.1, e]
-        | none => []
-      | none => []
+      match left.find? (fun b => S.fd b == S.fd w.2.1) with
+      | some b => (out, left.erase b)
+      | none =>
+        match inv with
+        | some g =>
+          match view.find? (fun e => match S.defOf e with
+              | some (.app h [y]) => h == g && S.fd y == S.fd w.2.1
+              | _ => false) with
+          -- The class is named by a plain member: the kernel reads through an
+          -- application of `f`.
+          | some e => (out ++ [(S.plain.getD (S.fd w.2.1) none).getD w.2.1, e], left)
+          | none => (out, left)
+        | none => (out, left)) ([], bound)).1
 
 /-- The fields of an `e` line after the operator: the nodes of the argument
 patterns, and between `[` and `]` the nodes of each rest variable, in the
@@ -1754,6 +1784,22 @@ def firstOf : List Pat → Option (String × Option Nat)
 
 end
 
+/-- The regroupings of `W` that name a later argument of `rest` at this level
+(at a position of `only`, when given): each is that argument's, so the
+arguments of an earlier argument's member do not take it. -/
+def keptWits (tree : Bool) (only : Option (List Nat)) (at_ : Nat) (rest : List Nat) (W : List Wit) :
+    List Wit :=
+  if tree then [] else
+    (rest.zipIdx.foldl (fun (acc : List Wit × List Wit) (r, j) =>
+      let mine := match only with
+        | some ps => ps.contains (at_ + 1 + j)
+        | none => true
+      match (if mine then acc.2.find? (fun v => v.2.1 == r) else none) with
+      | some v => (v :: acc.1, acc.2.erase v)
+      | none => acc) ([], W)).1
+
+def innerWits (kept W : List Wit) : List Wit := W.filter fun v => !kept.contains v
+
 mutual
 
 /-- Node `x`, which lies under the opening `ctx` and starts after `off`
@@ -1811,13 +1857,16 @@ def openArgs (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (W : List 
       if let some to := again then (S, some to, W, off + 1) else
       match (if here then Wit.pick S f tree ctx (offOf S f tree off) a rest W else none) with
       | some w =>
-        if _h : (W.erase w).length < W.length then
-          match openNode S f tree (some w.1) w.2.2.1 (W.erase w) none off with
+        if _h : (innerWits (keptWits tree only out.size rest (W.erase w)) (W.erase w)).length < W.length then
+          let kept := keptWits tree only out.size rest (W.erase w)
+          match openNode S f tree (some w.1) w.2.2.1
+              (innerWits (keptWits tree only out.size rest (W.erase w)) (W.erase w)) none off with
           | (S, some (m', pm), W', n) =>
             -- `a` is the member, which is its opened form.
             let (S, p) := eqP S a w.2.2.1
             let (S, q) := transP S a m' p pm
             let S := S.mergeBy a m' q
+            let W' := W' ++ kept.reverse
             if W'.length ≤ (W.erase w).length then (S, some m', W', n) else (S, none, W, off)
           | (S, none, _, _) => (S, none, W, off)
         else (S, none, W, off)
@@ -2000,7 +2049,7 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
           viewAt S f wr (regroupAt S f wr csU vd) csU
         else viewArgs S f false wr (csU.map (·, none))
       if h != f || (let (x, y) := nf2 S0 f vd vc; x != y) then
-        throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} read as {vd}, classes {(nf2 S0 f vd vc).1}; pattern bound to {cs} read as {vc}, classes {(nf2 S0 f vd vc).2}; openings {wo.map fun w => (w.2.1, w.2.2.1, w.2.2.2.1, w.2.2.2.2)}, regroupings {wr.map fun w => (w.2.1, w.2.2.1)}"
+        throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} read as {vd}, classes {(nf2 S0 f vd vc).1}; pattern bound to {cs} read as {vc}, classes {(nf2 S0 f vd vc).2}; openings {wo.map fun w => (w.2.1, w.2.2.1, w.2.2.2.1, w.2.2.2.2)}, regroupings {wr.map fun w => (w.2.1, w.2.2.1)}, placed {regroupAt S f wr csU vd}, fd {csU.map S.fd} {wr.map fun w => S.fd w.2.1}"
     | _ => throw "rule: matched node differs"
     set { w with atoms := rest, atomIdx := w.atomIdx + 1, σ := σ, ρ := ρ, μ := μ }
     let i ← instOf f ic.toList n (some w.atomIdx)

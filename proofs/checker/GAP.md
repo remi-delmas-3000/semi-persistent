@@ -5,11 +5,10 @@ Written by `proofs/checker/scripts/check-replay.py --gap`. Each program's unprov
 witness in the stream, or gets no kernel step. A program's later failures can
 follow from the merge that event did not apply.
 
-29682 of 29808 `check-eq` proved; 126 not proved, in 52 programs.
+29713 of 29808 `check-eq` proved; 95 not proved, in 49 programs.
 
 | cause | programs | `check-eq` not proved | example |
 | --- | --- | --- | --- |
-| rule: matched node differs | 3 | 31 | `egraph/tests/egg/conform-flatten/f2_0169.egg` |
 | no witness: rewrite:untraced-firing | 20 | 27 | `egraph/tests/egg/collection_rules.egg` |
 | rule: unbound rest variable | 2 | 21 | `egraph/tests/egg/rhs_comprehensions.egg` |
 | no witness: Cancellative | 2 | 11 | `egraph/tests/egg/cancel_lattice.egg` |
@@ -25,7 +24,7 @@ follow from the merge that event did not apply.
 | goal: its terms differ | 1 | 1 | `egraph/tests/egg/bench/until.native.egg` |
 | no kernel steps: p line | 1 | 1 | `egraph/tests/egg/conform-cc-cert/cs1_0043.egg` |
 | rule: no line for a literal | 1 | 1 | `doc/book/examples/05-rewrite-rules.egg` |
-| total | 52 | 126 | |
+| total | 49 | 95 | |
 
 ## Programs the reader does not read
 
