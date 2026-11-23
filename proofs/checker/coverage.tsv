@@ -159,7 +159,7 @@ egraph/tests/egg/alg_tags_reject_idem_inverse.egg	0	0	skipped
 egraph/tests/egg/alg_tags_reject_idem_needs_ac.egg	0	0	skipped
 egraph/tests/egg/alg_tags_reject_idem_nilpotent.egg	0	0	skipped
 egraph/tests/egg/atomic_bit_child_before_and_after_node.egg	5	5	replayed
-egraph/tests/egg/atomic_bit_inverse_after_splice.egg	0	3	replayed
+egraph/tests/egg/atomic_bit_inverse_after_splice.egg	3	3	replayed
 egraph/tests/egg/atomic_bit_last_node_collapses.egg	4	4	replayed
 egraph/tests/egg/atomic_bit_leaf_gains_node.egg	3	3	replayed
 egraph/tests/egg/atomic_bit_merge_spliced_side.egg	6	6	replayed
@@ -1517,7 +1517,7 @@ egraph/tests/egg/ground_mult_too_wide.egg	0	0	skipped
 egraph/tests/egg/ground_mult_zero.egg	0	0	skipped
 egraph/tests/egg/group_inverse_cancel.egg	1	1	replayed
 egraph/tests/egg/group_inverse_multiplicity.egg	1	1	replayed
-egraph/tests/egg/group_inverse_virtual_sum.egg	0	1	replayed
+egraph/tests/egg/group_inverse_virtual_sum.egg	1	1	replayed
 egraph/tests/egg/guard_div_by_zero_error.egg	0	0	skipped
 egraph/tests/egg/i64_all_ops.egg	18	18	replayed
 egraph/tests/egg/i64_wrapping_saturating.egg	10	10	replayed
@@ -1532,7 +1532,7 @@ egraph/tests/egg/identity_recanon_mset.egg	1	1	replayed
 egraph/tests/egg/identity_recanon_set.egg	1	1	replayed
 egraph/tests/egg/inverse_cancel_after_merge.egg	2	2	replayed
 egraph/tests/egg/inverse_cancel_after_merge_control.egg	1	1	replayed
-egraph/tests/egg/inverse_cancel_keeps_atomic_pair.egg	0	1	replayed
+egraph/tests/egg/inverse_cancel_keeps_atomic_pair.egg	1	1	replayed
 egraph/tests/egg/lazy_budget_prior_abort.egg	0	0	skipped
 egraph/tests/egg/lazy_budget_rules_growth.egg	0	0	skipped
 egraph/tests/egg/lit_pattern_bignum.egg	1	1	replayed

@@ -1395,6 +1395,59 @@ def latticeP (S : St P) (x y : Nat) (pos neg : List (Nat × Nat)) : St P × Opti
     return (S1, q)
   | (S1, none) => return (S1, none)
 
+/-- `x = y` when node `x`, an application of `f`, holds `g(c)` and what `c` is
+read as (`c` itself, or the arguments of `c` when it is an application of
+`f`): `x` is `f(f(c, g(c)), rest)` read through, `f(c, g(c))` is the unit by
+the `inv` step, and `f(unit, rest)` is `y` by the unit law. -/
+def invDirect (S : St P) (f : String) (x y : Nat) : St P × Pf := Id.run do
+  let (some (.app _ _), some u) := (S.defOf x, S.unit f) | return (S, none)
+  let args := kview S f x
+  let g := (S.prog.opDecl? f).bind (·.inverse)
+  if !(S.prog.kind f == .ac || S.prog.kind f == .aci) then return (S, none)
+  for q in args do
+    let some (.app h [c]) := S.defOf q | continue
+    if some h != g then continue
+    let take (cs : List Nat) : Option (List Nat) :=
+      cs.foldl (fun (r : Option (List Nat)) k =>
+        r.bind fun r => if r.contains k then some (r.erase k) else none) (some (args.erase q))
+    let open_ := match S.defOf c with
+      | some (.app h' _) => if h' == f then take (kview S f c) else none
+      | _ => none
+    let some rest := (take [c]).orElse fun _ => open_ | continue
+    let (S, pn) := appNode S f [c, q]
+    let some pn := pn | return (S, none)
+    let (S, s) := emit S (.inv f pn c q u) pn u
+    if rest.isEmpty then
+      -- `x` is `f(c, g(c))` read through.
+      let (S, p1) : St P × Pf := if pn == x then (S, some none) else
+        (let (S, t) := emit S (.cong f x pn []) x pn; (S, some (some t)))
+      let (S, p) := transP S x u p1 (some (some s))
+      let (S, p3) := eqP S u y
+      if p3.isNone then return (S, none)
+      return transP S x y p p3
+    let (S, mid) := appNode S f (pn :: rest)
+    let (S, low) := appNode S f (u :: rest)
+    let (some mid, some low) := (mid, low) | return (S, none)
+    let (S, p1) : St P × Pf := if mid == x then (S, some none) else
+      (let (S, t) := emit S (.cong f x mid []) x mid; (S, some (some t)))
+    let (S, t2) := emit S (.cong f mid low [s]) mid low
+    let (S, p3) := congStepL S f low y
+    if p3.isNone then return (S, none)
+    let (S, p) := transP S x low p1 (some (some t2))
+    return transP S x y p p3
+  return (S, none)
+
+/-- The merge of `a` and `b` by `invDirect`, from either node: for a
+completion merge whose derivation gives no kernel step. -/
+def invTry (S : St P) (a b : Nat) : St P :=
+  let try_ (S : St P) (x y : Nat) : St P × Pf :=
+    match S.defOf x with
+    | some (.app f _) => invDirect S f x y
+    | _ => (S, none)
+  let (S, p) := try_ S a b
+  let (S, p) := if p.isSome then (S, p) else (let (S, q) := try_ S b a; symmP S b a q)
+  S.mergeBy a b p
+
 /-- The kernel steps of a `v` line, whose check passed: the fact the line's
 case rests on is derived from `inv` steps (`f(x, g(x))` is the unit), a `nil`
 step for the powers, and a `cancel` step, and joins the classes; the proof of
@@ -2572,6 +2625,9 @@ def stepCore (S : St P) (line : String) : St P :=
           | _, some (.app g _) => g
           | _, _ => ""
         let (S, p) := congStepL S f a b
+        let (S, p) := if p.isSome then (S, p) else invDirect S f a b
+        let (S, p) := if p.isSome then (S, p) else
+          (let (S, q) := invDirect S f b a; symmP S b a q)
         S.mergeBy a b p
       else match S.defOf a, S.defOf b with
         | some (.app _ _), _ | _, some (.app _ _) => S.fail "law: arguments differ"
@@ -2690,8 +2746,8 @@ def stepCore (S : St P) (line : String) : St P :=
           let other := if target == a then b else a
           let (S, q) := eqP S other start
           let (S, q) := transP S other target q pf
-          S.mergeBy other target q
-        | none => S.merge a b
+          if q.isSome then S.mergeBy other target q else invTry S a b
+        | none => invTry S a b
       | .error e => S.fail e
     | _, _, _, _ => S.fail "completion: unreadable"
   | "p" :: a :: b :: rest =>
