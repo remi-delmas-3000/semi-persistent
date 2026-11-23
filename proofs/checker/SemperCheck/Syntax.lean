@@ -133,6 +133,16 @@ inductive SItem where
   | one (p : Pat)
   deriving Repr, Inhabited
 
+/-- A value a sequence rule computes from its binding: a literal, a scalar
+bound to a literal, the number of elements of a filter, or a primitive
+applied to such values. -/
+inductive SNum where
+  | lit (s v : String)
+  | var (x : String)
+  | count (g : String)
+  | prim (f : String) (args : List SNum)
+  deriving Repr, Inhabited
+
 mutual
 
 /-- A sequence rule's right side. -/
@@ -140,6 +150,8 @@ inductive SRhs where
   | var (x : String)
   | lit (s v : String)
   | app (f : String) (args : List SArg)
+  /-- The literal a computed value is. -/
+  | val (e : SNum)
   deriving Repr, Inhabited
 
 /-- An argument of a right-side application: one term, or the splice `..x`
@@ -156,6 +168,8 @@ structure SeqRule where
   op : String
   items : List SItem
   rhs : SRhs
+  /-- The `:when` conditions: each computes `true` for the rule to apply. -/
+  guards : List SNum := []
   /-- The sort of each variable, for the reader of a binding's literals. -/
   sorts : List (String × String) := []
   deriving Repr, Inhabited

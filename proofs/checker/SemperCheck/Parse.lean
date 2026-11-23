@@ -484,6 +484,37 @@ def sortNames : SExp → List String
   | .list xs => atoms xs
   | .atom a => [a]
 
+/-- The sort of a computed value, as far as its form tells. -/
+def SNum.sort? (sorts : List (String × String)) : SNum → Option String
+  | .lit s _ => some s
+  | .var x => sorts.lookup x
+  | .count _ => some "i64"
+  | .prim f _ => (primSig f).map (·.2)
+
+/-- A value a sequence rule computes: a literal, a scalar, `(count g)`, or a
+primitive, which may be written without its sort (`>=` for `i64::>=`, by its
+first argument's sort). -/
+partial def Env.seqNum (E : Env) (exp : Option String) : SExp → PatM SNum
+  | .atom a =>
+    if isLiteral a then
+      match litSort exp a with
+      | some s => pure (.lit s (canonLit s a))
+      | none => throw "a literal of another sort than its position"
+    else pure (.var a)
+  | .list [.atom "count", .atom g] => pure (.count g)
+  | .list (.atom f :: args) => do
+    let first ← match args with
+      | x :: _ => E.seqNum none x
+      | [] => throw "a primitive with no argument"
+    let s := first.sort? (← get).sorts
+    let name := if (primSig f).isSome then f else s!"{s.getD "i64"}::{f}"
+    let some (as, _) := primSig name | throw s!"a sequence form ({f})"
+    unless as.length == args.length do throw s!"a primitive with another number of arguments ({f})"
+    let mut out : Array SNum := #[]
+    for (x, srt) in args.zip as do out := out.push (← E.seqNum (some srt) x)
+    pure (.prim name out.toList)
+  | _ => throw "a sequence form"
+
 /-- A sequence rule's right side at a position of sort `exp`: variables,
 literals, applications of declared operators, and splices `..x` as arguments. -/
 partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
@@ -497,7 +528,11 @@ partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
     else match E.op? a with
       | some _ => pure (.app a [])
       | none => pure (.var a)
+  | .list [.atom "count", .atom g] => pure (.val (.count g))
   | .list (.atom f :: args) => do
+    if (E.op? f).isNone then
+      -- A primitive: the literal it computes.
+      return .val (← E.seqNum exp (.list (.atom f :: args)))
     let some d := E.op? f | throw s!"a sequence form ({f})"
     let mut out : Array SArg := #[]
     for (x, i) in args.zipIdx do
@@ -522,7 +557,9 @@ def isSeqLhs : SExp → Bool
 
 /-- The sequence rule of a `rewrite` whose left side has a filter. -/
 def Env.seqRule (E : Env) (lhs rhs : SExp) (tags : List SExp) : Except String SeqRule :=
-  if !tags.isEmpty then .error "a sequence rule with a tag" else (go.run {}).map (·.1)
+  match tags with
+  | [] | [.atom ":when", .list _] => (go.run {}).map (·.1)
+  | _ => .error "a sequence rule with a tag other than :when"
 where
   go : PatM SeqRule := do
     let .list (.atom f :: items) := lhs | throw "a sequence rule's left side"
@@ -542,12 +579,21 @@ where
           if g.contains ':' then throw s!"a sequence form ({g})"
           out := out.push (.filter (g.drop 2).toString (← E.pat exp p).1)
         else out := out.push (.one (← E.pat exp it).1)
+      -- `:except` says which arguments the engine gives the filter; a binding
+      -- names them, so the rule's instances are the same without it.
+      | .list [.atom g, p, .atom ":except", .atom _] =>
+        if g.startsWith ".." && !g.contains ':' then
+          out := out.push (.filter (g.drop 2).toString (← E.pat exp p).1)
+        else throw s!"a sequence form ({g})"
       | .list (.atom g :: _) =>
         if g.startsWith ".." then throw s!"a sequence form ({g} with a tag)"
         else out := out.push (.one (← E.pat exp it).1)
       | _ => throw "a sequence rule's item"
     let r ← E.seqRhs (some d.res) rhs
-    return { op := f, items := out.toList, rhs := r, sorts := (← get).sorts }
+    let mut guards : Array SNum := #[]
+    if let [_, .list gs] := tags then
+      for g in gs do guards := guards.push (← E.seqNum (some "bool") g)
+    return { op := f, items := out.toList, rhs := r, guards := guards.toList, sorts := (← get).sorts }
 
 /-- The operators applied in a pattern. -/
 def Pat.heads : Pat → List String

@@ -1,4 +1,5 @@
 import SemperCheck.Syntax
+import SemperCheck.Prim
 
 /-!
 # What a sequence rule yields under a binding
@@ -74,7 +75,27 @@ def spliceOf (r : SeqRule) (B : SBind) (x : String) : Option (List STm) :=
 
 mutual
 
+/-- The value of `e` under the binding: a filter's count is the number of its
+elements, as an `i64`. -/
+def numS (B : SBind) : SNum → Option Val
+  | .lit s v => Val.parse s v
+  | .var x =>
+    match B.scalars.lookup x with
+    | some (.lit s v) => Val.parse s v
+    | _ => none
+  | .count g => (B.counts.lookup g).map fun ks => .i64 ks.length
+  | .prim f args => (numsS B args).bind (primEval f)
+
+def numsS (B : SBind) : List SNum → Option (List Val)
+  | [] => some []
+  | e :: es => (numS B e).bind fun v => (numsS B es).map (v :: ·)
+
+end
+
+mutual
+
 def rhsS (r : SeqRule) (B : SBind) : SRhs → Option STm
+  | .val e => (numS B e).bind fun v => v.spell.map fun t => .atom (.lit v.sortName t)
   | .var x => (B.scalars.lookup x).map .atom
   | .lit s v => some (.atom (.lit s v))
   | .app f args => (argsS r B args).map (.app f)
@@ -86,8 +107,13 @@ def argsS (r : SeqRule) (B : SBind) : List SArg → Option (List STm)
 
 end
 
-/-- The two terms rule `r` equates under binding `B`. -/
+/-- The two terms rule `r` equates under binding `B`, when each of its
+conditions computes `true`. -/
 def seqApply (r : SeqRule) (B : SBind) : Option (STm × STm) :=
+  if !(r.guards.all fun g => match numS B g with
+      | some (.bool true) => true
+      | _ => false) then none
+  else
   (itemsArgs B r.items).bind fun ls => (rhsS r B r.rhs).map fun R => (.app r.op ls, R)
 
 end SemperCheck

@@ -387,6 +387,18 @@ def primSig (f : String) : Option (List String × String) :=
       else none
     | _ => none
 
+/-- The sort of a value. -/
+def Val.sortName : Val → String
+  | .bool _ => "bool"
+  | .i64 _ => "i64"
+  | .u64 _ => "u64"
+  | .usize _ => "usize"
+  | .ibig _ => "IBig"
+  | .ubig _ => "UBig"
+  | .rbig _ _ => "RBig"
+  | .f64 _ => "f64"
+  | .str _ => "String"
+
 /-- A spelling of a value, for the literal a nested primitive evaluates to. -/
 def Val.spell : Val → Option String
   | .bool true => some "true"
