@@ -5,13 +5,11 @@ Written by `proofs/checker/scripts/check-replay.py --gap`. Each program's unprov
 witness in the stream, or gets no kernel step. A program's later failures can
 follow from the merge that event did not apply.
 
-31097 of 31099 `check-eq` proved; 2 not proved, in 2 programs.
+31099 of 31099 `check-eq` proved; 0 not proved, in 0 programs.
 
 | cause | programs | `check-eq` not proved | example |
 | --- | --- | --- | --- |
-| law: not an application | 1 | 1 | `egraph/tests/egg/mult_build_flatten_product.egg` |
-| rule: unreadable | 1 | 1 | `egraph/tests/egg/mult_rhs_splice_rest.egg` |
-| total | 2 | 2 | |
+| total | 0 | 0 | |
 
 ## Programs the reader does not read
 

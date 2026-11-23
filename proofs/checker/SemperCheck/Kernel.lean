@@ -138,6 +138,33 @@ def wfSorts (P : Program) (nodes : Array Node) : Bool :=
           cs.all (fun ck => nodeSort P nodes ck.1 == some d.res && decide (0 < ck.2))
     | none => true
 
+/-- The total count of child `y` among counted children. -/
+def total (v : List (Nat × Nat)) (y : Nat) : Nat :=
+  (v.map fun yn => if yn.1 = y then yn.2 else 0).sum
+
+/-- Each count multiplied by `k`. -/
+def scaleC (k : Nat) (v : List (Nat × Nat)) : List (Nat × Nat) :=
+  v.map fun yn => (yn.1, yn.2 * k)
+
+/-- Counted children with `k` more of child `y`. -/
+def addC (y k : Nat) : List (Nat × Nat) → List (Nat × Nat)
+  | [] => [(y, k)]
+  | (z, j) :: t => if z = y then (z, j + k) :: t else (z, j) :: addC y k t
+
+/-- Counted children with each child once: its counts added. The comparison
+runs on this form, whose length is the number of distinct children. -/
+def normC (v : List (Nat × Nat)) : List (Nat × Nat) :=
+  v.foldl (fun acc yn => addC yn.1 yn.2 acc) []
+
+/-- Two counted lists are the same arguments under an operator's laws: for a
+multiset, each child has the same total count; for a set, the same children
+occur. -/
+def sameCounts : Kind → List (Nat × Nat) → List (Nat × Nat) → Bool
+  | .ac, l, m => (normC l ++ normC m).all fun yn => total (normC l) yn.1 == total (normC m) yn.1
+  | .aci, l, m =>
+    l.all (fun yn => m.any (·.1 == yn.1)) && m.all (fun yn => l.any (·.1 == yn.1))
+  | _, _, _ => false
+
 structure Ctx where
   P : Program
   nodes : Array Node
@@ -331,6 +358,44 @@ def congFoldR (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
     d.kind == .foldR && C.sortOf a == some d.res && C.sortOf b == some d.res && pairsOk prems l m
   | _, _, _ => false
 
+/-- The counted arguments node `x` flattens to under the multiset operator
+`f`: those of each child that is a counted application of `f`, with counts
+multiplied, and `x` once for any other node. -/
+def cview (f : String) (x : Nat) : Option (List (Nat × Nat)) :=
+  match C.nodes[x]? with
+  | some (.napp g cs) =>
+    if g = f then
+      (cs.mapM fun ck => if _h : ck.1 < x then (cview f ck.1).map (scaleC ck.2) else none).map
+        List.flatten
+    else some [(x, 1)]
+  -- An application of `f` held as a plain list: each child once.
+  | some (.app g cs) =>
+    if g = f then
+      if cs.isEmpty then none
+      else ((cs.map fun c => (c, 1)).mapM fun ck =>
+        if _h : ck.1 < x then (cview f ck.1).map (scaleC ck.2) else none).map List.flatten
+    else some [(x, 1)]
+  | _ => some [(x, 1)]
+termination_by x
+
+/-- The counted arguments of `x` under `f`, each replaced by its premise and
+flattened again, without the unit and without a child of count zero. -/
+def cside (f : String) (prems : List (Nat × Nat)) (x : Nat) : Option (List (Nat × Nat)) :=
+  match C.cview f x with
+  | none => none
+  | some v =>
+    match v.mapM (fun yn => (C.cview f (substOf prems yn.1)).map (scaleC yn.2)) with
+    | none => none
+    | some ws =>
+      some (ws.flatten.filter fun yn => decide (yn.2 ≠ 0) && (some yn.1 != C.unitOf f))
+
+/-- Two nodes of a multiset operator `f` with the same counted arguments. -/
+def congCount (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
+  match C.P.opDecl? f, C.cside f prems a, C.cside f prems b with
+  | some d, some l, some m =>
+    C.sortOf a == some d.res && C.sortOf b == some d.res && sameCounts d.kind l m
+  | _, _, _ => false
+
 def congAssoc (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
   match C.P.opDecl? f, C.side f prems a, C.side f prems b with
   | some d, some l, some m =>
@@ -344,7 +409,7 @@ def congOk (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
     | .comm => C.congComm f a b prems
     | .foldL => C.congFoldL f a b prems
     | .foldR => C.congFoldR f a b prems
-    | _ => C.congAssoc f a b prems
+    | _ => C.congAssoc f a b prems || C.congCount f a b prems
 
 def invOk (f : String) (a x q e : Nat) : Bool :=
   match C.P.opDecl? f with

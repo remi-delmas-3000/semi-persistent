@@ -1544,14 +1544,14 @@ egraph/tests/egg/lit_pattern_string.egg	1	1	replayed
 egraph/tests/egg/lit_pattern_term_paths_unaffected.egg	1	1	replayed
 egraph/tests/egg/lit_pattern_when_guard.egg	1	1	replayed
 egraph/tests/egg/mult_build_flatten_overflow.egg	0	0	skipped
-egraph/tests/egg/mult_build_flatten_product.egg	0	1	replayed
+egraph/tests/egg/mult_build_flatten_product.egg	1	1	replayed
 egraph/tests/egg/mult_flatten_view_overflow.egg	1	1	replayed
 egraph/tests/egg/mult_ground_past_u64.egg	0	0	skipped
 egraph/tests/egg/mult_recanon_sum_overflow.egg	0	0	skipped
 egraph/tests/egg/mult_rhs_computed_too_wide.egg	0	0	skipped
 egraph/tests/egg/mult_rhs_max_width.egg	1	1	replayed
 egraph/tests/egg/mult_rhs_splice_overflow.egg	0	0	skipped
-egraph/tests/egg/mult_rhs_splice_rest.egg	0	1	replayed
+egraph/tests/egg/mult_rhs_splice_rest.egg	1	1	replayed
 egraph/tests/egg/mult_rhs_sum_overflow.egg	0	0	skipped
 egraph/tests/egg/mult_rhs_u64_overflow.egg	0	0	skipped
 egraph/tests/egg/mult_rhs_underflow_two_vars.egg	0	0	skipped

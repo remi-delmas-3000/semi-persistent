@@ -91,6 +91,8 @@ structure St (P : Program) where
   argument patterns are bound to, each with its count, and, for each rest
   variable, its nodes. -/
   atoms : Array (Nat × String × List (Nat × Nat) × List (List Nat)) := #[]
+  /-- Per `e` line of the firing, its rest groups with their counts. -/
+  atomsC : Array (List (List (Nat × Nat))) := #[]
   /-- The right-hand side's nodes; `true` marks a `let` name's node. -/
   rhs : List (Nat × Bool) := []
   /-- The `check-eq` whose two nodes were in one class at their `g` line. -/
@@ -978,15 +980,20 @@ def droppedRegroups (S : St P) (f : String) (W : List Wit) (bound view : List Na
 /-- The fields of an `e` line after the operator: the nodes of the argument
 patterns, and between `[` and `]` the nodes of each rest variable, in the
 pattern's order. -/
-def atomArgs (S : St P) (xs : List String) : Option (List (Nat × Nat) × List (List Nat)) := do
+def atomArgs (S : St P) (xs : List String) : Option (List (Nat × Nat) × List (List Nat) × List (List (Nat × Nat))) := do
   let mut fixed : Array (Nat × Nat) := #[]
   let mut groups : Array (List Nat) := #[]
+  let mut groupsC : Array (List (Nat × Nat)) := #[]
   let mut open? : Option (List String) := none
   for x in xs do
     match x, open? with
     | "[", none => open? := some []
     | "]", some g =>
-      groups := groups.push (← ids S g.reverse)
+      let gc ← idsC S g.reverse
+      groupsC := groupsC.push gc
+      -- A group with a count above the kernel's limit is read from `groupsC`.
+      groups := groups.push (if gc.any (fun ck => ck.2 > Ctx.countLimit) then []
+        else Ctx.spread gc)
       open? := none
     | "[", some _ => none
     | "]", none => none
@@ -1001,7 +1008,7 @@ def atomArgs (S : St P) (xs : List String) : Option (List (Nat × Nat) × List (
         fixed := fixed.push (← S.node? n, k)
       | _ => none
   if open?.isSome then none
-  return (fixed.toList, groups.toList)
+  return (fixed.toList, groups.toList, groupsC.toList)
 
 /-- The number of arguments the fields of an `e` line stand for. -/
 def units (fixed : List (Nat × Nat)) : Nat := fixed.foldl (fun n e => n + e.2) 0
@@ -1062,6 +1069,32 @@ def foldCong (S : St P) (f : String) (left : Bool) (a b : Nat) : St P × Pf := I
       | _ => return (S, none)
   let (S', s) := emit S (.cong f a b prems.toList) a b
   return (S', some (some s))
+
+/-- The counted arguments node `x` flattens to under the multiset operator
+`f`, as the kernel's `cview` reads them. -/
+def cviewR (S : St P) (f : String) (x : Nat) : List (Nat × Nat) :=
+  match S.defOf x with
+  | some (.napp g cs) =>
+    if g == f then
+      cs.flatMap fun ck => if _h : ck.1 < x then scaleC ck.2 (cviewR S f ck.1) else [(ck.1, ck.2)]
+    else [(x, 1)]
+  | some (.app g cs) =>
+    if g == f && !cs.isEmpty then
+      cs.flatMap fun c => if _h : c < x then cviewR S f c else [(c, 1)]
+    else [(x, 1)]
+  | _ => [(x, 1)]
+termination_by x
+
+/-- A `cong` step for two nodes of a multiset operator whose counted
+arguments agree: each child has the same total count on both sides. -/
+def countedCong (S : St P) (f : String) (a b : Nat) : St P × Pf :=
+  if a == b then (S, some none)
+  else
+    let (l, m) := (cviewR S f a, cviewR S f b)
+    if sameCounts (S.prog.kind f) l m then
+      let (S, s) := emit S (.cong f a b []) a b
+      (S, some (some s))
+    else (S, none)
 
 /-- A `cong` step that concludes `a = b` for two nodes whose arguments the
 replayer found equal as classes under `f`'s laws: its premises prove each
@@ -2030,6 +2063,9 @@ structure Walk (P : Program) where
   ρ : List (String × List Nat) := []
   /-- The count each multiplicity variable is bound to. -/
   μ : List (String × Nat) := []
+  /-- The rest variables bound to counted nodes (a count above the kernel's
+  limit). -/
+  ρC : List (String × List (Nat × Nat)) := []
   /-- The position of the next `e` line. -/
   atomIdx : Nat := 0
   atoms : List (Nat × String × List (Nat × Nat) × List (List Nat))
@@ -2433,13 +2469,25 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
       throw "rule: line for another application"
     -- A count above the kernel's limit: each argument takes its field whole,
     -- and the instance is the counted node itself.
-    if fixed.any (fun e => e.2 > Ctx.countLimit) then
-      if !groups.isEmpty then throw "rule: a rest variable beside a count above the limit"
+    let groupsC := S.atomsC.getD w.atomIdx []
+    if fixed.any (fun e => e.2 > Ctx.countLimit) ||
+        groupsC.any (·.any fun ck => ck.2 > Ctx.countLimit) then
       let mut σ := w.σ
       let mut μ := w.μ
+      let mut ρC := w.ρC
+      let mut groupsC := groupsC
       let mut cks : Array (Nat × Nat) := #[]
       let mut fixed := fixed
       for (q, o) in ps.zip sub do
+        -- A rest variable takes the next group, with its counts.
+        if let .rest x := q then
+          let grp := groupsC.headD []
+          groupsC := groupsC.tail
+          match ρC.lookup x with
+          | some ys => if ys != grp then throw "rule: rest variable bound twice"
+          | none => ρC := (x, grp) :: ρC
+          cks := cks ++ grp.toArray
+          continue
         let (c, cnt) :: restF := fixed | throw "rule: argument differs | no field left"
         fixed := restF
         let q ← match q with
@@ -2468,11 +2516,17 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
             pure i
           | _, none => throw "rule: argument differs | an argument pattern with no match"
         cks := cks.push (inst, cnt)
-      if !fixed.isEmpty then throw "rule: line for another application"
-      set { w with atoms := rest, atomIdx := w.atomIdx + 1, σ := σ, μ := μ }
+      if !fixed.isEmpty || !groupsC.isEmpty then throw "rule: line for another application"
+      set { w with atoms := rest, atomIdx := w.atomIdx + 1, σ := σ, μ := μ, ρC := ρC }
       match ← withS fun S => intern S (countedNode f cks.toList) with
       | some i =>
-        if i != n then throw "rule: counted node differs"
+        -- The instance is the matched node, or has the same counted arguments.
+        if i != n then
+          let ok ← withS fun S =>
+            match countedCong S f i n with
+            | (S, some p) => (S.mergeBy i n (some p), true)
+            | (S, none) => (S, false)
+          if !ok then throw "rule: counted node differs"
         modify fun w => { w with memo := (key, n, i) :: w.memo }
         return (n, i)
       | none => throw "rule: instance ill-sorted"
@@ -2729,14 +2783,22 @@ def builtAppC (f : String) (cks : List ((Nat × Nat) × Nat)) : WalkM P (Nat × 
   | (n, _) :: rest =>
     set { w with rhs := rest }
     match ← withS fun S => intern S (countedNode f (cks.map fun x => (x.1.2, x.2))) with
-    | some i => if i == n then pure (n, i) else throw "rule: built counted node differs"
+    | some i =>
+      if i == n then pure (n, i)
+      else
+        let ok ← withS fun S =>
+          match countedCong S f i n with
+          | (S, some p) => (S.mergeBy i n (some p), true)
+          | (S, none) => (S, false)
+        if ok then pure (n, i) else throw "rule: built counted node differs"
     | none => throw "rule: instance ill-sorted"
   | [] => throw "rule: no node for a built application"
 
 /-- Whether an argument list holds a count above the kernel's limit. -/
-def bigCount (ps : List Pat) : Bool :=
+def bigCount (ρC : List (String × List (Nat × Nat))) (ps : List Pat) : Bool :=
   ps.any fun p => match p with
     | .times _ n => n > Ctx.countLimit
+    | .rest x => (ρC.lookup x).isSome
     | _ => false
 
 /-- The built application `f` of the built arguments `cs` against the next
@@ -2784,9 +2846,10 @@ def walkB (p : Pat) : WalkM P (Nat × Nat) :=
       -- A primitive application's `b` node is the literal the engine computed;
       -- its arguments have none.
       | none =>
-        if (primSig f).isSome then groundPs ps >>= builtPrim f
-        else if bigCount ps then walkBsC ps >>= builtAppC f
-        else walkBs ps >>= builtApp f
+        get >>= fun w0 =>
+          if (primSig f).isSome then groundPs ps >>= builtPrim f
+          else if bigCount w0.ρC ps then walkBsC ps >>= builtAppC f
+          else walkBs ps >>= builtApp f
 
 /-- The built arguments with their counts, none repeated: for an argument
 list with a count above the kernel's limit. -/
@@ -2806,7 +2869,12 @@ def walkBsC : List Pat → WalkM P (List ((Nat × Nat) × Nat))
   | .lit s v :: ps => walkB (.lit s v) >>= fun y => walkBsC ps >>= fun r => pure ((y, 1) :: r)
   | .app f qs :: ps => walkB (.app f qs) >>= fun y => walkBsC ps >>= fun r => pure ((y, 1) :: r)
   | .count k :: ps => groundCount k >>= fun y => walkBsC ps >>= fun r => pure ((y, 1) :: r)
-  | .rest _ :: _ => throw "rule: a rest variable beside a count above the limit"
+  -- A rest variable gives the nodes it is bound to, with their counts.
+  | .rest x :: ps => do
+    let w ← get
+    match (w.ρC.lookup x).orElse fun _ => (w.ρ.lookup x).map (·.map (·, 1)) with
+    | some ys => walkBsC ps >>= fun r => pure (ys.map (fun yk => ((yk.1, yk.1), yk.2)) ++ r)
+    | none => throw "rule: unbound rest variable"
   | .rep _ _ :: _ => throw "rule: a multiplicity variable beside a count above the limit"
 
 def walkBs : List Pat → WalkM P (List (Nat × Nat))
@@ -2894,6 +2962,7 @@ structure Fired where
   ir : Nat
   σ : List (String × Nat)
   ρ : List (String × List Nat)
+  ρC : List (String × List (Nat × Nat)) := []
   μ : List (String × Nat)
   prems : Option (List Nat)
 
@@ -2917,7 +2986,7 @@ def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
     | some n, some s => if sortOf w.S n != some s then throw "rule: variable of another sort"
     | _, _ => throw "rule: unbound variable"
   for x in r.rests do
-    match w.ρ.lookup x, r.sorts.lookup x with
+    match (w.ρ.lookup x).orElse (fun _ => (w.ρC.lookup x).map (·.map (·.1))), r.sorts.lookup x with
     | some ns, some s =>
       if ns.any (fun n => sortOf w.S n != some s) then throw "rule: rest variable of another sort"
     | _, _ => throw "rule: unbound rest variable"
@@ -2933,7 +3002,8 @@ def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
         | some ps, some st => some (ps.push st)
         | _, _ => none
     | _, _ => prems := none
-  pure { nl, il, nr, ir, σ := (← get).σ, ρ := (← get).ρ, μ := (← get).μ, prems := prems.map (·.toList) }
+  pure { nl, il, nr, ir, σ := (← get).σ, ρ := (← get).ρ, ρC := (← get).ρC, μ := (← get).μ,
+         prems := prems.map (·.toList) }
 
 mutual
 
@@ -3275,6 +3345,17 @@ def stepCore (S : St P) (line : String) : St P :=
   | ["w", a, b] =>
     match S.node? a, S.node? b with
     | some a, some b =>
+      -- Two nodes of a multiset operator, one of them counted: equal when
+      -- their counted arguments agree.
+      let counted : Option String := match S.defOf a, S.defOf b with
+        | some (.napp f _), _ => some f
+        | _, some (.napp f _) => some f
+        | _, _ => none
+      if let some f := counted then
+        match countedCong S f a b with
+        | (S, some p) => S.mergeBy a b (some p)
+        | (S, none) => S.fail "law: counted arguments differ"
+      else
       -- Either node can be the application whose arguments normalize to the other.
       let one (x y : Nat) : Bool :=
         match S.defOf x with
@@ -3359,12 +3440,13 @@ def stepCore (S : St P) (line : String) : St P :=
     | _, _, _, _ => S.fail "group law: unreadable"
   | ["r", off, kind] =>
     match off.toNat? with
-    | some o => { S with fire := some (o, kind == "w"), atoms := #[], rhs := [], seqLines := [], events := S.events - 1 }
+    | some o => { S with fire := some (o, kind == "w"), atoms := #[], atomsC := #[], rhs := [], seqLines := [], events := S.events - 1 }
     | none => S.fail "rule: unreadable"
   | "e" :: id :: f :: kids =>
     match S.node? id, atomArgs S kids with
-    | some i, some (fixed, groups) =>
-      { S with atoms := S.atoms.push (i, f, fixed, groups), events := S.events - 1 }
+    | some i, some (fixed, groups, groupsC) =>
+      { S with atoms := S.atoms.push (i, f, fixed, groups), atomsC := S.atomsC.push groupsC,
+               events := S.events - 1 }
     | _, _ => S.fail "rule: unreadable"
   | "b" :: xs =>
     let one (x : String) : Option (Nat × Bool) :=
@@ -3411,7 +3493,7 @@ def stepCore (S : St P) (line : String) : St P :=
               let (x, y) := if S.fd fr.nl == S.fd a then (a, b) else (b, a)
               let (S, pf) := match fr.prems with
                 | some prems =>
-                  let (S, st) := emit S (.rule od j fr.σ (fr.ρ.map fun (xn : String × List Nat) => (xn.1, xn.2.map fun n => (n, 1))) fr.μ prems fr.il fr.ir) fr.il fr.ir
+                  let (S, st) := emit S (.rule od j fr.σ ((fr.ρ.map fun (xn : String × List Nat) => (xn.1, xn.2.map fun n => (n, 1))) ++ fr.ρC) fr.μ prems fr.il fr.ir) fr.il fr.ir
                   let (S, p1) := eqP S x fr.il
                   let (S, p2) := eqP S fr.ir y
                   let (S, q) := transP S x fr.ir p1 (some (some st))

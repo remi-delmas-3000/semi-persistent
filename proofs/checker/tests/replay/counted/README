@@ -1,0 +1,8 @@
+A multiset operator whose nodes hold counts above 65,536. Building
+`(Plus (Plus a:65535 b):65537 c)` flattens the inner sum and multiplies its
+counts: the `w 6 5` line merges the nested node with `Plus a:4294967295
+b:65537 c`. The kernel compares the counted arguments of both sides and never
+writes a child more than once.
+
+`bad.trace` gives node 5 the count 4294967294 for `a`: the totals differ, the
+kernel has no step for `w 6 5`, and the goal is not proved.
