@@ -306,6 +306,9 @@ theorem instP_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
   | .rep p k, i, h => by
     rw [instP] at h
     cases h
+  | .times p n, i, h => by
+    rw [instP] at h
+    cases h
   | .app f ps, i, h => by
     rw [instP, Option.bind_eq_some_iff] at h
     obtain ⟨ids, hids, hi⟩ := h
@@ -336,6 +339,13 @@ theorem instArgs_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat)
     obtain ⟨t, ht, rfl⟩ := h
     rw [Model.evalArgs, List.map_append, List.map_replicate, instArgs_sound hwf σ ρ μ ps t ht,
       instP_sound hwf σ ρ μ p i hi, mval, hn]
+  | .times p n :: ps, ids, h => by
+    rw [instArgs, Option.bind_eq_some_iff] at h
+    obtain ⟨i, hi, h⟩ := h
+    rw [Option.map_eq_some_iff] at h
+    obtain ⟨t, ht, rfl⟩ := h
+    rw [Model.evalArgs, List.map_append, List.map_replicate, instArgs_sound hwf σ ρ μ ps t ht,
+      instP_sound hwf σ ρ μ p i hi]
   | .var x :: ps, ids, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h

@@ -27,6 +27,8 @@ inductive Pat where
   /-- An argument repeated: `p`, as many times as the multiplicity variable
   `k` says, as an argument of an `assoc`, `ac` or `aci` operator. -/
   | rep (p : Pat) (k : String)
+  /-- An argument repeated a fixed number of times: `p`, `n` times. -/
+  | times (p : Pat) (n : Nat)
   deriving Repr, Inhabited
 
 /-- The variables of a pattern. -/
@@ -36,6 +38,7 @@ def Pat.vars : Pat → List String
   | .app _ ps => (ps.attach.map fun ⟨p, _⟩ => p.vars).flatten
   | .rest _ => []
   | .rep p _ => p.vars
+  | .times p _ => p.vars
 
 /-- The rest variables of a pattern. -/
 def Pat.rests : Pat → List String
@@ -44,6 +47,7 @@ def Pat.rests : Pat → List String
   | .app _ ps => (ps.attach.map fun ⟨p, _⟩ => p.rests).flatten
   | .rest x => [x]
   | .rep p _ => p.rests
+  | .times p _ => p.rests
 
 /-- The algebraic laws of an operator. `assoc`, `ac` and `aci` operators are
 n-ary over their result sort: an application folds a binary operation over

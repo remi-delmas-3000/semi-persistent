@@ -860,7 +860,7 @@ egraph/tests/egg/conform-flatten/f2_0007.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0008.egg	0	0	replayed
 egraph/tests/egg/conform-flatten/f2_0009.egg	0	0	replayed
 egraph/tests/egg/conform-flatten/f2_0010.egg	4	4	replayed
-egraph/tests/egg/conform-flatten/f2_0011.egg	2	88	replayed
+egraph/tests/egg/conform-flatten/f2_0011.egg	88	88	replayed
 egraph/tests/egg/conform-flatten/f2_0012.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0013.egg	0	0	replayed
 egraph/tests/egg/conform-flatten/f2_0014.egg	0	0	unread
@@ -884,7 +884,7 @@ egraph/tests/egg/conform-flatten/f2_0031.egg	3	3	replayed
 egraph/tests/egg/conform-flatten/f2_0032.egg	2	2	replayed
 egraph/tests/egg/conform-flatten/f2_0033.egg	1	1	replayed
 egraph/tests/egg/conform-flatten/f2_0034.egg	204	204	replayed
-egraph/tests/egg/conform-flatten/f2_0035.egg	72	80	replayed
+egraph/tests/egg/conform-flatten/f2_0035.egg	80	80	replayed
 egraph/tests/egg/conform-flatten/f2_0036.egg	9	9	replayed
 egraph/tests/egg/conform-flatten/f2_0037.egg	1	1	replayed
 egraph/tests/egg/conform-flatten/f2_0038.egg	0	0	replayed
@@ -944,7 +944,7 @@ egraph/tests/egg/conform-flatten/f2_0091.egg	5	5	replayed
 egraph/tests/egg/conform-flatten/f2_0092.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0093.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0094.egg	0	0	unread
-egraph/tests/egg/conform-flatten/f2_0095.egg	0	50	replayed
+egraph/tests/egg/conform-flatten/f2_0095.egg	50	50	replayed
 egraph/tests/egg/conform-flatten/f2_0096.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0097.egg	1	1	replayed
 egraph/tests/egg/conform-flatten/f2_0098.egg	0	0	replayed
@@ -1024,7 +1024,7 @@ egraph/tests/egg/conform-flatten/f2_0171.egg	38	38	replayed
 egraph/tests/egg/conform-flatten/f2_0172.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0173.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0174.egg	2	2	replayed
-egraph/tests/egg/conform-flatten/f2_0175.egg	0	8	replayed
+egraph/tests/egg/conform-flatten/f2_0175.egg	8	8	replayed
 egraph/tests/egg/conform-flatten/f2_0176.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0177.egg	0	0	unread
 egraph/tests/egg/conform-flatten/f2_0178.egg	0	0	replayed
@@ -1063,7 +1063,7 @@ egraph/tests/egg/conform-rounds/r1_0010.egg	5	5	replayed
 egraph/tests/egg/conform-rounds/r1_0011.egg	8	8	replayed
 egraph/tests/egg/conform-rounds/r1_0012.egg	4	4	replayed
 egraph/tests/egg/conform-rounds/r1_0013.egg	1	1	replayed
-egraph/tests/egg/conform-rounds/r1_0014.egg	4	8	replayed
+egraph/tests/egg/conform-rounds/r1_0014.egg	8	8	replayed
 egraph/tests/egg/conform-rounds/r1_0015.egg	1	1	replayed
 egraph/tests/egg/conform-rounds/r1_0016.egg	6	6	replayed
 egraph/tests/egg/conform-rounds/r1_0017.egg	5	5	replayed
@@ -1115,7 +1115,7 @@ egraph/tests/egg/conform-rounds/r1_0062.egg	5	5	replayed
 egraph/tests/egg/conform-rounds/r1_0063.egg	5	5	replayed
 egraph/tests/egg/conform-rounds/r1_0064.egg	2	2	replayed
 egraph/tests/egg/conform-rounds/r1_0065.egg	20	20	replayed
-egraph/tests/egg/conform-rounds/r1_0066.egg	3	7	replayed
+egraph/tests/egg/conform-rounds/r1_0066.egg	7	7	replayed
 egraph/tests/egg/conform-rounds/r1_0067.egg	6	6	replayed
 egraph/tests/egg/conform-rounds/r1_0068.egg	4	4	replayed
 egraph/tests/egg/conform-rounds/r1_0069.egg	1	1	replayed
@@ -1135,7 +1135,7 @@ egraph/tests/egg/conform-rounds/r1_0082.egg	10	10	replayed
 egraph/tests/egg/conform-rounds/r1_0083.egg	2	2	replayed
 egraph/tests/egg/conform-rounds/r1_0084.egg	4	4	replayed
 egraph/tests/egg/conform-rounds/r1_0085.egg	3	3	replayed
-egraph/tests/egg/conform-rounds/r1_0086.egg	2	4	replayed
+egraph/tests/egg/conform-rounds/r1_0086.egg	4	4	replayed
 egraph/tests/egg/conform-rounds/r1_0087.egg	3	3	replayed
 egraph/tests/egg/conform-rounds/r1_0088.egg	7	7	replayed
 egraph/tests/egg/conform-rounds/r1_0089.egg	4	4	replayed
@@ -1208,7 +1208,7 @@ egraph/tests/egg/conform-rounds/r1_0155.egg	10	10	replayed
 egraph/tests/egg/conform-rounds/r1_0156.egg	2	2	replayed
 egraph/tests/egg/conform-rounds/r1_0157.egg	3	3	replayed
 egraph/tests/egg/conform-rounds/r1_0158.egg	3	3	replayed
-egraph/tests/egg/conform-rounds/r1_0159.egg	2	4	replayed
+egraph/tests/egg/conform-rounds/r1_0159.egg	4	4	replayed
 egraph/tests/egg/conform-rounds/r1_0160.egg	1	1	replayed
 egraph/tests/egg/conform-rounds/r1_0161.egg	3	3	replayed
 egraph/tests/egg/conform-rounds/r1_0162.egg	3	3	replayed
@@ -1217,7 +1217,7 @@ egraph/tests/egg/conform-rounds/r1_0164.egg	2	2	replayed
 egraph/tests/egg/conform-rounds/r1_0165.egg	6	6	replayed
 egraph/tests/egg/conform-rounds/r1_0166.egg	5	5	replayed
 egraph/tests/egg/conform-rounds/r1_0167.egg	6	6	replayed
-egraph/tests/egg/conform-rounds/r1_0168.egg	2	4	replayed
+egraph/tests/egg/conform-rounds/r1_0168.egg	4	4	replayed
 egraph/tests/egg/conform-rounds/r1_0169.egg	9	9	replayed
 egraph/tests/egg/conform-rounds/r1_0170.egg	8	8	replayed
 egraph/tests/egg/conform-rounds/r1_0171.egg	3	3	replayed
@@ -1422,7 +1422,7 @@ egraph/tests/egg/conform/c1_0169.egg	1	1	replayed
 egraph/tests/egg/conform/c1_0170.egg	1	1	replayed
 egraph/tests/egg/conform/c1_0171.egg	0	0	replayed
 egraph/tests/egg/conform/c1_0172.egg	6	6	replayed
-egraph/tests/egg/conform/c1_0173.egg	0	2	replayed
+egraph/tests/egg/conform/c1_0173.egg	2	2	replayed
 egraph/tests/egg/conform/c1_0174.egg	0	0	replayed
 egraph/tests/egg/conform/c1_0175.egg	2	2	replayed
 egraph/tests/egg/conform/c1_0176.egg	2	2	replayed
@@ -1490,10 +1490,10 @@ egraph/tests/egg/flatten_regroup_assoc.egg	4	4	replayed
 egraph/tests/egg/flatten_regroup_assoc_left.egg	0	0	unread
 egraph/tests/egg/flatten_regroup_assoc_right.egg	0	0	unread
 egraph/tests/egg/flatten_regroup_control.egg	0	0	unread
-egraph/tests/egg/flatten_regroup_laws_drop_need.egg	1	4	replayed	1 before the checker stopped reading a nested application as its arguments without a splice witness: the stream has none for this merge
+egraph/tests/egg/flatten_regroup_laws_drop_need.egg	3	4	replayed	1 before the checker stopped reading a nested application as its arguments without a splice witness: the stream has none for this merge
 egraph/tests/egg/flatten_regroup_laws_idem.egg	4	4	replayed
 egraph/tests/egg/flatten_regroup_laws_insert.egg	0	0	replayed
-egraph/tests/egg/flatten_regroup_laws_no_item.egg	1	3	replayed
+egraph/tests/egg/flatten_regroup_laws_no_item.egg	3	3	replayed
 egraph/tests/egg/flatten_regroup_nested_needs.egg	3	3	replayed
 egraph/tests/egg/flatten_rest_only.egg	9	9	replayed
 egraph/tests/egg/flatten_rest_only_control.egg	0	0	skipped
@@ -1545,7 +1545,7 @@ egraph/tests/egg/lit_pattern_term_paths_unaffected.egg	1	1	replayed
 egraph/tests/egg/lit_pattern_when_guard.egg	1	1	replayed
 egraph/tests/egg/mult_build_flatten_overflow.egg	0	0	skipped
 egraph/tests/egg/mult_build_flatten_product.egg	0	1	replayed
-egraph/tests/egg/mult_flatten_view_overflow.egg	0	1	replayed
+egraph/tests/egg/mult_flatten_view_overflow.egg	1	1	replayed
 egraph/tests/egg/mult_ground_past_u64.egg	0	0	skipped
 egraph/tests/egg/mult_recanon_sum_overflow.egg	0	0	skipped
 egraph/tests/egg/mult_rhs_computed_too_wide.egg	0	0	skipped

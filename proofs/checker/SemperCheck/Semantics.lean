@@ -53,6 +53,7 @@ def evalP (σ : String → M.α) (ρ : String → List M.α) (μ : String → Na
   | .lit s v => M.lit s v
   | .rest _ => M.lit "" ""
   | .rep _ _ => M.lit "" ""
+  | .times _ _ => M.lit "" ""
   | .app f args => M.app f (evalArgs σ ρ μ args)
 
 /-- The values of an argument list: a rest variable gives its whole list, a
@@ -61,6 +62,7 @@ def evalArgs (σ : String → M.α) (ρ : String → List M.α) (μ : String →
   | [] => []
   | .rest x :: ps => ρ x ++ evalArgs σ ρ μ ps
   | .rep p k :: ps => List.replicate (μ k) (evalP σ ρ μ p) ++ evalArgs σ ρ μ ps
+  | .times p n :: ps => List.replicate n (evalP σ ρ μ p) ++ evalArgs σ ρ μ ps
   | .var x :: ps => σ x :: evalArgs σ ρ μ ps
   | .lit s v :: ps => M.lit s v :: evalArgs σ ρ μ ps
   | .app f args :: ps => M.app f (evalArgs σ ρ μ args) :: evalArgs σ ρ μ ps

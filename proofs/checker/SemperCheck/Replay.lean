@@ -1681,6 +1681,7 @@ def Pat.toTerm? : Pat → Option Term
   | .var _ => none
   | .rest _ => none
   | .rep _ _ => none
+  | .times _ _ => none
   | .lit s v => some (.lit s v)
   | .app f ps => (Pat.toTerms? ps).map (.app f)
 
@@ -1694,7 +1695,10 @@ end
 none is a repeated argument (whose count the pattern does not give). -/
 def fixedArgs (ps : List Pat) : Option Nat :=
   if ps.any (fun p => match p with | .rep _ _ => true | _ => false) then none
-  else some (ps.filter fun p => match p with | .rest _ => false | _ => true).length
+  else some (ps.foldl (fun n p => match p with
+    | .rest _ => n
+    | .times _ k => n + k
+    | _ => n + 1) 0)
 
 mutual
 
@@ -1704,6 +1708,7 @@ def firstLine : Pat → String × Option Nat
   | .var _ => ("", some 0)
   | .rest _ => ("", some 0)
   | .rep _ _ => ("", some 0)
+  | .times _ _ => ("", some 0)
   | .lit _ _ => ("#lit", some 0)
   | .app f ps => (firstOf ps).getD (f, fixedArgs ps)
 
@@ -1717,6 +1722,13 @@ def firstOf : List Pat → Option (String × Option Nat)
   | .rep (.app f qs) _ :: _ => some (firstLine (.app f qs))
   | .rep (.rest _) _ :: ps => firstOf ps
   | .rep (.rep _ _) _ :: ps => firstOf ps
+  | .rep (.times _ _) _ :: ps => firstOf ps
+  | .times (.var _) _ :: ps => firstOf ps
+  | .times (.lit s v) _ :: _ => some (firstLine (.lit s v))
+  | .times (.app f qs) _ :: _ => some (firstLine (.app f qs))
+  | .times (.rest _) _ :: ps => firstOf ps
+  | .times (.rep _ _) _ :: ps => firstOf ps
+  | .times (.times _ _) _ :: ps => firstOf ps
   | .lit s v :: _ => some (firstLine (.lit s v))
   | .app f qs :: _ => some (firstLine (.app f qs))
 
@@ -1928,10 +1940,12 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
           | none => μ := (k, cnt) :: μ
           pure (q, cnt)
         | .rep _ _, [] => throw "rule: argument differs"
+        | .times q k, _ => pure (q, k)
         | q, _ => pure (q, 1)
       let c ← match fixed with
         | (c, cnt) :: rest =>
-          fixed := if cnt ≤ times then rest else (c, cnt - times) :: rest
+          if cnt < times then throw "rule: argument differs"
+          fixed := if cnt == times then rest else (c, cnt - times) :: rest
           pure c
         | [] => throw "rule: argument differs"
       let inst ← match q, o with
@@ -1984,6 +1998,7 @@ def walkQ (p : Pat) : WalkM P (Nat × Nat) :=
     | none => throw "rule: unbound variable"
   | .rest _ => throw "rule: a rest variable that is no argument"
   | .rep _ _ => throw "rule: a repeated argument that is no argument"
+  | .times _ _ => throw "rule: a repeated argument that is no argument"
   | .lit s v => do
     let w ← get
     match w.atoms with
@@ -1994,44 +2009,38 @@ def walkQ (p : Pat) : WalkM P (Nat × Nat) :=
         else throw "rule: literal differs"
       | _ => throw "rule: literal differs"
     | _ => throw "rule: no line for a literal"
-  | .app f ps => do
-    -- A multiset's or a set's equal argument patterns are one pattern with a
-    -- count: the match writes its lines once.
-    let k := (← get).S.prog.kind f
-    walkQs (k == .ac || k == .aci) none ps >>= walkApp (key (.app f ps)) f ps
+  | .app f ps => walkQs ps >>= walkApp (key (.app f ps)) f ps
 
 /-- The matched node and instance of each argument that is no variable. -/
-def walkQs (share : Bool) (prev : Option (String × Nat × Nat)) :
-    List Pat → WalkM P (List (Option (Nat × Nat)))
+def walkQs : List Pat → WalkM P (List (Option (Nat × Nat)))
   | [] => pure []
-  | .var _ :: rest => walkQs share prev rest >>= fun r => pure (none :: r)
-  | .rest _ :: rest => walkQs share prev rest >>= fun r => pure (none :: r)
+  | .var _ :: rest => walkQs rest >>= fun r => pure (none :: r)
+  | .rest _ :: rest => walkQs rest >>= fun r => pure (none :: r)
   -- A repeated argument is matched once.
-  | .rep (.var _) _ :: rest => walkQs share prev rest >>= fun r => pure (none :: r)
+  | .rep (.var _) _ :: rest => walkQs rest >>= fun r => pure (none :: r)
   | .rep (.rest _) _ :: _ => throw "rule: a repeated rest variable"
   | .rep (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .rep (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .times (.var _) _ :: rest => walkQs rest >>= fun r => pure (none :: r)
+  | .times (.rest _) _ :: _ => throw "rule: a repeated rest variable"
+  | .times (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .times (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .times (.lit s v) _ :: rest =>
+    walkQ (.lit s v) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
+  | .times (.app f qs) _ :: rest =>
+    walkQ (.app f qs) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
   | .rep (.lit s v) _ :: rest =>
-    walkQ (.lit s v) >>= fun x => walkQs share prev rest >>= fun r => pure (some x :: r)
+    walkQ (.lit s v) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
   | .rep (.app f qs) _ :: rest =>
-    walkQ (.app f qs) >>= fun x => walkQs share prev rest >>= fun r => pure (some x :: r)
+    walkQ (.app f qs) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
   | .lit s v :: rest =>
-    walkQ (.lit s v) >>= fun x => walkQs share prev rest >>= fun r => pure (some x :: r)
+    walkQ (.lit s v) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
   | .app f qs :: rest =>
-    match (if share then prev else none) with
-    | some (k, x) =>
-      if k == key (.app f qs) then walkQs share prev rest >>= fun r => pure (some x :: r)
-      else
-        groundNode (.app f qs) >>= fun g =>
-          (match g with
-            | some n => letInstance (.app f qs) n >>= fun i => pure (n, i)
-            | none => walkQ (.app f qs)) >>= fun x =>
-          walkQs share (some (key (.app f qs), x)) rest >>= fun r => pure (some x :: r)
-    | none =>
-      groundNode (.app f qs) >>= fun g =>
-        (match g with
-          | some n => letInstance (.app f qs) n >>= fun i => pure (n, i)
-          | none => walkQ (.app f qs)) >>= fun x =>
-        walkQs share (some (key (.app f qs), x)) rest >>= fun r => pure (some x :: r)
+    groundNode (.app f qs) >>= fun g =>
+      (match g with
+        | some n => letInstance (.app f qs) n >>= fun i => pure (n, i)
+        | none => walkQ (.app f qs)) >>= fun x =>
+      walkQs rest >>= fun r => pure (some x :: r)
 
 end
 
@@ -2070,6 +2079,7 @@ def walkB (p : Pat) : WalkM P (Nat × Nat) :=
     | some n => pure (n, n)
     | none => throw "rule: unbound variable"
   | .rep _ _ => throw "rule: a repeated argument that is no argument"
+  | .times _ _ => throw "rule: a repeated argument that is no argument"
   | .rest _ => throw "rule: a rest variable that is no argument"
   | .lit s v => do
     if let some r ← letName? (.lit s v) then return r
@@ -2110,6 +2120,17 @@ def walkBs : List Pat → WalkM P (List (Nat × Nat))
     | none => throw "rule: unbound multiplicity variable"
   | .rep (.rest _) _ :: _ => throw "rule: a repeated rest variable"
   | .rep (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .rep (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  -- An argument with a fixed count is built once.
+  | .times (.var x) n :: ps =>
+    walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
+  | .times (.lit s v) n :: ps =>
+    walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
+  | .times (.app f qs) n :: ps =>
+    walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
+  | .times (.rest _) _ :: _ => throw "rule: a repeated rest variable"
+  | .times (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .times (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .var x :: ps => walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
   | .lit s v :: ps => walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
   | .app f qs :: ps => walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure (y :: r)

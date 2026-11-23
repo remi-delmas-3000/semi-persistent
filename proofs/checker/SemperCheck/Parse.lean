@@ -217,15 +217,14 @@ def ofTerm : Term → Pat
   | .app f args => .app f (args.map ofTerm)
 
 /-- The argument patterns after `ps` for pattern `p` with the count `cnt`: a
-number repeats `p` that many times; a multiplicity variable `k`, or `k>=n`,
+number makes it `p` that many times (`Pat.times`); a multiplicity variable `k`, or `k>=n`,
 makes it a repeated argument and records the least count `k` takes. -/
 def counted (ps : Array Pat) (p : Pat) (cnt : String) : PatM (Array Pat) := do
   match cnt.toNat? with
   | some n =>
     if n > 65536 then throw s!"a count above 65536"
-    let mut ps := ps
-    for _ in [0:n] do ps := ps.push p
-    pure ps
+    if n == 0 then throw "a count of zero"
+    pure (ps.push (if n == 1 then p else .times p n))
   | none =>
     let (k, bound) ← match cnt.splitOn ">=" with
       | [k] => pure (k, 1)

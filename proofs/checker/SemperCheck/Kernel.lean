@@ -144,6 +144,7 @@ def instP (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : Lis
   | .lit s v => C.lookup (.lit s v)
   | .rest _ => none
   | .rep _ _ => none
+  | .times _ _ => none
   | .app f ps => (instArgs σ ρ μ ps).bind fun ids => C.lookup (.app f ids)
 
 /-- The nodes of an argument list: a rest variable gives the nodes `ρ` binds
@@ -155,6 +156,8 @@ def instArgs (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : 
   | .rep p k :: ps =>
     (μ.lookup k).bind fun n => (instP σ ρ μ p).bind fun i =>
       (instArgs σ ρ μ ps).map (List.replicate n i ++ ·)
+  | .times p n :: ps =>
+    (instP σ ρ μ p).bind fun i => (instArgs σ ρ μ ps).map (List.replicate n i ++ ·)
   | .var x :: ps => (σ.lookup x).bind fun i => (instArgs σ ρ μ ps).map (i :: ·)
   | .lit s v :: ps => (C.lookup (.lit s v)).bind fun i => (instArgs σ ρ μ ps).map (i :: ·)
   | .app f as :: ps =>
