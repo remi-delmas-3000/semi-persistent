@@ -309,6 +309,10 @@ theorem instP_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
   | .times p n, i, h => by
     rw [instP] at h
     cases h
+  | .count k, i, h => by
+    rw [instP, Option.bind_eq_some_iff] at h
+    obtain ⟨n, hn, h⟩ := h
+    rw [nval_lit (lookup_some h), Model.evalP, mval, hn]
   | .app f ps, i, h => by
     rw [instP, Option.bind_eq_some_iff] at h
     obtain ⟨ids, hids, hi⟩ := h
@@ -346,6 +350,15 @@ theorem instArgs_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat)
     obtain ⟨t, ht, rfl⟩ := h
     rw [Model.evalArgs, List.map_append, List.map_replicate, instArgs_sound hwf σ ρ μ ps t ht,
       instP_sound hwf σ ρ μ p i hi]
+  | .count k :: ps, ids, h => by
+    rw [instArgs, Option.bind_eq_some_iff] at h
+    obtain ⟨i, hi, h⟩ := h
+    rw [Option.bind_eq_some_iff] at hi
+    obtain ⟨n, hn, hi⟩ := hi
+    rw [Option.map_eq_some_iff] at h
+    obtain ⟨t, ht, rfl⟩ := h
+    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ μ ps t ht,
+      nval_lit (lookup_some hi), mval, hn]
   | .var x :: ps, ids, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
@@ -918,6 +931,34 @@ theorem restsOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes 
     exact nval_dom hwf hws hT n s this
   · cases hx'
 
+theorem primStepOk_sound (hwf : wfNodes C.nodes = true) {p : Nat} (hM : M.Models C.P p)
+    {f : String} {a e : Nat} (h : C.primStepOk f a e = true) :
+    nval M C.nodes a = nval M C.nodes e := by
+  unfold primStepOk at h
+  split at h
+  · rename_i g cs out ha he
+    rw [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨rfl, h⟩ := h
+    split at h
+    · rename_i args hargs
+      unfold litOf at he
+      split at he
+      · rename_i s v hlit
+        cases he
+        rw [nval_app hwf ha, nval_lit hlit, ← hM.2.2.2 g args (s, v) h]
+        congr 1
+        refine (mapM_some_map cs args hargs ?_).symm
+        intro c _ sv hc
+        unfold litOf at hc
+        split at hc
+        · rename_i s' v' hlit'
+          cases hc
+          exact (nval_lit hlit').symm
+        · cases hc
+      · cases he
+    · cases h
+  · cases h
+
 theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
     {acc : Array Concl} (hacc : AllValid M C acc) {st : Step} {c : Concl}
     (h : C.inferStep acc st = some c) : Valid M C c := by
@@ -949,7 +990,7 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
       split at h
       · rename_i hab
         cases h
-        have hs := hM.2.2 o _ (decl_mem hd) (Nat.lt_succ_self o)
+        have hs := hM.2.2.1 o _ (decl_mem hd) (Nat.lt_succ_self o)
         simp only [Model.DeclSat] at hs
         simp only
         rw [intern_sound hwf l a hab.1, intern_sound hwf r b hab.2, hs]
@@ -965,7 +1006,7 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
         · rename_i hok
           cases h
           obtain ⟨hl, hrr, heqs, hso, hro, hmu⟩ := hok
-          have hs := hM.2.2 o _ (decl_mem hd)
+          have hs := hM.2.2.1 o _ (decl_mem hd)
             (Nat.lt_of_lt_of_le (Nat.lt_succ_self o) (Nat.le_max_left _ _))
           simp only [Model.DeclSat] at hs
           have hrule := hs r (List.mem_of_getElem? hr)
@@ -1008,6 +1049,13 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
     · rename_i hok
       cases h
       exact unitOk_sound hwf hT hok
+    · cases h
+  | prim f a e =>
+    simp only [inferStep] at h
+    split at h
+    · rename_i hok
+      cases h
+      exact primStepOk_sound hwf hM hok
     · cases h
   | cancel f s a b z =>
     simp only [inferStep] at h

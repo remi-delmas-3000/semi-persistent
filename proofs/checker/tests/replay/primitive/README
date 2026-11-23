@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types machine --trace` writes for `program.egg`.
+`bad.trace` differs in line 15: the `b` line gives the literal 3 as the value of `(i64::+ 2 3)` instead of 5.

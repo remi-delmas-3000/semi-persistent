@@ -1,4 +1,5 @@
 import SemperCheck.Syntax
+import SemperCheck.Prim
 import Std.Data.HashMap
 
 /-!
@@ -60,6 +61,9 @@ inductive Step where
   | cancel (f : String) (s a b z : Nat)
   /-- `a = f()`, the application of `f` to no argument, is the unit `e`. -/
   | unit (f : String) (a e : Nat)
+  /-- `a = f(c1, .., ck)`, a primitive applied to literals, is the literal
+  `e` it computes (`primOk`). -/
+  | prim (f : String) (a e : Nat)
   deriving Repr, Inhabited
 
 structure Cert where
@@ -145,6 +149,7 @@ def instP (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : Lis
   | .rest _ => none
   | .rep _ _ => none
   | .times _ _ => none
+  | .count k => (μ.lookup k).bind fun n => C.lookup (.lit "i64" (toString n))
   | .app f ps => (instArgs σ ρ μ ps).bind fun ids => C.lookup (.app f ids)
 
 /-- The nodes of an argument list: a rest variable gives the nodes `ρ` binds
@@ -160,6 +165,9 @@ def instArgs (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : 
     (instP σ ρ μ p).bind fun i => (instArgs σ ρ μ ps).map (List.replicate n i ++ ·)
   | .var x :: ps => (σ.lookup x).bind fun i => (instArgs σ ρ μ ps).map (i :: ·)
   | .lit s v :: ps => (C.lookup (.lit s v)).bind fun i => (instArgs σ ρ μ ps).map (i :: ·)
+  | .count k :: ps =>
+    ((μ.lookup k).bind fun n => C.lookup (.lit "i64" (toString n))).bind fun i =>
+      (instArgs σ ρ μ ps).map (i :: ·)
   | .app f as :: ps =>
     ((instArgs σ ρ μ as).bind fun ids => C.lookup (.app f ids)).bind fun i =>
       (instArgs σ ρ μ ps).map (i :: ·)
@@ -276,6 +284,20 @@ def unitOk (f : String) (a e : Nat) : Bool :=
     d.kind.isAssoc && decide (C.nodes[a]? = some (.app f [])) && decide (C.unitOf f = some e)
   | none => false
 
+/-- The sort and spelling of node `c`, when it is a literal. -/
+def litOf (c : Nat) : Option (String × String) :=
+  match C.nodes[c]? with
+  | some (.lit s v) => some (s, v)
+  | _ => none
+
+def primStepOk (f : String) (a e : Nat) : Bool :=
+  match C.nodes[a]?, C.litOf e with
+  | some (.app g cs), some out =>
+    g == f && (match cs.mapM C.litOf with
+      | some args => primOk f args out
+      | none => false)
+  | _, _ => false
+
 def cancelOk (f : String) (p q a b z : Nat) : Bool :=
   match C.P.opDecl? f with
   | some d =>
@@ -358,6 +380,7 @@ def inferStep (acc : Array Concl) : Step → Option Concl
   | .inv f a x q e => if C.invOk f a x q e then some ⟨a, e, 0⟩ else none
   | .nil f a x k e => if C.nilOk f a x k e then some ⟨a, e, 0⟩ else none
   | .unit f a e => if C.unitOk f a e then some ⟨a, e, 0⟩ else none
+  | .prim f a e => if C.primStepOk f a e then some ⟨a, e, 0⟩ else none
   | .cancel f s a b z =>
     match acc[s]? with
     | some c => if C.cancelOk f c.a c.b a b z then some ⟨a, b, c.pos⟩ else none

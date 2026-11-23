@@ -63,7 +63,7 @@ carriers; the plan in `MANY-SORTED.md` adds that construction as a theorem.
 
 The theorems depend on Lean's three standard axioms (`propext`,
 `Classical.choice`, `Quot.sound`) and on no `sorry`. The trusted part is the
-statement (`Syntax.lean`, `Semantics.lean`), the `.egg` reader
+statement (`Syntax.lean`, `Semantics.lean`, `Prim.lean`), the `.egg` reader
 (`Parse.lean`), Lean's kernel, and Lean's compiler, which runs the checker.
 The engine and the stream are not trusted.
 
@@ -92,6 +92,7 @@ nodes, and a list of steps, each concluding that two nodes are equal
 | `nil f a x k e` | `a = f(x, .., x)`, with `k + 1` arguments, is the unit `e` of `f`, which is `:nilpotent (k + 1)` |
 | `cancel f s a b z` | step `s` concludes `f(a, z) = f(b, z)`, so `a = b`: `f` is `:cancellative`, or has `:inverse` and a unit |
 | `unit f a e` | `a = f()`, the application to no argument, is the unit `e` of `f` |
+| `prim f a e` | `a = f(c1, .., ck)`, a primitive applied to literals, is the literal `e` that `primOk` computes |
 
 `cong` covers congruence (children pairwise equal), a commutative operator's
 swapped children, and the associative operators: both sides flatten to their
@@ -101,11 +102,34 @@ and the two results are compared as lists (`assoc`), multisets (`ac`) or sets
 (`aci`). Every conclusion records the offsets of the commands it cites, so a
 `check-eq` can use only the commands before it.
 
+## Primitives
+
+A model interprets a primitive applied to literals as the literal the
+primitive computes: `Models` asks `M.app f (lits) = M.lit out` whenever
+`primOk f lits out` holds. `Prim.lean` defines `primOk` by an evaluator for
+every operation of `egraph/src/model.rs` (`bool`, `i64`, `u64`, `usize`,
+`f64`, `String`, `IBig`, `UBig`, `RBig`), ported operation by operation: a
+checked operation has no value on overflow or a zero divisor, a wrapping one
+reduces modulo 2^64, floats are Lean's `Float` (IEEE-754 binary64) under the
+engine's total order. The evaluator is part of the statement: no theorem
+relates it to the engine's table, and a disagreement shows as a goal the
+replay does not prove (the stream's literal is not the one `primOk` accepts).
+Where the evaluator is narrower than the engine it gives no value: a string
+literal with a backslash, and `RBig::pow` with an exponent above 4,096.
+`usize` is taken as 64 bits wide.
+
+A primitive in a rule is an operator: the reader declares it with the
+signature `primSig` gives. A primitive guard `(i64::< a b)` is the equality
+premise `(i64::< a b) = true`. A multiplicity variable read as a value
+(`(RBig::scale a k)`) is the pattern `count k`, the `i64` literal that spells
+the count. The reader gives each literal of the program the spelling the
+stream uses for its value (`canonLit`: `0/1` is `0`, `4.0` is `4`).
+
 ## What the reader reads
 
 The reader (`Parse.lean`) keeps the theory it returns implied by the
 program's: it reads no rule from a command whose
-pattern or guard uses a filter, a primitive predicate or a comprehension. A
+pattern or guard uses a filter or a comprehension. A
 count on an argument of an `assoc`, `ac` or `aci` operator is read: `x:6` is
 six arguments, and `x:k` (or `x:k>=2`) repeats the argument as many times as
 the multiplicity variable `k`, which in a model ranges over the counts from 1
@@ -149,9 +173,9 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,531 |
-| programs with every `check-eq` proved, of 1,066 | 979 |
-| kernel steps checked | 16,460,786 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,682 |
+| programs with every `check-eq` proved, of 1,066 | 1,014 |
+| kernel steps checked | 16,546,209 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,100 |
 | events whose check fails | 8,069 |

@@ -1,0 +1,10 @@
+;; Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+;; SPDX-License-Identifier: Apache-2.0
+;; TYPES: machine
+(sort E)
+(function Const (i64) E)
+(function Plus (E E) E)
+(rewrite (Plus (Const a) (Const b)) (Const (i64::+ a b)) :when ((i64::< a b)))
+(let t (Plus (Const 2) (Const 3)))
+(run 1)
+(check-eq t (Const 5))

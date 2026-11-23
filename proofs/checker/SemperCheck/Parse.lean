@@ -1,4 +1,5 @@
 import SemperCheck.Kernel
+import SemperCheck.Prim
 
 /-!
 # Reading a program and a certificate
@@ -128,6 +129,26 @@ def litSort (exp : Option String) (a : String) : Option String :=
     if str then some "String" else if bool then some "bool"
     else if a.contains '.' then some "f64" else some "i64"
 
+/-- The spelling the engine's stream gives the literal `a` of sort `s`: the
+program's literals are read with it, so that a literal is one term however
+the program spells it. A whole rational loses its denominator and a rational
+is reduced; a number loses a leading `+` and leading zeros; a float loses a
+fraction of zeros, and trailing zeros of its fraction. Another spelling is
+kept as it is. -/
+def canonLit (s a : String) : String :=
+  match s with
+  | "i64" | "u64" | "usize" | "IBig" | "UBig" | "RBig" =>
+    match Val.parse s a with
+    | some v => (v.spell).getD a
+    | none => a
+  | "f64" =>
+    let a := if a.startsWith "+" then (a.drop 1).toString else a
+    if a.toLower.contains 'e' || !a.contains '.' then a
+    else
+      let t := (a.dropEndWhile (· == '0')).toString
+      if t.endsWith "." then (t.dropEnd 1).toString else t
+  | _ => a
+
 structure Env where
   /-- Each `let` name with its term and the term's sort. -/
   globals : List (String × (Term × String)) := []
@@ -154,7 +175,7 @@ partial def Env.term (E : Env) (exp : Option String) : SExp → Except String (T
   | .atom a =>
     if isLiteral a then
       match litSort exp a with
-      | some s => pure (.lit s a, s)
+      | some s => pure (.lit s (canonLit s a), s)
       | none => throw s!"literal {a} where {exp.getD ""} is expected"
     else match E.globals.lookup a with
       | some (t, s) => do checkSort exp s; pure (t, s)
@@ -244,7 +265,7 @@ partial def Env.pat (E : Env) (exp : Option String) : SExp → PatM (Pat × Opti
   | .atom a =>
     if isLiteral a then
       match litSort exp a with
-      | some s => pure (.lit s a, some s)
+      | some s => pure (.lit s (canonLit s a), some s)
       | none => throw "a literal of another sort than its position"
     else if a.startsWith ".." then throw "a rest variable"
     else if a.startsWith ":" || (a.splitOn ":").length > 1 then throw "a multiplicity"
@@ -259,12 +280,22 @@ partial def Env.pat (E : Env) (exp : Option String) : SExp → PatM (Pat × Opti
           if exp.isSome && exp != some d.res then throw "an operator of another sort than its position"
           pure (.app a [], some d.res)
         | none => do
+          -- A multiplicity variable read as a value is its count, an `i64`.
+          if ((← get).mults.lookup a).isSome then
+            if exp.isSome && exp != some "i64" then throw "a multiplicity variable at another sort than i64"
+            return (.count a, some "i64")
           match exp with
           | some s => setSort a s; pure (.var a, some s)
           | none => pure (.var a, (← get).sorts.lookup a)
   | .list (.atom f :: args) => do
     if f == "=" then throw "an equality inside a pattern"
-    let some d := E.op? f | throw s!"a primitive or undeclared operator ({f})"
+    -- A primitive is an operator whose signature `primSig` gives.
+    let d ← match E.op? f with
+      | some d => pure d
+      | none =>
+        match primSig f with
+        | some (as, r) => pure ({ name := f, kind := .plain, args := as, res := r } : OpDecl)
+        | none => throw s!"a primitive or undeclared operator ({f})"
     if exp.isSome && exp != some d.res then throw "an operator of another sort than its position"
     unless d.kind.isAssoc || args.length == d.args.length do throw "an operator with another number of arguments"
     let mut ps : Array Pat := #[]
@@ -312,7 +343,11 @@ def Env.guard (E : Env) : SExp → PatM (List (Pat × Pat))
   | x => do
     let (p, _) ← E.pat none x
     match p with
-    | .app .. => return [(p, p)]
+    -- A primitive predicate holds when it computes `true`.
+    | .app f _ =>
+      if (primSig f).map (·.2) == some "bool" && (E.op? f).isNone then
+        return [(p, .lit "bool" "true")]
+      else return [(p, p)]
     | _ => return []
 
 /-- Gives the pending pairs of variables their sorts, until none changes. -/
@@ -449,14 +484,32 @@ def sortNames : SExp → List String
   | .list xs => atoms xs
   | .atom a => [a]
 
+/-- The operators applied in a pattern. -/
+def Pat.heads : Pat → List String
+  | .var _ => []
+  | .lit _ _ => []
+  | .rest _ => []
+  | .rep p _ => p.heads
+  | .times p _ => p.heads
+  | .count _ => []
+  | .app f ps => f :: (ps.attach.map fun ⟨p, _⟩ => p.heads).flatten
+
 /-- The rules of the command at `o`: a rule not read is `none` in the program,
-and its reason is kept in the environment. -/
+and its reason is kept in the environment. The primitives the rules apply are
+declared, each with the signature `primSig` gives. -/
 def rules (E : Env) (P : Program) (o : Nat) (rs : List (Except String Rule)) : Env × Program :=
   let why := rs.zipIdx.filterMap fun (r, j) => match r with
     | .error e => some (o, j, e)
     | .ok _ => none
-  ({ E with skipped := E.skipped ++ why },
-   { P with decls := P.decls ++ [(o, .rules (rs.map fun r => r.toOption))] })
+  let heads := rs.flatMap fun r => match r with
+    | .ok r => r.lhs.heads ++ r.rhs.heads ++ r.eqs.flatMap fun e => e.1.heads ++ e.2.heads
+    | .error _ => []
+  let prims : List OpDecl := heads.eraseDups.filterMap fun f =>
+    if (E.op? f).isSome then none
+    else (primSig f).map fun (as, r) => { name := f, kind := .plain, args := as, res := r }
+  ({ E with skipped := E.skipped ++ why, ops := E.ops ++ prims },
+   { P with ops := P.ops ++ prims,
+            decls := P.decls ++ [(o, .rules (rs.map fun r => r.toOption))] })
 
 /-- Reads one command. -/
 def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Program)

@@ -840,7 +840,11 @@ where
                 .ops()
                 .lit_op_for_sort(eg.ops().info(*op).return_sort)
                 .expect("no lit op for prim op return sort");
-            eg.add_lit(lit_op, result_id)
+            let id = eg.add_lit(lit_op, result_id);
+            // The computed literal is a built node: the replay checks the
+            // primitive's value against it, whatever its spelling.
+            eg.trace_rhs(id, false);
+            id
         }
     })
 }
@@ -1647,7 +1651,9 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
             }
             RAtom::Collect { .. } => return eg.trace_atom_opaque("collected-sequence"),
             RAtom::Neq(..) => return eg.trace_atom_opaque("disequality-guard"),
-            RAtom::Pred { .. } => return eg.trace_atom_opaque("primitive-guard"),
+            // A primitive guard reads values the atoms already name: the replay
+            // evaluates it on them.
+            RAtom::Pred { .. } => {}
         }
     }
 }

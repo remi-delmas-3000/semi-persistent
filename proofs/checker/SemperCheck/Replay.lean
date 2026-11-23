@@ -1697,6 +1697,7 @@ def Pat.toTerm? : Pat → Option Term
   | .rest _ => none
   | .rep _ _ => none
   | .times _ _ => none
+  | .count _ => none
   | .lit s v => some (.lit s v)
   | .app f ps => (Pat.toTerms? ps).map (.app f)
 
@@ -1724,6 +1725,7 @@ def firstLine : Pat → String × Option Nat
   | .rest _ => ("", some 0)
   | .rep _ _ => ("", some 0)
   | .times _ _ => ("", some 0)
+  | .count _ => ("", some 0)
   | .lit _ _ => ("#lit", some 0)
   | .app f ps => (firstOf ps).getD (f, fixedArgs ps)
 
@@ -1738,12 +1740,15 @@ def firstOf : List Pat → Option (String × Option Nat)
   | .rep (.rest _) _ :: ps => firstOf ps
   | .rep (.rep _ _) _ :: ps => firstOf ps
   | .rep (.times _ _) _ :: ps => firstOf ps
+  | .rep (.count _) _ :: ps => firstOf ps
   | .times (.var _) _ :: ps => firstOf ps
   | .times (.lit s v) _ :: _ => some (firstLine (.lit s v))
   | .times (.app f qs) _ :: _ => some (firstLine (.app f qs))
   | .times (.rest _) _ :: ps => firstOf ps
   | .times (.rep _ _) _ :: ps => firstOf ps
   | .times (.times _ _) _ :: ps => firstOf ps
+  | .times (.count _) _ :: ps => firstOf ps
+  | .count _ :: ps => firstOf ps
   | .lit s v :: _ => some (firstLine (.lit s v))
   | .app f qs :: _ => some (firstLine (.app f qs))
 
@@ -2016,6 +2021,7 @@ def walkQ (p : Pat) : WalkM P (Nat × Nat) :=
   | .rest _ => throw "rule: a rest variable that is no argument"
   | .rep _ _ => throw "rule: a repeated argument that is no argument"
   | .times _ _ => throw "rule: a repeated argument that is no argument"
+  | .count _ => throw "rule: a count matched"
   | .lit s v => do
     let w ← get
     match w.atoms with
@@ -2038,10 +2044,13 @@ def walkQs : List Pat → WalkM P (List (Option (Nat × Nat)))
   | .rep (.rest _) _ :: _ => throw "rule: a repeated rest variable"
   | .rep (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .rep (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .rep (.count _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .count _ :: _ => throw "rule: a count matched"
   | .times (.var _) _ :: rest => walkQs rest >>= fun r => pure (none :: r)
   | .times (.rest _) _ :: _ => throw "rule: a repeated rest variable"
   | .times (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .times (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .times (.count _) _ :: _ => throw "rule: a repeated argument repeated"
   | .times (.lit s v) _ :: rest =>
     walkQ (.lit s v) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
   | .times (.app f qs) _ :: rest =>
@@ -2072,6 +2081,98 @@ def letName? (p : Pat) : WalkM P (Option (Nat × Nat)) := do
       return some (n, ← letInstance p n)
   return none
 
+/-- The sort and spelling of node `n`, when it is a literal. -/
+def litOfNode (S : St P) (n : Nat) : Option (String × String) :=
+  match S.defOf n with
+  | some (.lit s v) => some (s, v)
+  | _ => none
+
+/-- The primitive `f` applied to the instances of its arguments, which are
+the literal nodes `args.map (·.1)`, when it computes the literal node `out`
+(`primOk`): the application to the literals is `out` by the kernel's `prim`
+step, and the instance is that application argument by argument. -/
+def primInst (S : St P) (f : String) (args : List (Nat × Nat)) (out : Nat) : St P × Option Nat :=
+  match (args.map (·.1)).mapM (litOfNode S), litOfNode S out with
+  | some lits, some o =>
+    if !primOk f lits o then (S, none)
+    else
+      match intern S (.app f (args.map (·.1))) with
+      | (S, some pn) =>
+        let (S, st) := emit S (.prim f pn out) pn out
+        let S := S.mergeBy pn out (some (some st))
+        match intern S (.app f (args.map (·.2))) with
+        | (S, some i) =>
+          if i == pn then (S, some i)
+          else
+            let (S, p) := congStep S f i pn
+            (S.mergeBy i pn p, some i)
+        | (S, none) => (S, none)
+      | (S, none) => (S, none)
+  | _, _ => (S, none)
+
+/-- The built primitive application `f` of the built arguments `cs` against
+the next `b` node, the literal the engine computed. -/
+def builtPrim (f : String) (cs : List (Nat × Nat)) : WalkM P (Nat × Nat) := do
+  let w ← get
+  match w.rhs with
+  | (n, _) :: rest =>
+    set { w with rhs := rest }
+    match ← withS fun S => primInst S f cs n with
+    | some i => pure (n, i)
+    | none => throw "rule: primitive computes another value"
+  | [] => throw "rule: no node for a computed literal"
+
+/-- The literal that spells the count of the multiplicity variable `k`. -/
+def groundCount (k : String) : WalkM P (Nat × Nat) := do
+  match (← get).μ.lookup k with
+  | some n =>
+    match ← withS fun S => intern S (.lit "i64" (toString n)) with
+    | some i => pure (i, i)
+    | none => throw "rule: count literal ill-sorted"
+  | none => throw "rule: unbound multiplicity variable"
+
+/-- A primitive application the stream has no node for (a guard, or an
+argument of one): its value is computed here from its arguments' literals,
+and it is that literal by the kernel's `prim` step. -/
+def groundPrim (f : String) (args : List (Nat × Nat)) : WalkM P (Nat × Nat) := do
+  let S := (← get).S
+  let some (_, res) := primSig f | throw "rule: not a primitive"
+  let some lits := (args.map (·.1)).mapM (litOfNode S) | throw "rule: primitive on a node that is no literal"
+  let some vals := lits.mapM (fun a => Val.parse a.1 a.2) | throw "rule: literal without a value"
+  let some v := primEval f vals | throw "rule: primitive has no value"
+  let some text := v.spell | throw "rule: computed value without a spelling"
+  let some out ← withS fun S => intern S (.lit res text) | throw "rule: computed literal ill-sorted"
+  match ← withS fun S => primInst S f args out with
+  | some i => pure (out, i)
+  | none => throw "rule: primitive computes another value"
+
+mutual
+
+/-- The node and the instance of a pattern the stream writes no line for, from
+the assignment alone: a bound variable, a literal, or a primitive applied to
+such. -/
+def groundP (p : Pat) : WalkM P (Nat × Nat) :=
+  match p with
+  | .var x => do
+    match (← get).σ.lookup x with
+    | some n => pure (n, n)
+    | none => throw "rule: unbound variable"
+  | .lit s v => do
+    match ← withS fun S => intern S (.lit s v) with
+    | some n => pure (n, n)
+    | none => throw "rule: literal ill-sorted"
+  | .app f ps => groundPs ps >>= groundPrim f
+  | .rest _ => throw "rule: a rest variable that is no argument"
+  | .rep _ _ => throw "rule: a repeated argument that is no argument"
+  | .times _ _ => throw "rule: a repeated argument that is no argument"
+  | .count k => groundCount k
+
+def groundPs : List Pat → WalkM P (List (Nat × Nat))
+  | [] => pure []
+  | p :: ps => groundP p >>= fun x => groundPs ps >>= fun r => pure (x :: r)
+
+end
+
 /-- The built application `f` of the built arguments `cs` against the next
 `b` node. -/
 def builtApp (f : String) (cs : List (Nat × Nat)) : WalkM P (Nat × Nat) := do
@@ -2097,6 +2198,7 @@ def walkB (p : Pat) : WalkM P (Nat × Nat) :=
     | none => throw "rule: unbound variable"
   | .rep _ _ => throw "rule: a repeated argument that is no argument"
   | .times _ _ => throw "rule: a repeated argument that is no argument"
+  | .count k => groundCount k
   | .rest _ => throw "rule: a rest variable that is no argument"
   | .lit s v => do
     if let some r ← letName? (.lit s v) then return r
@@ -2113,7 +2215,9 @@ def walkB (p : Pat) : WalkM P (Nat × Nat) :=
     letName? (.app f ps) >>= fun r =>
       match r with
       | some r => pure r
-      | none => walkBs ps >>= builtApp f
+      -- A primitive application's `b` node is the literal the engine computed;
+      -- its arguments have none.
+      | none => if (primSig f).isSome then groundPs ps >>= builtPrim f else walkBs ps >>= builtApp f
 
 def walkBs : List Pat → WalkM P (List (Nat × Nat))
   | [] => pure []
@@ -2138,6 +2242,7 @@ def walkBs : List Pat → WalkM P (List (Nat × Nat))
   | .rep (.rest _) _ :: _ => throw "rule: a repeated rest variable"
   | .rep (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .rep (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .rep (.count _) _ :: _ => throw "rule: a repeated argument repeated"
   -- An argument with a fixed count is built once.
   | .times (.var x) n :: ps =>
     walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
@@ -2148,6 +2253,8 @@ def walkBs : List Pat → WalkM P (List (Nat × Nat))
   | .times (.rest _) _ :: _ => throw "rule: a repeated rest variable"
   | .times (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .times (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .times (.count _) _ :: _ => throw "rule: a repeated argument repeated"
+  | .count k :: ps => groundCount k >>= fun y => walkBs ps >>= fun r => pure (y :: r)
   | .var x :: ps => walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
   | .lit s v :: ps => walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
   | .app f qs :: ps => walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
@@ -2157,6 +2264,15 @@ end
 /-- One side of a body equality: a bound variable's node, a matched pattern's
 node and instance, or `none` for a variable not bound yet. -/
 def side (p : Pat) : WalkM P (Option (Nat × Nat)) := do
+  -- A primitive application has no line: it is computed from the assignment.
+  if let .app f _ := p then
+    if (primSig f).isSome then return some (← groundP p)
+  -- A literal the stream writes no line for.
+  if let .lit _ _ := p then
+    let lined := match (← get).atoms with
+      | (_, "#lit", _, _) :: _ => true
+      | _ => false
+    if !lined then return some (← groundP p)
   match p with
   | .var x => pure (((← get).σ.lookup x).map fun n => (n, n))
   | _ =>

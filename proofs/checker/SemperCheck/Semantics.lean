@@ -1,4 +1,5 @@
 import SemperCheck.Syntax
+import SemperCheck.Prim
 
 /-!
 # Models of a program
@@ -54,6 +55,7 @@ def evalP (σ : String → M.α) (ρ : String → List M.α) (μ : String → Na
   | .rest _ => M.lit "" ""
   | .rep _ _ => M.lit "" ""
   | .times _ _ => M.lit "" ""
+  | .count k => M.lit "i64" (toString (μ k))
   | .app f args => M.app f (evalArgs σ ρ μ args)
 
 /-- The values of an argument list: a rest variable gives its whole list, a
@@ -65,6 +67,7 @@ def evalArgs (σ : String → M.α) (ρ : String → List M.α) (μ : String →
   | .times p n :: ps => List.replicate n (evalP σ ρ μ p) ++ evalArgs σ ρ μ ps
   | .var x :: ps => σ x :: evalArgs σ ρ μ ps
   | .lit s v :: ps => M.lit s v :: evalArgs σ ρ μ ps
+  | .count k :: ps => M.lit "i64" (toString (μ k)) :: evalArgs σ ρ μ ps
   | .app f args :: ps => M.app f (evalArgs σ ρ μ args) :: evalArgs σ ρ μ ps
 
 end
@@ -120,16 +123,20 @@ def DeclSat : Decl → Prop
   | .goal _ _ => True
 
 /-- `M` satisfies the signatures and laws of `P`'s operators, interprets each
-literal of a literal sort in that sort, and satisfies every command of `P`
-that starts before offset `p`. -/
+literal of a literal sort in that sort, satisfies every command of `P` that
+starts before offset `p`, and computes each primitive on literals as
+`primOk` says. -/
 def Models (P : Program) (p : Nat) : Prop :=
   (∀ d ∈ P.ops, M.OpTyped d ∧ M.OpSat d) ∧
   (∀ s v, s ∈ P.litSorts → M.dom s (M.lit s v)) ∧
-  ∀ o d, (o, d) ∈ P.decls → o < p → M.DeclSat d
+  (∀ o d, (o, d) ∈ P.decls → o < p → M.DeclSat d) ∧
+  -- A primitive applied to literals is the literal it computes (`Prim.lean`).
+  ∀ f args out, primOk f args out = true →
+    M.app f (args.map fun a => M.lit a.1 a.2) = M.lit out.1 out.2
 
 theorem Models.mono {M : Model} {P : Program} {p q : Nat} (h : M.Models P p) (hq : q ≤ p) :
     M.Models P q :=
-  ⟨h.1, h.2.1, fun o d hd ho => h.2.2 o d hd (Nat.lt_of_lt_of_le ho hq)⟩
+  ⟨h.1, h.2.1, fun o d hd ho => h.2.2.1 o d hd (Nat.lt_of_lt_of_le ho hq), h.2.2.2⟩
 
 end Model
 

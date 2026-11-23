@@ -53,7 +53,7 @@ program.
 | `y c m k` | regrouping witness for the next `m` line: on the `e` line at position `k`, the pattern argument bound to class `c` stands for the arguments of its member `m`, which the matched node holds in its place |
 | `r off k` | a rule of the command at `off` fired; `k` is `w` for a `rewrite` (its left side is matched) and `r` for a `rule` (both sides of its `union` actions are built) |
 | `e id f c1 .. ck` | within a firing: the pattern application `f` matched node `id`, with its argument patterns bound to `c1 .. ck` (`c:m` for an argument pattern of multiplicity `m`, which is the count a multiplicity variable is bound to when the pattern has one; the nodes a rest variable is bound to between `[` and `]`, in the pattern's order); one line per application of the matched patterns, arguments before the application (`f` is `#lit` for a literal pattern) |
-| `b id1 .. idk` | within a firing: the nodes the built patterns' applications evaluated to, arguments before the application (`g` before an id marks the node of a `let` name, which stands for the name's whole term) |
+| `b id1 .. idk` | within a firing: the nodes the built patterns' applications evaluated to, arguments before the application (`g` before an id marks the node of a `let` name, which stands for the name's whole term). A primitive application's node is the literal the engine computed, and its arguments have none: the replay evaluates the primitive on the arguments' literals and checks the literal (`prim` step) |
 | `m j a b` | within a firing: rule `j` of the command merged `a` and `b`, the nodes of its two sides |
 | `g off a b` | the `check-eq` at `off` compared `a` and `b`, the nodes of its two terms |
 | `mark d`, `restore d`, `rpop d` | the engine marked its state; restored a mark and kept it; restored a mark and dropped it. `d` is the depth of the mark stack after the operation |
@@ -221,8 +221,8 @@ replayer terminates by a structural or well-founded measure; none is `partial`.
 
 ## Not in this version
 
-A firing of a rule with a multiplicity variable, a primitive guard, a
-comprehension or a disequality is written as `u rewrite:REASON`: the reader
+A firing of a rule with a comprehension, a collected sequence or a
+disequality is written as `u rewrite:REASON`: the reader
 reads no rule from such a command. `GAP.md` counts the `check-eq` each reason
 costs.
 
