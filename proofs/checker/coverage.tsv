@@ -71,7 +71,7 @@ doc/book/examples/cost-models/24-first.egg	0	0	replayed
 doc/book/examples/cost-models/24-ladder.egg	0	0	replayed
 doc/book/examples/cost-models/24-three.egg	0	0	replayed
 doc/book/examples/cost-models/25-depth.egg	0	0	replayed
-doc/book/examples/cost-models/25-exact.egg	0	0	unread
+doc/book/examples/cost-models/25-exact.egg	0	0	replayed
 doc/book/examples/cost-models/25-latency.egg	0	0	replayed
 doc/book/examples/cost-models/25-polarity.egg	0	0	skipped
 doc/book/examples/cost-models/25-rust.egg	0	0	replayed
@@ -163,10 +163,10 @@ egraph/tests/egg/atomic_bit_inverse_after_splice.egg	3	3	replayed
 egraph/tests/egg/atomic_bit_last_node_collapses.egg	4	4	replayed
 egraph/tests/egg/atomic_bit_leaf_gains_node.egg	3	3	replayed
 egraph/tests/egg/atomic_bit_merge_spliced_side.egg	6	6	replayed
-egraph/tests/egg/audit_au_large_count.egg	0	0	unread
-egraph/tests/egg/audit_completion_rewrite_batch.egg	0	0	unread
+egraph/tests/egg/audit_au_large_count.egg	0	0	replayed
+egraph/tests/egg/audit_completion_rewrite_batch.egg	1	1	replayed
 egraph/tests/egg/audit_completion_sum_overflow.egg	0	0	skipped
-egraph/tests/egg/audit_extract_saturated_cost.egg	0	0	unread
+egraph/tests/egg/audit_extract_saturated_cost.egg	0	0	replayed
 egraph/tests/egg/audit_gt_u64_max.egg	0	0	skipped
 egraph/tests/egg/audit_merge_monomial_overflow.egg	0	0	skipped
 egraph/tests/egg/audit_mset_into_positional.egg	0	0	skipped
@@ -1509,7 +1509,7 @@ egraph/tests/egg/globals_in_patterns.egg	1	1	replayed
 egraph/tests/egg/ground_mult_aci_refused.egg	0	0	skipped
 egraph/tests/egg/ground_mult_aci_repeats.egg	3	3	replayed
 egraph/tests/egg/ground_mult_extract_roundtrip.egg	1	1	replayed
-egraph/tests/egg/ground_mult_full_width.egg	0	0	unread
+egraph/tests/egg/ground_mult_full_width.egg	1	1	replayed
 egraph/tests/egg/ground_mult_kinds.egg	3	3	replayed
 egraph/tests/egg/ground_mult_not_variadic.egg	0	0	skipped
 egraph/tests/egg/ground_mult_overflow.egg	0	0	skipped

@@ -5,7 +5,7 @@ Written by `proofs/checker/scripts/check-replay.py --gap`. Each program's unprov
 witness in the stream, or gets no kernel step. A program's later failures can
 follow from the merge that event did not apply.
 
-31099 of 31099 `check-eq` proved; 0 not proved, in 0 programs.
+31101 of 31101 `check-eq` proved; 0 not proved, in 0 programs.
 
 | cause | programs | `check-eq` not proved | example |
 | --- | --- | --- | --- |
@@ -17,4 +17,3 @@ Their `check-eq` are not in the total above.
 
 | reason | programs | example |
 | --- | --- | --- |
-| count N above N | 5 | `doc/book/examples/cost-models/25-exact.egg` |

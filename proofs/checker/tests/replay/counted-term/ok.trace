@@ -1,0 +1,26 @@
+o
+n 0 c
+t 0 c
+n 1 d
+t 1 d
+n 2 Plus 0:2000000 1:2000000
+t 2 Plus 0:2000000 1:2000000
+t 0 c
+t 1 d
+n 3 Plus 0 1
+t 3 Plus 0 1
+n 4 b
+t 4 b
+x 563 3 4
+o
+n 5 Plus 3:2000000
+i 5 2 2 3 3 1
+o
+o
+o
+t 4 b
+n 6 Plus 4:2000000
+w 6 5
+t 6 Plus 4:2000000
+o
+g 598 2 6

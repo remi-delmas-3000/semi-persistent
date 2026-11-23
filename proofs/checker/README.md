@@ -240,18 +240,18 @@ of line, a stream that proves its goal and the same stream with one witness
 changed, which costs the goal that depends on it.
 
 Over the 1,684 programs (release build, 60 s and 4 GB per run, four jobs, 27 s
-of wall time): 1,554 are replayed, 125 expect an outcome other than `ok`, and
-the reader rejects 5, which write a count above 65,536.
+of wall time): 1,559 are replayed and 125 expect an outcome other than `ok`. The reader
+reads every program.
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 31,099 | 31,099 |
-| programs with every `check-eq` proved, of 1,161 | 1,159 |
-| kernel steps checked | 16,636,148 |
+| `check-eq` proved (`replay_sound` covers them), of 31,101 | 31,101 |
+| programs with every `check-eq` proved, of 1,163 | 1,163 |
+| kernel steps checked | 16,636,176 |
 | steps the kernel rejects | 0 |
-| events replayed | 7,438,509 |
-| events whose check fails | 8,069 |
-| events the stream gives no witness for | 347 |
+| events replayed | 7,438,563 |
+| events whose check fails | 3 |
+| events the stream gives no witness for | 0 |
 
 `GAP.md`, which `check-replay.py --gap` writes, assigns each `check-eq` not
 proved to one cause: that of its program's first event that fails, has no

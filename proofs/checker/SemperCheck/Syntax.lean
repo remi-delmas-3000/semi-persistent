@@ -14,6 +14,8 @@ namespace SemperCheck
 inductive Term where
   | lit (s v : String)
   | app (f : String) (args : List Term)
+  /-- `f` applied to each argument as many times as its count. -/
+  | napp (f : String) (args : List Term) (counts : List Nat)
   deriving Repr, Inhabited
 
 /-- A rule pattern: a ground term with variables. -/

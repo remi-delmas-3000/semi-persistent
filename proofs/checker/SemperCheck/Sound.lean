@@ -406,18 +406,6 @@ theorem lookup_some {n : Node} {i : Nat} (h : C.lookup n = some i) : C.nodes[i]?
     · cases h
   · cases h
 
-theorem intern_sound (hwf : wfNodes C.nodes = true) :
-    ∀ (t : Term) (i : Nat), C.intern t = some i → nval M C.nodes i = M.eval t
-  | .lit s v, i, h => by
-    rw [intern] at h
-    rw [nval_lit (lookup_some h), Model.eval]
-  | .app f args, i, h => by
-    rw [intern, Option.bind_eq_some_iff] at h
-    obtain ⟨ids, hids, hi⟩ := h
-    rw [nval_app hwf (lookup_some hi), Model.eval]
-    congr 1
-    exact mapM_some_map args ids hids fun a _ j hj => intern_sound hwf a j hj
-
 theorem internS_sound (hwf : wfNodes C.nodes = true) :
     ∀ (t : STm) (i : Nat), C.internS t = some i → nval M C.nodes i = M.evS (nval M C.nodes) t
   | .atom (.node n), i, h => by
@@ -494,6 +482,26 @@ theorem mkApp_sound (hwf : wfNodes C.nodes = true) {f : String} {cks : List (Nat
   split at h
   · rw [nval_app hwf (lookup_some h), spread_map]
   · rw [nval_napp hwf (lookup_some h)]
+    rfl
+
+theorem intern_sound (hwf : wfNodes C.nodes = true) :
+    ∀ (t : Term) (i : Nat), C.intern t = some i → nval M C.nodes i = M.eval t
+  | .lit s v, i, h => by
+    rw [intern] at h
+    rw [nval_lit (lookup_some h), Model.eval]
+  | .app f args, i, h => by
+    rw [intern, Option.bind_eq_some_iff] at h
+    obtain ⟨ids, hids, hi⟩ := h
+    rw [nval_app hwf (lookup_some hi), Model.eval]
+    congr 1
+    exact mapM_some_map args ids hids fun a _ j hj => intern_sound hwf a j hj
+  | .napp f args ks, i, h => by
+    rw [intern, Option.bind_eq_some_iff] at h
+    obtain ⟨ids, hids, hi⟩ := h
+    rw [mkApp_sound hwf hi, Model.eval]
+    congr 1
+    have hm := mapM_some_map args ids hids fun a _ j hj => intern_sound hwf a j hj
+    rw [← hm, List.zip_map_left, List.flatMap_map]
     rfl
 
 mutual
@@ -780,6 +788,15 @@ theorem pairsOk_sound {prems : List (Nat × Nat)}
   | [], _ :: _, h => by simp [pairsOk] at h
   | _ :: _, [], h => by simp [pairsOk] at h
 
+theorem spreadV_zip : ∀ cks : List (Nat × Nat), spreadV M C.nodes cks =
+    (((cks.map (·.1)).map (nval M C.nodes)).zip (cks.map (·.2))).flatMap
+      fun vk => List.replicate vk.2 vk.1
+  | [] => rfl
+  | ck :: t => by
+    have ih := spreadV_zip t
+    unfold spreadV at ih ⊢
+    simp only [List.flatMap_cons, List.map_cons, List.zip_cons_cons, ih]
+
 theorem congPlain_sound (hwf : wfNodes C.nodes = true) {f : String} {a b : Nat}
     {prems : List (Nat × Nat)} (hp : ∀ p ∈ prems, nval M C.nodes p.1 = nval M C.nodes p.2)
     (h : C.congPlain f a b prems = true) : nval M C.nodes a = nval M C.nodes b := by
@@ -789,6 +806,14 @@ theorem congPlain_sound (hwf : wfNodes C.nodes = true) {f : String} {a b : Nat}
     simp only [Bool.and_eq_true, beq_iff_eq] at h
     obtain ⟨⟨rfl, rfl⟩, h⟩ := h
     rw [nval_app hwf ha, nval_app hwf hb, pairsOk_sound hp cs ds h]
+  · rename_i g cs h' ds ha hb
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨rfl, rfl⟩, hk⟩, h⟩ := h
+    rw [nval_napp hwf ha, nval_napp hwf hb]
+    have e1 := spreadV_zip (M := M) (C := C) cs
+    have e2 := spreadV_zip (M := M) (C := C) ds
+    unfold spreadV at e1 e2
+    rw [e1, e2, hk, pairsOk_sound hp _ _ h]
   · cases h
 
 theorem congComm_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)

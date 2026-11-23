@@ -40,6 +40,8 @@ structure St (P : Program) where
   cid : Array (Option Nat) := #[]
   /-- `(f, c1 .. ck) -> id`: the program term `f(c1 .. ck)` evaluated to `id`. -/
   spell : Spell := {}
+  /-- As `spell`, for an application with a count above the kernel's limit. -/
+  spellC : Std.HashMap (String × List (Nat × Nat)) Nat := {}
   /-- The node of each operator's unit (`z` lines). -/
   units : Std.HashMap String Nat := {}
   /-- Each literal's node, checked against its definition on use. -/
@@ -260,6 +262,11 @@ def St.mergeBy (S : St P) (a b : Nat) (pf : Pf) : St P :=
       | (S, false) => S.noStep
     | _ => S.noStep
 
+/-- The node that is `f` applied to counted children: the children repeated
+up to the kernel's `countLimit`, a counted application above it. -/
+def countedNode (f : String) (cks : List (Nat × Nat)) : Node :=
+  if cks.all (fun ck => ck.2 ≤ Ctx.countLimit) then .app f (Ctx.spread cks) else .napp f cks
+
 /-- A merge the replayer has no kernel step for: it is not applied. -/
 def St.merge (S : St P) (a b : Nat) : St P := S.mergeBy a b none
 
@@ -277,6 +284,7 @@ def eval (S : St P) : Term → Option Nat
   | .app f args =>
     (evalArgs S (if S.prog.kind f == .assoc then some f else none) args).bind fun ids =>
       S.spell[(f, ids)]?
+  | .napp f args ks => (evalArgs S none args).bind fun ids => S.spellC[(f, ids.zip ks)]?
 
 /-- The nodes of a term's arguments. With `fl = some f`, the arguments of a
 nested application of `f` take its place, as the engine's term builder
@@ -288,6 +296,8 @@ def evalArgs (S : St P) (fl : Option String) : List Term → Option (List Nat)
       (evalArgs S fl xs).bind fun a => (evalArgs S fl rest).map (a ++ ·)
     else (eval S (.app g xs)).bind fun a => (evalArgs S fl rest).map (a :: ·)
   | .lit s v :: rest => (eval S (.lit s v)).bind fun a => (evalArgs S fl rest).map (a :: ·)
+  | .napp g xs ks :: rest =>
+    (eval S (.napp g xs ks)).bind fun a => (evalArgs S fl rest).map (a :: ·)
 
 end
 
@@ -298,6 +308,7 @@ whose nested applications are `let` names, each standing for its class. -/
 def evalN (S : St P) : Term → Option Nat
   | .lit s v => eval S (.lit s v)
   | .app f args => (evalNs S args).bind fun ids => S.spell[(f, ids)]?
+  | .napp f args ks => (evalNs S args).bind fun ids => S.spellC[(f, ids.zip ks)]?
 
 def evalNs (S : St P) : List Term → Option (List Nat)
   | [] => some []
@@ -314,6 +325,9 @@ def denotes (S : St P) (n : Nat) : Term → Bool
     | _ => false
   | .app f ts => match S.defOf n with
     | some (.app g cs) => g == f && denotesArgs S cs ts
+    | _ => false
+  | .napp f ts ks => match S.defOf n with
+    | some (.napp g cks) => g == f && cks.map (·.2) == ks && denotesArgs S (cks.map (·.1)) ts
     | _ => false
 
 def denotesArgs (S : St P) : List Nat → List Term → Bool
@@ -799,11 +813,6 @@ def idsC (S : St P) (xs : List String) : Option (List (Nat × Nat)) :=
     | [n, k] => (S.node? n).bind fun n => k.toNat?.bind fun k => if k == 0 then none else some (n, k)
     | _ => none
 
-/-- The node that is `f` applied to counted children: the children repeated
-up to the kernel's `countLimit`, a counted application above it. -/
-def countedNode (f : String) (cks : List (Nat × Nat)) : Node :=
-  if cks.all (fun ck => ck.2 ≤ Ctx.countLimit) then .app f (Ctx.spread cks) else .napp f cks
-
 /-- `c` and `c:k` fields as node ids, a counted one repeated. -/
 def ids (S : St P) (xs : List String) : Option (List Nat) := do
   let mut out : Array Nat := #[]
@@ -1087,14 +1096,53 @@ termination_by x
 
 /-- A `cong` step for two nodes of a multiset operator whose counted
 arguments agree: each child has the same total count on both sides. -/
-def countedCong (S : St P) (f : String) (a b : Nat) : St P × Pf :=
-  if a == b then (S, some none)
-  else
-    let (l, m) := (cviewR S f a, cviewR S f b)
-    if sameCounts (S.prog.kind f) l m then
-      let (S, s) := emit S (.cong f a b []) a b
-      (S, some (some s))
-    else (S, none)
+def countedCong (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
+  if a == b then return (S, some none)
+  let kind := S.prog.kind f
+  let (l, m) := (cviewR S f a, cviewR S f b)
+  if sameCounts kind l m then
+    let (S, s) := emit S (.cong f a b []) a b
+    return (S, some (some s))
+  -- Two counted nodes with the same counts and children equal one by one:
+  -- no flattening, a child that is an application of `f` stands for its class.
+  if let (some (.napp g cs), some (.napp h ds)) := (S.defOf a, S.defOf b) then
+    if g == f && h == f && cs.map (·.2) == ds.map (·.2) &&
+        (cs.zip ds).all (fun cd => S.fd cd.1.1 == S.fd cd.2.1) then
+      let mut S := S
+      let mut prems : Array Nat := #[]
+      let mut ok := true
+      for (c, d) in cs.zip ds do
+        if c.1 != d.1 && ok then
+          let (S', p) := eqP S c.1 d.1
+          S := S'
+          match p with
+          | some (some st) => prems := prems.push st
+          | _ => ok := false
+      if ok then
+        let (S', st) := emit S (.cong f a b prems.toList) a b
+        return (S', some (some st))
+  -- Arguments equal as classes: each goes to the first argument of its
+  -- class, by a premise, and the two sides are compared again.
+  let keys := (normC l ++ normC m).map (·.1)
+  let reps : List (Nat × Nat) := keys.foldl (fun acc y =>
+    if acc.any (fun rc => rc.1 == S.fd y) then acc else acc ++ [(S.fd y, y)]) []
+  let repOf (y : Nat) : Nat := (reps.lookup (S.fd y)).getD y
+  let u := S.unit f
+  let side (v : List (Nat × Nat)) : List (Nat × Nat) :=
+    (v.flatMap fun yn => scaleC yn.2 (cviewR S f (repOf yn.1))).filter fun yn => some yn.1 != u
+  if !sameCounts kind (side l) (side m) then return (S, none)
+  let mut S := S
+  let mut prems : Array Nat := #[]
+  for y in keys.eraseDups do
+    let r := repOf y
+    if r != y then
+      let (S', p) := eqP S y r
+      S := S'
+      match p with
+      | some (some st) => prems := prems.push st
+      | _ => return (S, none)
+  let (S', s) := emit S (.cong f a b prems.toList) a b
+  return (S', some (some s))
 
 /-- A `cong` step that concludes `a = b` for two nodes whose arguments the
 replayer found equal as classes under `f`'s laws: its premises prove each
@@ -1674,6 +1722,7 @@ mutual
 def internT (S : St P) : Term → Option Nat
   | .lit s v => S.index[Node.lit s v]?
   | .app f args => (internTs S args).bind fun cs => S.index[Node.app f cs]?
+  | .napp f args ks => (internTs S args).bind fun cs => S.index[countedNode f (cs.zip ks)]?
 
 def internTs (S : St P) : List Term → Option (List Nat)
   | [] => some []
@@ -1764,6 +1813,19 @@ def writtenP (S : St P) (t : Term) : St P × Option (Nat × Nat × Pf) :=
     let node := eval S (.app f args)
     match writtenArgs S args #[] with
     | (S, some ws) => writtenApp S f args.isEmpty node ws
+    | (S, none) => (S, none)
+  | .napp f args ks =>
+    -- The counted term as the kernel interns it, and the node it evaluated
+    -- to: one node, or two with the same counted arguments.
+    let node := eval S (.napp f args ks)
+    match writtenArgs S args #[] with
+    | (S, some ws) =>
+      match intern S (countedNode f (ws.toList.zip ks)), node with
+      | (S, some w), some n =>
+        match countedCong S f w n with
+        | (S, some p) => (S, some (w, n, some p))
+        | (S, none) => (S, none)
+      | (S, _), _ => (S, none)
     | (S, none) => (S, none)
 
 /-- Each argument's term, joined to the node it evaluated to. -/
@@ -3055,6 +3117,8 @@ mutual
 def termS : Term → STm
   | .lit s v => .atom (.lit s v)
   | .app f args => .app f (termsS args)
+  -- No sequence operator holds counts: the kernel refuses a step built on this.
+  | .napp f args _ => .app f (termsS args)
 
 def termsS : List Term → List STm
   | [] => []
@@ -3272,8 +3336,15 @@ def stepCore (S : St P) (line : String) : St P :=
     | some i => define S i (.lit s (" ".intercalate rest))
     | none => S.fail "definition: unreadable"
   | "t" :: id :: f :: kids =>
-    match S.node? id, ids S kids with
-    | some i, some cs =>
+    match S.node? id, idsC S kids with
+    | some i, some cks =>
+      if cks.any (fun ck => ck.2 > Ctx.countLimit) then
+        -- A counted application: the node holds these children and counts.
+        if S.defOf i == some (countedNode f cks) then
+          { S with spellC := S.spellC.insert (f, cks) i }
+        else S.fail "term: its counted node differs"
+      else
+      let cs := Ctx.spread cks
       if spells S i f cs then termLine { S with spell := S.spell.insert (f, cs) i } i f cs
       else S.fail "term: its node differs"
     | _, _ => S.fail "term: unreadable"
@@ -3556,6 +3627,7 @@ def stepCore (S : St P) (line : String) : St P :=
                   | (S, some tn) => let (S, p) := congStepL S f tn n; (S, some (tn, p))
                   | (S, none) => (S, none)
               | .lit _ _ => (S, none)
+              | .napp _ _ _ => (S, none)
             match side S l a with
             | (S, some (tl, pl)) =>
               match side S r b with
@@ -3600,6 +3672,17 @@ def stepCore (S : St P) (line : String) : St P :=
         | some (.app f _) =>
           if S.prog.kind f == .assoc || (S.prog.kind f).isFold then some f else none
         | _ => none
+      -- A counted node: the two merged nodes have the same counted arguments,
+      -- a rewritten argument standing for its class.
+      let counted : Option String := match S.defOf a, S.defOf b with
+        | some (.napp f _), _ => some f
+        | _, some (.napp f _) => some f
+        | _, _ => none
+      if let some f := counted then
+        match countedCong S f a b with
+        | (S, some p) => S.mergeBy a b (some p)
+        | (S, none) => S.fail "completion: counted arguments differ"
+      else
       if let some f := seqOp then
         match rs with
         | [(l, r, _)] =>

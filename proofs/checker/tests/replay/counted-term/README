@@ -1,0 +1,9 @@
+A ground term with counts above 65,536: `(Plus (c):2000000 (d):2000000)`. The
+reader keeps each argument once with its count, the `t` line names the counted
+node, and the kernel interns the term as that node. The completion merge
+(`i`) and the law merge (`w`) are `cong` steps on counted arguments: the first
+by flattening `Plus (Plus c d):2000000`, the second child by child with the
+premise `Plus c d = b`.
+
+`bad.trace` gives node 6 the count 1999999: the goal's right side
+`(Plus (b):2000000)` has no node, and the goal is not proved.

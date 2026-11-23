@@ -182,11 +182,6 @@ def lookup (n : Node) : Option Nat :=
   | some i => if C.nodes[i]? = some n then some i else none
   | none => none
 
-/-- The node that is term `t`, child for child. -/
-def intern : Term → Option Nat
-  | .lit s v => C.lookup (.lit s v)
-  | .app f args => (args.mapM intern).bind fun ids => C.lookup (.app f ids)
-
 /-- The node that is the term `t` over atoms, an atom `node n` being node `n`. -/
 def internS : STm → Option Nat
   | .atom (.node n) => if n < C.nodes.size then some n else none
@@ -205,6 +200,12 @@ def spread (cks : List (Nat × Nat)) : List Nat :=
 def mkApp (f : String) (cks : List (Nat × Nat)) : Option Nat :=
   if cks.all (fun ck => ck.2 ≤ countLimit) then C.lookup (.app f (spread cks))
   else C.lookup (.napp f cks)
+
+/-- The node that is term `t`, child for child. -/
+def intern : Term → Option Nat
+  | .lit s v => C.lookup (.lit s v)
+  | .app f args => (args.mapM intern).bind fun ids => C.lookup (.app f ids)
+  | .napp f args ks => (args.mapM intern).bind fun ids => C.mkApp f (ids.zip ks)
 
 mutual
 
@@ -309,6 +310,10 @@ variable (C : Ctx)
 def congPlain (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
   match C.nodes[a]?, C.nodes[b]? with
   | some (.app g cs), some (.app h ds) => g == f && h == f && pairsOk prems cs ds
+  -- Counted nodes: the same counts, child by child.
+  | some (.napp g cs), some (.napp h ds) =>
+    g == f && h == f && cs.map (·.2) == ds.map (·.2) &&
+      pairsOk prems (cs.map (·.1)) (ds.map (·.1))
   | _, _ => false
 
 def congComm (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=

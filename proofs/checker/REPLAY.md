@@ -228,7 +228,11 @@ disequality is written as `u rewrite:REASON`: the reader
 reads no rule from such a command. `GAP.md` counts the `check-eq` each reason
 costs.
 
-The table holds an application's arguments as a list, so a multiplicity is that
-many arguments. The reader does not read a program that writes a count above
-65,536 (5 of the 1,684 programs), and the replayer does not read a line that
-does.
+The table holds a count above 65,536 as a counted node (`Node.napp`: each child
+once with its count) and a count up to it as that many arguments (`Node.app`).
+The kernel compares the two forms through one counted view (`cview`), so a
+count of 4,294,967,295 costs one table entry. A program term has the same two
+forms (`Term.app`, `Term.napp`). The sequence-rule evaluator (`Seq.lean`) still
+writes a built count as that many arguments: one firing in
+`seq_rhs_too_wide.egg`, which builds a count of 4,194,304, fails its check and
+costs no `check-eq`.

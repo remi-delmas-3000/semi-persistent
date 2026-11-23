@@ -42,6 +42,8 @@ variable (M : Model)
 def eval : Term → M.α
   | .lit s v => M.lit s v
   | .app f args => M.app f (args.map eval)
+  | .napp f args ks =>
+    M.app f (((args.map eval).zip ks).flatMap fun vk => List.replicate vk.2 vk.1)
 
 mutual
 

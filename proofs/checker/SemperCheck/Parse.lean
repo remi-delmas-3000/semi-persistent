@@ -193,30 +193,32 @@ partial def Env.term (E : Env) (exp : Option String) : SExp → Except String (T
   | .list (.atom f :: args) => do
     let some d := E.op? f | throw s!"unknown operator {f}"
     checkSort exp d.res
-    let mut out : Array Term := #[]
+    let mut out : Array (Term × Nat) := #[]
     for x in args do
       let i := out.size
       match x with
       | .atom a =>
         if a.startsWith ":" then
           let some k := (a.drop 1).toString.toNat? | throw s!"unsupported child tag {a}"
-          if k > 65536 then throw s!"count {k} above 65536"
           let some last := out.back? | throw s!"count without a child in {f}"
-          out := out.pop
-          for _ in [0:k] do out := out.push last
+          out := out.pop.push (last.1, k)
         else if (a.splitOn ":").length == 2 && !isLiteral a then
           match a.splitOn ":" with
           | [n, k] =>
             let some k := k.toNat? | throw s!"unsupported child {a}"
-            if k > 65536 then throw s!"count {k} above 65536"
             let (t, _) ← E.term (argSort d i) (.atom n)
-            for _ in [0:k] do out := out.push t
+            out := out.push (t, k)
           | _ => throw s!"unsupported child {a}"
-        else out := out.push (← E.term (argSort d i) x).1
-      | _ => out := out.push (← E.term (argSort d i) x).1
-    unless d.kind.isAssoc || d.kind.isFold || out.size == d.args.length do
+        else out := out.push ((← E.term (argSort d i) x).1, 1)
+      | _ => out := out.push ((← E.term (argSort d i) x).1, 1)
+    -- A count above 65,536 keeps the argument once with its count.
+    if out.any (fun tk => tk.2 > 65536) then
+      unless d.kind == .ac || d.kind == .aci do throw s!"a count in {f}, which is no multiset"
+      return (.napp f (out.toList.map (·.1)) (out.toList.map (·.2)), d.res)
+    let flat := out.toList.flatMap fun tk => List.replicate tk.2 tk.1
+    unless d.kind.isAssoc || d.kind.isFold || flat.length == d.args.length do
       throw s!"{f} takes {d.args.length} arguments"
-    return (.app f out.toList, d.res)
+    return (.app f flat, d.res)
   | x => .error s!"not a term: {repr x}"
 
 /-- What reading a rule's patterns has learned: each variable's sort, and the
@@ -244,6 +246,7 @@ def setSort (x s : String) : PatM Unit := do
 def ofTerm : Term → Pat
   | .lit s v => .lit s v
   | .app f args => .app f (args.map ofTerm)
+  | .napp f args ks => .app f (((args.map ofTerm).zip ks).map fun pk => .times pk.1 pk.2)
 
 /-- The argument patterns after `ps` for pattern `p` with the count `cnt`: a
 number makes it `p` that many times (`Pat.times`); a multiplicity variable `k`, or `k>=n`,
@@ -508,6 +511,8 @@ def sortNames : SExp → List String
 partial def ofTermS : Term → SRhs
   | .lit s v => .lit s v
   | .app f args => .app f (args.map fun t => .tm (ofTermS t))
+  | .napp f args ks =>
+    .app f ((args.zip ks).map fun tk => .times (ofTermS tk.1) (.lit "i64" (toString tk.2)))
 
 /-- The sort of a computed value, as far as its form tells. -/
 def SNum.sort? (sorts : List (String × String)) : SNum → Option String
