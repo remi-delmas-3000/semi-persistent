@@ -445,13 +445,15 @@ def spells (S : St P) (n : Nat) (f : String) (cs : List Nat) : Bool :=
       | some (.app g ds) => g == f && (let (x, y) := nf2 S f ds cs invUnit; x == y)
       | _ => false)
     || ((S.prog.kind f).isAssoc &&
+        -- The unit dropped and nothing else: the one argument left is the node.
+        ((nf2 S f cs [] false).1 == [S.fd n] ||
         (let t := (nf2 S f cs [] invUnit).1
          -- One class left: the application is that class. None left: it is the unit.
          t == [S.fd n] || (t.isEmpty && (S.unit f).map S.fd == some (S.fd n)) ||
          -- The normal form is the argument list of a node of `n`'s class.
          (match nodeOfArgs S f t with
            | some x => S.fd x == S.fd n
-           | none => false)))
+           | none => false))))
 
 /-! ## Completion merges
 
@@ -543,8 +545,9 @@ structure Rewrote where
 /-- Rewrites `m` by the rules `rules`, in order: the result and each rewrite.
 Monomials are read on the classes of `S`; a rule's two nodes are in one class
 of `now`, the current classes. -/
-def rewrite (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false)
-    (done : Array Rewrote := #[]) : List (Nat × Nat × Bool) → Except String (List Nat × Array Rewrote)
+def rewriteR (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool)
+    (done : Array Rewrote) (raw : Option (List Nat)) :
+    List (Nat × Nat × Bool) → Except String (List Nat × Array Rewrote)
   | [] => pure (m, done)
   | (l, r, atom) :: rest => do
     if now.fd l != now.fd r then throw "completion: rule sides in two classes"
@@ -554,10 +557,26 @@ def rewrite (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List N
       -- A rule's left side keeps its inverse pairs: the engine cancels them on
       -- a normal form only.
       let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)) (inverse := false))
-      match applyRule S f m lc (if atom then [r] else monomial S f W r) once with
-      | some (q, left, m') => rewrite now S f W m' once (done.push { l, r, q, rest := left, after := m', atom }) rest
+      -- The rule applies to the monomial as the laws left it, or to what the
+      -- last rewrite gave before the laws clamped its counts (`raw`): the
+      -- engine applies some rules before it clamps.
+      let rr := if atom then [r] else monomial S f W r
+      let hit := match applyRule S f m lc rr once, raw with
+        | some x, _ => some x
+        | none, some m0 => applyRule S f m0 lc rr once
+        | none, none => none
+      match hit with
+      | some (q, left, m') =>
+        rewriteR now S f W m' once (done.push { l, r, q, rest := left, after := m', atom })
+          (some (left ++ (List.replicate q rr).flatten)) rest
       | none => throw s!"completion: rule does not apply | rule {done.size}: left side {ls} as classes {lc}, monomial {m} as classes {classesOf S m}"
     | _ => throw "completion: rule of another operator"
+
+/-- `rewriteR` from a monomial the laws have reduced. -/
+def rewrite (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false)
+    (done : Array Rewrote := #[]) (rules : List (Nat × Nat × Bool)) :
+    Except String (List Nat × Array Rewrote) :=
+  rewriteR now S f W m once done none rules
 
 /-- `y` is the unit's node, or an application of `f` in the unit's class. -/
 def unitLike (S : St P) (f : String) (y : Nat) : Bool :=
