@@ -70,8 +70,10 @@ pub(crate) struct AbsSched {
     backward: VecDeque<usize>,
     /// `(class node, partner node)` applied as ordinary merges after the drain.
     derived: Vec<(usize, usize)>,
-    /// Constant payload → literal node id, for singleton derived merges.
-    constants: HashMap<i64, usize>,
+    /// `(sort, constant payload)` → literal node id, for singleton derived
+    /// merges. The sort is part of the key: Bool 1 and Int 1 are different
+    /// literals and must never be merged.
+    constants: HashMap<(usize, i64), usize>,
     conflict: Option<String>,
     /// Mark-time conflict, one entry per open scope. `pop` restores the top.
     saved: Vec<Option<String>>,
@@ -204,7 +206,8 @@ where
     }
 
     pub(crate) fn abs_bind_constant(&mut self, k: i64, node: Cfg::G) {
-        self.abs.constants.insert(k, node.to_usize());
+        let sort = self.abs_sort_of(node);
+        self.abs.constants.insert((sort, k), node.to_usize());
     }
 
     fn abs_class_key(&self, node: Cfg::G) -> Option<usize> {
@@ -255,7 +258,7 @@ where
         };
         let constant = self.abs.domain.as_ref().unwrap().as_constant(value);
         if let Some(k) = constant {
-            self.abs.constants.insert(k, id.to_usize());
+            self.abs.constants.insert((sort, k), id.to_usize());
         }
         self.abs_meet_node(id, value);
     }
@@ -269,6 +272,25 @@ where
             return;
         };
         self.abs_meet_node(survivor, absorbed_value);
+        // `abs_meet_node` queues the class only when the survivor's value
+        // changed. If the absorbed side was looser, its parents and members
+        // have not seen the met value yet, so queue the class for them too;
+        // otherwise the result would depend on which side survives.
+        if self.abs.conflict.is_some() {
+            return;
+        }
+        let met = self.abs_value_of_root(survivor);
+        let absorbed_is_met = match met {
+            Some(v) => v == absorbed_value,
+            None => {
+                let sort = self.abs_sort_of(survivor);
+                self.abs.domain.as_ref().unwrap().top(sort) == absorbed_value
+            }
+        };
+        if !absorbed_is_met && self.abs_analysed(survivor) {
+            self.abs.merges.push_back(survivor.to_usize());
+            self.abs_touch(survivor);
+        }
     }
 
     pub(crate) fn abs_value_of_root(&self, node: Cfg::G) -> Option<u64> {
@@ -355,7 +377,8 @@ where
         let Some(k) = self.abs.domain.as_ref().unwrap().as_constant(value) else {
             return;
         };
-        let Some(&partner) = self.abs.constants.get(&k) else {
+        let sort = self.abs_sort_of(node);
+        let Some(&partner) = self.abs.constants.get(&(sort, k)) else {
             return;
         };
         let partner_node = Cfg::G::from_usize(partner);
@@ -744,5 +767,50 @@ mod tests {
         let class_root = eg.find(class);
         let lit_root = eg.find(lit);
         assert_eq!(class_root, lit_root);
+    }
+
+    #[test]
+    fn singleton_never_merges_with_a_literal_of_another_sort() {
+        let (mut eg, _add, c) = eg_with_add();
+        let class = eg.add(c, &[]);
+        let bool_sort = eg.intern_sort("Bool");
+        let true_op = eg.register_op0("true", bool_sort);
+        let bool_lit = eg.add(true_op, &[]);
+        eg.abs_bind_constant(1, bool_lit);
+        eg.abs_seed(class, pack(1, 1));
+        eg.rebuild();
+        assert_ne!(eg.find(class), eg.find(bool_lit));
+    }
+
+    /// Merging a tight class into a loose one must reach the loose side's
+    /// parents whichever class survives the union.
+    #[test]
+    fn merge_propagates_to_the_looser_sides_parents() {
+        for tight_first in [true, false] {
+            let (mut eg, add, c) = eg_with_add();
+            let x = eg.add(c, &[]);
+            let sort = eg.node_sort(x);
+            let d = eg.register_op0("d", sort);
+            let y = eg.add(d, &[]);
+            let two_op = eg.register_op0("two", sort);
+            let two = eg.add(two_op, &[]);
+            let loose_parent = eg.add(add, &[y, two]);
+            eg.abs_seed(x, pack(0, 4));
+            eg.abs_seed(y, pack(0, 9));
+            eg.abs_seed(two, pack(2, 2));
+            eg.rebuild();
+            assert_eq!(eg.abs_value(loose_parent), Some(pack(2, 11)));
+            if tight_first {
+                eg.merge(x, y);
+            } else {
+                eg.merge(y, x);
+            }
+            eg.rebuild();
+            assert_eq!(
+                eg.abs_value(loose_parent),
+                Some(pack(2, 6)),
+                "tight_first={tight_first}"
+            );
+        }
     }
 }

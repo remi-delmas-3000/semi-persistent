@@ -2536,9 +2536,14 @@ where
             // Values propagate here, before the goal poll, so a derived merge can
             // be what joins the goal pair. A conflict stops the closure; the
             // caller reads `take_abs_conflict`.
-            let _ = self.abs_drain();
+            let abs_merged = self.abs_drain();
             if self.abs_has_conflict() {
                 return;
+            }
+            // A derived merge pushed worklist entries: close congruence again
+            // before any check below can report a fixpoint.
+            if abs_merged {
+                continue;
             }
             // Goal-directed early stop (the lazy-check transaction): the pair
             // joined, so the question is answered — stop mid-closure. The
