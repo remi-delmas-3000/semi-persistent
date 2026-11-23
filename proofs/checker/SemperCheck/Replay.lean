@@ -2184,8 +2184,10 @@ read the openings `W` (root first): each opened class is in the comb position
 (first argument of a left comb, last of a right one) of the node before it,
 and stands for its member. From the last opening back, each node gets the next
 one's node in that position, argument by argument; the root so rebuilt reads
-as the instance position by position. -/
-def foldInst (S : St P) (f : String) (left : Bool) (i n : Nat) (W : List Wit) : St P × Pf := Id.run do
+as the instance position by position, the instance's comb-position argument
+standing for a regrouping's member when `R` has one for its class. -/
+def foldInst (S : St P) (f : String) (left : Bool) (i n : Nat) (W : List Wit)
+    (R : List Wit := []) : St P × Pf := Id.run do
   -- `x` with its comb-position argument replaced by `y`, and the proof that
   -- the two are equal, given `y`'s proof from the member `m` it stands for.
   let put (S : St P) (x m y : Nat) (pm : Pf) : St P × Option (Nat × Pf) :=
@@ -2210,19 +2212,43 @@ def foldInst (S : St P) (f : String) (left : Bool) (i n : Nat) (W : List Wit) : 
         | (S, none) => (S, none)
       | none => (S, none)
     | _ => (S, none)
+  -- `x` with a plain member of its class in place of its comb-position
+  -- argument, when that argument is an application of `f` that no opening
+  -- reads through: the kernel would read through it.
+  let norm (S : St P) (x : Nat) : St P × Nat × Pf :=
+    match S.defOf x with
+    | some (.app _ cs) =>
+      match (if left then cs.head? else cs.getLast?) with
+      | some a =>
+        let isApp := match S.defOf a with
+          | some (.app g as) => g == f && !as.isEmpty
+          | _ => false
+        match isApp, S.plain.getD (S.fd a) none with
+        | true, some pm =>
+          let (S, pe) := eqP S a pm
+          match put S x a pm pe with
+          | (S, some (x', p)) => (S, x', p)
+          | (S, none) => (S, x, some none)
+        | _, _ => (S, x, some none)
+      | none => (S, x, some none)
+    | _ => (S, x, some none)
   let mut S := S
   -- The node the current opening's member is read as, and the proof.
   let mut acc : Option (Nat × Nat × Pf) := none
   for w in W.reverse do
     let m := w.2.2.1
     match acc with
-    | none => acc := some (m, m, some none)
+    | none =>
+      -- The innermost member's own comb-position argument is an element.
+      let (S1, m', pm') := norm S m
+      S := S1
+      acc := some (m, m', pm')
     | some (cm, cy, cp) =>
       match put S m cm cy cp with
       | (S1, some (m', pm')) => S := S1; acc := some (m, m', pm')
       | (S1, none) => return (S1, none)
   let (S1, root, pr) ← match acc with
-    | none => pure (S, n, (some none : Pf))
+    | none => pure (norm S n)
     | some (cm, cy, cp) =>
       match put S n cm cy cp with
       | (S1, some (n', pn')) => pure (S1, n', pn')
@@ -2238,6 +2264,16 @@ def foldInst (S : St P) (f : String) (left : Bool) (i n : Nat) (W : List Wit) : 
         let isApp := match S1.defOf a with
           | some (.app g as) => g == f && !as.isEmpty
           | _ => false
+        -- A regrouping of the argument's class: the argument stands for the
+        -- member's arguments, which the comb reads in its place.
+        match R.find? (fun w => S1.fd w.2.1 == S1.fd a) with
+        | some w =>
+          let m := w.2.2.1
+          let (S2, pe) := eqP S1 a m
+          match put S2 i a m pe with
+          | (S2, some (i', p)) => (S2, i', p)
+          | (S2, none) => (S2, i, some none)
+        | none =>
         match isApp, S1.plain.getD (S1.fd a) none with
         | true, some pm =>
           let (S2, pe) := eqP S1 a pm
@@ -2260,7 +2296,7 @@ def instProof (S : St P) (f : String) (i n : Nat) (k : Option Nat) : St P × Pf 
   let (wo, wr) := match k with
     | some k => witsOf S k
     | none => ([], [])
-  if (S.prog.kind f).isFold then foldInst S f (S.prog.kind f == .foldL) i n wo
+  if (S.prog.kind f).isFold then foldInst S f (S.prog.kind f == .foldL) i n wo wr
   else if wo.isEmpty && wr.isEmpty then congStepL S f i n
   else
     let argsOf (S : St P) (x : Nat) : List Nat := match S.defOf x with
@@ -3106,11 +3142,23 @@ def stepCore (S : St P) (line : String) : St P :=
       -- Either node can be the application whose arguments normalize to the other.
       let one (x y : Nat) : Bool :=
         match S.defOf x with
-        | some (.app f as) => spells S y f as
+        | some (.app f as) =>
+          -- A comb: the two nodes read through the comb are in one class
+          -- position by position (an application to one argument is it).
+          if (S.prog.kind f).isFold then
+            let left := S.prog.kind f == .foldL
+            let own (z : Nat) : List Nat := match S.defOf z with
+              | some (.app g cs) => if g == f then cs else [z]
+              | _ => [z]
+            let same (l m : List Nat) : Bool :=
+              l.length == m.length && (l.zip m).all fun (c, d) => S.fd c == S.fd d
+            same (own x) (own y) || same (kviewF S f left x) (kviewF S f left y)
+          else spells S y f as
         | _ => false
       if one a b || one b a then
+        -- The operator of the node whose arguments normalize to the other.
         let f := match S.defOf a, S.defOf b with
-          | some (.app f as), _ => if spells S b f as then f else
+          | some (.app f _), _ => if one a b then f else
               (match S.defOf b with | some (.app g _) => g | _ => f)
           | _, some (.app g _) => g
           | _, _ => ""
@@ -3255,6 +3303,12 @@ def stepCore (S : St P) (line : String) : St P :=
               -- The term's node, added to the table when it is not there.
               -- Only under a sequence operator can the two readings differ:
               -- elsewhere the stream's node is the term's or the line is wrong.
+              -- A term that evaluates to the stream's node as read here.
+              if eval S t == some n || evalN S t == some n then
+                match writtenP S t with
+                | (S, some (tn, _, p)) => (S, some (tn, p))
+                | (S, none) => (S, none)
+              else
               match t with
               | .app f _ =>
                 if !((S.prog.kind f).isAssoc || (S.prog.kind f).isFold) then (S, none)
