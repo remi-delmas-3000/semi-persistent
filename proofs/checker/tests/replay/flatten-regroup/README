@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`.
+`bad.trace` differs in each `y` line: the regrouping names node 3 instead of node 2 as the member the pattern argument stands for.

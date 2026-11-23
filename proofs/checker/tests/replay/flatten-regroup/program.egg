@@ -1,0 +1,13 @@
+;; Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+;; SPDX-License-Identifier: Apache-2.0
+(sort E)
+(function a () E)
+(function b () E)
+(function c () E)
+(function F (E) E :assoc-comm)
+(function T2 (E E) E)
+(let ab (F (a) (b)))
+(let t (F (a) (b) (c)))
+(rewrite (F x y) (T2 x y) :flatten)
+(run 1)
+(check-eq t (T2 ab (c)))

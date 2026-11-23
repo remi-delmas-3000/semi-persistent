@@ -191,6 +191,11 @@ pub const MULT_OVERFLOW: &str =
 pub const BEYOND_U64: &str =
     "multiplicity overflow: a flattened count beyond 2^64 in a sequence pattern";
 
+/// [`FlattenScratch::witness`]: a regrouping.
+pub const WIT_REGROUP: usize = usize::MAX;
+/// [`FlattenScratch::witness`]: an opening of one of the viewed node's own children.
+pub const WIT_ROOT: usize = usize::MAX - 1;
+
 #[derive(Clone, Copy, Debug)]
 enum Task<G, M> {
     /// Choose an option for this child class, with this multiplicity, directly under
@@ -325,6 +330,10 @@ pub struct FlattenScratch<G, M> {
     /// whether closing it is not inert ([`Leaf::non_inert`]).
     groups: Vec<(usize, usize, G, bool)>,
     group_elems: Vec<G>,
+    /// Per record, the members its derivation read ([`FlattenScratch::witness`]): for
+    /// each opening, the class opened and the `op` node whose children replaced it; for
+    /// each regrouping, the class taken and the `op` node whose children it replaced.
+    wit: Vec<(G, G, usize)>,
     /// The distinct views: a canonical span, and the span of `recs` (sorted) giving it.
     spans: Vec<(usize, usize, usize, usize)>,
     norm: Vec<(G, M)>,
@@ -363,6 +372,8 @@ struct Instance<G, M> {
     /// The folded count of that opening: the multiplicity the member's children were
     /// scaled by.
     mult: M,
+    /// The `op` node of `class` whose children the opening reads.
+    member: G,
 }
 
 /// A raw view's record: its canonical content and its opening tree's leaf groups.
@@ -375,6 +386,9 @@ struct Rec {
     /// The regrouped classes the items must take, a span of `needs`.
     nstart: usize,
     ncount: usize,
+    /// The members the record's derivation read, a span of `wit`.
+    wstart: usize,
+    wcount: usize,
 }
 
 /// A leaf of an opening tree: an opened instance with no opening below it.
@@ -457,6 +471,7 @@ impl<G, M> Default for FlattenScratch<G, M> {
             recs: Vec::new(),
             groups: Vec::new(),
             group_elems: Vec::new(),
+            wit: Vec::new(),
             spans: Vec::new(),
             norm: Vec::new(),
             needs: Vec::new(),
@@ -524,6 +539,21 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
         &self.elems[s..s + n]
     }
 
+    /// The members one derivation of the `i`-th distinct view read: for each opening,
+    /// the class opened and its `op` node; for each regrouping, the class taken and the
+    /// `op` node whose children it stands for. The third field is [`WIT_REGROUP`] for a
+    /// regrouping, [`WIT_ROOT`] for an opening of one of the node's own children, and
+    /// otherwise the position, in this list, of the opening it lies directly under. Any
+    /// record of the view is a derivation of it; the first is given.
+    pub fn witness(&self, i: usize) -> &[(G, G, usize)] {
+        let (_, _, r, n) = self.spans[i];
+        if n == 0 {
+            return &[];
+        }
+        let rec = self.recs[r];
+        &self.wit[rec.wstart..rec.wstart + rec.wcount]
+    }
+
     /// The `i`-th distinct view's demand, into `out`.
     pub fn demand_into(&self, i: usize, out: &mut Demand<G>) {
         let (_, _, rs, rn) = self.spans[i];
@@ -564,6 +594,7 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
         self.recs.clear();
         self.groups.clear();
         self.group_elems.clear();
+        self.wit.clear();
         self.spans.clear();
         self.needs.clear();
         self.regroup_truncated = false;
@@ -648,6 +679,12 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
                 non_inert,
             ));
         }
+        let wstart = self.wit.len();
+        self.wit.extend(
+            self.instances
+                .iter()
+                .map(|i| (i.class, i.member, i.parent.unwrap_or(WIT_ROOT))),
+        );
         self.recs.push(Rec {
             start,
             len: self.norm.len(),
@@ -655,6 +692,8 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
             gcount: self.groups.len() - gstart,
             nstart: self.needs.len(),
             ncount: 0,
+            wstart,
+            wcount: self.wit.len() - wstart,
         });
         Ok(())
     }
@@ -971,6 +1010,7 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
                             ts,
                             tl,
                             g,
+                            m,
                             &group,
                             &fresh,
                             &mut need,
@@ -1107,6 +1147,7 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
                                     ts,
                                     tl,
                                     g,
+                                    m,
                                     &group,
                                     &fresh,
                                     &mut need,
@@ -1141,6 +1182,7 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
         ts: usize,
         tl: usize,
         g: G,
+        member: G,
         group: &[G],
         fresh: &[(G, M)],
         need: &mut Vec<G>,
@@ -1153,6 +1195,8 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
             gcount,
             nstart,
             ncount,
+            wstart,
+            wcount,
             ..
         } = self.recs[r];
         // The classes the regrouped record needs taken: the source's, less those the
@@ -1224,6 +1268,10 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
         }
         let nn = self.needs.len();
         self.needs.extend_from_slice(need);
+        // The source's members, and the node whose children `g` replaces.
+        let nw = self.wit.len();
+        self.wit.extend_from_within(wstart..wstart + wcount);
+        self.wit.push((g, member, WIT_REGROUP));
         self.recs.push(Rec {
             start: ts,
             len: tl,
@@ -1231,6 +1279,8 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
             gcount,
             nstart: nn,
             ncount: need.len(),
+            wstart: nw,
+            wcount: wcount + 1,
         });
         entries[target].2.push(self.recs.len() - 1);
         Ok(false)
@@ -1786,6 +1836,7 @@ where
             hits: 0,
             class: x,
             mult: k,
+            member: m,
         });
         s.on_path.insert(x);
         s.trail.push(Undo::Opened(x));

@@ -69,6 +69,16 @@ structure St (P : Program) where
   unjustified : Std.HashMap String Nat := {}
   /-- Splice witnesses for the next `t`, `c` or `w` line. -/
   splices : List (Nat × Nat) := []
+  /-- The witnesses of the open firing's `:flatten` matches, in the stream's
+  order, each with the position `k` of the `e` line it belongs to. An opening
+  (`s c m k [p]`): a class `c` among the arguments the match reads, and the
+  application `m` in that class whose arguments it reads in its place; `p` is
+  the position, among the `e` line's openings, of the one whose member holds
+  that argument, and is absent for an argument of the matched node itself. A
+  regrouping (`y c m k`): a pattern argument bound to class `c`, and the
+  application `m` in that class whose arguments the node holds in its place. -/
+  opens : List (Nat × Nat × Nat × Option Nat) := []
+  regroups : List (Nat × Nat × Nat) := []
   /-- Inverse witnesses (`j` lines) for the next line: inverse applications,
   each standing for its class. -/
   inverses : List Nat := []
@@ -116,7 +126,7 @@ def fail (S : St P) (cause : String) : St P :=
   -- A cause can carry a detail after ` | `, which is shown and not counted by.
   let key := (cause.splitOn " | ").headD cause
   { S with failed := S.failed.insert key (S.failed.getD key 0 + 1), nFailed := S.nFailed + 1, lastCause := cause,
-           splices := [], inverses := [] }
+           splices := [], opens := [], regroups := [], inverses := [] }
 
 /-- Runs `k` on the checked state, taken out of `S` while `k` runs so that
 its arrays are held once and updated in place. -/
@@ -755,6 +765,45 @@ def ids (S : St P) (xs : List String) : Option (List Nat) := do
       for _ in [0:k] do out := out.push n
     | _ => none
   return out.toList
+
+/-- A witness of one `e` line: its position among the line's openings, the
+class, the member, and the opening it lies under (`none`: the node's own
+arguments). A regrouping has no position that matters and lies under none. -/
+abbrev Wit := Nat × Nat × Nat × Option Nat
+
+/-- The openings and the regroupings of the `e` line at position `k`. -/
+def witsOf (S : St P) (k : Nat) : List Wit × List Wit :=
+  (((S.opens.filter (·.1 == k)).map (·.2)).zipIdx.map fun ((c, m, p), i) => (i, c, m, p),
+   ((S.regroups.filter (·.1 == k)).map (·.2)).zipIdx.map fun ((c, m), i) => (i, c, m, none))
+
+/-- Witness `w` reads argument `a`, which lies under the opening `ctx`: `a` is
+in its class, its member is an application of `f` in that class and, for an
+opening (`tree`), it lies under `ctx` too. -/
+def Wit.reads (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (a : Nat) (w : Wit) : Bool :=
+  S.fd w.2.1 == S.fd a && S.fd w.2.2.1 == S.fd a && (!tree || w.2.2.2 == ctx) &&
+    (match S.defOf w.2.2.1 with | some (.app g cs) => g == f && !cs.isEmpty | _ => false)
+
+/-- The arguments `todo`, each with the opening it lies under, as one side of
+a `:flatten` match reads them, after `out`: an argument a witness of `W` reads
+(`Wit.reads`) is replaced by the arguments of the witness's member, which lie
+under that witness and are read the same way with the witnesses left; each
+witness is used once. Every other argument is one class, an application of
+`f` included. -/
+def viewArgs (S : St P) (f : String) (tree : Bool) (W : List Wit) (todo : List (Nat × Option Nat))
+    (out : Array Nat := #[]) : List Nat :=
+  match todo with
+  | [] => out.toList
+  | (a, ctx) :: rest =>
+    match W.find? (Wit.reads S f tree ctx a) with
+    | some w =>
+      match S.defOf w.2.2.1 with
+      | some (.app _ cs) =>
+        if _h : (W.erase w).length < W.length then
+          viewArgs S f tree (W.erase w) (cs.map (·, some w.1) ++ rest) out
+        else viewArgs S f tree W rest (out.push a)
+      | _ => viewArgs S f tree W rest (out.push a)
+    | none => viewArgs S f tree W rest (out.push a)
+termination_by (W.length, todo.length)
 
 /-- The fields of an `e` line after the operator: the nodes of the argument
 patterns, and between `[` and `]` the nodes of each rest variable, in the
@@ -1466,7 +1515,7 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
 /-- The kernel steps of a `t` line, whose check passed: the term as the
 program writes it (its arguments' own terms as arguments) is node `i`. -/
 def termLine (S : St P) (i : Nat) (f : String) (cs : List Nat) : St P := Id.run do
-  let done (S : St P) : St P := { S with splices := [], inverses := [] }
+  let done (S : St P) : St P := { S with splices := [], opens := [], regroups := [], inverses := [] }
   let ws := cs.map fun c => ((S.lastTerm[c]?).map (·.1)).getD c
   let (dW, dT) := (Node.app f ws, Node.app f cs)
   let (S, w) ← match intern S dW with
@@ -1511,6 +1560,8 @@ structure Walk (P : Program) where
   σ : List (String × Nat) := []
   /-- The nodes each rest variable is bound to. -/
   ρ : List (String × List Nat) := []
+  /-- The position of the next `e` line. -/
+  atomIdx : Nat := 0
   atoms : List (Nat × String × List Nat × List (List Nat))
   rhs : List (Nat × Bool)
   /-- The matched node and the instance of each matched pattern, by the
@@ -1572,14 +1623,111 @@ def firstOf : List Pat → Option (String × Nat)
 
 end
 
+mutual
+
+/-- Node `x`, which lies under the opening `ctx`, as the kernel must read it
+for one side of a `:flatten` match: an argument a witness of `W` reads becomes
+the witness's member, read the same way with the witnesses left, whose
+arguments the kernel reads in its place; an argument that is an application of
+`f` with no witness becomes a plain member of its class, which the kernel
+reads as one argument. The result, the proof that `x` is it (argument by
+argument), and the witnesses left. -/
+def openNode (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (x : Nat) (W : List Wit) :
+    St P × Option (Nat × Pf) × List Wit :=
+  match S.defOf x with
+  | some (.app g args) =>
+    if g != f then (S, some (x, some none), W)
+    else
+      match openArgs S f tree ctx W args #[] #[] false with
+      | (S, some (out, prems, changed), W') =>
+        if !changed then (S, some (x, some none), W')
+        else
+          match appNode S f out.toList with
+          | (S, some x') =>
+            if x' == x then (S, some (x, some none), W')
+            else
+              let (S, st) := emit S (.cong f x x' prems.toList) x x'
+              (S, some (x', some (some st)), W')
+          | (S, none) => (S, none, W')
+      | (S, none, W') => (S, none, W')
+  | _ => (S, some (x, some none), W)
+termination_by (W.length, 1, 0)
+
+/-- The arguments of `openNode`'s result, after `out`, and a step for each
+argument replaced, after `prems`. -/
+def openArgs (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (W : List Wit)
+    (args : List Nat) (out : Array Nat) (prems : Array Nat) (changed : Bool) :
+    St P × Option (Array Nat × Array Nat × Bool) × List Wit :=
+  match args with
+  | [] => (S, some (out, prems, changed), W)
+  | a :: rest =>
+    let isApp (m : Nat) : Bool :=
+      match S.defOf m with
+      | some (.app h cs) => h == f && !cs.isEmpty
+      | _ => false
+    -- The node the argument becomes, and the witnesses left.
+    let r : St P × Option Nat × List Wit :=
+      match W.find? (Wit.reads S f tree ctx a) with
+      | some w =>
+        if _h : (W.erase w).length < W.length then
+          match openNode S f tree (some w.1) w.2.2.1 (W.erase w) with
+          | (S, some (m', pm), W') =>
+            -- `a` is the member, which is its opened form.
+            let (S, p) := eqP S a w.2.2.1
+            let (S, q) := transP S a m' p pm
+            let S := S.mergeBy a m' q
+            if W'.length ≤ (W.erase w).length then (S, some m', W') else (S, none, W)
+          | (S, none, _) => (S, none, W)
+        else (S, none, W)
+      | none => (S, some (if isApp a then (S.plain.getD (S.fd a) none).getD a else a), W)
+    match r with
+    | (S, none, _) => (S, none, W)
+    | (S, some to, W') =>
+      if _h : W'.length ≤ W.length then
+        if to != a then
+          let (S, p) := eqP S a to
+          match stepOf S a p with
+          | (S, some st) => openArgs S f tree ctx W' rest (out.push to) (prems.push st) true
+          | (S, none) => (S, none, W')
+        else openArgs S f tree ctx W' rest (out.push to) prems changed
+      else (S, none, W)
+termination_by (W.length, 0, args.length)
+decreasing_by
+  all_goals simp_wf
+  all_goals try simp only [Prod.lex_def]
+  all_goals try simp only [Nat.lt_irrefl, false_or, true_and, Nat.lt_succ_self, and_true]
+  all_goals omega
+
+end
+
+/-- The proof that the instance `i` of an application pattern is the node `n`
+it matched on the `e` line at position `k`: by `f`'s laws and, for a
+`:flatten` match, with each side first read under its witnesses (`openNode`). -/
+def instProof (S : St P) (f : String) (i n : Nat) (k : Option Nat) : St P × Pf :=
+  let (wo, wr) := match k with
+    | some k => witsOf S k
+    | none => ([], [])
+  if wo.isEmpty && wr.isEmpty then congStepL S f i n
+  else
+    match openNode S f true none n wo with
+    | (S, some (n', pn), _) =>
+      match openNode S f false none i wr with
+      | (S, some (i', pi), _) =>
+        let (S, p) := congStepL S f i' n'
+        let (S, q) := transP S i n' pi p
+        let (S, pn') := symmP S n n' pn
+        transP S i n q pn'
+      | (S, none, _) => (S, none)
+    | (S, none, _) => (S, none)
+
 /-- The instance `f(ic)` of an application pattern, joined to node `n`. -/
-def instOf (f : String) (ic : List Nat) (n : Nat) : WalkM P Nat := do
+def instOf (f : String) (ic : List Nat) (n : Nat) (k : Option Nat := none) : WalkM P Nat := do
   let d := Node.app f ic
   let i ← withS fun S => intern S d
   match i with
   | some i =>
     withS fun S =>
-      let (S, p) := congStepL S f i n
+      let (S, p) := instProof S f i n k
       (S.mergeBy i n p, i)
   | none => throw "rule: instance ill-sorted"
 
@@ -1660,11 +1808,17 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
     let cs := bound.toList
     match S.defOf n with
     | some (.app h ds) =>
-      if h != f || (let (x, y) := nf2 S f ds cs; x != y) then
-        throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} as classes {(nf2 S f ds cs).1}, pattern {f} bound to {cs} as classes {(nf2 S f ds cs).2}, splices {S.splices}"
+      -- The node's arguments under the openings (`s` lines), the bound nodes
+      -- under the regroupings (`y` lines), then both as classes.
+      let S0 := { S with splices := [] }
+      let (wo, wr) := witsOf S w.atomIdx
+      let vd := viewArgs S f true wo (ds.map (·, none))
+      let vc := viewArgs S f false wr (cs.map (·, none))
+      if h != f || (let (x, y) := nf2 S0 f vd vc; x != y) then
+        throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} read as {vd}, classes {(nf2 S0 f vd vc).1}; pattern bound to {cs} read as {vc}, classes {(nf2 S0 f vd vc).2}; openings {wo.map fun w => (w.2.1, w.2.2.1, w.2.2.2)}, regroupings {wr.map fun w => (w.2.1, w.2.2.1)}"
     | _ => throw "rule: matched node differs"
-    set { w with atoms := rest, σ := σ, ρ := ρ }
-    let i ← instOf f ic.toList n
+    set { w with atoms := rest, atomIdx := w.atomIdx + 1, σ := σ, ρ := ρ }
+    let i ← instOf f ic.toList n (some w.atomIdx)
     modify fun w => { w with memo := (key, n, i) :: w.memo }
     pure (n, i)
   | [] => throw "rule: no line for an application"
@@ -1686,7 +1840,7 @@ def walkQ (p : Pat) : WalkM P (Nat × Nat) :=
     | (n, "#lit", _, _) :: rest =>
       match w.S.defOf n with
       | some (.lit s' v') =>
-        if s' == s && v' == v then set { w with atoms := rest }; pure (n, n)
+        if s' == s && v' == v then set { w with atoms := rest, atomIdx := w.atomIdx + 1 }; pure (n, n)
         else throw "rule: literal differs"
       | _ => throw "rule: literal differs"
     | _ => throw "rule: no line for a literal"
@@ -1882,6 +2036,21 @@ def stepCore (S : St P) (line : String) : St P :=
     match S.node? c, S.node? m with
     | some c, some m => { S with splices := (c, m) :: S.splices, events := S.events - 1 }
     | _, _ => S.fail "splice: unreadable"
+  | ["y", c, m, k] =>
+    match S.node? c, S.node? m, k.toNat? with
+    | some c, some m, some k =>
+      { S with regroups := S.regroups ++ [(k, c, m)], events := S.events - 1 }
+    | _, _, _ => S.fail "regroup: unreadable"
+  | ["s", c, m, k] =>
+    match S.node? c, S.node? m, k.toNat? with
+    | some c, some m, some k =>
+      { S with opens := S.opens ++ [(k, c, m, none)], events := S.events - 1 }
+    | _, _, _ => S.fail "splice: unreadable"
+  | ["s", c, m, k, p] =>
+    match S.node? c, S.node? m, k.toNat?, p.toNat? with
+    | some c, some m, some k, some p =>
+      { S with opens := S.opens ++ [(k, c, m, some p)], events := S.events - 1 }
+    | _, _, _, _ => S.fail "splice: unreadable"
   | ["z", f, u] =>
     match S.node? u, (S.prog.opDecl? f).bind (·.unit) with
     | some u, some t =>
@@ -2138,7 +2307,7 @@ def stepCore (S : St P) (line : String) : St P :=
   | "u" :: kind :: rest =>
     -- An event the stream gives no witness for: counted, and nothing is merged.
     let _ := rest
-    { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), splices := [], inverses := [] }
+    { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), splices := [], opens := [], regroups := [], inverses := [] }
   | [""] => { S with events := S.events - 1 }
   | _ => S.fail "unreadable line"
 
@@ -2151,8 +2320,8 @@ def step (S : St P) (line : String) : St P :=
       let entry := toString S.events ++ "\t" ++ (S.lastCause.splitOn " | ").headD "" ++ "\t" ++ line ++ "\n"
       { S with failedLog := S.failedLog.push entry }
     else S
-  if line.startsWith "s " || line.startsWith "j " then S
-  else { S with splices := [], inverses := [] }
+  if line.startsWith "s " || line.startsWith "j " || line.startsWith "y " then S
+  else { S with splices := [], opens := [], regroups := [], inverses := [] }
 
 def start (P : Program) : St P :=
   { declAt := P.decls.foldl (fun m (o, d) => m.insert o d) {},

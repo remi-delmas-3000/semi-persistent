@@ -1489,20 +1489,29 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
         PatVar::Local(id) => m.get(*id),
         PatVar::Global(g) => globals.binding(*g),
     };
+    // After each `e` line, the members its `:flatten` view read, recorded by the
+    // matcher as it enumerated them: an opened class and the node whose arguments
+    // replaced it, or a regrouped class and the node whose arguments it stands for.
+    let splices = |eg: &mut EGraph<Cfg, L, T, P>, node: crate::ast::VarId| {
+        for i in 0..m.splices().len() {
+            let (v, c, member, tag) = m.splices()[i];
+            if v == node.idx() {
+                eg.trace_splice(c, member, tag);
+            }
+        }
+    };
     for atom in &query.atoms {
         match atom {
             RAtom::Plain { node, op, children } | RAtom::AExact { node, op, children } => {
                 eg.trace_atom(m.get(*node), Some(*op));
+                splices(eg, *node);
                 for c in children {
                     eg.trace_atom_arg(bind(c));
-                }
-                if query.flatten && matches!(atom, RAtom::AExact { .. }) {
-                    let bound: Vec<Cfg::G> = children.iter().map(&bind).collect();
-                    trace_splices(eg, *op, m.get(*node), &bound);
                 }
             }
             RAtom::ACExact { node, op, elems } | RAtom::Comm { node, op, elems } => {
                 eg.trace_atom(m.get(*node), Some(*op));
+                splices(eg, *node);
                 for (v, k) in elems {
                     // A multiplicity variable is not spelled out: the firing is opaque.
                     let RMult::Exact(k) = k else {
@@ -1510,19 +1519,12 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     };
                     eg.trace_atom_arg_n(bind(v), *k);
                 }
-                if query.flatten && matches!(atom, RAtom::ACExact { .. }) {
-                    let bound: Vec<Cfg::G> = elems.iter().map(|(v, _)| bind(v)).collect();
-                    trace_splices(eg, *op, m.get(*node), &bound);
-                }
             }
             RAtom::ACIExact { node, op, elems } => {
                 eg.trace_atom(m.get(*node), Some(*op));
+                splices(eg, *node);
                 for c in elems {
                     eg.trace_atom_arg(bind(c));
-                }
-                if query.flatten {
-                    let bound: Vec<Cfg::G> = elems.iter().map(&bind).collect();
-                    trace_splices(eg, *op, m.get(*node), &bound);
                 }
             }
             RAtom::Lit { node, .. } => eg.trace_atom(m.get(*node), None),
@@ -1537,6 +1539,7 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 fixed,
             } => {
                 eg.trace_atom(m.get(*node), Some(*op));
+                splices(eg, *node);
                 eg.trace_atom_group(true);
                 for i in 0..m.seq_slice(*pre).len() {
                     let c = m.seq_slice(*pre)[i];
@@ -1545,15 +1548,6 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 eg.trace_atom_group(false);
                 for c in fixed {
                     eg.trace_atom_arg(bind(c));
-                }
-                if query.flatten {
-                    let bound: Vec<Cfg::G> = m
-                        .seq_slice(*pre)
-                        .iter()
-                        .copied()
-                        .chain(fixed.iter().map(&bind))
-                        .collect();
-                    trace_splices(eg, *op, m.get(*node), &bound);
                 }
             }
             RAtom::ASuffix {
@@ -1563,6 +1557,7 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 suf,
             } => {
                 eg.trace_atom(m.get(*node), Some(*op));
+                splices(eg, *node);
                 for c in fixed {
                     eg.trace_atom_arg(bind(c));
                 }
@@ -1572,14 +1567,6 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     eg.trace_atom_arg(c);
                 }
                 eg.trace_atom_group(false);
-                if query.flatten {
-                    let bound: Vec<Cfg::G> = fixed
-                        .iter()
-                        .map(&bind)
-                        .chain(m.seq_slice(*suf).iter().copied())
-                        .collect();
-                    trace_splices(eg, *op, m.get(*node), &bound);
-                }
             }
             RAtom::ABoth {
                 node,
@@ -1589,6 +1576,7 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 suf,
             } => {
                 eg.trace_atom(m.get(*node), Some(*op));
+                splices(eg, *node);
                 eg.trace_atom_group(true);
                 for i in 0..m.seq_slice(*pre).len() {
                     let c = m.seq_slice(*pre)[i];
@@ -1604,16 +1592,6 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     eg.trace_atom_arg(c);
                 }
                 eg.trace_atom_group(false);
-                if query.flatten {
-                    let bound: Vec<Cfg::G> = m
-                        .seq_slice(*pre)
-                        .iter()
-                        .copied()
-                        .chain(fixed.iter().map(&bind))
-                        .chain(m.seq_slice(*suf).iter().copied())
-                        .collect();
-                    trace_splices(eg, *op, m.get(*node), &bound);
-                }
             }
             RAtom::ACSub {
                 node,
@@ -1622,6 +1600,7 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 rest,
             } => {
                 eg.trace_atom(m.get(*node), Some(*op));
+                splices(eg, *node);
                 for (v, k) in elems {
                     let RMult::Exact(k) = k else {
                         return eg.trace_atom_opaque("multiplicity-variable");
@@ -1638,14 +1617,6 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     eg.trace_atom_arg_n(g, k);
                 }
                 eg.trace_atom_group(false);
-                if query.flatten {
-                    let bound: Vec<Cfg::G> = elems
-                        .iter()
-                        .map(|(v, _)| bind(v))
-                        .chain(m.mset_slice(*rest).iter().map(Cfg::mset_child_id))
-                        .collect();
-                    trace_splices(eg, *op, m.get(*node), &bound);
-                }
             }
             RAtom::ACISub {
                 node,
@@ -1654,6 +1625,7 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 rest,
             } => {
                 eg.trace_atom(m.get(*node), Some(*op));
+                splices(eg, *node);
                 for c in elems {
                     eg.trace_atom_arg(bind(c));
                 }
@@ -1663,45 +1635,10 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                     eg.trace_atom_arg(c);
                 }
                 eg.trace_atom_group(false);
-                if query.flatten {
-                    let bound: Vec<Cfg::G> = elems
-                        .iter()
-                        .map(&bind)
-                        .chain(m.set_slice(*rest).iter().copied())
-                        .collect();
-                    trace_splices(eg, *op, m.get(*node), &bound);
-                }
             }
             RAtom::Collect { .. } => return eg.trace_atom_opaque("collected-sequence"),
             RAtom::Neq(..) => return eg.trace_atom_opaque("disequality-guard"),
             RAtom::Pred { .. } => return eg.trace_atom_opaque("primitive-guard"),
-        }
-    }
-}
-
-/// The splice witnesses of a `:flatten` match of `node`: for each bound
-/// argument that is no stored child, the same-operator members the view read
-/// it through (`view_premises`).
-fn trace_splices<Cfg, L, const T: bool, const P: bool>(
-    eg: &mut EGraph<Cfg, L, T, P>,
-    op: Cfg::O,
-    node: Cfg::G,
-    bound: &[Cfg::G],
-) where
-    Cfg: EGraphConfig,
-    L: LitVal,
-    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
-    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
-{
-    let mut kids: Vec<Cfg::G> = Vec::new();
-    eg.for_each_child(node, |c, _| kids.push(c));
-    for &p in bound {
-        let mut budget = VIEW_BUDGET;
-        let Some(pairs) = view_splices(eg, op, &kids, p, VIEW_DEPTH, &mut budget) else {
-            continue;
-        };
-        for (a, b) in pairs {
-            eg.trace_splice(a, b);
         }
     }
 }
@@ -1806,96 +1743,6 @@ where
         let mut pairs = vec![(p, g)];
         for k in kids {
             match view_premises(eg, op, children, k, depth - 1, budget) {
-                Some(more) => pairs.extend(more),
-                None => continue 'groups,
-            }
-        }
-        return Some(pairs);
-    }
-    None
-}
-
-/// The splices of `view_premises`'s derivation, without the pairs that only
-/// place an element in a class: each `(element, member)` link of a flattened
-/// view, and each `(p, group)` of a regrouped one. The replay stream writes
-/// them as `s` lines.
-fn view_splices<Cfg, L, const T: bool, const P: bool>(
-    eg: &EGraph<Cfg, L, T, P>,
-    op: Cfg::O,
-    children: &[Cfg::G],
-    p: Cfg::G,
-    depth: usize,
-    budget: &mut usize,
-) -> Option<Vec<(Cfg::G, Cfg::G)>>
-where
-    Cfg: EGraphConfig,
-    L: LitVal,
-    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
-    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
-{
-    let rp = eg.find_const(p);
-    if children.iter().any(|&c| eg.find_const(c) == rp) {
-        return Some(Vec::new());
-    }
-    // Flattened: breadth-first over same-operator members, with parent links
-    // `(element, member, parent link)`.
-    let mut level: Vec<(Cfg::G, Option<usize>)> = children.iter().map(|&c| (c, None)).collect();
-    let mut links: Vec<(Cfg::G, Cfg::G, Option<usize>)> = Vec::new();
-    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for _ in 0..depth {
-        let mut next: Vec<(Cfg::G, Option<usize>)> = Vec::new();
-        for &(x, parent) in &level {
-            if !seen.insert(eg.find_const(x).to_usize()) {
-                continue;
-            }
-            for m in eg.class_members(x) {
-                if *budget == 0 {
-                    return None;
-                }
-                *budget -= 1;
-                if eg.node_op(m) != op || eg.is_evidence_node_pub(m) {
-                    continue;
-                }
-                links.push((x, m, parent));
-                let link = links.len() - 1;
-                let mut hit = None;
-                eg.for_each_child(m, |y, _| {
-                    if hit.is_none() && eg.find_const(y) == rp {
-                        hit = Some(y);
-                    }
-                    next.push((y, Some(link)));
-                });
-                if hit.is_some() {
-                    let mut pairs = Vec::new();
-                    let mut at = Some(link);
-                    while let Some(i) = at {
-                        let (a, b, up) = links[i];
-                        pairs.push((a, b));
-                        at = up;
-                    }
-                    return Some(pairs);
-                }
-            }
-        }
-        if next.is_empty() {
-            break;
-        }
-        level = next;
-    }
-    // Regrouped: a same-operator node in p's class whose children are elements.
-    if depth == 0 {
-        return None;
-    }
-    let groups: Vec<Cfg::G> = eg
-        .class_members(p)
-        .filter(|&g| eg.node_op(g) == op && !eg.is_evidence_node_pub(g))
-        .collect();
-    'groups: for g in groups {
-        let mut kids = Vec::new();
-        eg.for_each_child(g, |c, _| kids.push(c));
-        let mut pairs = vec![(p, g)];
-        for k in kids {
-            match view_splices(eg, op, children, k, depth - 1, budget) {
                 Some(more) => pairs.extend(more),
                 None => continue 'groups,
             }

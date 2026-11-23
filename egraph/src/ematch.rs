@@ -489,6 +489,11 @@ pub struct MatchPool<Cfg: EGraphConfig> {
     views: Vec<Vec<(Cfg::G, Cfg::M)>>,
     /// Per register, which matches its view admits (`crate::flatten::Demand`).
     view_demand: Vec<crate::flatten::Demand<Cfg::G>>,
+    /// Per register, the members its view's derivation read
+    /// (`crate::flatten::FlattenScratch::witness`), kept when `record_splices` is set:
+    /// the replay stream writes them with the match.
+    view_wit: Vec<Vec<(usize, Cfg::G, Cfg::G, usize)>>,
+    pub(crate) record_splices: bool,
     flatten_scratch: Vec<crate::flatten::FlattenScratch<Cfg::G, Cfg::M>>,
     /// Nodes the `Flatten` step skipped for exceeding a bound
     /// (`crate::flatten::OVER_BOUND`), for the query just run.
@@ -529,6 +534,8 @@ impl<Cfg: EGraphConfig> MatchPool<Cfg> {
             collect_rows: None,
             views: Vec::new(),
             view_demand: Vec::new(),
+            view_wit: Vec::new(),
+            record_splices: false,
             flatten_scratch: Vec::new(),
             flatten_skipped: 0,
             flatten_overflowed: 0,
@@ -581,9 +588,11 @@ impl<Cfg: EGraphConfig> MatchPool<Cfg> {
         self.flatten_scratch.push(s);
     }
 
-    /// Write view `i` of `fl` and its demand into register `r`.
+    /// Write view `i` of `fl`, a view of the node pattern variable `root` is bound to,
+    /// and its demand into register `r`.
     fn write_view(
         &mut self,
+        root: usize,
         r: crate::schedule::ViewReg,
         fl: &crate::flatten::FlattenScratch<Cfg::G, Cfg::M>,
         i: usize,
@@ -596,6 +605,14 @@ impl<Cfg: EGraphConfig> MatchPool<Cfg> {
         b.clear();
         b.extend_from_slice(fl.view(i));
         fl.demand_into(i, &mut self.view_demand[r.0]);
+        if self.record_splices {
+            if self.view_wit.len() <= r.0 {
+                self.view_wit.resize_with(r.0 + 1, Vec::new);
+            }
+            let w = &mut self.view_wit[r.0];
+            w.clear();
+            w.extend(fl.witness(i).iter().map(|&(c, m, re)| (root, c, m, re)));
+        }
     }
 
     /// Whether the decomposition at `step` keeps a match taking `taken`: always, unless
@@ -752,6 +769,11 @@ impl<Cfg: EGraphConfig> MatchPool<Cfg> {
     #[inline]
     pub fn push(&mut self, env: &Match<Cfg>) {
         self.set.push(env);
+        if self.record_splices && self.view_wit.iter().any(|w| !w.is_empty()) {
+            let row = self.set.len() - 1;
+            self.set
+                .set_splices(row, self.view_wit.iter().flat_map(|w| w.iter().copied()));
+        }
     }
 
     #[inline]
@@ -795,9 +817,36 @@ pub struct MatchSet<Cfg: EGraphConfig> {
     mset_pool: Vec<Cfg::C>,
     /// A sequence pattern's literal columns (`Match::lit_seq_pool`).
     lit_seq_pool: Vec<Cfg::V>,
+    /// The members the `:flatten` views of a match read, for the replay stream: a
+    /// span of `splice_pool` per match, kept only for the matches that have any
+    /// (`splice_spans` is shorter than `count` otherwise).
+    splice_spans: Vec<(usize, usize)>,
+    splice_pool: Vec<(usize, Cfg::G, Cfg::G, usize)>,
 }
 
 impl<Cfg: EGraphConfig> MatchSet<Cfg> {
+    /// Record the members match `row`'s `:flatten` views read.
+    pub fn set_splices(
+        &mut self,
+        row: usize,
+        data: impl Iterator<Item = (usize, Cfg::G, Cfg::G, usize)>,
+    ) {
+        let start = self.splice_pool.len();
+        self.splice_pool.extend(data);
+        if self.splice_spans.len() <= row {
+            self.splice_spans.resize(row + 1, (0, 0));
+        }
+        self.splice_spans[row] = (start, self.splice_pool.len() - start);
+    }
+
+    /// The members match `row`'s `:flatten` views read.
+    pub fn splices(&self, row: usize) -> &[(usize, Cfg::G, Cfg::G, usize)] {
+        match self.splice_spans.get(row) {
+            Some(&(s, n)) => &self.splice_pool[s..s + n],
+            None => &[],
+        }
+    }
+
     pub fn new(shape: &crate::resolve::MatchShape) -> Self {
         Self {
             count: 0,
@@ -819,6 +868,8 @@ impl<Cfg: EGraphConfig> MatchSet<Cfg> {
             set_pool: Vec::new(),
             mset_pool: Vec::new(),
             lit_seq_pool: Vec::new(),
+            splice_spans: Vec::new(),
+            splice_pool: Vec::new(),
         }
     }
 
@@ -846,6 +897,8 @@ impl<Cfg: EGraphConfig> MatchSet<Cfg> {
             set_pool: Vec::new(),
             mset_pool: Vec::new(),
             lit_seq_pool: Vec::new(),
+            splice_spans: Vec::new(),
+            splice_pool: Vec::new(),
         }
     }
 
@@ -871,6 +924,8 @@ impl<Cfg: EGraphConfig> MatchSet<Cfg> {
         self.set_pool.clear();
         self.mset_pool.clear();
         self.lit_seq_pool.clear();
+        self.splice_spans.clear();
+        self.splice_pool.clear();
     }
 
     /// Append one match.
@@ -984,6 +1039,8 @@ impl<Cfg: EGraphConfig> MatchSet<Cfg> {
         self.set_pool.clear();
         self.mset_pool.clear();
         self.lit_seq_pool.clear();
+        self.splice_spans.clear();
+        self.splice_pool.clear();
     }
 }
 
@@ -1005,6 +1062,12 @@ pub trait MatchView<Cfg: EGraphConfig> {
     /// A literal column of a sequence pattern. Views over ordinary queries, which have
     /// none, keep the default.
     fn lit_seq_slice(&self, _v: LitSeqVarId) -> &[Cfg::V] {
+        &[]
+    }
+    /// The members the match's `:flatten` views read, when the matcher records them
+    /// (`MatchSet::splices`): the pattern variable of the node viewed, the class, its
+    /// member, and the tag of `crate::flatten::FlattenScratch::witness`.
+    fn splices(&self) -> &[(usize, Cfg::G, Cfg::G, usize)] {
         &[]
     }
 }
@@ -1040,6 +1103,9 @@ pub struct MatchRow<'a, Cfg: EGraphConfig> {
 }
 
 impl<'a, Cfg: EGraphConfig> MatchView<Cfg> for MatchRow<'a, Cfg> {
+    fn splices(&self) -> &[(usize, Cfg::G, Cfg::G, usize)] {
+        self.set.splices(self.j)
+    }
     fn get(&self, v: VarId) -> Cfg::G {
         self.set.get_node(v, self.j)
     }
@@ -2391,6 +2457,8 @@ fn run_step<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
             let takeable = |c: Cfg::G| bound.as_ref().is_none_or(|b| b.contains(&c));
             // A match takes at most one regrouped class per item.
             let limit = items.len();
+            // The replay stream writes the members a view's derivation read.
+            results.record_splices = eg.tracing();
             match crate::flatten::enumerate(&snap, n, *op, *kind, takeable, limit, &mut fl) {
                 Ok(()) => {
                     if fl.regroup_truncated() {
@@ -2406,7 +2474,7 @@ fn run_step<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
                         }
                     }
                     for i in 0..fl.len() {
-                        results.write_view(*out, &fl, i);
+                        results.write_view(node.idx(), *out, &fl, i);
                         run_step(exec, step_idx + 1, eg, index, globals, env, results);
                     }
                 }

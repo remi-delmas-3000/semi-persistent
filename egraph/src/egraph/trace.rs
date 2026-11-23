@@ -107,9 +107,12 @@ pub struct Trace {
     /// to; `true` marks the node of a `let` name, which stands for the name's
     /// whole term.
     rhs: Vec<(usize, bool)>,
-    /// The firing's splice witnesses: `(argument, member)`, written as `s`
-    /// lines before each of its `m` lines.
-    splices: Vec<(usize, usize)>,
+    /// The firing's splice witnesses: `(class, member, regrouped)`, written
+    /// as `s` lines (an opened class of the matched node) and `y` lines (a
+    /// regrouped pattern argument) before each of its `m` lines.
+    splices: Vec<(usize, usize, usize, usize)>,
+    /// The `e` lines of the open firing so far.
+    natoms: usize,
     /// Why the open firing is opaque, for its `u` lines: the part of its rule
     /// the stream cannot spell.
     opaque: &'static str,
@@ -275,6 +278,7 @@ where
             t.atoms.clear();
             t.rhs.clear();
             t.splices.clear();
+            t.natoms = 0;
             t.opaque = "no-source";
             t.firing = t
                 .rule_src
@@ -298,6 +302,7 @@ where
         if let Some(t) = self.trace.as_mut()
             && t.firing.is_some()
         {
+            t.natoms += 1;
             t.atoms.push(op.map_or(usize::MAX, |o| o.to_usize()));
             t.atoms.push(node.to_usize());
             t.atoms.push(0);
@@ -341,14 +346,15 @@ where
 
     /// Within the firing, a `:flatten` match read argument `c` through
     /// `member`, an application of the matched operator in `c`'s class.
-    pub(crate) fn trace_splice(&mut self, c: Cfg::G, member: Cfg::G) {
+    pub(crate) fn trace_splice(&mut self, c: Cfg::G, member: Cfg::G, tag: usize) {
         if let Some(t) = self.trace.as_mut()
             && t.firing.is_some()
         {
-            let pair = (c.to_usize(), member.to_usize());
-            if !t.splices.contains(&pair) {
-                t.splices.push(pair);
-            }
+            // One per opening or regrouping, for the `e` line just written
+            // (the lines are three or more fields each in `atoms`: counted
+            // by `natoms`).
+            t.splices
+                .push((t.natoms - 1, c.to_usize(), member.to_usize(), tag));
         }
     }
 
@@ -482,8 +488,14 @@ where
                     }
                     t.out.push('\n');
                     for i in 0..t.splices.len() {
-                        let (c, member) = t.splices[i];
-                        let _ = writeln!(t.out, "s {c} {member}");
+                        let (k, c, member, tag) = t.splices[i];
+                        if tag == crate::flatten::WIT_REGROUP {
+                            let _ = writeln!(t.out, "y {c} {member} {k}");
+                        } else if tag == crate::flatten::WIT_ROOT {
+                            let _ = writeln!(t.out, "s {c} {member} {k}");
+                        } else {
+                            let _ = writeln!(t.out, "s {c} {member} {k} {tag}");
+                        }
                     }
                     let j = f.base + f.action.saturating_sub(1);
                     let _ = writeln!(t.out, "m {j} {x} {y}");
