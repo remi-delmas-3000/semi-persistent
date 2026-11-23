@@ -84,6 +84,7 @@ def numS (B : SBind) : SNum → Option Val
     | some (.lit s v) => Val.parse s v
     | _ => none
   | .count g => (B.counts.lookup g).map fun ks => .i64 ks.length
+  | .sum g => (B.counts.lookup g).map fun ks => .i64 ((ks.foldl (· + ·) 0 : Nat) : Int)
   | .prim f args => (numsS B args).bind (primEval f)
 
 def numsS (B : SBind) : List SNum → Option (List Val)
@@ -113,6 +114,9 @@ def seqApply (r : SeqRule) (B : SBind) : Option (STm × STm) :=
   if !(r.guards.all fun g => match numS B g with
       | some (.bool true) => true
       | _ => false) then none
+  else if !(r.least.all fun (g, n) => match B.counts.lookup g with
+      | some ks => ks.all (n ≤ ·)
+      | none => false) then none
   else
   (itemsArgs B r.items).bind fun ls => (rhsS r B r.rhs).map fun R => (.app r.op ls, R)
 

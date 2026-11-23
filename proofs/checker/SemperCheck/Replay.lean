@@ -2640,7 +2640,9 @@ def readSeq (S : St P) (r : SeqRule) (lines : List (List String)) : SeqRead :=
       match S.node? v with
       | some n => { R with B := { R.B with scalars := R.B.scalars ++ [(name, .node n)] } }
       | none => { R with ok := false }
-    -- A multiplicity column or scalar: not read yet.
+    -- A filter's counts are on its `qf` line.
+    | "qk" :: _ => R
+    -- A multiplicity scalar: not read yet.
     | _ => { R with ok := false }) {}
 
 /-- A sequence rule's firing, which merged `new`, the node it built, with the

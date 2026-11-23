@@ -24,7 +24,7 @@ doc/book/examples/05-rule-actions.egg	2	2	replayed
 doc/book/examples/05-rules-over-mset.egg	5	5	replayed
 doc/book/examples/05-rules-over-seq.egg	9	9	replayed
 doc/book/examples/05-rules-over-set.egg	7	7	replayed
-doc/book/examples/05-seq-ac-multiplicity.egg	1	3	replayed
+doc/book/examples/05-seq-ac-multiplicity.egg	3	3	replayed
 doc/book/examples/05-seq-assoc-runs.egg	1	1	replayed
 doc/book/examples/05-seq-comprehensions.egg	0	3	replayed
 doc/book/examples/05-seq-except.egg	3	3	replayed
@@ -35,7 +35,7 @@ doc/book/examples/05-seq-illegal-outside-rewrite.egg	0	0	skipped
 doc/book/examples/05-seq-illegal-two-bare.egg	0	0	skipped
 doc/book/examples/05-seq-narrow.egg	0	1	replayed
 doc/book/examples/05-seq-simple-items.egg	2	2	replayed
-doc/book/examples/05-seq-splice.egg	1	2	replayed
+doc/book/examples/05-seq-splice.egg	2	2	replayed
 doc/book/examples/05-subsumption-rulesets.egg	2	2	replayed
 doc/book/examples/05-variadic-limits.egg	1	1	replayed
 doc/book/examples/06-congruence.egg	1	1	replayed
@@ -1621,8 +1621,8 @@ egraph/tests/egg/semi_recanon_inverse_cancel.egg	4	4	replayed
 egraph/tests/egg/semi_recanon_parent_delta.egg	1	1	replayed
 egraph/tests/egg/semi_recanon_pending_collapse.egg	3	3	replayed
 egraph/tests/egg/semi_recanon_unit_drop.egg	4	4	replayed
-egraph/tests/egg/seq_ac_default_mult.egg	1	2	replayed
-egraph/tests/egg/seq_ac_multiplicity.egg	0	1	replayed
+egraph/tests/egg/seq_ac_default_mult.egg	2	2	replayed
+egraph/tests/egg/seq_ac_multiplicity.egg	1	1	replayed
 egraph/tests/egg/seq_ac_splice.egg	1	1	replayed
 egraph/tests/egg/seq_assoc_not_split.egg	0	0	skipped
 egraph/tests/egg/seq_assoc_run.egg	1	1	replayed
@@ -1654,8 +1654,8 @@ egraph/tests/egg/seq_snapshot.egg	1	1	replayed
 egraph/tests/egg/seq_snapshot_merged_children.egg	1	1	replayed
 egraph/tests/egg/seq_splice_a_into_ac.egg	1	1	replayed
 egraph/tests/egg/seq_splice_a_into_aci.egg	1	1	replayed
-egraph/tests/egg/seq_splice_ac_into_a.egg	0	1	replayed
-egraph/tests/egg/seq_splice_ac_into_aci.egg	0	1	replayed
+egraph/tests/egg/seq_splice_ac_into_a.egg	1	1	replayed
+egraph/tests/egg/seq_splice_ac_into_aci.egg	1	1	replayed
 egraph/tests/egg/seq_splice_aci_into_a.egg	1	1	replayed
 egraph/tests/egg/seq_splice_aci_into_ac.egg	1	1	replayed
 egraph/tests/egg/seq_type_column_source.egg	0	0	skipped

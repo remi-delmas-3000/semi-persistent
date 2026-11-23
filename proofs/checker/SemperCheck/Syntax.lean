@@ -140,6 +140,8 @@ inductive SNum where
   | lit (s v : String)
   | var (x : String)
   | count (g : String)
+  /-- The sum of the counts of filter `g`'s elements. -/
+  | sum (g : String)
   | prim (f : String) (args : List SNum)
   deriving Repr, Inhabited
 
@@ -170,6 +172,9 @@ structure SeqRule where
   rhs : SRhs
   /-- The `:when` conditions: each computes `true` for the rule to apply. -/
   guards : List SNum := []
+  /-- Per filter with a count `:k>=n`: the least count of each of its
+  elements. -/
+  least : List (String × Nat) := []
   /-- The sort of each variable, for the reader of a binding's literals. -/
   sorts : List (String × String) := []
   deriving Repr, Inhabited

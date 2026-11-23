@@ -142,7 +142,9 @@ fires. A `:when` condition is part of the rule: `seqApply` yields nothing
 under a binding for which a condition does not compute `true` (`numS`: a
 literal, a scalar, `(count g)`, a primitive). `:except` is read and adds
 nothing, since a binding names each filter's elements. The reader reads a
-sequence rule with no tag but `:when`, no count on a filter, and a right side
+sequence rule with no tag but `:when`, a filter with or without a count
+(`..g:k`, `..g:k>=n`, whose least count `seqApply` checks; `(sum k)` is the
+sum of the elements' counts), and a right side
 of variables, literals, applications, splices `..x` and computed literals.
 
 ## What the reader reads
@@ -193,9 +195,9 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,752 |
-| programs with every `check-eq` proved, of 1,066 | 1,039 |
-| kernel steps checked | 16,547,886 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,759 |
+| programs with every `check-eq` proved, of 1,066 | 1,045 |
+| kernel steps checked | 16,547,937 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,101 |
 | events whose check fails | 8,069 |

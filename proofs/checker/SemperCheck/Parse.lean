@@ -489,6 +489,7 @@ def SNum.sort? (sorts : List (String × String)) : SNum → Option String
   | .lit s _ => some s
   | .var x => sorts.lookup x
   | .count _ => some "i64"
+  | .sum _ => some "i64"
   | .prim f _ => (primSig f).map (·.2)
 
 /-- A value a sequence rule computes: a literal, a scalar, `(count g)`, or a
@@ -502,6 +503,12 @@ partial def Env.seqNum (E : Env) (exp : Option String) : SExp → PatM SNum
       | none => throw "a literal of another sort than its position"
     else pure (.var a)
   | .list [.atom "count", .atom g] => pure (.count g)
+  -- `(sum k)`, for the count variable `k` of a filter: recorded as a
+  -- multiplicity variable whose bound names the filter's position.
+  | .list [.atom "sum", .atom k] => do
+    match (← get).pending.lookup s!"#mult:{k}" with
+    | some g => pure (.sum g)
+    | none => throw "a sum of what is no filter's count"
   | .list (.atom f :: args) => do
     let first ← match args with
       | x :: _ => E.seqNum none x
@@ -529,6 +536,7 @@ partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
       | some _ => pure (.app a [])
       | none => pure (.var a)
   | .list [.atom "count", .atom g] => pure (.val (.count g))
+  | .list [.atom "sum", .atom k] => do return .val (← E.seqNum exp (.list [.atom "sum", .atom k]))
   | .list (.atom f :: args) => do
     if (E.op? f).isNone then
       -- A primitive: the literal it computes.
@@ -546,6 +554,18 @@ partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
       | _ => out := out.push (.tm (← E.seqRhs exp x))
     pure (.app f out.toList)
   | _ => throw "a sequence form"
+
+/-- A filter's head `..g`, `..g:k` or `..g:k>=n`: its name, its count
+variable and the least count. -/
+def filterHead (g : String) : Option (String × Option (String × Nat)) :=
+  match ((g.drop 2).toString.splitOn ":") with
+  | [name] => some (name, none)
+  | [name, k] =>
+    match k.splitOn ">=" with
+    | [k] => some (name, some (k, 1))
+    | [k, n] => n.toNat?.map fun n => (name, some (k, n))
+    | _ => none
+  | _ => none
 
 /-- Whether a left side is a sequence rule's: one of its arguments is a
 filter `(..g p ..)`. -/
@@ -567,6 +587,7 @@ where
     unless d.kind.isAssoc do throw "a filter under an operator that takes no sequence"
     let exp := d.args.head?
     let mut out : Array SItem := #[]
+    let mut least : Array (String × Nat) := #[]
     for it in items do
       match it with
       | .atom a =>
@@ -576,8 +597,11 @@ where
         else out := out.push (.one (← E.pat exp it).1)
       | .list [.atom g, p] =>
         if g.startsWith ".." then
-          if g.contains ':' then throw s!"a sequence form ({g})"
-          out := out.push (.filter (g.drop 2).toString (← E.pat exp p).1)
+          let some (name, mult) := filterHead g | throw s!"a sequence form ({g})"
+          if let some (k, n) := mult then
+            least := least.push (name, n)
+            modify fun st => { st with pending := (s!"#mult:{k}", name) :: st.pending }
+          out := out.push (.filter name (← E.pat exp p).1)
         else out := out.push (.one (← E.pat exp it).1)
       -- `:except` says which arguments the engine gives the filter; a binding
       -- names them, so the rule's instances are the same without it.
@@ -593,7 +617,8 @@ where
     let mut guards : Array SNum := #[]
     if let [_, .list gs] := tags then
       for g in gs do guards := guards.push (← E.seqNum (some "bool") g)
-    return { op := f, items := out.toList, rhs := r, guards := guards.toList, sorts := (← get).sorts }
+    return { op := f, items := out.toList, rhs := r, guards := guards.toList, least := least.toList,
+             sorts := (← get).sorts }
 
 /-- The operators applied in a pattern. -/
 def Pat.heads : Pat → List String
