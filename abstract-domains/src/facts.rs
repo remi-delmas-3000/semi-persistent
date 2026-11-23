@@ -315,6 +315,8 @@ impl<W: Word> Domain for Facts<W> {
         }
         match grid_step(&u, &c) {
             Some((u2, c2)) => Facts { u: u2, c: c2 },
+            // Unreachable: `self.u.lo()` lies in both fields, so the grid
+            // step finds a value. The arm only satisfies the match.
             None => {
                 proof {
                     assert(in_fields(u, c, self.u.lo()));
@@ -379,6 +381,10 @@ impl<W: Word> Domain for Facts<W> {
 
     /// Field-wise widening, then the grid step: a bound that jumps to the end
     /// of the range rounds back onto the grid.
+    ///
+    /// Termination: `c` has finite height, so its widening stabilizes; once
+    /// `c` is fixed, a bound that jumps rounds to the same grid point on every
+    /// later step, so `u` stabilizes too.
     fn widen(&self, o: &Self) -> (r: Self) {
         let u = self.u.widen(&o.u);
         let c = self.c.widen(&o.c);
@@ -394,6 +400,8 @@ impl<W: Word> Domain for Facts<W> {
         }
         match grid_step(&u, &c) {
             Some((u2, c2)) => Facts { u: u2, c: c2 },
+            // Unreachable: `self.u.lo()` lies in both fields, so the grid
+            // step finds a value. The arm only satisfies the match.
             None => {
                 proof {
                     assert(in_fields(u, c, self.u.lo()));

@@ -54,8 +54,9 @@ fn lift<W: Word>(u: Interval<W>) -> (r: Facts<W>)
     }
 }
 
-/// Combine independently sound fields. An empty intersection has no concrete
-/// result to preserve, so Top is a sound fallback for the bottomless return type.
+/// Combine independently sound fields. The `Bot` case is unreachable for
+/// nonempty operands, because both fields contain every concrete result; when
+/// it does occur there is no concrete result to preserve, so Top is sound.
 fn lift_parts<W: Word>(u: Interval<W>, c: Congruence<W>) -> (r: Facts<W>)
     requires
         u.wf(),

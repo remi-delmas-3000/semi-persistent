@@ -117,12 +117,13 @@ Reduction is only as precise as the record. With a bounds-only record `{u}` and 
   the same γ.
 - `[10, 11] × 4ℤ+1` is never reported as `Bot`.
 
-Today's `{u, c}` record and Congruence `Refine` implementation resolve these
-cases through grid normalization.
+The `{u, c}` record resolves these cases: its grid step snaps `[3, 10]` to
+`[3, 7]` and reports `[10, 11] × 4ℤ+1` as `Bot`.
 
 So the rule: **a domain is exact in the product only once its facts are a
-field of the record.** Until then, it can still sit in a `Product` and refine
-through `to_channel` and `refine`, which is sound and helps precision. But the
+field of the record.** A domain whose facts are not a field can still sit in
+a `Product` and refine through `to_channel` and `refine`, which is sound and
+helps precision. But the
 e-graph's guarantees (change detection by `==`, conflicts as `Bot`) hold only
 for what the record can express.
 
@@ -360,6 +361,18 @@ the domain implies (top elsewhere), normalizes it to `BotOr<Facts<W>>`
 domain with the fields it can read. `impl Refine for Interval<W>` in
 `facts.rs` is the template. `Product<YourDomain, Facts<W>>` then reduces.
 
+`impl Refine for Congruence<W>` in `congruence_refine.rs` is the template for
+a domain that is also a field of the record. `to_channel` exports
+`[residue, max_member] ∩ c` through `Facts::from_parts`, which denotes exactly
+the source class. `refine` meets the class with `f.congruence()`, returning
+`Bot` when the grids are incompatible, then normalizes the merged grid against
+`f.interval()` with `from_parts`. For example, `[8, 9]` with `4ℤ+3` gives
+`Bot`, and `[5, 9]` with `4ℤ+3` leaves only `7`, which the leaf learns as a
+constant class. A Congruence leaf cannot hold interval bounds: the
+normalized record carries them to the interval or `Facts` components. The
+inherent `Congruence::refines(&other) -> bool` decides containment and backs
+`Domain::leq`; it is unrelated to `Refine::refine`.
+
 **Replace a stub transfer.** Change the body, keep the trait contract, and
 prove it. Then measure: call `check_binop_u8`, `check_cmp_u8` or
 `check_assume_u8` from `tests/common/mod.rs` with your samples and a best
@@ -401,17 +414,12 @@ test name in your PR.
 `src/congruence.rs` (new), `src/sbounds.rs` (new). Builds on #106, #112,
 #114, #118 (Congruence) and #109 (Strided).
 
-- *Implemented (A1–A3):* Congruence uses `Word` primitives and participates
-  in `Refine` through `Facts.c`. Grid rounding in `src/grid.rs` supports the
-  interval and congruence step in `normalize`, with canonicality proved.
 - *Later:* the signed-bounds field `s` and the unsigned and signed step;
   known bits against bounds; congruence against low bits.
 
 **BitVec transfers.** Files: `src/facts_ops.rs`, `src/tnum_w.rs` (new).
 Builds on #108 (interval transfers) and #120 (Wrapped).
 
-- *Implemented (A4):* unsigned add/sub/neg combine interval and Congruence
-  results through `Facts::from_parts`, with sound arithmetic proved.
 - *First:* `Compare<Unsigned<W>>` and `Compare<Signed<W>>` for `Facts<W>` on
   the `u` field, forward and backward, replacing the stubs; and bvand, bvor,
   bvxor, bvnot and the shifts from #108.
