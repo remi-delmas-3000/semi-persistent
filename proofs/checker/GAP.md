@@ -5,12 +5,12 @@ Written by `proofs/checker/scripts/check-replay.py --gap`. Each program's unprov
 witness in the stream, or gets no kernel step. A program's later failures can
 follow from the merge that event did not apply.
 
-29503 of 29808 `check-eq` proved; 305 not proved, in 88 programs.
+29531 of 29808 `check-eq` proved; 277 not proved, in 87 programs.
 
 | cause | programs | `check-eq` not proved | example |
 | --- | --- | --- | --- |
 | unread rule: a primitive or undeclared operator | 25 | 136 | `egraph/tests/egg/bignum_all_ops.egg` |
-| rule: matched node differs | 4 | 59 | `egraph/tests/egg/conform/c1_0030.egg` |
+| rule: matched node differs | 3 | 31 | `egraph/tests/egg/conform-flatten/f2_0169.egg` |
 | no witness: rewrite:untraced-firing | 20 | 27 | `egraph/tests/egg/collection_rules.egg` |
 | rule: unbound rest variable | 2 | 22 | `egraph/tests/egg/rhs_comprehensions.egg` |
 | no witness: rewrite:primitive-guard | 7 | 11 | `egraph/tests/egg/bench/typecheck.rules.egg` |
@@ -27,7 +27,7 @@ follow from the merge that event did not apply.
 | unread rule: a multiplicity constraint other than >= | 1 | 2 | `egraph/tests/egg/rhs_mult_expr.egg` |
 | no kernel steps: p line | 1 | 1 | `egraph/tests/egg/conform-cc-cert/cs1_0043.egg` |
 | rule: no line for a literal | 1 | 1 | `doc/book/examples/05-rewrite-rules.egg` |
-| total | 88 | 305 | |
+| total | 87 | 277 | |
 
 ## Programs the reader does not read
 

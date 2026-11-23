@@ -1279,7 +1279,7 @@ egraph/tests/egg/conform/c1_0026.egg	0	0	replayed
 egraph/tests/egg/conform/c1_0027.egg	2	2	replayed
 egraph/tests/egg/conform/c1_0028.egg	4	4	replayed
 egraph/tests/egg/conform/c1_0029.egg	1	1	replayed
-egraph/tests/egg/conform/c1_0030.egg	22	50	replayed
+egraph/tests/egg/conform/c1_0030.egg	49	50	replayed
 egraph/tests/egg/conform/c1_0031.egg	11	11	replayed
 egraph/tests/egg/conform/c1_0032.egg	4	4	replayed
 egraph/tests/egg/conform/c1_0033.egg	0	0	replayed
@@ -1490,7 +1490,7 @@ egraph/tests/egg/flatten_regroup_assoc.egg	4	4	replayed
 egraph/tests/egg/flatten_regroup_assoc_left.egg	0	0	unread
 egraph/tests/egg/flatten_regroup_assoc_right.egg	0	0	unread
 egraph/tests/egg/flatten_regroup_control.egg	0	0	unread
-egraph/tests/egg/flatten_regroup_laws_drop_need.egg	3	4	replayed	1 before the checker stopped reading a nested application as its arguments without a splice witness: the stream has none for this merge
+egraph/tests/egg/flatten_regroup_laws_drop_need.egg	4	4	replayed	1 before the checker stopped reading a nested application as its arguments without a splice witness: the stream has none for this merge
 egraph/tests/egg/flatten_regroup_laws_idem.egg	4	4	replayed
 egraph/tests/egg/flatten_regroup_laws_insert.egg	0	0	replayed
 egraph/tests/egg/flatten_regroup_laws_no_item.egg	3	3	replayed

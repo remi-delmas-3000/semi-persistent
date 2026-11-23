@@ -149,8 +149,8 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,503 |
-| programs with every `check-eq` proved, of 1,066 | 978 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,531 |
+| programs with every `check-eq` proved, of 1,066 | 979 |
 | kernel steps checked | 16,460,786 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,100 |

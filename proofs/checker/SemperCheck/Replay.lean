@@ -873,14 +873,29 @@ def viewAt (S : St P) (f : String) (W : List Wit) (at_ : List Nat) (bound : List
       | none => out := out.push b
     return out.toList
 
-/-- The classes of the regroupings `W` that are the unit's: a group of the
-node's arguments that an application in the unit's class spells is dropped by
-the operator's laws, so no bound argument stands for it. The match's side then
-has the unit as one more argument, which the regrouping reads. -/
-def unitRegroups (S : St P) (f : String) (W : List Wit) : List Nat :=
-  match S.unit f with
-  | some u => (W.filter fun w => S.fd w.2.1 == S.fd u).map fun _ => u
-  | none => []
+/-- The arguments the regroupings `W` read that the bound arguments `bound`
+do not hold, because the operator's laws dropped them from the match's view:
+- a regrouping in the unit's class reads the unit, which the unit law adds;
+- a regrouping in a class no bound argument is in, whose inverse the node's
+  view `view` holds, reads a member of that class, which the inverse law adds
+  together with that inverse. -/
+def droppedRegroups (S : St P) (f : String) (W : List Wit) (bound view : List Nat) : List Nat :=
+  let u := S.unit f
+  let inv := (S.prog.opDecl? f).bind (·.inverse)
+  W.flatMap fun w =>
+    if (u.map S.fd) == some (S.fd w.2.1) then u.toList
+    else if bound.any (fun b => S.fd b == S.fd w.2.1) then []
+    else
+      match inv with
+      | some g =>
+        match view.find? (fun e => match S.defOf e with
+            | some (.app h [y]) => h == g && S.fd y == S.fd w.2.1
+            | _ => false) with
+        -- The class is named by a plain member: the kernel reads through an
+        -- application of `f`.
+        | some e => [(S.plain.getD (S.fd w.2.1) none).getD w.2.1, e]
+        | none => []
+      | none => []
 
 /-- The fields of an `e` line after the operator: the nodes of the argument
 patterns, and between `[` and `]` the nodes of each rest variable, in the
@@ -1836,9 +1851,11 @@ def instProof (S : St P) (f : String) (i n : Nat) (k : Option Nat) : St P × Pf 
     let argsOf (S : St P) (x : Nat) : List Nat := match S.defOf x with
       | some (.app _ cs) => cs
       | _ => []
-    -- A regrouping in the unit's class reads the unit, which the instance
-    -- gets as one more argument: the two are equal by the unit law.
-    let extra := unitRegroups S f wr
+    -- A regrouping whose class the laws dropped reads an argument the instance
+    -- gets back (`droppedRegroups`): the two are equal by the unit or inverse
+    -- law.
+    let extra := droppedRegroups S f wr (argsOf S i)
+      (viewArgs S f true wo ((argsOf S n).map (·, none)))
     let (S, i0, p0) : St P × Nat × Pf :=
       if extra.isEmpty then (S, i, some none)
       else match appNode S f (argsOf S i ++ extra) with
@@ -1973,7 +1990,7 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
       let S0 := { S with splices := [] }
       let (wo, wr) := witsOf S w.atomIdx
       let vd := viewArgs S f true wo (ds.map (·, none))
-      let csU := cs ++ unitRegroups S f wr
+      let csU := cs ++ droppedRegroups S f wr cs vd
       let vc := if S.prog.kind f == .assoc && !wr.isEmpty then
           viewAt S f wr (regroupAt S f wr csU vd) csU
         else viewArgs S f false wr (csU.map (·, none))
