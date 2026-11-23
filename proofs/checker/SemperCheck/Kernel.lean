@@ -118,6 +118,8 @@ def wfSorts (P : Program) (nodes : Array Node) : Bool :=
       | some d =>
         if d.kind.isAssoc then
           cs.all (fun c => nodeSort P nodes c == some d.res) && (!cs.isEmpty || d.unit.isSome)
+        else if d.kind.isFold then
+          cs.all (fun c => nodeSort P nodes c == some d.res) && !cs.isEmpty
         else argsOk P nodes d.args cs
     | none => true
 
@@ -258,6 +260,47 @@ def congComm (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
     g == f && h == f && pairsOk prems [c1, c2] [d2, d1]
   | _, _ => false
 
+/-- The arguments node `x` is read as under the left comb `f`: those of its
+first argument, when that is an application of `f`, then its other arguments;
+`[x]` for a node that is no application of `f`. -/
+def viewL (f : String) (x : Nat) : Option (List Nat) :=
+  match C.nodes[x]? with
+  | some (.app g cs) =>
+    if g = f then
+      match cs with
+      | c :: rest => if _h : c < x then (viewL f c).map (· ++ rest) else none
+      | [] => none
+    else some [x]
+  | _ => some [x]
+termination_by x
+
+/-- Two nodes of the left comb `f` whose arguments, read through the first
+one, are equal or a premise position by position. -/
+def congFoldL (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
+  match C.P.opDecl? f, C.viewL f a, C.viewL f b with
+  | some d, some l, some m =>
+    d.kind == .foldL && C.sortOf a == some d.res && C.sortOf b == some d.res && pairsOk prems l m
+  | _, _, _ => false
+
+/-- The arguments node `x` is read as under the right comb `f`: its arguments
+but the last, then those of the last one when it is an application of `f`. -/
+def viewR (f : String) (x : Nat) : Option (List Nat) :=
+  match C.nodes[x]? with
+  | some (.app g cs) =>
+    if g = f then
+      match cs.reverse with
+      | c :: revInit => if _h : c < x then (viewR f c).map (revInit.reverse ++ ·) else none
+      | [] => none
+    else some [x]
+  | _ => some [x]
+termination_by x
+
+def congFoldR (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
+  match C.P.opDecl? f, C.viewR f a, C.viewR f b with
+  | some d, some l, some m =>
+    d.kind == .foldR && C.sortOf a == some d.res && C.sortOf b == some d.res && pairsOk prems l m
+  | _, _, _ => false
+
 def congAssoc (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
   match C.P.opDecl? f, C.side f prems a, C.side f prems b with
   | some d, some l, some m =>
@@ -269,6 +312,8 @@ def congOk (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
     match C.P.kind f with
     | .plain => false
     | .comm => C.congComm f a b prems
+    | .foldL => C.congFoldL f a b prems
+    | .foldR => C.congFoldR f a b prems
     | _ => C.congAssoc f a b prems
 
 def invOk (f : String) (a x q e : Nat) : Bool :=

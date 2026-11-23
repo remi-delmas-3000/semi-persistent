@@ -63,10 +63,19 @@ inductive Kind where
   | assoc
   | ac
   | aci
+  /-- `:assoc-left`: any number of arguments, read as a left comb. -/
+  | foldL
+  /-- `:assoc-right`: any number of arguments, read as a right comb. -/
+  | foldR
   deriving Repr, DecidableEq, Inhabited
 
 def Kind.isAssoc : Kind → Bool
   | .assoc | .ac | .aci => true
+  | _ => false
+
+/-- An operator read as a comb of one binary operation, with no law. -/
+def Kind.isFold : Kind → Bool
+  | .foldL | .foldR => true
   | _ => false
 
 structure OpDecl where

@@ -95,6 +95,11 @@ nodes, and a list of steps, each concluding that two nodes are equal
 | `prim f a e` | `a = f(c1, .., ck)`, a primitive applied to literals, is the literal `e` that `primOk` computes |
 | `seq o B a b` | the sequence rule of the command at `o`, under the binding `B`, yields the terms that are nodes `a` and `b` (`seqApply`) |
 
+For a comb operator (`:assoc-left`, `:assoc-right`), `cong` reads each node
+through its first argument (left) or its last (right) when that argument is an
+application of the same operator, and compares the two argument lists position
+by position, each pair equal or a premise.
+
 `cong` covers congruence (children pairwise equal), a commutative operator's
 swapped children, and the associative operators: both sides flatten to their
 arguments, the premises rewrite each argument (an argument rewritten to an
@@ -171,6 +176,13 @@ argument's class. A firing that read several arguments through is not proved.
 
 ## What the reader reads
 
+An `:assoc-left` or `:assoc-right` operator takes any number of arguments of
+its sort. In a model it is a comb of one binary operation with no law:
+`(L a b c)` is `b(b(a, b), c)` under `:assoc-left` and `b(a, b(b, c))` under
+`:assoc-right` (`OpSat`, kinds `foldL` and `foldR`). `(L (L a b) c)` and
+`(L a b c)` are then equal by the fold itself, and `(L a (L b c))` is not.
+A unit, inverse or other tag on such an operator is not read.
+
 `(push)` and `(pop)` are read. The program records each pair of offsets
 (`Program.pops`), and a command is in force at an offset when no scope that
 holds it was closed before that offset (`Program.active`). `Models P p` asks
@@ -228,18 +240,16 @@ of line, a stream that proves its goal and the same stream with one witness
 changed, which costs the goal that depends on it.
 
 Over the 1,684 programs (release build, 60 s and 4 GB per run, four jobs, 27 s
-of wall time): 1,452 are replayed, 125 expect an outcome other than `ok`, and
-the reader rejects 107 (102 apply an `:assoc-left` or `:assoc-right` operator
-to more arguments than its signature takes, and 5 write a count above
-65,536).
+of wall time): 1,554 are replayed, 125 expect an outcome other than `ok`, and
+the reader rejects 5, which write a count above 65,536.
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,879 | 29,876 |
-| programs with every `check-eq` proved, of 1,076 | 1,073 |
-| kernel steps checked | 16,615,528 |
+| `check-eq` proved (`replay_sound` covers them), of 31,099 | 31,078 |
+| programs with every `check-eq` proved, of 1,161 | 1,152 |
+| kernel steps checked | 16,635,818 |
 | steps the kernel rejects | 0 |
-| events replayed | 7,410,056 |
+| events replayed | 7,438,518 |
 | events whose check fails | 8,069 |
 | events the stream gives no witness for | 347 |
 

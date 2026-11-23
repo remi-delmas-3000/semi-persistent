@@ -986,6 +986,51 @@ def kview (S : St P) (f : String) (x : Nat) : List Nat :=
   | _ => [x]
 termination_by x
 
+/-- The arguments node `x` is read as under a comb `f`, as the kernel's
+`viewL` (`left`) or `viewR` reads them: through its first, or last, argument
+when that is an application of `f`. -/
+def kviewF (S : St P) (f : String) (left : Bool) (x : Nat) : List Nat :=
+  match S.defOf x with
+  | some (.app g cs) =>
+    if g == f then
+      match (if left then cs else cs.reverse) with
+      | c :: rest =>
+        if _h : c < x then
+          if left then kviewF S f left c ++ rest else rest.reverse ++ kviewF S f left c
+        else [x]
+      | [] => [x]
+    else [x]
+  | _ => [x]
+termination_by x
+
+/-- A `cong` step for two nodes of a comb operator `f` (`:assoc-left`,
+`:assoc-right`) whose arguments, read through the comb, are in one class
+position by position. -/
+def foldCong (S : St P) (f : String) (left : Bool) (a b : Nat) : St P × Pf := Id.run do
+  if a == b then return (S, some none)
+  -- The two nodes' own arguments, when they are in one class position by
+  -- position (the kernel takes them as they are); else the arguments read
+  -- through the comb.
+  let own (x : Nat) : List Nat := match S.defOf x with
+    | some (.app g cs) => if g == f then cs else [x]
+    | _ => [x]
+  let same (l m : List Nat) : Bool :=
+    l.length == m.length && (l.zip m).all (fun (c, d) => S.fd c == S.fd d)
+  let (l, m) := if same (own a) (own b) then (own a, own b)
+    else (kviewF S f left a, kviewF S f left b)
+  if !same l m then return (S, none)
+  let mut S := S
+  let mut prems : Array Nat := #[]
+  for (c, d) in l.zip m do
+    if c != d then
+      let (S', p) := eqP S c d
+      S := S'
+      match p with
+      | some (some s) => prems := prems.push s
+      | _ => return (S, none)
+  let (S', s) := emit S (.cong f a b prems.toList) a b
+  return (S', some (some s))
+
 /-- A `cong` step that concludes `a = b` for two nodes whose arguments the
 replayer found equal as classes under `f`'s laws: its premises prove each
 differing pair of arguments equal (plain and commutative operators), or send
@@ -997,6 +1042,7 @@ def congStep (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   if a == b then return (S, some none)
   let mut S := S
   let kind := S.prog.kind f
+  if kind.isFold then return foldCong S f (kind == .foldL) a b
   if !kind.isAssoc then
     let (some (.app g as), some (.app h bs)) := (S.defOf a, S.defOf b) | return (S, none)
     if g != f || h != f || as.length != bs.length then return (S, none)
@@ -1417,6 +1463,29 @@ read through nested applications, hold those of `l` as a run: `n` is
 argument since `l = r` is one class, which is `other` under `f`'s laws. The
 run is the first one, as the engine takes it. -/
 def seqReduce (S : St P) (f : String) (n other l r : Nat) : St P × Option (Option Nat) := Id.run do
+  -- A comb: the rule's left side is the node's first (or last) argument read
+  -- through, so the node is `f(l, rest)` (or `f(rest, l)`).
+  if (S.prog.kind f).isFold then
+    let left := S.prog.kind f == .foldL
+    let (vn, vl) := (kviewF S f left n, kviewF S f left l)
+    if S.fd l != S.fd r || vl.length > vn.length then return (S, none)
+    let rest := if left then vn.drop vl.length else vn.take (vn.length - vl.length)
+    let (S, x1) := appNode S f (if left then l :: rest else rest ++ [l])
+    let (S, x2) := appNode S f (if left then r :: rest else rest ++ [r])
+    let (some x1, some x2) := (x1, x2) | return (S, none)
+    let (S, p1) := foldCong S f left n x1
+    -- `f(l, rest) = f(r, rest)` argument by argument, from `l = r`.
+    let (S, lr) := eqP S l r
+    let (S, lrStep) := stepOf S l lr
+    let (S, p2) : St P × Pf := if x1 == x2 then (S, some none) else
+      match lrStep with
+      | some e => let (S, t) := emit S (.cong f x1 x2 (if l == r then [] else [e])) x1 x2; (S, some (some t))
+      | none => (S, none)
+    let (S, p3) := foldCong S f left x2 other
+    if p1.isNone || p2.isNone || p3.isNone then return (S, none)
+    let (S, p) := transP S n x2 p1 p2
+    let (S, p) := transP S n other p p3
+    return (S, p)
   let args := kview S f n
   let ls := kview S f l
   if ls.isEmpty || S.fd l != S.fd r then return (S, none)
@@ -2110,6 +2179,80 @@ decreasing_by
 
 end
 
+/-- The instance `i` of a comb pattern is the matched node `n`, whose view
+read the openings `W` (root first): each opened class is in the comb position
+(first argument of a left comb, last of a right one) of the node before it,
+and stands for its member. From the last opening back, each node gets the next
+one's node in that position, argument by argument; the root so rebuilt reads
+as the instance position by position. -/
+def foldInst (S : St P) (f : String) (left : Bool) (i n : Nat) (W : List Wit) : St P × Pf := Id.run do
+  -- `x` with its comb-position argument replaced by `y`, and the proof that
+  -- the two are equal, given `y`'s proof from the member `m` it stands for.
+  let put (S : St P) (x m y : Nat) (pm : Pf) : St P × Option (Nat × Pf) :=
+    match S.defOf x with
+    | some (.app _ cs) =>
+      let arg := if left then cs.head? else cs.getLast?
+      match arg with
+      | some a =>
+        let cs' := if left then y :: cs.drop 1 else cs.dropLast ++ [y]
+        match appNode S f cs' with
+        | (S, some x') =>
+          if x' == x then (S, some (x, some none))
+          else
+            -- `a` is in `m`'s class, and `m` is `y`.
+            let (S, p1) := eqP S a m
+            let (S, p) := transP S a y p1 pm
+            match stepOf S a p with
+            | (S, some st) =>
+              let (S, t) := emit S (.cong f x x' (if a == y then [] else [st])) x x'
+              (S, some (x', some (some t)))
+            | (S, none) => (S, none)
+        | (S, none) => (S, none)
+      | none => (S, none)
+    | _ => (S, none)
+  let mut S := S
+  -- The node the current opening's member is read as, and the proof.
+  let mut acc : Option (Nat × Nat × Pf) := none
+  for w in W.reverse do
+    let m := w.2.2.1
+    match acc with
+    | none => acc := some (m, m, some none)
+    | some (cm, cy, cp) =>
+      match put S m cm cy cp with
+      | (S1, some (m', pm')) => S := S1; acc := some (m, m', pm')
+      | (S1, none) => return (S1, none)
+  let (S1, root, pr) ← match acc with
+    | none => pure (S, n, (some none : Pf))
+    | some (cm, cy, cp) =>
+      match put S n cm cy cp with
+      | (S1, some (n', pn')) => pure (S1, n', pn')
+      | (S1, none) => return (S1, none)
+  -- The instance's argument in the comb position is one element of the
+  -- pattern: when it is an application of `f`, which the kernel would read
+  -- through, a plain member of its class takes its place.
+  let (S1, i', pi) : St P × Nat × Pf :=
+    match S1.defOf i with
+    | some (.app _ cs) =>
+      match (if left then cs.head? else cs.getLast?) with
+      | some a =>
+        let isApp := match S1.defOf a with
+          | some (.app g as) => g == f && !as.isEmpty
+          | _ => false
+        match isApp, S1.plain.getD (S1.fd a) none with
+        | true, some pm =>
+          let (S2, pe) := eqP S1 a pm
+          match put S2 i a pm pe with
+          | (S2, some (i', p)) => (S2, i', p)
+          | (S2, none) => (S2, i, some none)
+        | _, _ => (S1, i, some none)
+      | none => (S1, i, some none)
+    | _ => (S1, i, some none)
+  let (S1, p2) := foldCong S1 f left i' root
+  if pr.isNone || p2.isNone || pi.isNone then return (S1, none)
+  let (S1, p2) := transP S1 i root pi p2
+  let (S1, pr') := symmP S1 n root pr
+  transP S1 i n p2 pr'
+
 /-- The proof that the instance `i` of an application pattern is the node `n`
 it matched on the `e` line at position `k`: by `f`'s laws and, for a
 `:flatten` match, with each side first read under its witnesses (`openNode`). -/
@@ -2117,7 +2260,8 @@ def instProof (S : St P) (f : String) (i n : Nat) (k : Option Nat) : St P × Pf 
   let (wo, wr) := match k with
     | some k => witsOf S k
     | none => ([], [])
-  if wo.isEmpty && wr.isEmpty then congStepL S f i n
+  if (S.prog.kind f).isFold then foldInst S f (S.prog.kind f == .foldL) i n wo
+  else if wo.isEmpty && wr.isEmpty then congStepL S f i n
   else
     let argsOf (S : St P) (x : Nat) : List Nat := match S.defOf x with
       | some (.app _ cs) => cs
@@ -3113,7 +3257,7 @@ def stepCore (S : St P) (line : String) : St P :=
               -- elsewhere the stream's node is the term's or the line is wrong.
               match t with
               | .app f _ =>
-                if !(S.prog.kind f).isAssoc then (S, none)
+                if !((S.prog.kind f).isAssoc || (S.prog.kind f).isFold) then (S, none)
                 else
                   match addS S (termS t) with
                   | (S, some tn) => let (S, p) := congStepL S f tn n; (S, some (tn, p))
@@ -3160,7 +3304,8 @@ def stepCore (S : St P) (line : String) : St P :=
       -- kernel steps are emitted after, when the state is held once again.
       -- A sequence operator: one rule, applied to a run of the node's arguments.
       let seqOp : Option String := match S.defOf n with
-        | some (.app f _) => if S.prog.kind f == .assoc then some f else none
+        | some (.app f _) =>
+          if S.prog.kind f == .assoc || (S.prog.kind f).isFold then some f else none
         | _ => none
       if let some f := seqOp then
         match rs with

@@ -90,6 +90,16 @@ def OpSat (d : OpDecl) : Prop :=
   | .plain => True
   | .comm => ∀ x y, M.ArgsIn d.args [x, y] → M.ArgsIn d.args [y, x] →
       M.app d.name [x, y] = M.app d.name [y, x]
+  -- `:assoc-left`: `f(x1, x2, .., xn)` is the left comb `b(..b(x1, x2).., xn)`.
+  | .foldL => ∃ b : M.α → M.α → M.α,
+      (∀ x y, M.dom d.res x → M.dom d.res y → M.dom d.res (b x y)) ∧
+      (∀ x xs, M.dom d.res x → (∀ y ∈ xs, M.dom d.res y) →
+        M.app d.name (x :: xs) = xs.foldl b x)
+  -- `:assoc-right`: `f(x1, .., xn)` is the right comb `b(x1, ..b(xn-1, xn)..)`.
+  | .foldR => ∃ b : M.α → M.α → M.α,
+      (∀ x y, M.dom d.res x → M.dom d.res y → M.dom d.res (b x y)) ∧
+      (∀ x xs, M.dom d.res x → (∀ y ∈ xs, M.dom d.res y) →
+        M.app d.name (xs ++ [x]) = xs.foldr b x)
   | k => ∃ b : M.α → M.α → M.α,
       (∀ x y, M.dom d.res x → M.dom d.res y → M.dom d.res (b x y)) ∧
       (∀ x y z, M.dom d.res x → M.dom d.res y → M.dom d.res z →

@@ -1,0 +1,78 @@
+o
+n 0 A
+t 0 A
+n 1 B
+t 1 B
+n 2 Sub 0 1
+t 2 Sub 0 1
+n 3 C
+t 3 C
+n 4 D
+t 4 D
+n 5 Sub 3 4
+t 5 Sub 3 4
+x 803 2 5
+o
+t 0 A
+t 1 B
+n 6 Pow 0 1
+t 6 Pow 0 1
+t 3 C
+t 4 D
+n 7 Pow 3 4
+t 7 Pow 3 4
+x 839 6 7
+o
+t 0 A
+t 1 B
+n 8 X
+t 8 X
+n 9 Sub 0 1 8
+t 9 Sub 0 1 8
+t 3 C
+t 4 D
+t 8 X
+n 10 Sub 3 4 8
+t 10 Sub 3 4 8
+o
+i 10 9 10 5 2 1
+o
+o
+g 875 9 10
+t 8 X
+t 0 A
+t 1 B
+n 11 Pow 8 0 1
+t 11 Pow 8 0 1
+t 8 X
+t 3 C
+t 4 D
+n 12 Pow 8 3 4
+t 12 Pow 8 3 4
+o
+i 12 11 12 7 6 1
+o
+o
+g 922 11 12
+t 8 X
+t 0 A
+t 1 B
+n 13 Sub 8 0 1
+t 13 Sub 8 0 1
+t 8 X
+t 3 C
+t 4 D
+n 14 Sub 8 3 4
+t 14 Sub 8 3 4
+o
+t 0 A
+t 1 B
+t 8 X
+n 15 Pow 0 1 8
+t 15 Pow 0 1 8
+t 3 C
+t 4 D
+t 8 X
+n 16 Pow 3 4 8
+t 16 Pow 3 4 8
+o

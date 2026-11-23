@@ -166,7 +166,7 @@ def Env.op? (E : Env) (f : String) : Option OpDecl := E.ops.find? (·.name == f)
 
 /-- The sort an argument at position `i` of `d` takes. -/
 def argSort (d : OpDecl) (i : Nat) : Option String :=
-  if d.kind.isAssoc then some d.res else d.args[i]?
+  if d.kind.isAssoc || d.kind.isFold then some d.res else d.args[i]?
 
 def checkSort (exp : Option String) (s : String) : Except String Unit :=
   match exp with
@@ -214,7 +214,7 @@ partial def Env.term (E : Env) (exp : Option String) : SExp → Except String (T
           | _ => throw s!"unsupported child {a}"
         else out := out.push (← E.term (argSort d i) x).1
       | _ => out := out.push (← E.term (argSort d i) x).1
-    unless d.kind.isAssoc || out.size == d.args.length do
+    unless d.kind.isAssoc || d.kind.isFold || out.size == d.args.length do
       throw s!"{f} takes {d.args.length} arguments"
     return (.app f out.toList, d.res)
   | x => .error s!"not a term: {repr x}"
@@ -306,13 +306,13 @@ partial def Env.pat (E : Env) (exp : Option String) : SExp → PatM (Pat × Opti
         | some (as, r) => pure ({ name := f, kind := .plain, args := as, res := r } : OpDecl)
         | none => throw s!"a primitive or undeclared operator ({f})"
     if exp.isSome && exp != some d.res then throw "an operator of another sort than its position"
-    unless d.kind.isAssoc || args.length == d.args.length do throw "an operator with another number of arguments"
+    unless d.kind.isAssoc || d.kind.isFold || args.length == d.args.length do throw "an operator with another number of arguments"
     let mut ps : Array Pat := #[]
     for x in args do
       -- A rest variable `..r`, as an argument of an associative operator: any
       -- number of arguments of the operator's sort.
       if let .atom a := x then
-        if a.startsWith ".." && d.kind.isAssoc && !(a.drop 2).toString.any (fun c => c == ':' || c == '.') then
+        if a.startsWith ".." && (d.kind.isAssoc || d.kind.isFold) && !(a.drop 2).toString.any (fun c => c == ':' || c == '.') then
           setSort a d.res
           ps := ps.push (.rest a)
           continue
@@ -393,7 +393,10 @@ def kindOf (tags : List String) : Kind :=
   let a := tags.contains ":assoc" || tags.contains ":assoc-comm" || tags.contains ":assoc-comm-idem"
   let c := tags.contains ":comm" || tags.contains ":assoc-comm" || tags.contains ":assoc-comm-idem"
   let i := tags.contains ":assoc-comm-idem" || tags.contains ":idempotent"
-  if a && c && i then .aci
+  -- `:assoc-left` and `:assoc-right`: any number of arguments, a comb.
+  if tags.contains ":assoc-left" then .foldL
+  else if tags.contains ":assoc-right" then .foldR
+  else if a && c && i then .aci
   else if a && c then .ac
   else if a then .assoc
   else if c then .comm
@@ -481,7 +484,7 @@ result sort, and `comm` two of one sort; otherwise the operator gets no laws. -/
 def Env.decl (E : Env) (f : String) (args : List String) (res : String) (tags : List SExp) :
     Except String OpDecl := do
   let k := kindOf (atoms tags)
-  let k := if k.isAssoc && args != [res] then .plain
+  let k := if (k.isAssoc || k.isFold) && args != [res] then .plain
     else if k == .comm && !(args.length == 2 && args[0]? == args[1]?) then .plain
     else k
   let unit ← match identityOf tags with

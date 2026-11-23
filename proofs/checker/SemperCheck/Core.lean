@@ -41,6 +41,8 @@ def nodeOk (P : Program) (nodes : Array Node) : Node → Bool
     | some d =>
       if d.kind.isAssoc then
         cs.all (fun c => nodeSort P nodes c == some d.res) && (!cs.isEmpty || d.unit.isSome)
+      else if d.kind.isFold then
+        cs.all (fun c => nodeSort P nodes c == some d.res) && !cs.isEmpty
       else argsOk P nodes d.args cs
 
 /-- The condition `wfNodes` asks of node `i`. -/
@@ -153,7 +155,19 @@ theorem nodeOk_push {P : Program} (nodes : Array Node) (n m : Node)
         exact nodeSort_push_some nodes n this
       · rename_i hk
         rw [if_neg hk] at h
-        exact argsOk_push nodes n _ _ h
+        split
+        · rename_i hf
+          rw [if_pos hf] at h
+          rw [Bool.and_eq_true] at h ⊢
+          refine ⟨?_, h.2⟩
+          rw [List.all_eq_true] at h ⊢
+          intro c hc
+          have := h.1 c hc
+          rw [beq_iff_eq] at this ⊢
+          exact nodeSort_push_some nodes n this
+        · rename_i hf
+          rw [if_neg hf] at h
+          exact argsOk_push nodes n _ _ h
 
 theorem wfNodes_push {nodes : Array Node} {n : Node} (hwf : wfNodes nodes = true)
     (hn : kidsBelow nodes.size n = true) : wfNodes (nodes.push n) = true := by

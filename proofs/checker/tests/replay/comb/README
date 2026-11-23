@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`, whose operators are a left comb (`:assoc-left`) and a right comb (`:assoc-right`).
+`bad.trace` differs in line 38: the `i` line names the rule with its two sides exchanged, and the node does not start with the left one.

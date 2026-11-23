@@ -112,7 +112,9 @@ theorem wfSorts_app {P : Program} {nodes : Array Node} (h : wfSorts P nodes = tr
     ∃ d, P.opDecl? f = some d ∧
       (d.kind.isAssoc = true → (∀ c ∈ cs, nodeSort P nodes c = some d.res) ∧
         (cs ≠ [] ∨ d.unit.isSome = true)) ∧
-      (d.kind.isAssoc = false → argsOk P nodes d.args cs = true) := by
+      (d.kind.isAssoc = false →
+        if d.kind.isFold = true then (∀ c ∈ cs, nodeSort P nodes c = some d.res) ∧ ¬cs = []
+        else argsOk P nodes d.args cs = true) := by
   unfold wfSorts at h
   have := (List.all_eq_true.1 h) i (List.mem_range.2 (lt_size_of_some hn))
   rw [hn] at this
@@ -127,6 +129,23 @@ theorem wfSorts_app {P : Program} {nodes : Array Node} (h : wfSorts P nodes = tr
       exact ⟨this.1, this.2⟩
     · rw [ha] at this
       simpa using this
+
+/-- A list that is not empty is a list and a last element. -/
+theorem exists_snoc {α : Type} : ∀ (l : List α), l ≠ [] → ∃ init last, l = init ++ [last]
+  | [], h => absurd rfl h
+  | [x], _ => ⟨[], x, rfl⟩
+  | x :: y :: t, _ => by
+    obtain ⟨i, l, h⟩ := exists_snoc (y :: t) (by simp)
+    exact ⟨x :: i, l, by rw [h]; rfl⟩
+
+theorem foldr_closed {α : Type} {p : α → Prop} {b : α → α → α}
+    (hc : ∀ x y, p x → p y → p (b x y)) : ∀ (xs : List α) (x : α), p x → (∀ y ∈ xs, p y) →
+    p (xs.foldr b x)
+  | [], x, hx, _ => hx
+  | y :: ys, x, hx, h => by
+    rw [List.foldr_cons]
+    exact hc _ _ (h y (List.mem_cons_self ..))
+      (foldr_closed hc ys x hx fun z hz => h z (List.mem_cons_of_mem _ hz))
 
 theorem foldl_closed {α : Type} {p : α → Prop} {b : α → α → α}
     (hc : ∀ x y, p x → p y → p (b x y)) : ∀ (xs : List α) (x : α), p x → (∀ y ∈ xs, p y) →
@@ -171,6 +190,8 @@ theorem assoc_laws {d : OpDecl} (hs : M.OpSat d) (hk : d.kind.isAssoc = true) :
   cases hd : d.kind with
   | plain => simp [hd, Kind.isAssoc] at hk
   | comm => simp [hd, Kind.isAssoc] at hk
+  | foldL => simp [hd, Kind.isAssoc] at hk
+  | foldR => simp [hd, Kind.isAssoc] at hk
   | assoc | ac | aci =>
     rw [hd] at hs
     obtain ⟨b, hc, hA, hApp, hC, hI, hU, -⟩ := hs
@@ -192,6 +213,8 @@ theorem assoc_laws_ext {d : OpDecl} (hs : M.OpSat d) (hk : d.kind.isAssoc = true
   cases hd : d.kind with
   | plain => simp [hd, Kind.isAssoc] at hk
   | comm => simp [hd, Kind.isAssoc] at hk
+  | foldL => simp [hd, Kind.isAssoc] at hk
+  | foldR => simp [hd, Kind.isAssoc] at hk
   | assoc | ac | aci =>
     rw [hd] at hs
     obtain ⟨b, hc, hA, hApp, -, -, hU, hInv, hNil, hCan⟩ := hs
@@ -221,7 +244,51 @@ theorem nval_dom {P : Program} {nodes : Array Node} (hwf : wfNodes nodes = true)
     have hlt := wf_child hwf hn
     rw [nval_app hwf hn, ← hname]
     cases hk : d.kind.isAssoc
-    · exact (hT.1 d hmem).1 hk _ (argsIn_of_argsOk _ _ (hF hk) fun c hc s' hs' => ih c (hlt c hc) s' hs')
+    · have hF' := hF hk
+      cases hfold : d.kind.isFold
+      · rw [hfold] at hF'
+        exact (hT.1 d hmem).1 hk _ (argsIn_of_argsOk _ _ (by simpa using hF')
+          fun c hc s' hs' => ih c (hlt c hc) s' hs')
+      · -- A comb of one closed binary operation.
+        rw [hfold] at hF'
+        simp only [if_true] at hF'
+        obtain ⟨hcs, hne⟩ := hF'
+        have hdc : ∀ c ∈ cs, M.dom d.res (nval M nodes c) := fun c hc => ih c (hlt c hc) _ (hcs c hc)
+        have hsat := (hT.1 d hmem).2
+        unfold Model.OpSat at hsat
+        cases hdk : d.kind with
+        | plain => simp [hdk, Kind.isFold] at hfold
+        | comm => simp [hdk, Kind.isFold] at hfold
+        | assoc => simp [hdk, Kind.isFold] at hfold
+        | ac => simp [hdk, Kind.isFold] at hfold
+        | aci => simp [hdk, Kind.isFold] at hfold
+        | foldL =>
+          rw [hdk] at hsat
+          obtain ⟨b, hc, happ⟩ := hsat
+          cases cs with
+          | nil => exact absurd rfl hne
+          | cons c cs =>
+            have htail : ∀ y ∈ cs.map (nval M nodes), M.dom d.res y := by
+              intro y hy
+              obtain ⟨c', hc', rfl⟩ := List.mem_map.1 hy
+              exact hdc c' (List.mem_cons_of_mem _ hc')
+            simp only [List.map_cons]
+            rw [happ _ _ (hdc c (List.mem_cons_self ..)) htail]
+            exact foldl_closed hc _ _ (hdc c (List.mem_cons_self ..)) htail
+        | foldR =>
+          rw [hdk] at hsat
+          obtain ⟨b, hc, happ⟩ := hsat
+          obtain ⟨init, last, rfl⟩ : ∃ init last, cs = init ++ [last] :=
+            exists_snoc cs hne
+          have hinit : ∀ y ∈ init.map (nval M nodes), M.dom d.res y := by
+            intro y hy
+            obtain ⟨c', hc', rfl⟩ := List.mem_map.1 hy
+            exact hdc c' (List.mem_append_left _ hc')
+          have hlast : M.dom d.res (nval M nodes last) :=
+            hdc last (List.mem_append_right _ (List.mem_singleton_self _))
+          simp only [List.map_append, List.map_cons, List.map_nil]
+          rw [happ _ _ hlast hinit]
+          exact foldr_closed hc _ _ hlast hinit
     · obtain ⟨hcs, hne⟩ := hA hk
       obtain ⟨b, L, -, -, hU⟩ := assoc_laws (hT.1 d hmem).2 hk
       have hdc : ∀ c ∈ cs, M.dom d.res (nval M nodes c) := fun c hc => ih c (hlt c hc) _ (hcs c hc)
@@ -614,7 +681,10 @@ theorem congComm_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes
     obtain ⟨d', hd', -, hF⟩ := wfSorts_app hws hi
     rw [hd] at hd'
     cases hd'
-    exact argsIn_of_argsOk _ [e1, e2] (hF hna) fun c _ s hs => nval_dom hwf hws hT c s hs
+    have hF' := hF hna
+    rw [hdk] at hF'
+    exact argsIn_of_argsOk _ [e1, e2] (by simpa [Kind.isFold] using hF')
+      fun c _ s hs => nval_dom hwf hws hT c s hs
   unfold congComm at h
   split at h
   · rename_i g c1 c2 h' d1 d2 ha hb
@@ -670,6 +740,8 @@ theorem congAssoc_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
     cases hdk : d.kind with
     | plain => rw [hdk] at h; simp [sameBy] at h
     | comm => rw [hdk] at h; simp [sameBy] at h
+    | foldL => rw [hdk] at h; simp [sameBy] at h
+    | foldR => rw [hdk] at h; simp [sameBy] at h
     | assoc => rw [hdk] at h; simp only [sameBy, beq_iff_eq] at h; rw [h]
     | ac =>
       rw [hdk] at h
@@ -688,6 +760,162 @@ theorem congAssoc_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
       · exact hdl
   · cases h
 
+/-- The left view of a node of the comb's sort: its elements are of that sort
+and fold to the node's value. -/
+theorem viewL_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    (hT : Typed M C.P) {f : String} {d : OpDecl} (hd : C.P.opDecl? f = some d)
+    (hk : d.kind = .foldL) {b : M.α → M.α → M.α}
+    (happ : ∀ x xs, M.dom d.res x → (∀ y ∈ xs, M.dom d.res y) →
+      M.app f (x :: xs) = xs.foldl b x) :
+    ∀ (x : Nat) (v : List Nat), C.viewL f x = some v → C.sortOf x = some d.res →
+      (∀ y ∈ v, C.sortOf y = some d.res) ∧
+        ∃ h t, v = h :: t ∧ (t.map (nval M C.nodes)).foldl b (nval M C.nodes h) = nval M C.nodes x
+  | x, v, h, hx => by
+    have hdom : ∀ c, C.sortOf c = some d.res → M.dom d.res (nval M C.nodes c) :=
+      fun c hc => nval_dom hwf hws hT c _ hc
+    rw [viewL] at h
+    split at h
+    · rename_i g cs hn
+      split at h
+      · rename_i hgf
+        subst hgf
+        split at h
+        · rename_i c rest
+          split at h
+          · rename_i hlt
+            rw [Option.map_eq_some_iff] at h
+            obtain ⟨w, hw, rfl⟩ := h
+            obtain ⟨d', hd', -, hF⟩ := wfSorts_app hws hn
+            rw [hd] at hd'
+            cases hd'
+            have hF' := hF (by rw [hk]; rfl)
+            rw [hk] at hF'
+            simp only [Kind.isFold, if_true] at hF'
+            have hcs := hF'.1
+            obtain ⟨hws', h', t, rfl, hfold⟩ :=
+              viewL_sound hwf hws hT hd hk happ c w hw (hcs c (List.mem_cons_self ..))
+            refine ⟨?_, h', t ++ rest, rfl, ?_⟩
+            · intro y hy
+              rcases List.mem_append.1 hy with hy | hy
+              · exact hws' y hy
+              · exact hcs y (List.mem_cons_of_mem _ hy)
+            · rw [List.map_append, List.foldl_append, hfold, nval_app hwf hn, List.map_cons]
+              exact (happ _ _ (hdom c (hcs c (List.mem_cons_self ..))) (by
+                intro y hy
+                obtain ⟨z, hz, rfl⟩ := List.mem_map.1 hy
+                exact hdom z (hcs z (List.mem_cons_of_mem _ hz)))).symm
+          · cases h
+        · cases h
+      · cases h
+        exact ⟨by simpa using hx, x, [], rfl, rfl⟩
+    · cases h
+      exact ⟨by simpa using hx, x, [], rfl, rfl⟩
+termination_by x => x
+decreasing_by assumption
+
+theorem congFoldL_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    (hT : Typed M C.P) {f : String} {a b : Nat} {prems : List (Nat × Nat)}
+    (hp : ∀ p ∈ prems, nval M C.nodes p.1 = nval M C.nodes p.2)
+    (h : C.congFoldL f a b prems = true) : nval M C.nodes a = nval M C.nodes b := by
+  unfold congFoldL at h
+  split at h
+  · rename_i d l m hd hl hm
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨hk, ha⟩, hb⟩, hpairs⟩ := h
+    obtain ⟨hmem, hname⟩ := opDecl_spec hd
+    have hsat := (hT.1 d hmem).2
+    unfold Model.OpSat at hsat
+    rw [hk] at hsat
+    obtain ⟨op, -, happ⟩ := hsat
+    rw [hname] at happ
+    obtain ⟨-, h1, t1, rfl, e1⟩ := viewL_sound hwf hws hT hd hk happ a _ hl ha
+    obtain ⟨-, h2, t2, rfl, e2⟩ := viewL_sound hwf hws hT hd hk happ b _ hm hb
+    have hmap := pairsOk_sound hp _ _ hpairs
+    simp only [List.map_cons, List.cons.injEq] at hmap
+    rw [← e1, ← e2, hmap.1, hmap.2]
+  · cases h
+
+theorem viewR_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    (hT : Typed M C.P) {f : String} {d : OpDecl} (hd : C.P.opDecl? f = some d)
+    (hk : d.kind = .foldR) {b : M.α → M.α → M.α}
+    (happ : ∀ x xs, M.dom d.res x → (∀ y ∈ xs, M.dom d.res y) →
+      M.app f (xs ++ [x]) = xs.foldr b x) :
+    ∀ (x : Nat) (v : List Nat), C.viewR f x = some v → C.sortOf x = some d.res →
+      (∀ y ∈ v, C.sortOf y = some d.res) ∧
+        ∃ t l, v = t ++ [l] ∧ (t.map (nval M C.nodes)).foldr b (nval M C.nodes l) = nval M C.nodes x
+  | x, v, h, hx => by
+    have hdom : ∀ c, C.sortOf c = some d.res → M.dom d.res (nval M C.nodes c) :=
+      fun c hc => nval_dom hwf hws hT c _ hc
+    rw [viewR] at h
+    split at h
+    · rename_i g cs hn
+      split at h
+      · rename_i hgf
+        subst hgf
+        split at h
+        · rename_i c revInit hrev
+          split at h
+          · rename_i hlt
+            rw [Option.map_eq_some_iff] at h
+            obtain ⟨w, hw, rfl⟩ := h
+            have hcs' : cs = revInit.reverse ++ [c] := by
+              have := congrArg List.reverse hrev
+              simpa using this
+            subst hcs'
+            obtain ⟨d', hd', -, hF⟩ := wfSorts_app hws hn
+            rw [hd] at hd'
+            cases hd'
+            have hF' := hF (by rw [hk]; rfl)
+            rw [hk] at hF'
+            simp only [Kind.isFold, if_true] at hF'
+            have hcs := hF'.1
+            have hc : C.sortOf c = some d.res :=
+              hcs c (List.mem_append_right _ (List.mem_singleton_self _))
+            obtain ⟨hws', t, l, rfl, hfold⟩ := viewR_sound hwf hws hT hd hk happ c w hw hc
+            refine ⟨?_, revInit.reverse ++ t, l, by rw [List.append_assoc], ?_⟩
+            · intro y hy
+              rcases List.mem_append.1 hy with hy | hy
+              · exact hcs y (List.mem_append_left _ hy)
+              · exact hws' y hy
+            · rw [List.map_append, List.foldr_append, hfold, nval_app hwf hn, List.map_append,
+                List.map_cons, List.map_nil]
+              exact (happ _ _ (hdom c hc) (by
+                intro y hy
+                obtain ⟨z, hz, rfl⟩ := List.mem_map.1 hy
+                exact hdom z (hcs z (List.mem_append_left _ hz)))).symm
+          · cases h
+        · cases h
+      · cases h
+        exact ⟨by simpa using hx, [], x, rfl, rfl⟩
+    · cases h
+      exact ⟨by simpa using hx, [], x, rfl, rfl⟩
+termination_by x => x
+decreasing_by assumption
+
+theorem congFoldR_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    (hT : Typed M C.P) {f : String} {a b : Nat} {prems : List (Nat × Nat)}
+    (hp : ∀ p ∈ prems, nval M C.nodes p.1 = nval M C.nodes p.2)
+    (h : C.congFoldR f a b prems = true) : nval M C.nodes a = nval M C.nodes b := by
+  unfold congFoldR at h
+  split at h
+  · rename_i d l m hd hl hm
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨⟨hk, ha⟩, hb⟩, hpairs⟩ := h
+    obtain ⟨hmem, hname⟩ := opDecl_spec hd
+    have hsat := (hT.1 d hmem).2
+    unfold Model.OpSat at hsat
+    rw [hk] at hsat
+    obtain ⟨op, -, happ⟩ := hsat
+    rw [hname] at happ
+    obtain ⟨-, t1, l1, rfl, e1⟩ := viewR_sound hwf hws hT hd hk happ a _ hl ha
+    obtain ⟨-, t2, l2, rfl, e2⟩ := viewR_sound hwf hws hT hd hk happ b _ hm hb
+    have hmap := pairsOk_sound hp _ _ hpairs
+    simp only [List.map_append, List.map_cons, List.map_nil] at hmap
+    obtain ⟨ht, hl'⟩ := List.append_inj' hmap rfl
+    simp only [List.cons.injEq, and_true] at hl'
+    rw [← e1, ← e2, ht, hl']
+  · cases h
+
 theorem congOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
     (hT : Typed M C.P) {f : String} {a b : Nat} {prems : List (Nat × Nat)}
     (hp : ∀ p ∈ prems, nval M C.nodes p.1 = nval M C.nodes p.2)
@@ -700,6 +928,8 @@ theorem congOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes =
   · split at h
     · cases h
     · exact congComm_sound hwf hws hT (by assumption) hp h
+    · exact congFoldL_sound hwf hws hT hp h
+    · exact congFoldR_sound hwf hws hT hp h
     · exact congAssoc_sound hwf hws hT hp hps h
 
 /-! ## Steps -/
