@@ -61,6 +61,7 @@ program.
 | `o` | a completion round starts |
 | `i a b n (l r k)..` | inter-reduction merged `a` and `b`: node `n`, in one of the two classes, rewrites by the rules, in order, to the other node |
 | `p a b c d h [x] K s1..sK na (l r k).. nb (l r k).. npa (l r k).. (l r k)..` | a critical pair merged `a` and `b` (see below) |
+| `k a b np (n q).. (n q)..` | a lattice merge of `a` and `b` under a cancellative operator: node equations `n = f(children)` with counts `q`, the first `np` with a positive coefficient, such that `a` plus the children of the positive ones plus the nodes of the negative ones is, as a sum of classes, `b` plus the nodes of the positive ones plus the children of the negative ones. The engine carries each row's combination of node equations through its integer elimination and writes the difference of the two classes' combinations. The replay builds the two sums and concludes by `cong` and `cancel` steps. A merge whose combination uses a unit, inverse or nilpotence row stays `u Cancellative` |
 | `v a b n1 n2` | a consequence of the group law merged `a` and `b`; `n1` and `n2` are the inverse applications it rests on (`n2 = n1` when one is enough) |
 | `u kind a b` | a merge the replayer does not check (`kind` names the engine's justification) |
 

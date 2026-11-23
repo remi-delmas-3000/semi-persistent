@@ -1,0 +1,24 @@
+n 0 a
+t 0 a
+n 1 f 0
+t 1 f 0
+n 2 b
+t 2 b
+n 3 g 2
+t 3 g 2
+n 4 g 0
+r 388 w
+e 1 f 0
+b 4
+m 0 1 4
+n 5 f 2
+r 394 w
+e 3 g 2
+b 5
+m 0 3 5
+t 0 a
+t 4 g 0
+g 472 1 4
+t 2 b
+t 5 f 2
+g 662 3 5

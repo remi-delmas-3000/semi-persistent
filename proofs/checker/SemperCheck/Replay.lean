@@ -1328,6 +1328,73 @@ def congStepL (S : St P) (f : String) (a b : Nat) (peak : Bool := false) : St P 
         | (S, none) => (S, none)
       | (S, none) => (S, none)
 
+/-- A lattice merge of `x` and `y` under a cancellative operator `f`. The
+stream gives node equations `n = f(children)` with counts, `pos` and `neg`,
+such that, as sums over classes,
+`x + sum pos (q * children n) + sum neg (q * n)` is
+`y + sum pos (q * n) + sum neg (q * children n)`.
+Each class is named by one member `R`, kept as one argument. The chain goes
+from `f(x, z)` to `f(y, z)`, with `z = f(R of each equation)`, by steps of two
+kinds: the two sides have the same arguments once nested applications are
+read through (`cong` with no premise), or the same number of arguments, in
+one class pairwise (`congStep`). In the middle, both sides hold the members
+`R` of one multiset of classes. `cancel` then concludes. -/
+def latticeP (S : St P) (x y : Nat) (pos neg : List (Nat × Nat)) : St P × Option (Option Nat) := Id.run do
+  let some (n0, _) := (pos ++ neg).head? | return (S.fail "lattice: no equation", none)
+  let some (.app f _) := S.defOf n0 | return (S.fail "lattice: equation of no application", none)
+  let rep (c : Nat) : Nat := (S.plain.getD (S.fd c) none).getD (S.fd c)
+  let kids (n : Nat) : List Nat := match S.defOf n with
+    | some (.app _ cs) => cs
+    | _ => []
+  let each (g : Nat → List Nat) (ps : List (Nat × Nat)) : List Nat :=
+    ps.flatMap fun (n, q) => (List.replicate q (g n)).flatten
+  let one (g : Nat → Nat) : Nat → List Nat := fun n => [g n]
+  let rx := rep x
+  let ry := rep y
+  let zs := each (one rep) pos ++ each (one rep) neg
+  -- The sums, from `f(x, z)` to `f(y, z)`; `true` marks a link whose two
+  -- sides have the same arguments read through.
+  let sums : List (List Nat × Bool) := [
+    ([rx] ++ zs, true),
+    ([rx] ++ each (one id) pos ++ each (one rep) neg, false),
+    ([rx] ++ each kids pos ++ each (one rep) neg, true),
+    ([rx] ++ each (fun n => (kids n).map rep) pos ++ each (one rep) neg, false),
+    ([ry] ++ each (one rep) pos ++ each (fun n => (kids n).map rep) neg, true),
+    ([ry] ++ each (one rep) pos ++ each kids neg, false),
+    ([ry] ++ each (one rep) pos ++ each (one id) neg, true),
+    ([ry] ++ zs, false)]
+  let mut S := S
+  let (S1, z) := appNode S f zs
+  let some z := z | return (S1.fail "lattice: sum ill-sorted", none)
+  let (S1, a4) := appNode S1 f [rx, z]
+  let (S1, b4) := appNode S1 f [ry, z]
+  S := S1
+  let (some a4, some b4) := (a4, b4) | return (S.fail "lattice: sum ill-sorted", none)
+  let mut cur := a4
+  let mut pf : Pf := some none
+  for (args, flat) in sums ++ [([ry, z], true)] do
+    let (S1, i) := if args == [ry, z] then (S, some b4) else appNode S f args
+    let some i := i | return (S1.fail "lattice: sum ill-sorted", none)
+    S := S1
+    if i != cur then
+      let (S1, p) : St P × Pf :=
+        if flat then
+          let (S1, s) := emit S (.cong f cur i []) cur i
+          (S1, some (some s))
+        else congStep S f cur i
+      if p.isNone then return (S1.fail s!"lattice: sums differ | {cur} = {repr (S1.defOf cur)}, {i} = {repr (S1.defOf i)}", none)
+      let (S1, q) := transP S1 a4 i pf p
+      S := S1
+      pf := q
+      cur := i
+  match stepOf S a4 pf with
+  | (S1, some st) =>
+    let (S1, c) := emit S1 (.cancel f st rx ry z) rx ry
+    let S1 := S1.mergeBy rx ry (some (some c))
+    let (S1, q) := eqP S1 x y
+    return (S1, q)
+  | (S1, none) => return (S1, none)
+
 /-- The kernel steps of a `v` line, whose check passed: the fact the line's
 case rests on is derived from `inv` steps (`f(x, g(x))` is the unit), a `nil`
 step for the powers, and a `cancel` step, and joins the classes; the proof of
@@ -2593,6 +2660,22 @@ def stepCore (S : St P) (line : String) : St P :=
         else S.fail "goal: its terms differ"
       | _ => S.fail "goal: no such command"
     | _, _, _ => S.fail "goal: unreadable"
+  -- A cancellative operator's lattice merge, with the combination of node
+  -- equations the two classes differ by.
+  | "k" :: a :: b :: npos :: rest =>
+    match S.node? a, S.node? b, npos.toNat?, rest.mapM (fun (x : String) => x.toNat?) with
+    | some a, some b, some np, some fs =>
+      let rec pairs : List Nat → Option (List (Nat × Nat))
+        | [] => some []
+        | n :: q :: r => (S.node? (toString n)).bind fun n => (pairs r).map ((n, q) :: ·)
+        | [_] => none
+      match pairs fs with
+      | some ps =>
+        match latticeP S a b (ps.take np) (ps.drop np) with
+        | (S, some p) => S.mergeBy a b (some p)
+        | (S, none) => S
+      | none => S.fail "lattice: unreadable"
+    | _, _, _, _ => S.fail "lattice: unreadable"
   | "i" :: a :: b :: n :: rest =>
     match S.node? a, S.node? b, S.node? n, (rest.mapM (fun (x : String) => x.toNat?)).bind (rules S) with
     | some a, some b, some n, some rs =>

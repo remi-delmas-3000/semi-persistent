@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`.
+`bad.trace` differs in line 18: the `m` line names rule 0 of the `birewrite`, the left-to-right rule, for a firing of rule 1.

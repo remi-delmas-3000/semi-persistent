@@ -3565,6 +3565,11 @@ where
         // whole system, so its premises are all of them.
         let mut op_prems: Vec<Vec<(Cfg::G, Cfg::G)>> = Vec::new();
         let mut merge_prem: Vec<usize> = Vec::new();
+        // With a replay stream, each merge's witness: the integer combination of the
+        // operator's node equations that the two classes differ by. Every row carries
+        // its combination of the generating rows through the elimination.
+        let track = PROOFS && self.trace.is_some();
+        let mut merge_wit: Vec<Option<Vec<usize>>> = Vec::new();
         // The operator of each merge, for its mirror tag.
         #[cfg(debug_assertions)]
         let mut merge_ops: Vec<Cfg::O> = Vec::new();
@@ -3573,6 +3578,9 @@ where
             let mut var: std::collections::HashMap<Cfg::G, usize> = Default::default();
             let mut classes: Vec<Cfg::G> = Vec::new();
             let mut sparse: Vec<Vec<(usize, BigInt)>> = Vec::new();
+            // The node of each generating row; `None` for a unit, inverse or
+            // nilpotence row.
+            let mut gens: Vec<Option<Cfg::G>> = Vec::new();
             let mut index = |g: Cfg::G, var: &mut std::collections::HashMap<Cfg::G, usize>| {
                 *var.entry(g).or_insert_with(|| {
                     classes.push(g);
@@ -3613,6 +3621,7 @@ where
                     row.push((k, -BigInt::from(m.to_biguint())));
                 }
                 sparse.push(row);
+                gens.push(Some(node));
             }
             if let Some(u) = self.unit_node(op) {
                 sparse.push(vec![(
@@ -3633,17 +3642,26 @@ where
                     sparse.push(vec![(k, BigInt::from(order))]);
                 }
             }
-            let mut rows: Vec<Vec<BigInt>> = sparse
-                .into_iter()
-                .map(|r| {
-                    let mut d = vec![BigInt::zero(); n];
-                    for (k, v) in r {
-                        d[k] += v;
+            gens.resize(sparse.len(), None);
+            let ngen = if track { gens.len() } else { 0 };
+            let mut rows: Vec<Vec<BigInt>> = Vec::new();
+            // `rcomb[i]` is the combination of generating rows that `rows[i]` is.
+            let mut rcomb: Vec<Vec<BigInt>> = Vec::new();
+            for (gi, r) in sparse.into_iter().enumerate() {
+                let mut d = vec![BigInt::zero(); n];
+                for (k, v) in r {
+                    d[k] += v;
+                }
+                if d.iter().any(|v| !v.is_zero()) {
+                    rows.push(d);
+                    let mut c = vec![BigInt::zero(); ngen];
+                    if track {
+                        c[gi] = BigInt::from(1);
                     }
-                    d
-                })
-                .filter(|d| d.iter().any(|v| !v.is_zero()))
-                .collect();
+                    rcomb.push(c);
+                }
+            }
+            let mut pcomb: Vec<Vec<BigInt>> = Vec::new();
             // Echelon form by Euclid's algorithm per column.
             let mut pivots: Vec<(usize, Vec<BigInt>)> = Vec::new();
             for col in 0..n {
@@ -3658,11 +3676,13 @@ where
                     }
                     let Some(b) = best else { break };
                     let mut pivot = rows.swap_remove(b);
+                    let mut pc = rcomb.swap_remove(b);
                     if pivot[col].is_negative() {
                         pivot.iter_mut().for_each(|v| *v = -&*v);
+                        pc.iter_mut().for_each(|v| *v = -&*v);
                     }
                     let mut reduced_all = true;
-                    for r in rows.iter_mut() {
+                    for (r, rc) in rows.iter_mut().zip(rcomb.iter_mut()) {
                         if r[col].is_zero() {
                             continue;
                         }
@@ -3671,23 +3691,38 @@ where
                             let t = &q * &pivot[k];
                             r[k] -= t;
                         }
+                        for (c, p) in rc.iter_mut().zip(&pc) {
+                            *c -= &q * p;
+                        }
                         if !r[col].is_zero() {
                             reduced_all = false;
                         }
                     }
-                    rows.retain(|r| r.iter().any(|v| !v.is_zero()));
+                    let keep: Vec<bool> = rows
+                        .iter()
+                        .map(|r| r.iter().any(|v| !v.is_zero()))
+                        .collect();
+                    let mut it = keep.iter();
+                    rows.retain(|_| *it.next().expect("one flag per row"));
+                    let mut it = keep.iter();
+                    rcomb.retain(|_| *it.next().expect("one flag per row"));
                     if reduced_all {
                         pivots.push((col, pivot));
+                        pcomb.push(pc);
                         break;
                     }
                     rows.push(pivot);
+                    rcomb.push(pc);
                 }
             }
-            let mut by_rep: std::collections::HashMap<Vec<BigInt>, Cfg::G> = Default::default();
+            // Per representative: its class, and the combination `e_class - rep` is.
+            let mut by_rep: std::collections::HashMap<Vec<BigInt>, (Cfg::G, Vec<BigInt>)> =
+                Default::default();
             for (k, &g) in classes.iter().enumerate() {
                 let mut v = vec![BigInt::zero(); n];
                 v[k] = BigInt::from(1);
-                for (col, pivot) in &pivots {
+                let mut vc = vec![BigInt::zero(); ngen];
+                for ((col, pivot), pc) in pivots.iter().zip(&pcomb) {
                     let p = &pivot[*col];
                     let mut q = &v[*col] / p;
                     if (&v[*col] - &q * p).is_negative() {
@@ -3698,11 +3733,45 @@ where
                             let t = &q * &pivot[j];
                             v[j] -= t;
                         }
+                        for (c, p) in vc.iter_mut().zip(pc) {
+                            *c += &q * p;
+                        }
                     }
                 }
                 match by_rep.entry(v) {
                     std::collections::hash_map::Entry::Occupied(e) => {
-                        merges.push((*e.get(), g));
+                        merges.push((e.get().0, g));
+                        if track {
+                            // `e_x - e_g` is the difference of the two combinations.
+                            // Written as: the number of positive coefficients, then
+                            // (node, coefficient) pairs, positive ones first. `None`
+                            // when a row that is no node's takes part, or a
+                            // coefficient does not fit.
+                            use num_traits::ToPrimitive;
+                            let mut pos: Vec<usize> = Vec::new();
+                            let mut neg: Vec<usize> = Vec::new();
+                            let mut ok = true;
+                            for (gi, (a, b)) in e.get().1.iter().zip(&vc).enumerate() {
+                                let q = a - b;
+                                if q.is_zero() {
+                                    continue;
+                                }
+                                match (gens[gi], q.abs().to_usize()) {
+                                    (Some(node), Some(m)) if m <= 65_536 => {
+                                        let out = if q.is_negative() { &mut neg } else { &mut pos };
+                                        out.push(node.to_usize());
+                                        out.push(m);
+                                    }
+                                    _ => ok = false,
+                                }
+                            }
+                            merge_wit.push(ok.then(|| {
+                                let mut w = vec![pos.len() / 2];
+                                w.extend(pos);
+                                w.extend(neg);
+                                w
+                            }));
+                        }
                         if PROOFS {
                             merge_prem.push(op_prems.len() - 1);
                         }
@@ -3710,7 +3779,7 @@ where
                         merge_ops.push(op);
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
-                        e.insert(g);
+                        e.insert((g, vc));
                     }
                 }
             }
@@ -3732,7 +3801,11 @@ where
             self.cc_mirror_tag(cc_mirror::MergeWhy::Lattice { op });
             let m = if PROOFS {
                 self.pending_premises = Some(op_prems[merge_prem[mi]].clone());
+                if let Some(Some(w)) = merge_wit.get(mi) {
+                    self.trace_law_raw('k', w.clone());
+                }
                 let m = self.merge_in_classes(x, y, Some(just));
+                self.trace_law_end();
                 self.pending_premises = None;
                 m
             } else {

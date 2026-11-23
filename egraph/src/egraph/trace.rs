@@ -65,6 +65,48 @@ pub fn form_offsets(src: &str, head: &str) -> Vec<usize> {
     out
 }
 
+/// The byte ranges of the top-level forms of `src` whose head is `head`: each
+/// from its `(` to after its closing `)`.
+pub fn form_spans(src: &str, head: &str) -> Vec<(usize, usize)> {
+    let b = src.as_bytes();
+    form_offsets(src, head)
+        .into_iter()
+        .map(|start| {
+            let mut depth = 0usize;
+            let mut i = start;
+            while i < b.len() {
+                match b[i] {
+                    b';' => {
+                        while i < b.len() && b[i] != b'\n' {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    b'"' => {
+                        i += 1;
+                        while i < b.len() && b[i] != b'"' {
+                            if b[i] == b'\\' {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                    }
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            return (start, i + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            (start, b.len())
+        })
+        .collect()
+}
+
 /// One rule firing, buffered until its first merge: a firing that merges
 /// nothing proves nothing, and most firings merge nothing.
 struct Firing {
@@ -121,6 +163,8 @@ pub struct Trace {
     law: Option<(char, Vec<usize>)>,
     /// The offsets of the program's `union` and `check-eq` forms, in order.
     union_offsets: Vec<usize>,
+    /// The `birewrite` forms: the two rules of one are rules 0 and 1 of one command.
+    birewrites: Vec<(usize, usize)>,
     goal_offsets: Vec<usize>,
     n_unions: usize,
     n_goals: usize,
@@ -137,6 +181,7 @@ where
         self.trace = Some(Box::new(Trace {
             file: Some(std::io::BufWriter::new(file)),
             union_offsets: form_offsets(src, "union"),
+            birewrites: form_spans(src, "birewrite"),
             goal_offsets: form_offsets(src, "check-eq"),
             ..Trace::default()
         }));
@@ -264,10 +309,17 @@ where
     /// How many rules the stream already has from the command at `off`.
     pub fn trace_rules_at(&self, off: usize) -> usize {
         self.trace.as_ref().map_or(0, |t| {
+            // A `birewrite` gives its two rules the offsets of its two sides.
+            let cmd = |o: usize| {
+                t.birewrites
+                    .iter()
+                    .find(|(s, e)| *s <= o && o < *e)
+                    .map_or(o, |(s, _)| *s)
+            };
             t.rule_src
                 .iter()
                 .flatten()
-                .filter(|(o, _, _)| *o == off)
+                .filter(|(o, _, _)| cmd(*o) == cmd(off))
                 .count()
         })
     }
@@ -610,6 +662,13 @@ where
     pub(crate) fn trace_law(&mut self, kind: char, ids: impl IntoIterator<Item = Cfg::G>) {
         if let Some(t) = self.trace.as_mut() {
             t.law = Some((kind, ids.into_iter().map(|g| g.to_usize()).collect()));
+        }
+    }
+
+    /// As [`trace_law`](Self::trace_law), with fields that are not all nodes.
+    pub(crate) fn trace_law_raw(&mut self, kind: char, fields: Vec<usize>) {
+        if let Some(t) = self.trace.as_mut() {
+            t.law = Some((kind, fields));
         }
     }
 

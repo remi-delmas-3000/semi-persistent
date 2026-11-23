@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`.
+`bad.trace` differs in line 378: the `k` line gives the equation of node 36 the coefficient 2 instead of 1.

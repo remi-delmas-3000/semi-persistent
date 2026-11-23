@@ -17,8 +17,8 @@ doc/book/examples/05-guards.egg	2	2	replayed
 doc/book/examples/05-illegal-comp-binders.egg	0	0	skipped
 doc/book/examples/05-illegal-comprehension-filter.egg	0	0	skipped
 doc/book/examples/05-illegal-set-multiplicity.egg	0	0	skipped
-doc/book/examples/05-rewrite-directions.egg	2	3	replayed
-doc/book/examples/05-rewrite-rules.egg	5	6	replayed
+doc/book/examples/05-rewrite-directions.egg	3	3	replayed
+doc/book/examples/05-rewrite-rules.egg	6	6	replayed
 doc/book/examples/05-rhs-comprehensions.egg	1	7	replayed
 doc/book/examples/05-rule-actions.egg	2	2	replayed
 doc/book/examples/05-rules-over-mset.egg	5	5	replayed
@@ -207,13 +207,13 @@ egraph/tests/egg/bench/until.rules.egg	0	1	replayed
 egraph/tests/egg/bignum_all_ops.egg	24	24	replayed
 egraph/tests/egg/bignum_arith.egg	1	1	replayed
 egraph/tests/egg/bignum_div_by_zero_error.egg	0	0	skipped
-egraph/tests/egg/birewrite_both_directions.egg	1	2	replayed
+egraph/tests/egg/birewrite_both_directions.egg	2	2	replayed
 egraph/tests/egg/bool_ops.egg	8	8	replayed
 egraph/tests/egg/bug_duplicate_declaration.egg	0	0	skipped
 egraph/tests/egg/bug_literal_return_sort.egg	0	0	skipped
 egraph/tests/egg/bug_set_action_rejected.egg	0	0	skipped
-egraph/tests/egg/cancel_crit_pair.egg	17	18	replayed
-egraph/tests/egg/cancel_lattice.egg	371	381	replayed
+egraph/tests/egg/cancel_crit_pair.egg	18	18	replayed
+egraph/tests/egg/cancel_lattice.egg	381	381	replayed
 egraph/tests/egg/cancel_lattice_lazy.egg	177	177	replayed
 egraph/tests/egg/cancellative_cancel.egg	1	1	replayed
 egraph/tests/egg/cancellative_disjoint_superposition.egg	1	1	replayed
