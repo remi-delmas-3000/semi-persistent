@@ -873,6 +873,15 @@ def viewAt (S : St P) (f : String) (W : List Wit) (at_ : List Nat) (bound : List
       | none => out := out.push b
     return out.toList
 
+/-- The classes of the regroupings `W` that are the unit's: a group of the
+node's arguments that an application in the unit's class spells is dropped by
+the operator's laws, so no bound argument stands for it. The match's side then
+has the unit as one more argument, which the regrouping reads. -/
+def unitRegroups (S : St P) (f : String) (W : List Wit) : List Nat :=
+  match S.unit f with
+  | some u => (W.filter fun w => S.fd w.2.1 == S.fd u).map fun _ => u
+  | none => []
+
 /-- The fields of an `e` line after the operator: the nodes of the argument
 patterns, and between `[` and `]` the nodes of each rest variable, in the
 pattern's order. -/
@@ -1812,19 +1821,29 @@ def instProof (S : St P) (f : String) (i n : Nat) (k : Option Nat) : St P × Pf 
     | none => ([], [])
   if wo.isEmpty && wr.isEmpty then congStepL S f i n
   else
-    -- A sequence's regroupings apply where the node's view puts them.
-    let argsOf (x : Nat) : List Nat := match S.defOf x with
+    let argsOf (S : St P) (x : Nat) : List Nat := match S.defOf x with
       | some (.app _ cs) => cs
       | _ => []
+    -- A regrouping in the unit's class reads the unit, which the instance
+    -- gets as one more argument: the two are equal by the unit law.
+    let extra := unitRegroups S f wr
+    let (S, i0, p0) : St P × Nat × Pf :=
+      if extra.isEmpty then (S, i, some none)
+      else match appNode S f (argsOf S i ++ extra) with
+        | (S, some i0) => let (S, p) := congStepL S f i i0; (S, i0, p)
+        | (S, none) => (S, i, none)
+    -- A sequence's regroupings apply where the node's view puts them.
     let only := if S.prog.kind f == .assoc && !wr.isEmpty then
-        some (regroupAt S f wr (argsOf i) (viewArgs S f true wo ((argsOf n).map (·, none))))
+        some (regroupAt S f wr (argsOf S i0) (viewArgs S f true wo ((argsOf S n).map (·, none))))
       else none
     match openNode S f true none n wo with
     | (S, some (n', pn), _, _) =>
-      match openNode S f false none i wr only with
+      match openNode S f false none i0 wr only with
       | (S, some (i', pi), _, _) =>
         let (S, p) := congStepL S f i' n'
-        let (S, q) := transP S i n' pi p
+        let (S, q) := transP S i i0 (some none) p0
+        let (S, q) := transP S i i' q pi
+        let (S, q) := transP S i n' q p
         let (S, pn') := symmP S n n' pn
         transP S i n q pn'
       | (S, none, _, _) => (S, none)
@@ -1940,9 +1959,10 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
       let S0 := { S with splices := [] }
       let (wo, wr) := witsOf S w.atomIdx
       let vd := viewArgs S f true wo (ds.map (·, none))
+      let csU := cs ++ unitRegroups S f wr
       let vc := if S.prog.kind f == .assoc && !wr.isEmpty then
-          viewAt S f wr (regroupAt S f wr cs vd) cs
-        else viewArgs S f false wr (cs.map (·, none))
+          viewAt S f wr (regroupAt S f wr csU vd) csU
+        else viewArgs S f false wr (csU.map (·, none))
       if h != f || (let (x, y) := nf2 S0 f vd vc; x != y) then
         throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} read as {vd}, classes {(nf2 S0 f vd vc).1}; pattern bound to {cs} read as {vc}, classes {(nf2 S0 f vd vc).2}; openings {wo.map fun w => (w.2.1, w.2.2.1, w.2.2.2.1, w.2.2.2.2)}, regroupings {wr.map fun w => (w.2.1, w.2.2.1)}"
     | _ => throw "rule: matched node differs"
