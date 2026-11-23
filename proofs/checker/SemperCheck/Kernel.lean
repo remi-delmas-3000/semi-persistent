@@ -53,7 +53,7 @@ inductive Step where
   | symm (s : Nat)
   | trans (s t : Nat)
   | axiom (o a b : Nat)
-  | rule (o j : Nat) (σ : List (String × Nat)) (ρ : List (String × List Nat))
+  | rule (o j : Nat) (σ : List (String × Nat)) (ρ : List (String × List (Nat × Nat)))
       (μ : List (String × Nat)) (prems : List Nat) (a b : Nat)
   | cong (f : String) (a b : Nat) (prems : List Nat)
   /-- `a = f(x, g(x))` is the unit `e` of `f`, whose `:inverse` is `g`. -/
@@ -182,7 +182,7 @@ def mkApp (f : String) (cks : List (Nat × Nat)) : Option Nat :=
 mutual
 
 /-- The node that is pattern `p` with each variable read from `σ`. -/
-def instP (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
+def instP (σ : List (String × Nat)) (ρ : List (String × List (Nat × Nat))) (μ : List (String × Nat)) :
     Pat → Option Nat
   | .var x => σ.lookup x
   | .lit s v => C.lookup (.lit s v)
@@ -193,13 +193,13 @@ def instP (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : Lis
   | .app f ps => (instArgs σ ρ μ ps).bind (C.mkApp f)
 
 /-- The nodes of an argument list, each with its count: a rest variable gives
-the nodes `ρ` binds it to, a repeated argument its node with the count `μ`
-says. -/
-def instArgs (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
+the nodes `ρ` binds it to, each with its count, a repeated argument its node
+with the count `μ` says. -/
+def instArgs (σ : List (String × Nat)) (ρ : List (String × List (Nat × Nat))) (μ : List (String × Nat)) :
     List Pat → Option (List (Nat × Nat))
   | [] => some []
   | .rest x :: ps =>
-    (ρ.lookup x).bind fun r => (instArgs σ ρ μ ps).map (r.map (·, 1) ++ ·)
+    (ρ.lookup x).bind fun r => (instArgs σ ρ μ ps).map (r ++ ·)
   | .rep p k :: ps =>
     (μ.lookup k).bind fun n => (instP σ ρ μ p).bind fun i =>
       (instArgs σ ρ μ ps).map ((i, n) :: ·)
@@ -395,7 +395,7 @@ def cancelOk (f : String) (p q a b z : Nat) : Bool :=
 def decl? (o : Nat) : Option Decl :=
   (C.P.decls.find? (·.1 == o)).map (·.2)
 
-def eqsOk (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
+def eqsOk (σ : List (String × Nat)) (ρ : List (String × List (Nat × Nat))) (μ : List (String × Nat)) :
     List (Pat × Pat) → List (Nat × Nat) → Bool
   | [], [] => true
   | (p, q) :: es, (x, y) :: ps =>
@@ -418,10 +418,10 @@ def multsOk (μ : List (String × Nat)) (r : Rule) : Bool :=
     | none => false
 
 /-- Each rest variable of the rule is bound by `ρ` to nodes of its sort. -/
-def restsOk (ρ : List (String × List Nat)) (r : Rule) : Bool :=
+def restsOk (ρ : List (String × List (Nat × Nat))) (r : Rule) : Bool :=
   r.rests.all fun x =>
     match ρ.lookup x, r.sorts.lookup x with
-    | some ns, some s => ns.all fun n => C.sortOf n == some s
+    | some ns, some s => ns.all fun n => C.sortOf n.1 == some s
     | _, _ => false
 
 end Ctx

@@ -442,10 +442,10 @@ def sval (M : Model) (nodes : Array Node) (σ : List (String × Nat)) (x : Strin
   | none => M.lit "" ""
 
 /-- The assignment `ρ` names for the rest variables, through node values. -/
-def rval (M : Model) (nodes : Array Node) (ρ : List (String × List Nat)) (x : String) :
+def rval (M : Model) (nodes : Array Node) (ρ : List (String × List (Nat × Nat))) (x : String) :
     List M.α :=
   match ρ.lookup x with
-  | some ns => ns.map (nval M nodes)
+  | some ns => ns.flatMap fun ck => List.replicate ck.2 (nval M nodes ck.1)
   | none => []
 
 /-- The assignment `μ` names for the multiplicity variables. -/
@@ -498,7 +498,7 @@ theorem mkApp_sound (hwf : wfNodes C.nodes = true) {f : String} {cks : List (Nat
 mutual
 
 theorem instP_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
-    (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
+    (ρ : List (String × List (Nat × Nat))) (μ : List (String × Nat)) :
     ∀ (p : Pat) (i : Nat), C.instP σ ρ μ p = some i →
       nval M C.nodes i = M.evalP (sval M C.nodes σ) (rval M C.nodes ρ) (mval μ) p
   | .var x, i, h => by
@@ -526,7 +526,7 @@ theorem instP_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
     rw [mkApp_sound hwf hi, Model.evalP, instArgs_sound hwf σ ρ μ ps cks hcks]
 
 theorem instArgs_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
-    (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
+    (ρ : List (String × List (Nat × Nat))) (μ : List (String × Nat)) :
     ∀ (ps : List Pat) (cks : List (Nat × Nat)), C.instArgs σ ρ μ ps = some cks →
       spreadV M C.nodes cks =
         M.evalArgs (sval M C.nodes σ) (rval M C.nodes ρ) (mval μ) ps
@@ -540,7 +540,9 @@ theorem instArgs_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat)
     obtain ⟨r, hr, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, spreadV_ones, instArgs_sound hwf σ ρ μ ps t ht, rval, hr]
+    rw [Model.evalArgs, show spreadV M C.nodes (r ++ t) = spreadV M C.nodes r ++ spreadV M C.nodes t
+      from List.flatMap_append .., instArgs_sound hwf σ ρ μ ps t ht, rval, hr]
+    rfl
   | .rep p k :: ps, cks, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨n, hn, h⟩ := h
@@ -1243,7 +1245,7 @@ theorem decl_mem {o : Nat} {d : Decl} (h : C.decl? o = some d) : (o, d) ∈ C.P.
   exact List.mem_of_find?_eq_some hf
 
 theorem eqsOk_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
-    (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
+    (ρ : List (String × List (Nat × Nat))) (μ : List (String × Nat)) :
     ∀ (es : List (Pat × Pat)) (ps : List (Nat × Nat)), C.eqsOk σ ρ μ es ps = true →
       (∀ p ∈ ps, nval M C.nodes p.1 = nval M C.nodes p.2) →
       ∀ e ∈ es, M.evalP (sval M C.nodes σ) (rval M C.nodes ρ) (mval μ) e.1 =
@@ -1288,7 +1290,7 @@ theorem multsOk_sound {μ : List (String × Nat)} {r : Rule} (h : multsOk μ r =
   · cases hk
 
 theorem restsOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
-    (hT : Typed M C.P) {ρ : List (String × List Nat)} {r : Rule} (h : C.restsOk ρ r = true) :
+    (hT : Typed M C.P) {ρ : List (String × List (Nat × Nat))} {r : Rule} (h : C.restsOk ρ r = true) :
     ∀ x ∈ r.rests, ∃ s, r.sorts.lookup x = some s ∧ ∀ y ∈ rval M C.nodes ρ x, M.dom s y := by
   intro x hx
   unfold restsOk at h
@@ -1299,10 +1301,11 @@ theorem restsOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes 
     intro y hy
     unfold rval at hy
     rw [hn] at hy
-    obtain ⟨n, hn', rfl⟩ := List.mem_map.1 hy
-    have := (List.all_eq_true.1 hx') n hn'
+    obtain ⟨ck, hck, hy⟩ := List.mem_flatMap.1 hy
+    obtain ⟨-, rfl⟩ := List.mem_replicate.1 hy
+    have := (List.all_eq_true.1 hx') ck hck
     simp only [beq_iff_eq] at this
-    exact nval_dom hwf hws hT n s this
+    exact nval_dom hwf hws hT ck.1 s this
   · cases hx'
 
 theorem primStepOk_sound (hwf : wfNodes C.nodes = true) {p : Nat} (hM : M.Models C.P p)

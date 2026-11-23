@@ -251,7 +251,6 @@ makes it a repeated argument and records the least count `k` takes. -/
 def counted (ps : Array Pat) (p : Pat) (cnt : String) : PatM (Array Pat) := do
   match cnt.toNat? with
   | some n =>
-    if n > 65536 then throw s!"a count above 65536"
     if n == 0 then throw "a count of zero"
     pure (ps.push (if n == 1 then p else .times p n))
   | none =>
