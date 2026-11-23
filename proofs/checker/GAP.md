@@ -9,9 +9,8 @@ follow from the merge that event did not apply.
 
 | cause | programs | `check-eq` not proved | example |
 | --- | --- | --- | --- |
-| no witness: rewrite:untraced-firing | 20 | 27 | `egraph/tests/egg/collection_rules.egg` |
+| sequence rule: binding read, not checked | 25 | 38 | `egraph/tests/egg/collection_rules.egg` |
 | rule: unbound rest variable | 2 | 21 | `egraph/tests/egg/rhs_comprehensions.egg` |
-| no witness: rewrite:outside-a-firing | 5 | 11 | `doc/book/examples/05-seq-except.egg` |
 | definition: unreadable | 4 | 4 | `egraph/tests/egg/seq_rhs_too_wide.egg` |
 | rule: built node differs | 2 | 3 | `egraph/tests/egg/seq_flatten_rhs_nesting.egg` |
 | no kernel steps: m line | 1 | 2 | `egraph/tests/egg/rhs_empty_application_identity.egg` |

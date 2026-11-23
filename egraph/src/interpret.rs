@@ -1049,7 +1049,13 @@ where
                 // Registered like an ordinary rule, so the unions it makes carry
                 // `Justification::Rewrite` with its id.
                 let mut r = (**r).clone();
-                r.rule_id = Some(self.eg.register_rule(&r.name, "", ""));
+                let rule_id = self.eg.register_rule(&r.name, "", "");
+                r.rule_id = Some(rule_id);
+                if let crate::ast::Span::Range { start, .. } = r.span {
+                    let base = self.eg.trace_rules_at(start as usize);
+                    self.eg
+                        .trace_rule_source(rule_id.to_usize(), start as usize, base, true);
+                }
                 for w in &r.seq_rhs.warnings {
                     self.warn(format!("{}: {w}", r.name));
                 }

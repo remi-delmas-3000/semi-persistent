@@ -67,7 +67,11 @@ def replay (progPath tracePath : String) : IO UInt32 := do
           | some e => s!"unread rule: {e}"
           | none => cause)
       else if S.unchecked.fold (fun n _ k => n + k) 0 > beforeN then
-        first := some s!"no witness: {((line.splitOn " ").getD 1 "").trimAscii}"
+        -- A `u` line names its kind; an `m` line with no witness checked is a
+        -- sequence rule's firing.
+        first := some (if line.startsWith "u " then
+            s!"no witness: {((line.splitOn " ").getD 1 "").trimAscii}"
+          else "sequence rule: binding read, not checked")
       else if S.nUnjustified > beforeU then
         first := some s!"no kernel steps: {kind} line"
     if S.core.rejected > beforeR && beforeR < shown then IO.eprintln s!"kernel rejects a step at event {S.events}: {line}"

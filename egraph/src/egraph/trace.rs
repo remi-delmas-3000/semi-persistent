@@ -155,6 +155,8 @@ pub struct Trace {
     splices: Vec<(usize, usize, usize, usize, usize)>,
     /// The `e` lines of the open firing so far.
     natoms: usize,
+    /// A sequence rule's firing: its binding, as `q` lines.
+    seq: String,
     /// Why the open firing is opaque, for its `u` lines: the part of its rule
     /// the stream cannot spell.
     opaque: &'static str,
@@ -331,6 +333,7 @@ where
             t.rhs.clear();
             t.splices.clear();
             t.natoms = 0;
+            t.seq.clear();
             t.opaque = "no-source";
             t.firing = t
                 .rule_src
@@ -438,9 +441,20 @@ where
         }
     }
 
+    /// Within the firing of a sequence rule: its binding, as the `q` lines
+    /// `lines` (each ended by a newline), written after the `r` line.
+    pub(crate) fn trace_seq(&mut self, lines: String) {
+        if let Some(t) = self.trace.as_mut()
+            && t.firing.is_some()
+        {
+            t.seq = lines;
+        }
+    }
+
     pub(crate) fn trace_fire_end(&mut self) {
         if let Some(t) = self.trace.as_mut() {
             t.firing = None;
+            t.seq.clear();
             t.opaque = "outside-a-firing";
         }
     }
@@ -502,6 +516,7 @@ where
                     if !f.written {
                         let _ =
                             writeln!(t.out, "r {} {}", f.src.0, if f.src.1 { 'w' } else { 'r' });
+                        t.out.push_str(&t.seq);
                         let mut i = 0;
                         while i < t.atoms.len() {
                             let (op, node, k) = (t.atoms[i], t.atoms[i + 1], t.atoms[i + 2]);

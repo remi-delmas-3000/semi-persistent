@@ -1557,9 +1557,18 @@ where
     for (root, ri, m, lets) in plans {
         let r = rules[ri];
         crate::collection::open_seq_instance(r, &m, eg, globals);
+        if eg.tracing()
+            && let Some(rule_id) = r.rule_id
+        {
+            eg.trace_fire(rule_id.to_usize());
+            eg.trace_seq(binding_lines(r, root, &m, eg));
+        }
         let new =
             match crate::seq_rhs::build(&r.seq_rhs, lets, &r.seq_shape, &m, eg, model, globals) {
-                Ok(g) => g,
+                Ok(g) => {
+                    eg.trace_rhs(g, false);
+                    g
+                }
                 // "§Edge cases 1": a right-hand side with no value does not fire.
                 Err(e) if e == crate::seq_rhs::NO_FIRE => {
                     eg.end_rule_instance();
@@ -1594,11 +1603,120 @@ where
             _ => eg.merge(new, root).is_some(),
         };
         eg.end_rule_instance();
+        eg.trace_fire_end();
         if merged {
             report.changed += 1;
         }
     }
     Ok(report)
+}
+
+/// The binding of one firing of the sequence rule `r` at `root`, for the replay
+/// stream: `q root`, then one line per name of the match,
+/// - `qf name e..`: a filter's elements, each `class` or `class:count`;
+/// - `qn name v..`: a class-valued column or a bare rest sequence;
+/// - `ql name` then one `qv spelling` line per element: a literal-valued column;
+/// - `qk name k..`: a multiplicity column;
+/// - `qs name v`, `qt name` + `qv spelling`, `qm name k`: a scalar that is a
+///   class, a literal, a multiplicity.
+fn binding_lines<Cfg, L, const T: bool, const P: bool>(
+    r: &SeqRule<Cfg, L>,
+    root: Cfg::G,
+    row: &crate::ematch::Match<Cfg>,
+    eg: &EGraph<Cfg, L, T, P>,
+) -> String
+where
+    Cfg: EGraphConfig,
+    L: LitVal,
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
+{
+    use crate::containers::DenseId;
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(out, "q {}", root.to_usize());
+    let Some(asm) = r.query_assembly() else {
+        return out;
+    };
+    let elems = |tag: &str, name: &str, rr: RestRef, out: &mut String| {
+        let _ = write!(out, "{tag} {name}");
+        match rr {
+            RestRef::Seq(v) => {
+                for g in row.seq_slice(v) {
+                    let _ = write!(out, " {}", g.to_usize());
+                }
+            }
+            RestRef::Set(v) => {
+                for g in row.set_slice(v) {
+                    let _ = write!(out, " {}", g.to_usize());
+                }
+            }
+            RestRef::Mset(v) => {
+                for c in row.mset_slice(v) {
+                    let k = Cfg::mset_child_mult(c).to_string();
+                    let g = Cfg::mset_child_id(c).to_usize();
+                    if k == "1" {
+                        let _ = write!(out, " {g}");
+                    } else {
+                        let _ = write!(out, " {g}:{k}");
+                    }
+                }
+            }
+        }
+        out.push('\n');
+    };
+    for (f, (es, cols)) in asm.spec.filters.iter().zip(&asm.layout.filters) {
+        elems("qf", &f.name, *es, &mut out);
+        for (name, col) in f.vars.iter().zip(cols) {
+            match col {
+                ColRef::Node(v) => {
+                    let _ = write!(out, "qn {name}");
+                    for g in row.seq_slice(*v) {
+                        let _ = write!(out, " {}", g.to_usize());
+                    }
+                    out.push('\n');
+                }
+                ColRef::Lit(v) => {
+                    let _ = writeln!(out, "ql {name}");
+                    for &l in row.lit_seq_slice(*v) {
+                        let _ = writeln!(
+                            out,
+                            "qv {}",
+                            crate::egraph::trace::lit_spelling(eg.lits().get(l))
+                        );
+                    }
+                }
+                ColRef::Mult(v) => {
+                    let _ = write!(out, "qk {name}");
+                    for c in row.mset_slice(*v) {
+                        let _ = write!(out, " {}", Cfg::mset_child_mult(c));
+                    }
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    for (name, rr) in &asm.layout.bare {
+        elems("qn", name, *rr, &mut out);
+    }
+    for (name, sr) in asm.spec.scalars.iter().zip(&asm.layout.scalars) {
+        match sr {
+            ScalarRef::Node(v) => {
+                let _ = writeln!(out, "qs {name} {}", row.get(*v).to_usize());
+            }
+            ScalarRef::Lit(v) => {
+                let _ = writeln!(
+                    out,
+                    "qt {name}\nqv {}",
+                    crate::egraph::trace::lit_spelling(eg.lits().get(row.get_lit_val(*v)))
+                );
+            }
+            ScalarRef::Mult(v) => {
+                let _ = writeln!(out, "qm {name} {}", row.get_mult(*v));
+            }
+        }
+    }
+    out
 }
 
 /// Test support: the relational engine's matches of `r` at node `id`, on a snapshot

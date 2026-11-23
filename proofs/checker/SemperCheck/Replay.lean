@@ -80,6 +80,8 @@ structure St (P : Program) where
   application `m` in that class whose arguments the node holds in its place. -/
   opens : List (Nat × Nat × Nat × Option Nat × Nat) := []
   regroups : List (Nat × Nat × Nat) := []
+  /-- The binding lines (`q..`) of the sequence rule firing being read. -/
+  seqLines : List (List String) := []
   /-- Inverse witnesses (`j` lines) for the next line: inverse applications,
   each standing for its class. -/
   inverses : List Nat := []
@@ -2669,7 +2671,7 @@ def stepCore (S : St P) (line : String) : St P :=
     | _, _, _, _ => S.fail "group law: unreadable"
   | ["r", off, kind] =>
     match off.toNat? with
-    | some o => { S with fire := some (o, kind == "w"), atoms := #[], rhs := [], events := S.events - 1 }
+    | some o => { S with fire := some (o, kind == "w"), atoms := #[], rhs := [], seqLines := [], events := S.events - 1 }
     | none => S.fail "rule: unreadable"
   | "e" :: id :: f :: kids =>
     match S.node? id, atomArgs S kids with
@@ -2683,6 +2685,12 @@ def stepCore (S : St P) (line : String) : St P :=
     | some r => { S with rhs := r, events := S.events - 1 }
     | none => S.fail "rule: unreadable"
   | ["m", j, a, b] =>
+    -- A sequence rule's firing: its binding is read, and not checked yet.
+    if !S.seqLines.isEmpty then
+      let kind := "rewrite:sequence-rule"
+      { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), seqLines := [],
+               splices := [], opens := [], regroups := [], inverses := [] }
+    else
     match j.toNat?, S.node? a, S.node? b, S.fire with
     | some j, some a, some b, some (o, rw) =>
       -- The engine cites a rule by an offset inside its command.
@@ -2878,6 +2886,11 @@ def stepCore (S : St P) (line : String) : St P :=
     let _ := rest
     { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), splices := [], opens := [], regroups := [], inverses := [] }
   | [""] => { S with events := S.events - 1 }
+  | q :: rest =>
+    -- The binding of a sequence rule's firing: kept for its `m` line.
+    if ["q", "qf", "qn", "ql", "qv", "qk", "qs", "qt", "qm"].contains q then
+      { S with seqLines := S.seqLines ++ [q :: rest], events := S.events - 1 }
+    else S.fail "unreadable line"
   | _ => S.fail "unreadable line"
 
 /-- Replays one line. The witness lines (`s`, `j`) hold until the next line
