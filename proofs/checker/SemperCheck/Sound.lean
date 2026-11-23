@@ -26,6 +26,9 @@ def nval (nodes : Array Node) (i : Nat) : M.α :=
   match nodes[i]? with
   | some (.lit s v) => M.lit s v
   | some (.app f cs) => M.app f (cs.map fun c => if _h : c < i then nval nodes c else M.lit "" "")
+  | some (.napp f cs) =>
+    M.app f (cs.flatMap fun ck =>
+      List.replicate ck.2 (if _h : ck.1 < i then nval nodes ck.1 else M.lit "" ""))
   | none => M.lit "" ""
 termination_by i
 
@@ -80,6 +83,37 @@ theorem nval_app {nodes : Array Node} (hwf : wfNodes nodes = true) {i : Nat} {f 
   intro c hc
   simp [wf_child hwf h c hc]
 
+theorem flatMap_congr_mem {α β : Type} {f g : α → List β} :
+    ∀ {l : List α}, (∀ a ∈ l, f a = g a) → l.flatMap f = l.flatMap g
+  | [], _ => rfl
+  | a :: t, h => by
+    simp only [List.flatMap_cons]
+    rw [h a (List.mem_cons_self ..), flatMap_congr_mem fun x hx => h x (List.mem_cons_of_mem _ hx)]
+
+theorem wf_child_n {nodes : Array Node} (hwf : wfNodes nodes = true) {i : Nat} {f : String}
+    {cs : List (Nat × Nat)} (h : nodes[i]? = some (.napp f cs)) : ∀ ck ∈ cs, ck.1 < i := by
+  have hi : i < nodes.size := by
+    rcases Nat.lt_or_ge i nodes.size with hi | hi
+    · exact hi
+    · simp [Array.getElem?_eq_none hi] at h
+  unfold wfNodes at hwf
+  have := (List.all_eq_true.1 hwf) i (List.mem_range.2 hi)
+  rw [h] at this
+  intro ck hck
+  simpa using (List.all_eq_true.1 this) ck hck
+
+/-- A counted application's value: the operator on each child's value, as
+many times as its count. -/
+theorem nval_napp {nodes : Array Node} (hwf : wfNodes nodes = true) {i : Nat} {f : String}
+    {cs : List (Nat × Nat)} (h : nodes[i]? = some (.napp f cs)) :
+    nval M nodes i = M.app f (cs.flatMap fun ck => List.replicate ck.2 (nval M nodes ck.1)) := by
+  rw [nval, h]
+  simp only
+  congr 1
+  apply flatMap_congr_mem
+  intro ck hck
+  simp [wf_child_n hwf h ck hck]
+
 theorem nval_lit {nodes : Array Node} {i : Nat} {s v : String} (h : nodes[i]? = some (.lit s v)) :
     nval M nodes i = M.lit s v := by
   rw [nval, h]
@@ -106,6 +140,21 @@ theorem wfSorts_lit {P : Program} {nodes : Array Node} (h : wfSorts P nodes = tr
   have := (List.all_eq_true.1 h) i (List.mem_range.2 (lt_size_of_some hn))
   rw [hn] at this
   simpa using this
+
+theorem wfSorts_napp {P : Program} {nodes : Array Node} (h : wfSorts P nodes = true) {i : Nat}
+    {f : String} {cs : List (Nat × Nat)} (hn : nodes[i]? = some (.napp f cs)) :
+    ∃ d, P.opDecl? f = some d ∧ d.kind.isAssoc = true ∧ cs ≠ [] ∧
+      ∀ ck ∈ cs, nodeSort P nodes ck.1 = some d.res ∧ 0 < ck.2 := by
+  unfold wfSorts at h
+  have := (List.all_eq_true.1 h) i (List.mem_range.2 (lt_size_of_some hn))
+  rw [hn] at this
+  simp only at this
+  split at this
+  · cases this
+  · rename_i d hd
+    simp only [Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff, List.all_eq_true,
+      beq_iff_eq, decide_eq_true_eq] at this
+    exact ⟨d, hd, this.1.1, this.1.2, this.2⟩
 
 theorem wfSorts_app {P : Program} {nodes : Array Node} (h : wfSorts P nodes = true) {i : Nat}
     {f : String} {cs : List Nat} (hn : nodes[i]? = some (.app f cs)) :
@@ -310,6 +359,38 @@ theorem nval_dom {P : Program} {nodes : Array Node} (hwf : wfNodes nodes = true)
           intro y hy
           obtain ⟨c', hc', rfl⟩ := List.mem_map.1 hy
           exact hdc c' (List.mem_cons_of_mem _ hc'))
+  · rename_i f cs hn
+    rw [Option.map_eq_some_iff] at hs
+    obtain ⟨d, hd, rfl⟩ := hs
+    obtain ⟨d', hd', hk, hne, hcs⟩ := wfSorts_napp hws hn
+    rw [hd] at hd'
+    cases hd'
+    obtain ⟨hmem, hname⟩ := opDecl_spec hd
+    have hlt := wf_child_n hwf hn
+    obtain ⟨b, L, -, -, -⟩ := assoc_laws (hT.1 d hmem).2 hk
+    rw [nval_napp hwf hn, ← hname]
+    have hall : ∀ y ∈ cs.flatMap (fun ck => List.replicate ck.2 (nval M nodes ck.1)),
+        M.dom d.res y := by
+      intro y hy
+      obtain ⟨ck, hck, hy⟩ := List.mem_flatMap.1 hy
+      obtain ⟨-, rfl⟩ := List.mem_replicate.1 hy
+      exact ih ck.1 (hlt ck hck) _ (hcs ck hck).1
+    cases hxs : cs.flatMap (fun ck => List.replicate ck.2 (nval M nodes ck.1)) with
+    | nil =>
+      cases cs with
+      | nil => exact absurd rfl hne
+      | cons c0 rest =>
+        have hpos := (hcs c0 (List.mem_cons_self ..)).2
+        have hin : nval M nodes c0.1 ∈
+            (c0 :: rest).flatMap (fun ck => List.replicate ck.2 (nval M nodes ck.1)) :=
+          List.mem_flatMap.2 ⟨c0, List.mem_cons_self .., List.mem_replicate.2 ⟨by omega, rfl⟩⟩
+        rw [hxs] at hin
+        cases hin
+    | cons x rest =>
+      rw [hxs] at hall
+      rw [L.app _ _ (hall x (List.mem_cons_self ..)) fun y hy => hall y (List.mem_cons_of_mem _ hy)]
+      exact foldl_closed L.closed _ _ (hall x (List.mem_cons_self ..))
+        fun y hy => hall y (List.mem_cons_of_mem _ hy)
   · cases hs
 
 namespace Ctx

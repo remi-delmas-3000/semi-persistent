@@ -42,6 +42,10 @@ namespace SemperCheck
 inductive Node where
   | lit (s v : String)
   | app (f : String) (cs : List Nat)
+  /-- A counted application: `f` applied to each child as many times as its
+  count. It is the application to the children repeated, held without
+  repeating them. -/
+  | napp (f : String) (cs : List (Nat × Nat))
   deriving Repr, DecidableEq, Hashable, Inhabited
 
 inductive Step where
@@ -89,6 +93,7 @@ def wfNodes (nodes : Array Node) : Bool :=
   (List.range nodes.size).all fun i =>
     match nodes[i]? with
     | some (.app _ cs) => cs.all (· < i)
+    | some (.napp _ cs) => cs.all (·.1 < i)
     | _ => true
 
 /-- The sort of node `i`. -/
@@ -96,6 +101,7 @@ def nodeSort (P : Program) (nodes : Array Node) (i : Nat) : Option String :=
   match nodes[i]? with
   | some (.lit s _) => some s
   | some (.app f _) => (P.opDecl? f).map (·.res)
+  | some (.napp f _) => (P.opDecl? f).map (·.res)
   | none => none
 
 /-- Each child is a node of the sort at its position. -/
@@ -121,6 +127,15 @@ def wfSorts (P : Program) (nodes : Array Node) : Bool :=
         else if d.kind.isFold then
           cs.all (fun c => nodeSort P nodes c == some d.res) && !cs.isEmpty
         else argsOk P nodes d.args cs
+    -- A counted application: of an `assoc`, `ac` or `aci` operator, with at
+    -- least one child, each of the operator's sort and with a count of at
+    -- least one.
+    | some (.napp f cs) =>
+      match P.opDecl? f with
+      | none => false
+      | some d =>
+        d.kind.isAssoc && !cs.isEmpty &&
+          cs.all (fun ck => nodeSort P nodes ck.1 == some d.res && decide (0 < ck.2))
     | none => true
 
 structure Ctx where

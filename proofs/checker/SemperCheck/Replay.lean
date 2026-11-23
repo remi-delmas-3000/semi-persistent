@@ -1651,6 +1651,7 @@ def sortOf (S : St P) (t : Nat) : Option String :=
   match S.defOf t with
   | some (.lit s _) => some s
   | some (.app f _) => (S.prog.opDecl? f).map (·.res)
+  | some (.napp f _) => (S.prog.opDecl? f).map (·.res)
   | none => none
 
 /-- The table id of definition `d`, added to the table if it is new and
@@ -1664,6 +1665,7 @@ def intern (S : St P) (d : Def) : St P × Option Nat :=
       let isPlain := match d with
         | .lit _ _ => true
         | .app f _ => !(S.prog.kind f).isAssoc
+        | .napp _ _ => false
       let S := match d with
         | .app g [_] => if S.invOps.contains g then { S with invIn := S.invIn.insert t [t] } else S
         | _ => S

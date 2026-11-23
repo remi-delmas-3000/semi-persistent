@@ -48,6 +48,7 @@ def replay (progPath tracePath : String) : IO UInt32 := do
         if let some t := S.node? x then
           let d := match S.defOf t with
             | some (.app f cs) => s!"{f} {cs}"
+            | some (.napp f cs) => s!"{f} {cs} (counted)"
             | some (.lit s v) => s!"{s} {v}"
             | none => "?"
           IO.eprintln s!"  {x}: table {t}, root {S.fd t}, {d}"

@@ -44,10 +44,17 @@ def nodeOk (P : Program) (nodes : Array Node) : Node → Bool
       else if d.kind.isFold then
         cs.all (fun c => nodeSort P nodes c == some d.res) && !cs.isEmpty
       else argsOk P nodes d.args cs
+  | .napp f cs =>
+    match P.opDecl? f with
+    | none => false
+    | some d =>
+      d.kind.isAssoc && !cs.isEmpty &&
+        cs.all (fun ck => nodeSort P nodes ck.1 == some d.res && decide (0 < ck.2))
 
 /-- The condition `wfNodes` asks of node `i`. -/
 def kidsBelow (i : Nat) : Node → Bool
   | .app _ cs => cs.all (· < i)
+  | .napp _ cs => cs.all (·.1 < i)
   | .lit _ _ => true
 
 theorem wfNodes_iff {nodes : Array Node} :
@@ -59,13 +66,19 @@ theorem wfNodes_iff {nodes : Array Node} :
     have hi := lt_size_of_some hn
     have := h i (List.mem_range.2 hi)
     rw [hn] at this
-    cases n <;> simp_all [kidsBelow]
+    cases n with
+    | lit s v => rfl
+    | app f cs => exact this
+    | napp f cs => exact this
   · intro h i _
     cases hn : nodes[i]? with
     | none => rfl
     | some n =>
       have := h i n hn
-      cases n <;> simp_all [kidsBelow]
+      cases n with
+      | lit s v => rfl
+      | app f cs => exact this
+      | napp f cs => exact this
 
 theorem wfSorts_iff {P : Program} {nodes : Array Node} :
     wfSorts P nodes = true ↔ ∀ (i : Nat) (n : Node), nodes[i]? = some n → nodeOk P nodes n = true := by
@@ -82,6 +95,10 @@ theorem wfSorts_iff {P : Program} {nodes : Array Node} :
       simp only [nodeOk]
       simp only at this
       exact this
+    | napp f cs =>
+      simp only [nodeOk]
+      simp only at this
+      exact this
   · intro h i _
     cases hn : nodes[i]? with
     | none => rfl
@@ -90,6 +107,10 @@ theorem wfSorts_iff {P : Program} {nodes : Array Node} :
       cases n with
       | lit s v => simpa [nodeOk] using this
       | app f cs =>
+        simp only [nodeOk] at this
+        simp only
+        exact this
+      | napp f cs =>
         simp only [nodeOk] at this
         simp only
         exact this
@@ -136,6 +157,20 @@ theorem nodeOk_push {P : Program} (nodes : Array Node) (n m : Node)
     (h : nodeOk P nodes m = true) : nodeOk P (nodes.push n) m = true := by
   cases m with
   | lit s v => exact h
+  | napp f cs =>
+    simp only [nodeOk] at h ⊢
+    split
+    · rename_i hd; rw [hd] at h; cases h
+    · rename_i d hd
+      rw [hd] at h
+      simp only at h
+      rw [Bool.and_eq_true] at h ⊢
+      refine ⟨h.1, ?_⟩
+      rw [List.all_eq_true] at h ⊢
+      intro ck hck
+      have := h.2 ck hck
+      rw [Bool.and_eq_true, beq_iff_eq] at this ⊢
+      exact ⟨nodeSort_push_some nodes n this.1, this.2⟩
   | app f cs =>
     simp only [nodeOk] at h ⊢
     split
@@ -205,6 +240,15 @@ theorem nval_push (M : Model) (nodes : Array Node) (n : Node) :
     | some nd =>
       cases nd with
       | lit s v => rfl
+      | napp f cs =>
+        simp only
+        congr 1
+        apply flatMap_congr_mem
+        intro ck _
+        congr 1
+        split
+        · rename_i hc; exact ih ck.1 hc (Nat.lt_trans hc hi)
+        · rfl
       | app f cs =>
         simp only
         congr 1
