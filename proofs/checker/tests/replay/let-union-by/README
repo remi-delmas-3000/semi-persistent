@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types machine --trace` writes for `program.egg`.
+`bad.trace` differs in line 45: the `qv` line gives the second element's lower bound 5 instead of 4, so the two intervals no longer touch, `(union-by p l u)` has as many rows as the filter has elements, and the rule's `:when` condition does not hold under the binding.

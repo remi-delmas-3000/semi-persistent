@@ -1,0 +1,82 @@
+l 0 String "a"
+n 1 Var 0
+t 1 Var 0
+l 2 String "b"
+n 3 Var 2
+t 3 Var 2
+l 4 String "c"
+n 5 Var 4
+t 5 Var 4
+l 6 i64 1
+l 7 i64 3
+n 8 Interval 6 7
+t 8 Interval 6 7
+n 9 Global 8 1
+t 9 Global 8 1
+l 10 i64 2
+l 11 i64 5
+n 12 Interval 10 11
+t 12 Interval 10 11
+n 13 Global 12 3
+t 13 Global 12 3
+l 14 i64 6
+n 15 Interval 7 14
+t 15 Interval 7 14
+n 16 Global 15 5
+t 16 Global 15 5
+l 17 String "cc"
+n 18 Var 17
+t 18 Var 17
+n 19 And 9 18
+t 19 And 9 18
+n 20 And 13 16
+t 20 And 13 16
+x 725 18 20
+n 21 Interval 6 10
+n 22 Global 21 3
+n 23 Interval 10 7
+n 24 Global 23 5
+n 25 And 1 22 24
+n 26 Global 8 25
+r 818 w
+q 19
+qf gs 9 13 16
+ql l
+qv 1
+qv 2
+qv 3
+ql u
+qv 3
+qv 5
+qv 6
+qn p 1 3 5
+qn rest
+qe gs 9 13 16
+b 26
+m 0 26 19
+n 27 Interval 6 6
+n 28 Global 27 5
+n 29 And 3 28
+n 30 Global 12 29
+r 818 w
+q 20
+qf gs 13 16
+ql l
+qv 2
+qv 3
+ql u
+qv 5
+qv 6
+qn p 3 5
+qn rest
+qe gs 13 16
+b 30
+m 0 30 20
+t 8 Interval 6 7
+t 21 Interval 6 10
+t 22 Global 21 3
+t 23 Interval 10 7
+t 24 Global 23 5
+t 25 And 1 22 24
+t 26 Global 8 25
+g 1246 19 26

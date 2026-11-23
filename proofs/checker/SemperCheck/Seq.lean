@@ -113,6 +113,88 @@ def srcRows (r : SeqRule) (B : SBind) (grouped : Bool) (x : String) : Option (Li
         if grouped then (groupsOf as).map fun (a, k) => (.atom a, k)
         else as.map fun a => (.atom a, 1)
 
+/-- A literal atom as an integer, with its sort. -/
+def intOf : STm → Option (Int × String)
+  | .atom (.lit s v) =>
+    match Val.parse s v with
+    | some (.i64 n) => some (n, s)
+    | some (.ibig n) => some (n, s)
+    | some (.u64 n) => some (n, s)
+    | some (.usize n) => some (n, s)
+    | some (.ubig n) => some (n, s)
+    | _ => none
+  | _ => none
+
+/-- The union of integer intervals, as the engine computes it: the intervals
+in order of lower then upper bound, an interval that starts at most one past
+the last one's end extending it. -/
+def unionInts (w : List (Int × Int)) : List (Int × Int) :=
+  let before (x y : Int × Int) : Bool := x.1 < y.1 || (x.1 == y.1 && x.2 < y.2)
+  let insert (sorted : List (Int × Int)) (x : Int × Int) : List (Int × Int) :=
+    sorted.takeWhile (fun y => !before x y) ++ x :: sorted.dropWhile (fun y => !before x y)
+  ((w.foldl insert []).foldl (fun (out : List (Int × Int)) (lu : Int × Int) =>
+    match out with
+    | last :: rest => if lu.1 ≤ last.2 + 1 then (last.1, max last.2 lu.2) :: rest else lu :: out
+    | [] => [lu]) []).reverse
+
+/-- The interval `[c, d]` shrunk past the windows: its start moves past a
+window that covers it and ends before `d`; its end moves before a window that
+covers it and starts after the start. Each pass reads every window; the bounds
+only move inward, so they are stable after twice as many passes as there are
+windows. An interval that empties is kept as it was. -/
+def narrowInt (windows : List (Int × Int)) (c d : Int) : Int × Int :=
+  let pass (lh : Int × Int) : Int × Int :=
+    windows.foldl (fun (lh : Int × Int) (w : Int × Int) =>
+      let lo := if w.1 ≤ lh.1 && lh.1 ≤ w.2 + 1 && w.2 < lh.2 then max lh.1 (w.2 + 1) else lh.1
+      let hi := if lo < w.1 && w.1 ≤ lh.2 && lh.2 ≤ w.2 then min lh.2 (w.1 - 1) else lh.2
+      (lo, hi)) lh
+  let r := (List.range (2 * windows.length + 2)).foldl (fun lh _ => pass lh) (c, d)
+  if r.1 ≤ r.2 then r else (c, d)
+
+/-- An integer as a literal atom of sort `s`. -/
+def intAtom (s : String) (n : Int) : STm := .atom (.lit s (toString n))
+
+/-- The atom a row's value is, when it is one. -/
+def atomOf? : STm → Option SAtom
+  | .atom a => some a
+  | .app _ _ => none
+
+/-- An element of an interval operation: its key and its interval. -/
+structure IRow where
+  key : SAtom
+  lo : Int
+  hi : Int
+  sort : String
+
+/-- The elements `(key, [lo, hi])` of three columns side by side. -/
+def iRows (ks ls us : List (STm × Nat)) : Option (List IRow) :=
+  (ks.zip (ls.zip us)).mapM fun (x : (STm × Nat) × (STm × Nat) × (STm × Nat)) =>
+    (atomOf? x.1.1).bind fun k => (intOf x.2.1.1).bind fun a => (intOf x.2.2.1).map fun b =>
+      ({ key := k, lo := a.1, hi := b.1, sort := a.2 } : IRow)
+
+/-- `(union-by p l u)`: per key, in the order of first sight, the union of
+its intervals; a row is the key and one interval. -/
+def unionByRows (ps ls us : List (STm × Nat)) : Option (List (List STm × Nat)) :=
+  (iRows ps ls us).map fun (xs : List IRow) =>
+    let keys : List SAtom := xs.foldl (fun ks x => if ks.contains x.key then ks else ks ++ [x.key]) []
+    let sort : String := (xs.head?.map (·.sort)).getD "i64"
+    keys.flatMap fun g =>
+      (unionInts ((xs.filter (·.key == g)).map fun x => (x.lo, x.hi))).map fun (ab : Int × Int) =>
+        ([STm.atom g, intAtom sort ab.1, intAtom sort ab.2], 1)
+
+/-- `(narrow c d r a b q)`: per element `(r, [c, d])`, the interval narrowed
+past the union of the intervals `[a, b]` whose key `q` is `r`; with `changed`,
+only the rows whose interval changed. -/
+def narrowRows (cs ds rs as bs qs : List (STm × Nat)) (changed : Bool) :
+    Option (List (List STm × Nat)) :=
+  (iRows qs as bs).bind fun (ws : List IRow) => (iRows rs cs ds).map fun (fs : List IRow) =>
+    fs.filterMap fun f =>
+      let windows := unionInts ((ws.filter (·.key == f.key)).map fun w => (w.lo, w.hi))
+      let r := narrowInt windows f.lo f.hi
+      if !changed || r.1 != f.lo || r.2 != f.hi then
+        some ([STm.atom f.key, intAtom f.sort r.1, intAtom f.sort r.2], 1)
+      else none
+
 /-- The rows a comprehension ranges over: each the values of its binders and
 a count. Side by side, the rows stop at the shortest sequence and take the
 first one's counts. -/
@@ -125,6 +207,14 @@ def rowsOf (r : SeqRule) (B : SBind) (grouped : Bool) : SSrc → Option (List (L
       let n := (ls.map (·.length)).foldl min ((ls.head?.map (·.length)).getD 0)
       (List.range n).map fun i =>
         (ls.filterMap fun l => (l[i]?).map (·.1), ((ls.head?.bind (·[i]?)).map (·.2)).getD 1)
+  | .unionBy p l u =>
+    (srcRows r B grouped p).bind fun ps => (srcRows r B grouped l).bind fun ls =>
+      (srcRows r B grouped u).bind fun us => unionByRows ps ls us
+  | .narrow c d rr a b q changed =>
+    (srcRows r B grouped c).bind fun cs => (srcRows r B grouped d).bind fun ds =>
+      (srcRows r B grouped rr).bind fun rs => (srcRows r B grouped a).bind fun as =>
+        (srcRows r B grouped b).bind fun bs => (srcRows r B grouped q).bind fun qs =>
+          narrowRows cs ds rs as bs qs changed
 
 /-- The arguments a left-side item stands for. -/
 def SItem.args (B : SBind) : SItem → Option (List STm)
@@ -154,7 +244,20 @@ mutual
 
 /-- The value of `e` under the binding: a filter's count is the number of its
 elements, as an `i64`. -/
-def numS (B : SBind) (lc : SLoc) : SNum → Option Val
+def numS (r : SeqRule) (B : SBind) (lc : SLoc) : SNum → Option Val
+  | .rows src => (rowsOf r B false src).map fun rows => .i64 rows.length
+  | .agg op e =>
+    -- `e` at each element: the filters' variables read at that element.
+    let n := (B.cols.map (·.2.length)).foldl max 0
+    ((List.range n).mapM fun i =>
+      let cols : List (String × STm) := B.cols.filterMap fun (ca : String × List SAtom) =>
+        (ca.2[i]?).map fun a => (ca.1, STm.atom a)
+      numS r B { lc with vals := cols ++ lc.vals } e).bind fun vs =>
+      match vs with
+      | [] => if op == "sum" then some (.i64 0) else none
+      | v :: rest =>
+        let f := v.sortName ++ "::" ++ (if op == "sum" then "+" else op)
+        rest.foldlM (fun acc x => primEval f [acc, x]) v
   | .lit s v => Val.parse s v
   | .var x =>
     match lc.vals.lookup x with
@@ -170,31 +273,32 @@ def numS (B : SBind) (lc : SLoc) : SNum → Option Val
     match lc.cnts.lookup x with
     | some n => natVal s n
     | none => (B.kcounts.lookup x).bind (natVal s)
-  | .prim f args => (numsS B lc args).bind (primEval f)
+  | .prim f args => (numsS r B lc args).bind (primEval f)
 
-def numsS (B : SBind) (lc : SLoc) : List SNum → Option (List Val)
+def numsS (r : SeqRule) (B : SBind) (lc : SLoc) : List SNum → Option (List Val)
   | [] => some []
-  | e :: es => (numS B lc e).bind fun v => (numsS B lc es).map (v :: ·)
+  | e :: es => (numS r B lc e).bind fun v => (numsS r B lc es).map (v :: ·)
 
 end
 
 /-- Whether the condition `g`, when there is one, computes `true`. -/
-def holdsS (B : SBind) (lc : SLoc) : Option SNum → Option Bool
+def holdsS (r : SeqRule) (B : SBind) (lc : SLoc) : Option SNum → Option Bool
   | none => some true
   | some g =>
-    match numS B lc g with
+    match numS r B lc g with
     | some (.bool b) => some b
     | _ => none
 
 /-- The count `k` computes, 1 without it. -/
-def timesS (B : SBind) (lc : SLoc) : Option SNum → Option Nat
+def timesS (r : SeqRule) (B : SBind) (lc : SLoc) : Option SNum → Option Nat
   | none => some 1
-  | some k => (numS B lc k).bind Val.toNat?
+  | some k => (numS r B lc k).bind Val.toNat?
 
 mutual
 
 def rhsS (r : SeqRule) (B : SBind) (lc : SLoc) : SRhs → Option STm
-  | .val e => (numS B lc e).bind fun v => v.spell.map fun t => .atom (.lit v.sortName t)
+  | .val e => (numS r B lc e).bind fun v => v.spell.map fun t => .atom (.lit v.sortName t)
+  | .ite c a b => (holdsS r B lc (some c)).bind fun ok => if ok then rhsS r B lc a else rhsS r B lc b
   | .var x =>
     match lc.vals.lookup x with
     | some t => some t
@@ -207,7 +311,7 @@ def argsS (r : SeqRule) (B : SBind) (lc : SLoc) : List SArg → Option (List STm
   | .tm t :: as => (rhsS r B lc t).bind fun x => (argsS r B lc as).map (x :: ·)
   | .splice x :: as => (spliceOf r B x).bind fun xs => (argsS r B lc as).map (xs ++ ·)
   | .times t k :: as =>
-    (timesS B lc (some k)).bind fun n => (rhsS r B lc t).bind fun x =>
+    (timesS r B lc (some k)).bind fun n => (rhsS r B lc t).bind fun x =>
       (argsS r B lc as).map (List.replicate n x ++ ·)
   | .comp body bs kv src grouped guard mult :: as =>
     (rowsOf r B grouped src).bind fun rows =>
@@ -217,9 +321,9 @@ def argsS (r : SeqRule) (B : SBind) (lc : SLoc) : List SArg → Option (List STm
           (ca.2[i]?).map fun a => (ca.1, STm.atom a)
         let lc' : SLoc := { vals := bs.zip row.1 ++ cols ++ lc.vals,
                             cnts := (match kv with | some x => [(x, row.2)] | none => []) ++ lc.cnts }
-        (holdsS B lc' guard).bind fun ok =>
+        (holdsS r B lc' guard).bind fun ok =>
           if ok then
-            (timesS B lc' mult).bind fun n => (rhsS r B lc' body).map (List.replicate n)
+            (timesS r B lc' mult).bind fun n => (rhsS r B lc' body).map (List.replicate n)
           else some []).bind fun parts =>
         (argsS r B lc as).map (parts.flatten ++ ·)
 
@@ -229,7 +333,14 @@ end
 conditions computes `true` and each element of a counted filter has at least
 the filter's least count. -/
 def seqApply (r : SeqRule) (B : SBind) : Option (STm × STm) :=
-  if !(r.guards.all fun g => holdsS B {} (some g) == some true) then none
+  -- The `:let` names, in order: each the literal its value is.
+  let lc : Option SLoc := r.lets.foldl (fun (lc : Option SLoc) (xe : String × SNum) =>
+    lc.bind fun lc => (numS r B lc xe.2).bind fun v => v.spell.map fun t =>
+      { lc with vals := (xe.1, STm.atom (.lit v.sortName t)) :: lc.vals }) (some {})
+  match lc with
+  | none => none
+  | some lc =>
+  if !(r.guards.all fun g => holdsS r B lc (some g) == some true) then none
   else if !(r.least.all fun (g, n) => match B.counts.lookup g with
       | some ks => ks.all (n ≤ ·)
       | none => false) then none
@@ -237,6 +348,6 @@ def seqApply (r : SeqRule) (B : SBind) : Option (STm × STm) :=
     let L := match r.lhs with
       | some p => patB B (B.look none) p
       | none => (itemsArgs B r.items).map (.app r.op)
-    L.bind fun L => (rhsS r B {} r.rhs).map fun R => (L, R)
+    L.bind fun L => (rhsS r B lc r.rhs).map fun R => (L, R)
 
 end SemperCheck

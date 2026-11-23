@@ -862,18 +862,22 @@ theorem foldl_max_ge : ∀ (cs : List Concl) (init : Nat),
     · exact h2 c' hc'
 
 theorem premConcls_sound {acc : Array Concl} (hacc : AllValid M C acc) {prems : List Nat}
-    {ps : List (Nat × Nat)} {pos : Nat} (h : premConcls acc prems = some (ps, pos)) :
+    {ps : List (Nat × Nat)} {pos : Nat} (h : premConcls C.P acc prems = some (ps, pos)) :
     (M.Models C.P pos → ∀ p ∈ ps, nval M C.nodes p.1 = nval M C.nodes p.2) ∧
       ∀ p ∈ ps, C.sortOf p.1 = C.sortOf p.2 := by
   unfold premConcls at h
-  rw [Option.map_eq_some_iff] at h
+  rw [Option.bind_eq_some_iff] at h
   obtain ⟨cs, hcs, hps⟩ := h
-  simp only [Prod.mk.injEq] at hps
+  split at hps
+  case isFalse => cases hps
+  rename_i hst
+  simp only [Option.some.injEq, Prod.mk.injEq] at hps
   obtain ⟨rfl, rfl⟩ := hps
+  rw [List.all_eq_true] at hst
   refine ⟨fun hM p hp => ?_, fun p hp => ?_⟩
   · obtain ⟨c, hc, rfl⟩ := List.mem_map.1 hp
     obtain ⟨s, _, hs⟩ := mapM_some_mem prems cs hcs c hc
-    exact (hacc s c hs).1 (hM.mono ((foldl_max_ge cs 0).2 c hc))
+    exact (hacc s c hs).1 (hM.mono ((foldl_max_ge cs 0).2 c hc) (hst c hc))
   · obtain ⟨c, hc, rfl⟩ := List.mem_map.1 hp
     obtain ⟨s, _, hs⟩ := mapM_some_mem prems cs hcs c hc
     exact (hacc s c hs).2
@@ -995,10 +999,10 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
       split at h
       · rename_i hb
         cases h
-        have e1 := (hacc s c1 h1).1 (hM.mono (Nat.le_max_left _ _))
-        have e2 := (hacc t c2 h2).1 (hM.mono (Nat.le_max_right _ _))
+        have e1 := (hacc s c1 h1).1 (hM.mono (Nat.le_max_left _ _) hb.2.1)
+        have e2 := (hacc t c2 h2).1 (hM.mono (Nat.le_max_right _ _) hb.2.2)
         simp only
-        rw [e1, hb, e2]
+        rw [e1, hb.1, e2]
       · cases h
     · cases h
   | «axiom» o a b =>
@@ -1008,7 +1012,7 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
       split at h
       · rename_i hab
         cases h
-        have hs := hM.2.2.1 o _ (decl_mem hd) (Nat.lt_succ_self o)
+        have hs := hM.2.2.1 o _ (decl_mem hd) (Nat.lt_succ_self o) (Program.active_succ _ o)
         simp only [Model.DeclSat] at hs
         simp only
         rw [intern_sound hwf l a hab.1, intern_sound hwf r b hab.2, hs]
@@ -1023,12 +1027,12 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
         split at h
         · rename_i hok
           cases h
-          obtain ⟨hl, hrr, heqs, hso, hro, hmu⟩ := hok
+          obtain ⟨hl, hrr, heqs, hso, hro, hmu, hst, hact⟩ := hok
           have hs := hM.2.2.1 o _ (decl_mem hd)
-            (Nat.lt_of_lt_of_le (Nat.lt_succ_self o) (Nat.le_max_left _ _))
+            (Nat.lt_of_lt_of_le (Nat.lt_succ_self o) (Nat.le_max_left _ _)) hact
           simp only [Model.DeclSat] at hs
           have hrule := hs r (List.mem_of_getElem? hr)
-          have hpv := (premConcls_sound hacc hps).1 (hM.mono (Nat.le_max_right _ _))
+          have hpv := (premConcls_sound hacc hps).1 (hM.mono (Nat.le_max_right _ _) hst)
           simp only
           rw [instP_sound hwf σ ρ μ _ a hl, instP_sound hwf σ ρ μ _ b hrr]
           exact hrule _ _ _ (sortsOk_sound hwf hws hT hso) (restsOk_sound hwf hws hT hro)
@@ -1047,7 +1051,7 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
           split at h
           · rename_i hok
             cases h
-            have hs := hM.2.2.1 o _ (decl_mem hd) (Nat.lt_succ_self o)
+            have hs := hM.2.2.1 o _ (decl_mem hd) (Nat.lt_succ_self o) (Program.active_succ _ o)
             simp only [Model.DeclSat] at hs
             simp only
             rw [internS_sound hwf L a hok.1, internS_sound hwf R b hok.2]
@@ -1165,9 +1169,9 @@ theorem goal_sound {P : Program} {cert : Cert} {C : Ctx} {acc : Array Concl}
       split at hg
       · rename_i c a b hc ha hb
         simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hg
-        obtain ⟨⟨rfl, rfl⟩, hpos⟩ := hg
+        obtain ⟨⟨⟨rfl, rfl⟩, hpos⟩, hst⟩ := hg
         rw [← Ctx.intern_sound hwf' l _ ha, ← Ctx.intern_sound hwf' r _ hb]
-        exact (hall s c hc).1 (hM.mono hpos)
+        exact (hall s c hc).1 (hM.mono hpos hst)
       · cases hg
     · cases hg
   · cases hrun

@@ -115,8 +115,8 @@ def litSorts : List String :=
 
 /-- The sort of literal `a` at a position of sort `exp`: `exp` itself when a
 literal of that spelling can be of that sort, else none; with no expected
-sort, the engine's default for the spelling (`String`, `bool`, `f64` for a
-spelling with a point, else `i64`). -/
+sort, the engine's default for the spelling (`String`, `bool`, `RBig` for a
+fraction, `f64` for a spelling with a point, else `i64`). -/
 def litSort (exp : Option String) (a : String) : Option String :=
   let str := a.startsWith "\""
   let bool := a == "true" || a == "false"
@@ -127,6 +127,7 @@ def litSort (exp : Option String) (a : String) : Option String :=
   | some s => if ok s then some s else none
   | none =>
     if str then some "String" else if bool then some "bool"
+    else if a.contains '/' then some "RBig"
     else if a.contains '.' then some "f64" else some "i64"
 
 /-- The spelling the engine's stream gives the literal `a` of sort `s`: the
@@ -157,6 +158,9 @@ structure Env where
   /-- Each rule not read: its command's offset, its position in the command
   and the reason. -/
   skipped : List (Nat × Nat × String) := []
+  /-- The open `(push)` scopes, innermost first: the offset of each `push`
+  and the names in scope before it. -/
+  scopes : List (Nat × List (String × (Term × String)) × List OpDecl) := []
 
 def Env.op? (E : Env) (f : String) : Option OpDecl := E.ops.find? (·.name == f)
 
@@ -324,7 +328,14 @@ partial def Env.pat (E : Env) (exp : Option String) : SExp → PatM (Pat × Opti
             ps ← counted ps q cnt
             continue
       let (p, _) ← E.pat (argSort d ps.size) x
-      ps := ps.push p
+      -- In a built side, a nested application of the same sequence operator
+      -- gives its arguments: the engine's builder reads them in its place, and
+      -- the operator's associativity makes the two terms equal.
+      match p with
+      | .app g qs =>
+        if (← get).built && d.kind == .assoc && g == f && !qs.isEmpty then ps := ps ++ qs.toArray
+        else ps := ps.push p
+      | _ => ps := ps.push p
     pure (.app f ps.toList, some d.res)
   | _ => throw "a pattern that is no application"
 
@@ -503,7 +514,39 @@ def SNum.sort? (sorts : List (String × String)) : SNum → Option String
   | .count _ => some "i64"
   | .sum _ => some "i64"
   | .cnt _ s => some s
+  | .rows _ => some "i64"
+  | .agg _ _ => none
   | .prim f _ => (primSig f).map (·.2)
+
+/-- What a comprehension or a count ranges over. -/
+def seqSrc : SExp → Option SSrc
+  | .atom x => some (.one x)
+  | .list (.atom f :: xs) =>
+    let names := xs.filterMap fun x => match x with | .atom b => some b | _ => none
+    if names.length != xs.length then none
+    else match f, names with
+      | "zip", _ => some (.zip names)
+      | "concat", _ => some (.concat names)
+      | "union-by", [p, l, u] => some (.unionBy p l u)
+      | "narrow", [c, d, r, a, b, q] => some (.narrow c d r a b q false)
+      | "narrowed", [c, d, r, a, b, q] => some (.narrow c d r a b q true)
+      | _, _ => none
+  | _ => none
+
+/-- The `:when` conditions and the `:let` definitions of a sequence rule's
+tags; `none` with another tag. -/
+def seqTags : List SExp → Option (List SExp × List (String × SExp))
+  | [] => some ([], [])
+  -- `:flatten` says which nodes the engine matches (a nested application
+  -- read through); a binding names the arguments, so the rule's instances are
+  -- the same without it.
+  | .atom ":flatten" :: rest => seqTags rest
+  | .atom ":when" :: .list gs :: rest => (seqTags rest).map fun (g, l) => (gs ++ g, l)
+  | .atom ":let" :: .list ds :: rest =>
+    (ds.mapM fun (d : SExp) => match d with
+      | SExp.list [SExp.atom x, e] => some (x, e)
+      | _ => none).bind fun ds => (seqTags rest).map fun (g, l) => (g, ds ++ l)
+  | _ => none
 
 /-- A value a sequence rule computes: a literal, a scalar, `(count g)`, or a
 primitive, which may be written without its sort (`>=` for `i64::>=`, by its
@@ -522,12 +565,20 @@ partial def Env.seqNum (E : Env) (exp : Option String) : SExp → PatM SNum
         pure (.cnt a (exp.getD "i64"))
       else pure (.var a)
   | .list [.atom "count", .atom g] => pure (.count g)
-  -- `(sum k)`, for the count variable `k` of a filter: recorded as a
-  -- multiplicity variable whose bound names the filter's position.
+  -- The number of rows of an interval operation, of `zip` or of `concat`.
+  | .list [.atom "count", .list src] =>
+    match seqSrc (SExp.list src) with
+    | some src => pure (SNum.rows src)
+    | none => throw "a count of what is no sequence"
+  -- `(sum k)`, for the count variable `k` of a filter (recorded with the
+  -- filter's name); else `min`, `max`, `sum` of a value over the elements.
   | .list [.atom "sum", .atom k] => do
     match (← get).pending.lookup s!"#mult:{k}" with
     | some g => pure (.sum g)
-    | none => throw "a sum of what is no filter's count"
+    | none => pure (.agg "sum" (← E.seqNum exp (.atom k)))
+  | .list [.atom "min", e] => do pure (.agg "min" (← E.seqNum exp e))
+  | .list [.atom "max", e] => do pure (.agg "max" (← E.seqNum exp e))
+  | .list [.atom "sum", e] => do pure (.agg "sum" (← E.seqNum exp e))
   | .list (.atom f :: args) => do
     let first ← match args with
       | x :: _ => E.seqNum none x
@@ -561,7 +612,12 @@ partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
           pure (.val (.cnt a (exp.getD "i64")))
         else pure (.var a)
   | .list [.atom "count", .atom g] => pure (.val (.count g))
-  | .list [.atom "sum", .atom k] => do return .val (← E.seqNum exp (.list [.atom "sum", .atom k]))
+  | .list [.atom "sum", e] => do return .val (← E.seqNum exp (.list [.atom "sum", e]))
+  | .list [.atom "min", e] => do return .val (← E.seqNum exp (.list [.atom "min", e]))
+  | .list [.atom "max", e] => do return .val (← E.seqNum exp (.list [.atom "max", e]))
+  | .list [.atom "count", .list src] => do return .val (← E.seqNum exp (.list [.atom "count", .list src]))
+  | .list [.atom "if", c, a, b] => do
+    return .ite (← E.seqNum (some "bool") c) (← E.seqRhs exp a) (← E.seqRhs exp b)
   | .list (.atom f :: args) => do
     if (E.op? f).isNone then
       -- A primitive: the literal it computes.
@@ -612,13 +668,7 @@ partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
               pure (bs.filterMap (fun x => match x with | .atom b => some b | _ => none), none)
           if let some k := kv then
             modify fun st => { st with pending := (s!"#cnt:{k}", "") :: st.pending }
-          let source ← match src with
-            | .atom x => pure (SSrc.one x)
-            | .list (.atom "zip" :: xs) =>
-              pure (SSrc.zip (xs.filterMap fun x => match x with | .atom b => some b | _ => none))
-            | .list (.atom "concat" :: xs) =>
-              pure (SSrc.concat (xs.filterMap fun x => match x with | .atom b => some b | _ => none))
-            | _ => throw "a comprehension's source"
+          let some source := seqSrc src | throw "a comprehension's source"
           let guard ← match tail with
             | [] => pure none
             | [.atom "if", c] => pure (some (← E.seqNum (some "bool") c))
@@ -665,27 +715,29 @@ def isSeqLhs : SExp → Bool
     | _ => false
   | _ => false
 
-/-- Whether a right side holds a comprehension. -/
+/-- Whether a right side holds a comprehension, or an argument with a
+computed count (`t:(u64::- k 1)`, written as the atom `:` before the count). -/
 partial def hasComp : SExp → Bool
-  | .atom a => a == "..[" || a == "..{"
+  | .atom a => a == "..[" || a == "..{" || a == ":"
   | .list xs => xs.any hasComp
 
 /-- The sequence rule of a `rewrite` whose left side has a filter. -/
 def Env.seqRule (E : Env) (lhs rhs : SExp) (tags : List SExp) : Except String SeqRule :=
-  match tags with
-  | [] | [.atom ":when", .list _] => (go.run {}).map (·.1)
-  | _ => .error "a sequence rule with a tag other than :when"
+  match seqTags tags with
+  | some (gs, ls) => ((go gs ls).run {}).map (·.1)
+  | none => .error "a sequence rule with a tag other than :when and :let"
 where
-  go : PatM SeqRule := do
+  go (gs : List SExp) (ls : List (String × SExp)) : PatM SeqRule := do
     if !isSeqLhs lhs then
       -- No filter: the left side is a pattern, the right side has a comprehension.
       let (l, sl) ← E.pat none lhs
       let r ← E.seqRhs sl rhs
       let mut guards : Array SNum := #[]
-      if let [_, .list gs] := tags then
-        for g in gs do guards := guards.push (← E.seqNum (some "bool") g)
+      for g in gs do guards := guards.push (← E.seqNum (some "bool") g)
+      let mut lets : Array (String × SNum) := #[]
+      for (x, e) in ls do lets := lets.push (x, ← E.seqNum none e)
       return { op := "", items := [], lhs := some l, rhs := r, guards := guards.toList,
-               sorts := (← get).sorts }
+               lets := lets.toList, sorts := (← get).sorts }
     let .list (.atom f :: items) := lhs | throw "a sequence rule's left side"
     let some d := E.op? f | throw s!"unknown operator {f}"
     unless d.kind.isAssoc do throw "a filter under an operator that takes no sequence"
@@ -719,10 +771,11 @@ where
       | _ => throw "a sequence rule's item"
     let r ← E.seqRhs (some d.res) rhs
     let mut guards : Array SNum := #[]
-    if let [_, .list gs] := tags then
-      for g in gs do guards := guards.push (← E.seqNum (some "bool") g)
-    return { op := f, items := out.toList, rhs := r, guards := guards.toList, least := least.toList,
-             sorts := (← get).sorts }
+    for g in gs do guards := guards.push (← E.seqNum (some "bool") g)
+    let mut lets : Array (String × SNum) := #[]
+    for (x, e) in ls do lets := lets.push (x, ← E.seqNum none e)
+    return { op := f, items := out.toList, rhs := r, guards := guards.toList, lets := lets.toList,
+             least := least.toList, sorts := (← get).sorts }
 
 /-- The operators applied in a pattern. -/
 def Pat.heads : Pat → List String
@@ -819,8 +872,17 @@ def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Prog
               { P with decls := P.decls ++ [(o, .seq (rs.map fun r => r.toOption))] })
     else
     return rules E P o (E.ruleRules body actions)
-  | .list (.atom "push" :: _) | .list (.atom "pop" :: _) | .list (.atom "include" :: _) =>
-    .error "push, pop and include are not supported"
+  -- `(push)` opens a scope; `(pop)` closes the innermost one: the names
+  -- declared in it go out of scope, and its commands are retired for what
+  -- follows (`Program.pops`).
+  | .list (.atom "push" :: _) =>
+    return ({ E with scopes := (o, E.globals, E.ops) :: E.scopes }, P)
+  | .list (.atom "pop" :: _) =>
+    match E.scopes with
+    | (s, gs, os) :: rest =>
+      return ({ E with globals := gs, ops := os, scopes := rest }, { P with pops := P.pops ++ [(s, o)] })
+    | [] => .error "a pop with no push"
+  | .list (.atom "include" :: _) => .error "include is not supported"
   | _ => return (E, P)
 
 /-- The program, and each rule the reader did not read: its command's offset,

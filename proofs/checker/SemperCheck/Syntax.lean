@@ -133,6 +133,22 @@ inductive SItem where
   | one (p : Pat)
   deriving Repr, Inhabited
 
+/-- What a comprehension ranges over: one sequence (a filter's elements, a
+column, a rest sequence), several side by side (to the shortest), several
+one after the other, or the rows of an interval operation. -/
+inductive SSrc where
+  | one (x : String)
+  | zip (xs : List String)
+  | concat (xs : List String)
+  /-- `(union-by p l u)`: per value of column `p`, the union of the integer
+  intervals `[l, u]` of its elements; a row is the value and one interval. -/
+  | unionBy (p l u : String)
+  /-- `(narrow c d r a b q)`: per element of `r`, its interval `[c, d]`
+  shrunk past the intervals `[a, b]` of the elements whose `q` is that `r`;
+  with `changed`, only the rows whose interval changed (`narrowed`). -/
+  | narrow (c d r a b q : String) (changed : Bool)
+  deriving Repr, Inhabited
+
 /-- A value a sequence rule computes from its binding: a literal, a scalar
 bound to a literal, the number of elements of a filter, or a primitive
 applied to such values. -/
@@ -145,16 +161,12 @@ inductive SNum where
   /-- A count (of a multiplicity variable, or of a comprehension's element)
   as a literal of sort `sort`. -/
   | cnt (x : String) (sort : String)
+  /-- The number of rows of `src`. -/
+  | rows (src : SSrc)
+  /-- `e` at each element of the filters, folded by `op` (`min`, `max`,
+  `sum`). -/
+  | agg (op : String) (e : SNum)
   | prim (f : String) (args : List SNum)
-  deriving Repr, Inhabited
-
-/-- What a comprehension ranges over: one sequence (a filter's elements, a
-column, a rest sequence), several side by side (to the shortest), or several
-one after the other. -/
-inductive SSrc where
-  | one (x : String)
-  | zip (xs : List String)
-  | concat (xs : List String)
   deriving Repr, Inhabited
 
 mutual
@@ -166,6 +178,8 @@ inductive SRhs where
   | app (f : String) (args : List SArg)
   /-- The literal a computed value is. -/
   | val (e : SNum)
+  /-- `a` when `c` computes `true`, else `b`. -/
+  | ite (c : SNum) (a b : SRhs)
   deriving Repr, Inhabited
 
 /-- An argument of a right-side application: one term, or the splice `..x`
@@ -199,6 +213,8 @@ structure SeqRule where
   rhs : SRhs
   /-- The `:when` conditions: each computes `true` for the rule to apply. -/
   guards : List SNum := []
+  /-- The `:let` names, in order: each is the literal its value is. -/
+  lets : List (String × SNum) := []
   /-- Per filter with a count `:k>=n`: the least count of each of its
   elements. -/
   least : List (String × Nat) := []
@@ -243,7 +259,20 @@ structure Program where
   /-- Each command with the byte offset of its top-level form; offsets
   increase along the list. -/
   decls : List (Nat × Decl)
+  /-- Each `(push)` with the `(pop)` that closes it, by their offsets: the
+  commands between the two are retired once the `pop` is passed. -/
+  pops : List (Nat × Nat) := []
   deriving Repr, Inhabited
+
+/-- The command at `o` is in force at offset `p`: no scope that holds `o` was
+closed before `p`. -/
+def Program.active (P : Program) (o p : Nat) : Bool :=
+  P.pops.all fun se => !(decide (se.1 < o) && decide (o < se.2) && decide (se.2 < p))
+
+/-- Every command in force at `q` is in force at `p`: no scope that holds `q`
+was closed before `p`. -/
+def Program.stays (P : Program) (q p : Nat) : Bool :=
+  P.pops.all fun se => !(decide (se.1 < q) && decide (q ≤ se.2) && decide (se.2 < p))
 
 /-- The first declaration of `f`. -/
 def Program.opDecl? (P : Program) (f : String) : Option OpDecl :=

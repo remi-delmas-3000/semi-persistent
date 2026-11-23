@@ -291,6 +291,20 @@ end
 
 mutual
 
+/-- As `eval`, with no nested application read through: the node of a term
+whose nested applications are `let` names, each standing for its class. -/
+def evalN (S : St P) : Term → Option Nat
+  | .lit s v => eval S (.lit s v)
+  | .app f args => (evalNs S args).bind fun ids => S.spell[(f, ids)]?
+
+def evalNs (S : St P) : List Term → Option (List Nat)
+  | [] => some []
+  | t :: ts => (evalN S t).bind fun a => (evalNs S ts).map (a :: ·)
+
+end
+
+mutual
+
 /-- Node `n`'s definition is the term `t`, argument for argument. -/
 def denotes (S : St P) (n : Nat) : Term → Bool
   | .lit s v => match S.defOf n with
@@ -1397,59 +1411,6 @@ def latticeP (S : St P) (x y : Nat) (pos neg : List (Nat × Nat)) : St P × Opti
     return (S1, q)
   | (S1, none) => return (S1, none)
 
-/-- `x = y` when node `x`, an application of `f`, holds `g(c)` and what `c` is
-read as (`c` itself, or the arguments of `c` when it is an application of
-`f`): `x` is `f(f(c, g(c)), rest)` read through, `f(c, g(c))` is the unit by
-the `inv` step, and `f(unit, rest)` is `y` by the unit law. -/
-def invDirect (S : St P) (f : String) (x y : Nat) : St P × Pf := Id.run do
-  let (some (.app _ _), some u) := (S.defOf x, S.unit f) | return (S, none)
-  let args := kview S f x
-  let g := (S.prog.opDecl? f).bind (·.inverse)
-  if !(S.prog.kind f == .ac || S.prog.kind f == .aci) then return (S, none)
-  for q in args do
-    let some (.app h [c]) := S.defOf q | continue
-    if some h != g then continue
-    let take (cs : List Nat) : Option (List Nat) :=
-      cs.foldl (fun (r : Option (List Nat)) k =>
-        r.bind fun r => if r.contains k then some (r.erase k) else none) (some (args.erase q))
-    let open_ := match S.defOf c with
-      | some (.app h' _) => if h' == f then take (kview S f c) else none
-      | _ => none
-    let some rest := (take [c]).orElse fun _ => open_ | continue
-    let (S, pn) := appNode S f [c, q]
-    let some pn := pn | return (S, none)
-    let (S, s) := emit S (.inv f pn c q u) pn u
-    if rest.isEmpty then
-      -- `x` is `f(c, g(c))` read through.
-      let (S, p1) : St P × Pf := if pn == x then (S, some none) else
-        (let (S, t) := emit S (.cong f x pn []) x pn; (S, some (some t)))
-      let (S, p) := transP S x u p1 (some (some s))
-      let (S, p3) := eqP S u y
-      if p3.isNone then return (S, none)
-      return transP S x y p p3
-    let (S, mid) := appNode S f (pn :: rest)
-    let (S, low) := appNode S f (u :: rest)
-    let (some mid, some low) := (mid, low) | return (S, none)
-    let (S, p1) : St P × Pf := if mid == x then (S, some none) else
-      (let (S, t) := emit S (.cong f x mid []) x mid; (S, some (some t)))
-    let (S, t2) := emit S (.cong f mid low [s]) mid low
-    let (S, p3) := congStepL S f low y
-    if p3.isNone then return (S, none)
-    let (S, p) := transP S x low p1 (some (some t2))
-    return transP S x y p p3
-  return (S, none)
-
-/-- The merge of `a` and `b` by `invDirect`, from either node: for a
-completion merge whose derivation gives no kernel step. -/
-def invTry (S : St P) (a b : Nat) : St P :=
-  let try_ (S : St P) (x y : Nat) : St P × Pf :=
-    match S.defOf x with
-    | some (.app f _) => invDirect S f x y
-    | _ => (S, none)
-  let (S, p) := try_ S a b
-  let (S, p) := if p.isSome then (S, p) else (let (S, q) := try_ S b a; symmP S b a q)
-  S.mergeBy a b p
-
 /-- `n = other` for a node `n` of the sequence operator `f` whose arguments,
 read through nested applications, hold those of `l` as a run: `n` is
 `f(before, l, after)` read through, which is `f(before, r, after)` argument by
@@ -1701,6 +1662,94 @@ def plainArgs (S : St P) (f : String) (x : Nat) : St P × Option Nat :=
   | some (.app g cs) => if g == f && !cs.isEmpty then monoNode S f cs else (S, some x)
   | _ => (S, some x)
 
+/-- `x = y` when node `x`, an application of `f`, holds `g(c)` and what `c` is
+read as (`c` itself, or the arguments of `c` when it is an application of
+`f`): `x` is `f(f(c, g(c)), rest)` read through, `f(c, g(c))` is the unit by
+the `inv` step, and `f(unit, rest)` is `y` by the unit law. -/
+def invDirect (S : St P) (f : String) (x y : Nat) : St P × Pf := Id.run do
+  let (some (.app _ _), some u) := (S.defOf x, S.unit f) | return (S, none)
+  let args := kview S f x
+  let g := (S.prog.opDecl? f).bind (·.inverse)
+  if !(S.prog.kind f == .ac || S.prog.kind f == .aci) then return (S, none)
+  for q in args do
+    let some (.app h [c]) := S.defOf q | continue
+    if some h != g then continue
+    let take (cs : List Nat) : Option (List Nat) :=
+      cs.foldl (fun (r : Option (List Nat)) k =>
+        r.bind fun r => if r.contains k then some (r.erase k) else none) (some (args.erase q))
+    let open_ := match S.defOf c with
+      | some (.app h' _) => if h' == f then take (kview S f c) else none
+      | _ => none
+    let some rest := (take [c]).orElse fun _ => open_ | continue
+    let (S, pn) := appNode S f [c, q]
+    let some pn := pn | return (S, none)
+    let (S, s) := emit S (.inv f pn c q u) pn u
+    if rest.isEmpty then
+      -- `x` is `f(c, g(c))` read through.
+      let (S, p1) : St P × Pf := if pn == x then (S, some none) else
+        (let (S, t) := emit S (.cong f x pn []) x pn; (S, some (some t)))
+      let (S, p) := transP S x u p1 (some (some s))
+      let (S, p3) := eqP S u y
+      if p3.isNone then return (S, none)
+      return transP S x y p p3
+    let (S, mid) := appNode S f (pn :: rest)
+    let (S, low) := appNode S f (u :: rest)
+    let (some mid, some low) := (mid, low) | return (S, none)
+    let (S, p1) : St P × Pf := if mid == x then (S, some none) else
+      (let (S, t) := emit S (.cong f x mid []) x mid; (S, some (some t)))
+    let (S, t2) := emit S (.cong f mid low [s]) mid low
+    let (S, p3) := congStepL S f low y
+    if p3.isNone then return (S, none)
+    let (S, p) := transP S x low p1 (some (some t2))
+    return transP S x y p p3
+  -- The same on classes: an argument that is an application of `f` stands for
+  -- its class, named by a plain member; an argument in the class of an
+  -- inverse application `g(c)`, with another argument in `c`'s class, cancels.
+  let (S, xp) := plainArgs S f x
+  let some xp := xp | return (S, none)
+  let cls : List Nat := match S.defOf xp with
+    | some (.app _ cs) => cs
+    | _ => []
+  for a in cls do
+    for q in (S.invIn.getD (S.fd a) []) do
+      let some (.app h [c]) := S.defOf q | continue
+      if some h != g then continue
+      let some b := (cls.erase a).find? (fun b => S.fd b == S.fd c) | continue
+      let rest : List Nat := (cls.erase a).erase b
+      let (S, pn) := appNode S f [c, q]
+      let some pn := pn | return (S, none)
+      let (S, s) := emit S (.inv f pn c q u) pn u
+      let (S, p0) : St P × Pf := if xp == x then (S, some none) else congStep S f x xp
+      let (S, mid, low, pml) : St P × Nat × Nat × Pf :=
+        if rest.isEmpty then (S, pn, u, some (some s))
+        else
+          match appNode S f (pn :: rest) with
+          | (S, some mid) =>
+            match appNode S f (u :: rest) with
+            | (S, some low) =>
+              let (S, t2) := emit S (.cong f mid low [s]) mid low
+              (S, mid, low, some (some t2))
+            | (S, none) => (S, mid, mid, none)
+          | (S, none) => (S, pn, pn, none)
+      let (S, p1) := congStepL S f xp mid
+      let (S, p3) := congStepL S f low y
+      if p0.isNone || p1.isNone || pml.isNone || p3.isNone then return (S, none)
+      let (S, p) := transP S x mid p0 p1
+      let (S, p) := transP S x low p pml
+      return transP S x y p p3
+  return (S, none)
+
+/-- The merge of `a` and `b` by `invDirect`, from either node: for a
+completion merge whose derivation gives no kernel step. -/
+def invTry (S : St P) (a b : Nat) : St P :=
+  let try_ (S : St P) (x y : Nat) : St P × Pf :=
+    match S.defOf x with
+    | some (.app f _) => invDirect S f x y
+    | _ => (S, none)
+  let (S, p) := try_ S a b
+  let (S, p) := if p.isSome then (S, p) else (let (S, q) := try_ S b a; symmP S b a q)
+  S.mergeBy a b p
+
 /-- The kernel steps of a derivation: the proof that its start is its
 target, and the start's node. Each rewrite of `q` copies of `l` by `r` is
 three `cong` steps: the monomial is `f(l, .., l, rest)` by `f`'s laws, which
@@ -1789,6 +1838,18 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
       match monoNode S f m with
       | (S', some t) => S := S'; pure t
       | (S', none) => return (S', none)
+  -- A target node whose arguments are applications of `f`, each standing for
+  -- its class: the hop goes to its copy with plain arguments, which is the
+  -- target argument by argument.
+  if let .inl _ := c.target then
+    let (S', t') := plainArgs S f target
+    S := S'
+    if let some t' := t' then
+      if t' != target then
+        let (S', pt) := congStep S f t' target
+        S := S'.mergeBy t' target pt
+        let (S', pf') := hop S cur t' pf
+        S := S'; pf := pf'; cur := t'
   let (S', pf') := hop S cur target pf
   return (S', some (start, target, pf'))
 
@@ -1796,6 +1857,15 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
 program writes it (its arguments' own terms as arguments) is node `i`. -/
 def termLine (S : St P) (i : Nat) (f : String) (cs : List Nat) : St P := Id.run do
   let done (S : St P) : St P := { S with splices := [], opens := [], regroups := [], inverses := [] }
+  -- The application to no argument is the unit, by the `unit` step.
+  let S := match cs, S.unit f with
+    | [], some u =>
+      match intern S (Node.app f []) with
+      | (S, some w) =>
+        if S.fd w == S.fd u then S
+        else let (S, st) := emit S (.unit f w u) w u; S.mergeBy w u (some (some st))
+      | (S, none) => S
+    | _, _ => S
   let ws := cs.map fun c => ((S.lastTerm[c]?).map (·.1)).getD c
   let (dW, dT) := (Node.app f ws, Node.app f cs)
   let (S, w) ← match intern S dW with
@@ -2086,6 +2156,12 @@ def instOf (f : String) (ic : List Nat) (n : Nat) (k : Option Nat := none) : Wal
   match i with
   | some i =>
     withS fun S =>
+      -- The application to no argument is the unit, by the `unit` step.
+      let S := match ic, S.unit f with
+        | [], some u =>
+          if S.fd i == S.fd u then S
+          else let (S, st) := emit S (.unit f i u) i u; S.mergeBy i u (some (some st))
+        | _, _ => S
       let (S, p) := instProof S f i n k
       (S.mergeBy i n p, i)
   | none => throw "rule: instance ill-sorted"
@@ -2107,9 +2183,11 @@ def groundNode (q : Pat) : WalkM P (Option Nat) := do
   -- The lines come arguments first: the next one is for `q`'s first
   -- innermost application or literal.
   match q, w.atoms with
-  | .app _ _, (_, h, cs, _) :: _ =>
+  | .app f ps, (_, h, cs, _) :: _ =>
     let (g, k) := firstLine q
-    if g == h && k.all (· == units cs) then pure none
+    -- The line is for `q`'s first inner application, or for `q` itself when
+    -- its ground arguments are `let` names, which have no line.
+    if (g == h && k.all (· == units cs)) || (f == h && (fixedArgs ps).all (· == units cs)) then pure none
     else pure ((Pat.toTerm? q).bind (eval w.S))
   | .app _ _, [] => pure ((Pat.toTerm? q).bind (eval w.S))
   | _, _ => pure none
@@ -2157,15 +2235,15 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
           | some v => if v != cnt then throw "rule: multiplicity variable bound twice"
           | none => μ := (k, cnt) :: μ
           pure (q, cnt)
-        | .rep _ _, [] => throw "rule: argument differs"
+        | .rep _ _, [] => throw "rule: argument differs | no field for a repeated argument"
         | .times q k, _ => pure (q, k)
         | q, _ => pure (q, 1)
       let c ← match fixed with
         | (c, cnt) :: rest =>
-          if cnt < times then throw "rule: argument differs"
+          if cnt < times then throw "rule: argument differs | a field with fewer copies than the argument's count"
           fixed := if cnt == times then rest else (c, cnt - times) :: rest
           pure c
-        | [] => throw "rule: argument differs"
+        | [] => throw "rule: argument differs | no field left"
       let inst ← match q, o with
         | .var x, _ =>
           match σ.lookup x with
@@ -2176,9 +2254,9 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
             σ := (x, c) :: σ
             pure c
         | _, some (m, i) =>
-          if S.fd m != S.fd c then throw "rule: argument differs"
+          if S.fd m != S.fd c then throw s!"rule: argument differs | the argument's match {m} is not in the field's class {c}"
           pure i
-        | _, none => throw "rule: argument differs"
+        | _, none => throw "rule: argument differs | an argument pattern with no match"
       for _ in [0:times] do
         bound := bound.push c
         ic := ic.push inst
@@ -2568,17 +2646,33 @@ end
 mutual
 
 /-- The applications in `t` of a sequence operator to one argument, each with
-that argument: the engine builds the argument in the application's place. -/
+that argument (the engine builds the argument in the application's place),
+and those to no argument, which the engine builds as the unit. -/
 def singlesS (isSeq : String → Bool) : STm → List (STm × STm)
   | .atom _ => []
   | .app f args =>
     (match args with
       | [x] => if isSeq f then [(STm.app f [x], x)] else []
+      -- No argument: listed with itself, for the unit.
+      | [] => if isSeq f then [(STm.app f [], STm.app f [])] else []
       | _ => []) ++ singlesSs isSeq args
 
 def singlesSs (isSeq : String → Bool) : List STm → List (STm × STm)
   | [] => []
   | t :: ts => singlesS isSeq t ++ singlesSs isSeq ts
+
+end
+
+mutual
+
+/-- A program term as a term over atoms. -/
+def termS : Term → STm
+  | .lit s v => .atom (.lit s v)
+  | .app f args => .app f (termsS args)
+
+def termsS : List Term → List STm
+  | [] => []
+  | t :: ts => termS t :: termsS ts
 
 end
 
@@ -2677,8 +2771,14 @@ def seqFinish (S : St P) (od j : Nat) (r : SeqRule) (B : SBind) (members : List 
     let (S1, ti) := addS S t
     let (S1, xi) := addS S1 x
     S := S1
-    if let (some ti, some xi, .app f _) := (ti, xi, t) then
-      if S.fd ti != S.fd xi then
+    if let (some ti, some xi, .app f as) := (ti, xi, t) then
+      if as.isEmpty then
+        -- The application to no argument is the unit, by the `unit` step.
+        if let some u := S.unit f then
+          if S.fd ti != S.fd u then
+            let (S1, st) := emit S (.unit f ti u) ti u
+            S := S1.mergeBy ti u (some (some st))
+      else if S.fd ti != S.fd xi then
         let (S1, pf) := congStepL S f ti xi
         S := S1.mergeBy ti xi pf
   let f := match L with
@@ -2688,6 +2788,30 @@ def seqFinish (S : St P) (od j : Nat) (r : SeqRule) (B : SBind) (members : List 
   let (S1, p2) : St P × Pf := match T with
     | .app g _ => congStepL S1 g b new
     | .atom _ => eqP S1 b new
+  -- A `:flatten` match that read one root argument through a member of its
+  -- class: the member is the application of the bound arguments no other root
+  -- argument answers, built here and found in that argument's class. The root
+  -- is then the root with the member in the argument's place, argument by
+  -- argument, which is the left term under the operator's laws.
+  let (S1, p1) : St P × Pf := Id.run do
+    if p1.isSome then return (S1, p1)
+    let S := S1
+    let (some (.app _ rootArgs), some (.app _ bound)) := (S.defOf root, S.defOf a) | return (S, none)
+    let (opened, left) := rootArgs.foldl (fun (acc : List Nat × List Nat) r =>
+      match acc.2.find? (fun x => S.fd x == S.fd r) with
+      | some x => (acc.1, acc.2.erase x)
+      | none => (acc.1 ++ [r], acc.2)) ([], bound)
+    let [o] := opened | return (S, none)
+    if left.isEmpty then return (S, none)
+    let (S, m) := appNode S f left
+    let some m := m | return (S, none)
+    if S.fd m != S.fd o then return (S, none)
+    let (S, root2) := appNode S f (rootArgs.map fun r => if r == o then m else r)
+    let some root2 := root2 | return (S, none)
+    let (S, pa) := congStep S f root root2
+    let (S, pb) := congStepL S f root2 a
+    if pa.isNone || pb.isNone then return (S, none)
+    transP S root a pa pb
   if p1.isNone then return S1.fail "sequence rule: left side is not the root node"
   if p2.isNone then return S1.fail "sequence rule: right side is not the built node"
   let (S1, q) := transP S1 root b p1 (some (some st))
@@ -2850,6 +2974,26 @@ def stepCore (S : St P) (line : String) : St P :=
         let (S, p) := if p.isSome then (S, p) else invDirect S f a b
         let (S, p) := if p.isSome then (S, p) else
           (let (S, q) := invDirect S f b a; symmP S b a q)
+        -- An argument that is itself an application of `f` and stands for its
+        -- class, which the line's splice witness reads through another
+        -- member: the node with the member in the argument's place, argument
+        -- by argument, is the other node under `f`'s laws.
+        let viaSplice (S : St P) (x y : Nat) : St P × Pf :=
+          match S.defOf x with
+          | some (.app _ xs) =>
+            match S.splices.find? (fun (cm : Nat × Nat) => xs.any fun a => S.fd a == S.fd cm.1 && a != cm.2) with
+            | some (c, m) =>
+              match appNode S f (xs.map fun a => if S.fd a == S.fd c then m else a) with
+              | (S, some x2) =>
+                let (S, p1) := congStep S f x x2
+                let (S, p2) := congStepL S f x2 y
+                if p1.isNone || p2.isNone then (S, none) else transP S x y p1 p2
+              | (S, none) => (S, none)
+            | none => (S, none)
+          | _ => (S, none)
+        let (S, p) := if p.isSome then (S, p) else viaSplice S a b
+        let (S, p) := if p.isSome then (S, p) else
+          (let (S, q) := viaSplice S b a; symmP S b a q)
         S.mergeBy a b p
       else match S.defOf a, S.defOf b with
         | some (.app _ _), _ | _, some (.app _ _) => S.fail "law: arguments differ"
@@ -2935,7 +3079,10 @@ def stepCore (S : St P) (line : String) : St P :=
     | some o, some a, some b =>
       match S.declAt[o]? with
       | some (.goal l r) =>
-        if eval S l == some a && eval S r == some b then
+        -- A term's node, with nested applications read through (as written
+        -- in place) or not (as `let` names).
+        let is (t : Term) (n : Nat) : Bool := eval S t == some n || evalN S t == some n
+        if is l a && is r b then
           if S.fd a == S.fd b then
             let S := { S with proved := o :: S.proved }
             -- The kernel's goal step: left term = `a` = `b` = right term.
@@ -2951,7 +3098,43 @@ def stepCore (S : St P) (line : String) : St P :=
               | (S, none) => S
             | (S, none) => S
           else S.fail "goal: not in one class"
-        else S.fail "goal: its terms differ"
+        else
+          -- The stream's nodes are not what the terms evaluate to as read
+          -- here (a nested application written in place beside one named by
+          -- a `let`). The kernel's goal step needs the terms only: each term,
+          -- as the kernel interns it, is the stream's node under its
+          -- operator's laws, whatever the grouping; the two nodes are in one
+          -- class.
+          if S.fd a != S.fd b then S.fail "goal: not in one class"
+          else
+            let side (S : St P) (t : Term) (n : Nat) : St P × Option (Nat × Pf) :=
+              -- The term's node, added to the table when it is not there.
+              -- Only under a sequence operator can the two readings differ:
+              -- elsewhere the stream's node is the term's or the line is wrong.
+              match t with
+              | .app f _ =>
+                if !(S.prog.kind f).isAssoc then (S, none)
+                else
+                  match addS S (termS t) with
+                  | (S, some tn) => let (S, p) := congStepL S f tn n; (S, some (tn, p))
+                  | (S, none) => (S, none)
+              | .lit _ _ => (S, none)
+            match side S l a with
+            | (S, some (tl, pl)) =>
+              match side S r b with
+              | (S, some (tr, pr)) =>
+                if pl.isNone || pr.isNone then S.fail "goal: its terms differ"
+                else
+                  let S := { S with proved := o :: S.proved }
+                  let (S, q) := eqP S a b
+                  let (S, q) := transP S tl b pl q
+                  let (S, pr') := symmP S tr b pr
+                  let (S, q) := transP S tl tr q pr'
+                  match stepOf S tl q with
+                  | (S, some st) => (S.withCore fun c => c.goal o l r st).1
+                  | (S, none) => S
+              | (S, none) => S.fail "goal: its terms differ"
+            | (S, none) => S.fail "goal: its terms differ"
       | _ => S.fail "goal: no such command"
     | _, _, _ => S.fail "goal: unreadable"
   -- A cancellative operator's lattice merge, with the combination of node
@@ -3050,10 +3233,12 @@ def stepCore (S : St P) (line : String) : St P :=
                 | (S, some st) =>
                   let (S, c) := emit S (.cancel f st nl nr ng) nl nr
                   let S := S.mergeBy nl nr (some (some c))
-                  let (S, _) := emitChain S ca
-                  let (S, _) := emitChain S cb
+                  let (S, r1) := emitChain S ca
+                  let (S, r2) := emitChain S cb
                   let (S, q) := eqP S a b
-                  S.mergeBy a b q
+                  if q.isNone then
+                    S.fail s!"completion: sides do not join after the cancellation | kept {nl} {nr}, lost {ng}, chains {r1.map fun x => (x.1, x.2.1, x.2.2.isSome)} {r2.map fun x => (x.1, x.2.1, x.2.2.isSome)}, classes of a b {S.fd a} {S.fd b}, of kept {S.fd nl} {S.fd nr}, of chain ends {r1.map fun x => S.fd x.2.1} {r2.map fun x => S.fd x.2.1}, left chain first {ca.first} peak {ca.peak} steps {ca.steps.toList.map fun st => (st.l, st.r, st.q, st.rest, st.after, st.atom)}, defs {(ca.steps.toList.map fun st => (repr (S.defOf st.l), repr (S.defOf st.r)))}, left {left} right {right} gone {gone}"
+                  else S.mergeBy a b q
                 | (S, none) => S.merge a b
               | _, _ => S.merge a b
           | _, _, _ => S.merge a b

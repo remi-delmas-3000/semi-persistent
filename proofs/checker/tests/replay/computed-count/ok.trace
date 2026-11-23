@@ -1,0 +1,101 @@
+l 0 String "x"
+n 1 V 0
+t 1 V 0
+l 2 String "y"
+n 3 V 2
+t 3 V 2
+n 4 Add 1 3
+t 4 Add 1 3
+l 5 String "z"
+n 6 V 5
+t 6 V 5
+n 7 Mul 4:2 6
+t 7 Mul 4 4 6
+l 8 String "w"
+n 9 V 8
+t 9 V 8
+n 10 Mul 4 9
+t 10 Mul 4 9
+n 11 Mul 1 4 6
+n 12 Add 3
+w 12 3
+n 13 Mul 3 4 6
+n 14 Mul 12 4 6
+w 14 13
+n 15 Add 11 13
+n 16 Add 11 14
+w 16 15
+r 672 w
+e 4 Add 1 [ 3 ]
+e 7 Mul 4:2 [ 6 ]
+b 4 11 12 4 14 16
+m 0 7 16
+n 17 Mul 1 9
+n 18 Mul 3 9
+n 19 Mul 12 9
+w 19 18
+n 20 Add 17 18
+n 21 Add 17 19
+w 21 20
+r 672 w
+e 4 Add 1 [ 3 ]
+e 10 Mul 4 [ 9 ]
+b 17 12 19 21
+m 0 10 21
+n 22 Add 1
+w 22 1
+n 23 Mul 22 4 6
+w 23 11
+n 24 Add 13 23
+w 24 15
+n 25 Mul 22 9
+w 25 17
+n 26 Add 18 25
+w 26 20
+n 27 Mul 1:2 6
+n 28 Mul 1 3 6
+n 29 Mul 12 1 6
+w 29 28
+n 30 Add 27 28
+n 31 Add 27 29
+w 31 30
+r 672 w
+e 4 Add 1 [ 3 ]
+e 11 Mul 4 [ 1 6 ]
+b 27 12 29 31
+m 0 11 31
+n 32 Mul 3:2 6
+n 33 Mul 12 3 6
+w 33 32
+n 34 Add 28 32
+n 35 Add 28 33
+w 35 34
+r 672 w
+e 4 Add 1 [ 3 ]
+e 13 Mul 4 [ 3 6 ]
+b 28 12 33 35
+m 0 13 35
+n 36 Mul 22 1 6
+w 36 27
+n 37 Add 28 36
+w 37 30
+n 38 Mul 22 3 6
+w 38 28
+n 39 Add 32 38
+w 39 34
+t 1 V 0
+t 6 V 5
+t 11 Mul 1 4 6
+t 3 V 2
+t 6 V 5
+t 13 Mul 3 4 6
+t 15 Add 11 13
+g 990 7 15
+t 1 V 0
+t 9 V 8
+t 17 Mul 1 9
+t 3 V 2
+t 9 V 8
+t 18 Mul 3 9
+t 20 Add 17 18
+g 1057 10 20

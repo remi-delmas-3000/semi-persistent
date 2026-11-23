@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types bignum --trace` writes for `program.egg`.
+`bad.trace` lacks lines 15 to 19: the `rpop` that restores the state at the `(pop)`, and the union and the congruence after it. The second `check-eq` is then in one class only through the union made inside the scope, which the `(pop)` retired: the kernel does not accept a proof that cites it for a goal after the `(pop)`.

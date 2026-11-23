@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types machine --trace` writes for `program.egg`, whose `:flatten` rule reads one argument of the root through a member of its class.
+`bad.trace` differs in line 52: the `qn` line gives the third element the value node 3 instead of node 5 for `p`, so the member the replay builds from the binding is not in the argument's class.

@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types machine --trace` writes for `program.egg`.
+`bad.trace` differs in line 30: the `e` line gives the multiplicity variable the count 3 instead of 2, so the counts the rule computes from it build another term.

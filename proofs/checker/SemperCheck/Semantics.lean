@@ -140,19 +140,42 @@ def DeclSat : Decl → Prop
 
 /-- `M` satisfies the signatures and laws of `P`'s operators, interprets each
 literal of a literal sort in that sort, satisfies every command of `P` that
-starts before offset `p`, and computes each primitive on literals as
-`primOk` says. -/
+starts before offset `p` and is in force there (no `pop` before `p` closed a
+scope that holds it), and computes each primitive on literals as `primOk`
+says. -/
 def Models (P : Program) (p : Nat) : Prop :=
   (∀ d ∈ P.ops, M.OpTyped d ∧ M.OpSat d) ∧
   (∀ s v, s ∈ P.litSorts → M.dom s (M.lit s v)) ∧
-  (∀ o d, (o, d) ∈ P.decls → o < p → M.DeclSat d) ∧
+  (∀ o d, (o, d) ∈ P.decls → o < p → P.active o p = true → M.DeclSat d) ∧
   -- A primitive applied to literals is the literal it computes (`Prim.lean`).
   ∀ f args out, primOk f args out = true →
     M.app f (args.map fun a => M.lit a.1 a.2) = M.lit out.1 out.2
 
-theorem Models.mono {M : Model} {P : Program} {p q : Nat} (h : M.Models P p) (hq : q ≤ p) :
-    M.Models P q :=
-  ⟨h.1, h.2.1, fun o d hd ho => h.2.2.1 o d hd (Nat.lt_of_lt_of_le ho hq), h.2.2.2⟩
+/-- A command in force at `q` is in force at `p ≥ q`, when no scope that
+holds `q` was closed before `p`. -/
+theorem Program.active_of_stays {P : Program} {o q p : Nat} (ho : o < q)
+    (ha : P.active o q = true) (hs : P.stays q p = true) : P.active o p = true := by
+  unfold Program.active at ha ⊢
+  unfold Program.stays at hs
+  rw [List.all_eq_true] at ha hs ⊢
+  intro se hse
+  have h1 := ha se hse
+  have h2 := hs se hse
+  simp only [Bool.not_eq_true', Bool.and_eq_false_iff, decide_eq_false_iff_not] at h1 h2 ⊢
+  omega
+
+/-- The command at `o` is in force right after it. -/
+theorem Program.active_succ (P : Program) (o : Nat) : P.active o (o + 1) = true := by
+  unfold Program.active
+  rw [List.all_eq_true]
+  intro se _
+  simp only [Bool.not_eq_true', Bool.and_eq_false_iff, decide_eq_false_iff_not]
+  omega
+
+theorem Models.mono {M : Model} {P : Program} {p q : Nat} (h : M.Models P p) (hq : q ≤ p)
+    (hs : P.stays q p = true) : M.Models P q :=
+  ⟨h.1, h.2.1, fun o d hd ho ha =>
+    h.2.2.1 o d hd (Nat.lt_of_lt_of_le ho hq) (Program.active_of_stays ho ha hs), h.2.2.2⟩
 
 end Model
 

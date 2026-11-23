@@ -497,11 +497,11 @@ theorem goal_ok {P : Program} {r : Raw} (h : Ok P r) (o : Nat) (lhs rhs : Term) 
         split at hg
         · rename_i c a b hc ha hb
           simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hg
-          obtain ⟨⟨rfl, rfl⟩, hpos⟩ := hg
+          obtain ⟨⟨⟨rfl, rfl⟩, hpos⟩, hst⟩ := hg
           have hwf : wfNodes (r.ctx P).nodes = true := h.wf
           show M.eval lhs = M.eval rhs
           rw [← Ctx.intern_sound hwf lhs _ ha, ← Ctx.intern_sound hwf rhs _ hb]
-          exact (h.valid M s' c hc).1 (hM.mono hpos)
+          exact (h.valid M s' c hc).1 (hM.mono hpos hst)
         · cases hg
       · cases hg
     · exact h.goals g hg' M hM

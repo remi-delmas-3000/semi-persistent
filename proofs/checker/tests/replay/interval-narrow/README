@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types machine --trace` writes for `program.egg`.
+`bad.trace` differs in line 30: the `qv` line gives the window of the `Global` element the upper bound 1 instead of 3, so the narrowing computes another interval and the rule's terms under the binding are not the root node and the built node.

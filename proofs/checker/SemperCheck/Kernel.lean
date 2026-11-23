@@ -352,8 +352,13 @@ def restsOk (ρ : List (String × List Nat)) (r : Rule) : Bool :=
 end Ctx
 
 /-- The premises' equalities and the largest of their offsets. -/
-def premConcls (acc : Array Concl) (prems : List Nat) : Option (List (Nat × Nat) × Nat) :=
-  (prems.mapM fun s => acc[s]?).map fun cs => (cs.map fun c => (c.a, c.b), cs.foldl (fun m c => max m c.pos) 0)
+def premConcls (P : Program) (acc : Array Concl) (prems : List Nat) :
+    Option (List (Nat × Nat) × Nat) :=
+  (prems.mapM fun s => acc[s]?).bind fun cs =>
+    -- Each premise's commands are still in force at the largest offset.
+    if cs.all (fun c => P.stays c.pos (cs.foldl (fun m c => max m c.pos) 0)) then
+      some (cs.map fun c => (c.a, c.b), cs.foldl (fun m c => max m c.pos) 0)
+    else none
 
 namespace Ctx
 
@@ -364,7 +369,11 @@ def inferStep (acc : Array Concl) : Step → Option Concl
   | .symm s => acc[s]?.map fun c => ⟨c.b, c.a, c.pos⟩
   | .trans s t =>
     match acc[s]?, acc[t]? with
-    | some c, some d => if c.b = d.a then some ⟨c.a, d.b, max c.pos d.pos⟩ else none
+    | some c, some d =>
+      if c.b = d.a ∧ C.P.stays c.pos (max c.pos d.pos) = true ∧
+          C.P.stays d.pos (max c.pos d.pos) = true then
+        some ⟨c.a, d.b, max c.pos d.pos⟩
+      else none
     | _, _ => none
   | .axiom o a b =>
     match C.decl? o with
@@ -374,17 +383,18 @@ def inferStep (acc : Array Concl) : Step → Option Concl
   | .rule o j σ ρ μ prems a b =>
     match C.decl? o with
     | some (.rules rs) =>
-      match rs[j]?, premConcls acc prems with
+      match rs[j]?, premConcls C.P acc prems with
       | some (some r), some (ps, pos) =>
         if C.instP σ ρ μ r.lhs = some a ∧ C.instP σ ρ μ r.rhs = some b ∧
             C.eqsOk σ ρ μ r.eqs ps = true ∧ C.sortsOk σ r = true ∧ C.restsOk ρ r = true ∧
-            multsOk μ r = true then
+            multsOk μ r = true ∧ C.P.stays pos (max (o + 1) pos) = true ∧
+            C.P.active o (max (o + 1) pos) = true then
           some ⟨a, b, max (o + 1) pos⟩
         else none
       | _, _ => none
     | _ => none
   | .cong f a b prems =>
-    match premConcls acc prems with
+    match premConcls C.P acc prems with
     | some (ps, pos) => if C.congOk f a b ps then some ⟨a, b, pos⟩ else none
     | none => none
   | .inv f a x q e => if C.invOk f a x q e then some ⟨a, e, 0⟩ else none
@@ -429,7 +439,7 @@ def checkGoal (acc : Array Concl) (goals : List (Nat × Nat)) (o : Nat) (l r : T
   match goals.find? (·.1 == o) with
   | some (_, s) =>
     match acc[s]?, C.intern l, C.intern r with
-    | some c, some a, some b => c.a == a && c.b == b && decide (c.pos ≤ o)
+    | some c, some a, some b => c.a == a && c.b == b && decide (c.pos ≤ o) && C.P.stays c.pos o
     | _, _, _ => false
   | none => false
 

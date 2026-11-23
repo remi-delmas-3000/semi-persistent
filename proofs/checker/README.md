@@ -153,11 +153,42 @@ evaluator. A rule with a comprehension and no filter is a sequence rule whose
 left side is a pattern: its binding is read from the match's `e` lines, and
 equal neighbours of a rest sequence are one row with their number as count.
 
+The evaluator also reads: `:let` names (each the literal its value is, in
+order); `min`, `max` and `sum` of a value over the filters' elements; `(if c a
+b)`; the number of rows of a source; and two interval operations ported from
+`egraph/src/seq_rhs.rs`: `(union-by p l u)` (per value of `p`, the union of
+the integer intervals `[l, u]`, intervals that touch being one) and `(narrow c
+d r a b q)` (each `[c, d]` shrunk past the intervals `[a, b]` whose `q` is its
+`r`; `narrowed` keeps the rows that changed). Values of `p`, `r`, `q` are
+compared as atoms of the binding. Integer bounds are unbounded integers here;
+the engine reports an overflow of the literal sort as an error. `:flatten` and
+`:except` are read and add nothing to the rule: they say which arguments the
+engine collects, and a binding names them. For a firing of a `:flatten`
+sequence rule that read one root argument through a member of its class, the
+replay builds the member from the binding (the application of the bound
+arguments no other root argument answers) and checks that it is in that
+argument's class. A firing that read several arguments through is not proved.
+
 ## What the reader reads
+
+`(push)` and `(pop)` are read. The program records each pair of offsets
+(`Program.pops`), and a command is in force at an offset when no scope that
+holds it was closed before that offset (`Program.active`). `Models P p` asks
+a model to satisfy the commands before `p` that are in force at `p`, so a
+`check-eq` after a `(pop)` does not get the scope's unions and rules as
+premises. The kernel keeps each conclusion's offset and combines two
+conclusions, or accepts one for a goal, only when no scope that holds the
+earlier offset was closed before the later one (`Program.stays`). Operators
+declared inside a scope stay in the program's signature. `(include)` is not
+read.
 
 In a matched pattern a bare name is a variable, also when a nullary operator
 has that name (`(rewrite (f a) (g a))` matches `(f (b))`); in a built side a
 bare name no pattern bound is the operator. The engine reads them so.
+In a built side, a nested application of the same `:assoc` operator is read
+as its arguments, as the engine's builder splices them; associativity makes
+the two terms equal. A rule whose right side has an argument with a computed
+count (`t:(u64::- k 1)`) is read as a sequence rule.
 
 The reader (`Parse.lean`) keeps the theory it returns implied by the
 program's: it reads no rule from a command whose
@@ -169,7 +200,7 @@ the multiplicity variable `k`, which in a model ranges over the counts from 1
 `ac` or `aci` operator: in a model the rule holds for every list of elements
 of the operator's sort in its place, the empty one included. Dropping a law or a rule makes some
 certificates fail to check; it never makes a false equality check. A program
-with `push`, `pop` or `include` is rejected.
+with `include` is rejected.
 
 Sorts come from the declarations (`sort`, `datatype`, `function`,
 `constructor`, `relation`). A literal takes the sort of its position (`6` in
@@ -197,19 +228,18 @@ of line, a stream that proves its goal and the same stream with one witness
 changed, which costs the goal that depends on it.
 
 Over the 1,684 programs (release build, 60 s and 4 GB per run, four jobs, 27 s
-of wall time): 1,442 are replayed, 125 expect an outcome other than `ok`, and
-the reader rejects 117 (101 apply an `:assoc-left` or `:assoc-right` operator
-to more arguments than its signature takes, 8 use `push` and `pop`, 5 write a
-count above 65,536, and 2 use an unannotated literal where its default sort is
-not the one the position takes).
+of wall time): 1,452 are replayed, 125 expect an outcome other than `ok`, and
+the reader rejects 107 (102 apply an `:assoc-left` or `:assoc-right` operator
+to more arguments than its signature takes, and 5 write a count above
+65,536).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,786 |
-| programs with every `check-eq` proved, of 1,066 | 1,051 |
-| kernel steps checked | 16,548,102 |
+| `check-eq` proved (`replay_sound` covers them), of 29,879 | 29,876 |
+| programs with every `check-eq` proved, of 1,076 | 1,073 |
+| kernel steps checked | 16,615,528 |
 | steps the kernel rejects | 0 |
-| events replayed | 7,396,101 |
+| events replayed | 7,410,056 |
 | events whose check fails | 8,069 |
 | events the stream gives no witness for | 347 |
 
