@@ -784,6 +784,16 @@ def Wit.reads (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (a : Nat)
   S.fd w.2.1 == S.fd a && S.fd w.2.2.1 == S.fd a && (!tree || w.2.2.2 == ctx) &&
     (match S.defOf w.2.2.1 with | some (.app g cs) => g == f && !cs.isEmpty | _ => false)
 
+/-- The witness of `W` that reads argument `a` under `ctx`: one that names the
+node `a` itself when there is one; else the first that names its class and
+does not name another of the arguments `later` at this level, which is then
+the one it reads. Two arguments of one class are told apart this way when the
+stream names each. -/
+def Wit.pick (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (a : Nat) (later : List Nat)
+    (W : List Wit) : Option Wit :=
+  (W.find? fun w => w.2.1 == a && Wit.reads S f tree ctx a w).orElse fun _ =>
+    W.find? fun w => !later.contains w.2.1 && Wit.reads S f tree ctx a w
+
 /-- The arguments `todo`, each with the opening it lies under, as one side of
 a `:flatten` match reads them, after `out`: an argument a witness of `W` reads
 (`Wit.reads`) is replaced by the arguments of the witness's member, which lie
@@ -795,7 +805,7 @@ def viewArgs (S : St P) (f : String) (tree : Bool) (W : List Wit) (todo : List (
   match todo with
   | [] => out.toList
   | (a, ctx) :: rest =>
-    match W.find? (Wit.reads S f tree ctx a) with
+    match Wit.pick S f tree ctx a ((rest.filter (·.2 == ctx)).map (·.1)) W with
     | some w =>
       match S.defOf w.2.2.1 with
       | some (.app _ cs) =>
@@ -1745,7 +1755,7 @@ def openArgs (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (W : List 
       | none => true
     let r : St P × Option Nat × List Wit :=
       if let some to := again then (S, some to, W) else
-      match (if here then W.find? (Wit.reads S f tree ctx a) else none) with
+      match (if here then Wit.pick S f tree ctx a rest W else none) with
       | some w =>
         if _h : (W.erase w).length < W.length then
           match openNode S f tree (some w.1) w.2.2.1 (W.erase w) with
