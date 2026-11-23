@@ -333,7 +333,7 @@ pub struct FlattenScratch<G, M> {
     /// Per record, the members its derivation read ([`FlattenScratch::witness`]): for
     /// each opening, the class opened and the `op` node whose children replaced it; for
     /// each regrouping, the class taken and the `op` node whose children it replaced.
-    wit: Vec<(G, G, usize)>,
+    wit: Vec<(G, G, usize, usize)>,
     /// The distinct views: a canonical span, and the span of `recs` (sorted) giving it.
     spans: Vec<(usize, usize, usize, usize)>,
     norm: Vec<(G, M)>,
@@ -374,6 +374,9 @@ struct Instance<G, M> {
     mult: M,
     /// The `op` node of `class` whose children the opening reads.
     member: G,
+    /// The number of elements the view held when the opening was made: where, in a
+    /// sequence's view, the member's children start.
+    at: usize,
 }
 
 /// A raw view's record: its canonical content and its opening tree's leaf groups.
@@ -543,9 +546,11 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
     /// the class opened and its `op` node; for each regrouping, the class taken and the
     /// `op` node whose children it stands for. The third field is [`WIT_REGROUP`] for a
     /// regrouping, [`WIT_ROOT`] for an opening of one of the node's own children, and
-    /// otherwise the position, in this list, of the opening it lies directly under. Any
-    /// record of the view is a derivation of it; the first is given.
-    pub fn witness(&self, i: usize) -> &[(G, G, usize)] {
+    /// otherwise the position, in this list, of the opening it lies directly under. The
+    /// fourth is, for an opening, the number of elements the view held before the
+    /// member's children. Any record of the view is a derivation of it; the first is
+    /// given.
+    pub fn witness(&self, i: usize) -> &[(G, G, usize, usize)] {
         let (_, _, r, n) = self.spans[i];
         if n == 0 {
             return &[];
@@ -683,7 +688,7 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
         self.wit.extend(
             self.instances
                 .iter()
-                .map(|i| (i.class, i.member, i.parent.unwrap_or(WIT_ROOT))),
+                .map(|i| (i.class, i.member, i.parent.unwrap_or(WIT_ROOT), i.at)),
         );
         self.recs.push(Rec {
             start,
@@ -1271,7 +1276,7 @@ impl<G: Copy + Ord + std::hash::Hash, M: MultiplicityLike> FlattenScratch<G, M> 
         // The source's members, and the node whose children `g` replaces.
         let nw = self.wit.len();
         self.wit.extend_from_within(wstart..wstart + wcount);
-        self.wit.push((g, member, WIT_REGROUP));
+        self.wit.push((g, member, WIT_REGROUP, 0));
         self.recs.push(Rec {
             start: ts,
             len: tl,
@@ -1837,6 +1842,7 @@ where
             class: x,
             mult: k,
             member: m,
+            at: s.view.len(),
         });
         s.on_path.insert(x);
         s.trail.push(Undo::Opened(x));

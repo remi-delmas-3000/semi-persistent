@@ -149,12 +149,12 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 28,744 |
-| programs with every `check-eq` proved, of 1,066 | 949 |
-| kernel steps checked | 16,436,173 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,330 |
+| programs with every `check-eq` proved, of 1,066 | 966 |
+| kernel steps checked | 16,454,844 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,100 |
-| events whose check fails | 9,740 |
+| events whose check fails | 8,539 |
 | events the stream gives no witness for | 347 |
 
 `GAP.md`, which `check-replay.py --gap` writes, assigns each `check-eq` not

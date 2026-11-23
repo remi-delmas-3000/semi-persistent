@@ -1494,9 +1494,9 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
     // replaced it, or a regrouped class and the node whose arguments it stands for.
     let splices = |eg: &mut EGraph<Cfg, L, T, P>, node: crate::ast::VarId| {
         for i in 0..m.splices().len() {
-            let (v, c, member, tag) = m.splices()[i];
+            let (v, c, member, tag, at) = m.splices()[i];
             if v == node.idx() {
-                eg.trace_splice(c, member, tag);
+                eg.trace_splice(c, member, tag, at);
             }
         }
     };

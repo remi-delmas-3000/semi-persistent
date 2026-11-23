@@ -110,7 +110,7 @@ pub struct Trace {
     /// The firing's splice witnesses: `(class, member, regrouped)`, written
     /// as `s` lines (an opened class of the matched node) and `y` lines (a
     /// regrouped pattern argument) before each of its `m` lines.
-    splices: Vec<(usize, usize, usize, usize)>,
+    splices: Vec<(usize, usize, usize, usize, usize)>,
     /// The `e` lines of the open firing so far.
     natoms: usize,
     /// Why the open firing is opaque, for its `u` lines: the part of its rule
@@ -346,15 +346,13 @@ where
 
     /// Within the firing, a `:flatten` match read argument `c` through
     /// `member`, an application of the matched operator in `c`'s class.
-    pub(crate) fn trace_splice(&mut self, c: Cfg::G, member: Cfg::G, tag: usize) {
+    pub(crate) fn trace_splice(&mut self, c: Cfg::G, member: Cfg::G, tag: usize, at: usize) {
         if let Some(t) = self.trace.as_mut()
             && t.firing.is_some()
         {
-            // One per opening or regrouping, for the `e` line just written
-            // (the lines are three or more fields each in `atoms`: counted
-            // by `natoms`).
+            // One per opening or regrouping, for the `e` line just written.
             t.splices
-                .push((t.natoms - 1, c.to_usize(), member.to_usize(), tag));
+                .push((t.natoms - 1, c.to_usize(), member.to_usize(), tag, at));
         }
     }
 
@@ -488,13 +486,13 @@ where
                     }
                     t.out.push('\n');
                     for i in 0..t.splices.len() {
-                        let (k, c, member, tag) = t.splices[i];
+                        let (k, c, member, tag, at) = t.splices[i];
                         if tag == crate::flatten::WIT_REGROUP {
                             let _ = writeln!(t.out, "y {c} {member} {k}");
                         } else if tag == crate::flatten::WIT_ROOT {
-                            let _ = writeln!(t.out, "s {c} {member} {k}");
+                            let _ = writeln!(t.out, "s {c} {member} {k} - {at}");
                         } else {
-                            let _ = writeln!(t.out, "s {c} {member} {k} {tag}");
+                            let _ = writeln!(t.out, "s {c} {member} {k} {tag} {at}");
                         }
                     }
                     let j = f.base + f.action.saturating_sub(1);

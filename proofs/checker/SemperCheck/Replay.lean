@@ -71,13 +71,14 @@ structure St (P : Program) where
   splices : List (Nat × Nat) := []
   /-- The witnesses of the open firing's `:flatten` matches, in the stream's
   order, each with the position `k` of the `e` line it belongs to. An opening
-  (`s c m k [p]`): a class `c` among the arguments the match reads, and the
+  (`s c m k p at`): a class `c` among the arguments the match reads, and the
   application `m` in that class whose arguments it reads in its place; `p` is
   the position, among the `e` line's openings, of the one whose member holds
-  that argument, and is absent for an argument of the matched node itself. A
+  that argument, and `-` for an argument of the matched node itself; `at` is
+  the number of arguments the match had read before `m`'s. A
   regrouping (`y c m k`): a pattern argument bound to class `c`, and the
   application `m` in that class whose arguments the node holds in its place. -/
-  opens : List (Nat × Nat × Nat × Option Nat) := []
+  opens : List (Nat × Nat × Nat × Option Nat × Nat) := []
   regroups : List (Nat × Nat × Nat) := []
   /-- Inverse witnesses (`j` lines) for the next line: inverse applications,
   each standing for its class. -/
@@ -768,31 +769,40 @@ def ids (S : St P) (xs : List String) : Option (List Nat) := do
   return out.toList
 
 /-- A witness of one `e` line: its position among the line's openings, the
-class, the member, and the opening it lies under (`none`: the node's own
-arguments). A regrouping has no position that matters and lies under none. -/
-abbrev Wit := Nat × Nat × Nat × Option Nat
+class, the member, the opening it lies under (`none`: the node's own
+arguments) and the number of arguments read before the member's. A regrouping
+has no position that matters, lies under none and has no such number. -/
+abbrev Wit := Nat × Nat × Nat × Option Nat × Nat
 
 /-- The openings and the regroupings of the `e` line at position `k`. -/
 def witsOf (S : St P) (k : Nat) : List Wit × List Wit :=
-  (((S.opens.filter (·.1 == k)).map (·.2)).zipIdx.map fun ((c, m, p), i) => (i, c, m, p),
-   ((S.regroups.filter (·.1 == k)).map (·.2)).zipIdx.map fun ((c, m), i) => (i, c, m, none))
+  (((S.opens.filter (·.1 == k)).map (·.2)).zipIdx.map fun ((c, m, p, at_), i) => (i, c, m, p, at_),
+   ((S.regroups.filter (·.1 == k)).map (·.2)).zipIdx.map fun ((c, m), i) => (i, c, m, none, 0))
 
-/-- Witness `w` reads argument `a`, which lies under the opening `ctx`: `a` is
-in its class, its member is an application of `f` in that class and, for an
-opening (`tree`), it lies under `ctx` too. -/
-def Wit.reads (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (a : Nat) (w : Wit) : Bool :=
-  S.fd w.2.1 == S.fd a && S.fd w.2.2.1 == S.fd a && (!tree || w.2.2.2 == ctx) &&
+/-- Witness `w` reads argument `a`, which lies under the opening `ctx` after
+`off` arguments read: `a` is in its class, its member is an application of `f`
+in that class and, for an opening (`tree`), it lies under `ctx` too and, in a
+sequence (`off` given), starts at `off`. -/
+def Wit.reads (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (off : Option Nat) (a : Nat)
+    (w : Wit) : Bool :=
+  S.fd w.2.1 == S.fd a && S.fd w.2.2.1 == S.fd a && (!tree || w.2.2.2.1 == ctx) &&
+    (!tree || off.all (· == w.2.2.2.2)) &&
     (match S.defOf w.2.2.1 with | some (.app g cs) => g == f && !cs.isEmpty | _ => false)
 
-/-- The witness of `W` that reads argument `a` under `ctx`: one that names the
-node `a` itself when there is one; else the first that names its class and
-does not name another of the arguments `later` at this level, which is then
-the one it reads. Two arguments of one class are told apart this way when the
-stream names each. -/
-def Wit.pick (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (a : Nat) (later : List Nat)
-    (W : List Wit) : Option Wit :=
-  (W.find? fun w => w.2.1 == a && Wit.reads S f tree ctx a w).orElse fun _ =>
-    W.find? fun w => !later.contains w.2.1 && Wit.reads S f tree ctx a w
+/-- Where an opening of `f` must start: a sequence's openings are told apart
+by the number of arguments read before them. -/
+def offOf (S : St P) (f : String) (tree : Bool) (n : Nat) : Option Nat :=
+  if tree && S.prog.kind f == .assoc then some n else none
+
+/-- The witness of `W` that reads argument `a` under `ctx` after `off`
+arguments: one that names the node `a` itself when there is one; else the
+first that names its class and does not name another of the arguments `later`
+at this level, which is then the one it reads. Two arguments of one class are
+told apart this way when the stream names each. -/
+def Wit.pick (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (off : Option Nat) (a : Nat)
+    (later : List Nat) (W : List Wit) : Option Wit :=
+  (W.find? fun w => w.2.1 == a && Wit.reads S f tree ctx off a w).orElse fun _ =>
+    W.find? fun w => !later.contains w.2.1 && Wit.reads S f tree ctx off a w
 
 /-- The arguments `todo`, each with the opening it lies under, as one side of
 a `:flatten` match reads them, after `out`: an argument a witness of `W` reads
@@ -805,7 +815,7 @@ def viewArgs (S : St P) (f : String) (tree : Bool) (W : List Wit) (todo : List (
   match todo with
   | [] => out.toList
   | (a, ctx) :: rest =>
-    match Wit.pick S f tree ctx a ((rest.filter (·.2 == ctx)).map (·.1)) W with
+    match Wit.pick S f tree ctx (offOf S f tree out.size) a ((rest.filter (·.2 == ctx)).map (·.1)) W with
     | some w =>
       match S.defOf w.2.2.1 with
       | some (.app _ cs) =>
@@ -839,7 +849,7 @@ def regroupAt (S : St P) (f : String) (W : List Wit) (bound view : List Nat) (po
     | v :: vs =>
       if S.fd b == S.fd v then regroupAt S f W rest vs (pos + 1) out
       else
-        match W.find? (Wit.reads S f false none b) with
+        match W.find? (Wit.reads S f false none none b) with
         | some w =>
           let n := match S.defOf w.2.2.1 with
             | some (.app _ cs) => cs.length
@@ -854,7 +864,7 @@ def viewAt (S : St P) (f : String) (W : List Wit) (at_ : List Nat) (bound : List
     let mut W := W
     let mut out : Array Nat := #[]
     for (b, i) in bound.zipIdx do
-      match (if at_.contains i then W.find? (Wit.reads S f false none b) else none) with
+      match (if at_.contains i then W.find? (Wit.reads S f false none none b) else none) with
       | some w =>
         W := W.erase w
         match S.defOf w.2.2.1 with
@@ -1705,48 +1715,49 @@ end
 
 mutual
 
-/-- Node `x`, which lies under the opening `ctx`, as the kernel must read it
-for one side of a `:flatten` match: an argument a witness of `W` reads becomes
-the witness's member, read the same way with the witnesses left, whose
-arguments the kernel reads in its place; an argument that is an application of
-`f` with no witness becomes a plain member of its class, which the kernel
-reads as one argument. The result, the proof that `x` is it (argument by
-argument), and the witnesses left. -/
+/-- Node `x`, which lies under the opening `ctx` and starts after `off`
+arguments read, as the kernel must read it for one side of a `:flatten`
+match: an argument a witness of `W` reads becomes the witness's member, read
+the same way with the witnesses left, whose arguments the kernel reads in its
+place; an argument that is an application of `f` with no witness becomes a
+plain member of its class, which the kernel reads as one argument. The result,
+the proof that `x` is it (argument by argument), the witnesses left, and the
+number of arguments `x` is read as. -/
 def openNode (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (x : Nat) (W : List Wit)
-    (only : Option (List Nat) := none) : St P × Option (Nat × Pf) × List Wit :=
+    (only : Option (List Nat) := none) (off : Nat := 0) :
+    St P × Option (Nat × Pf) × List Wit × Nat :=
   match S.defOf x with
   | some (.app g args) =>
-    if g != f then (S, some (x, some none), W)
+    if g != f then (S, some (x, some none), W, 1)
     else
-      match openArgs S f tree ctx W args #[] #[] false [] only with
-      | (S, some (out, prems, changed), W') =>
-        if !changed then (S, some (x, some none), W')
+      match openArgs S f tree ctx W args #[] #[] false [] only off with
+      | (S, some (out, prems, changed), W', n) =>
+        if !changed then (S, some (x, some none), W', n)
         else
           match appNode S f out.toList with
           | (S, some x') =>
-            if x' == x then (S, some (x, some none), W')
+            if x' == x then (S, some (x, some none), W', n)
             else
               let (S, st) := emit S (.cong f x x' prems.toList) x x'
-              (S, some (x', some (some st)), W')
-          | (S, none) => (S, none, W')
-      | (S, none, W') => (S, none, W')
-  | _ => (S, some (x, some none), W)
+              (S, some (x', some (some st)), W', n)
+          | (S, none) => (S, none, W', n)
+      | (S, none, W', n) => (S, none, W', n)
+  | _ => (S, some (x, some none), W, 1)
 termination_by (W.length, 1, 0)
 
 /-- The arguments of `openNode`'s result, after `out`, and a step for each
-argument replaced, after `prems`. -/
+argument replaced, after `prems`; `off` counts the arguments read so far. -/
 def openArgs (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (W : List Wit)
     (args : List Nat) (out : Array Nat) (prems : Array Nat) (changed : Bool)
-    (opened : List (Nat × Nat) := []) (only : Option (List Nat) := none) :
-    St P × Option (Array Nat × Array Nat × Bool) × List Wit :=
+    (opened : List (Nat × Nat) := []) (only : Option (List Nat) := none) (off : Nat := 0) :
+    St P × Option (Array Nat × Array Nat × Bool) × List Wit × Nat :=
   match args with
-  | [] => (S, some (out, prems, changed), W)
+  | [] => (S, some (out, prems, changed), W, off)
   | a :: rest =>
     let isApp (m : Nat) : Bool :=
       match S.defOf m with
       | some (.app h cs) => h == f && !cs.isEmpty
       | _ => false
-    -- The node the argument becomes, and the witnesses left.
     -- A multiset's argument an opening already read: its other copies become
     -- the same node.
     let again := if tree && S.prog.kind f == .ac then opened.lookup a else none
@@ -1754,33 +1765,35 @@ def openArgs (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (W : List 
     let here := match only with
       | some ps => ps.contains out.size
       | none => true
-    let r : St P × Option Nat × List Wit :=
-      if let some to := again then (S, some to, W) else
-      match (if here then Wit.pick S f tree ctx a rest W else none) with
+    -- The node the argument becomes, the witnesses left, and the arguments read.
+    let r : St P × Option Nat × List Wit × Nat :=
+      if let some to := again then (S, some to, W, off + 1) else
+      match (if here then Wit.pick S f tree ctx (offOf S f tree off) a rest W else none) with
       | some w =>
         if _h : (W.erase w).length < W.length then
-          match openNode S f tree (some w.1) w.2.2.1 (W.erase w) with
-          | (S, some (m', pm), W') =>
+          match openNode S f tree (some w.1) w.2.2.1 (W.erase w) none off with
+          | (S, some (m', pm), W', n) =>
             -- `a` is the member, which is its opened form.
             let (S, p) := eqP S a w.2.2.1
             let (S, q) := transP S a m' p pm
             let S := S.mergeBy a m' q
-            if W'.length ≤ (W.erase w).length then (S, some m', W') else (S, none, W)
-          | (S, none, _) => (S, none, W)
-        else (S, none, W)
-      | none => (S, some (if isApp a then (S.plain.getD (S.fd a) none).getD a else a), W)
+            if W'.length ≤ (W.erase w).length then (S, some m', W', n) else (S, none, W, off)
+          | (S, none, _, _) => (S, none, W, off)
+        else (S, none, W, off)
+      | none => (S, some (if isApp a then (S.plain.getD (S.fd a) none).getD a else a), W, off + 1)
     match r with
-    | (S, none, _) => (S, none, W)
-    | (S, some to, W') =>
+    | (S, none, _, _) => (S, none, W, off)
+    | (S, some to, W', off') =>
       if _h : W'.length ≤ W.length then
         if to != a then
           let (S, p) := eqP S a to
           match stepOf S a p with
           | (S, some st) =>
             openArgs S f tree ctx W' rest (out.push to) (prems.push st) true ((a, to) :: opened) only
-          | (S, none) => (S, none, W')
-        else openArgs S f tree ctx W' rest (out.push to) prems changed opened only
-      else (S, none, W)
+              off'
+          | (S, none) => (S, none, W', off')
+        else openArgs S f tree ctx W' rest (out.push to) prems changed opened only off'
+      else (S, none, W, off)
 termination_by (W.length, 0, args.length)
 decreasing_by
   all_goals simp_wf
@@ -1807,15 +1820,15 @@ def instProof (S : St P) (f : String) (i n : Nat) (k : Option Nat) : St P × Pf 
         some (regroupAt S f wr (argsOf i) (viewArgs S f true wo ((argsOf n).map (·, none))))
       else none
     match openNode S f true none n wo with
-    | (S, some (n', pn), _) =>
+    | (S, some (n', pn), _, _) =>
       match openNode S f false none i wr only with
-      | (S, some (i', pi), _) =>
+      | (S, some (i', pi), _, _) =>
         let (S, p) := congStepL S f i' n'
         let (S, q) := transP S i n' pi p
         let (S, pn') := symmP S n n' pn
         transP S i n q pn'
-      | (S, none, _) => (S, none)
-    | (S, none, _) => (S, none)
+      | (S, none, _, _) => (S, none)
+    | (S, none, _, _) => (S, none)
 
 /-- The instance `f(ic)` of an application pattern, joined to node `n`. -/
 def instOf (f : String) (ic : List Nat) (n : Nat) (k : Option Nat := none) : WalkM P Nat := do
@@ -1931,7 +1944,7 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
           viewAt S f wr (regroupAt S f wr cs vd) cs
         else viewArgs S f false wr (cs.map (·, none))
       if h != f || (let (x, y) := nf2 S0 f vd vc; x != y) then
-        throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} read as {vd}, classes {(nf2 S0 f vd vc).1}; pattern bound to {cs} read as {vc}, classes {(nf2 S0 f vd vc).2}; openings {wo.map fun w => (w.2.1, w.2.2.1, w.2.2.2)}, regroupings {wr.map fun w => (w.2.1, w.2.2.1)}"
+        throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} read as {vd}, classes {(nf2 S0 f vd vc).1}; pattern bound to {cs} read as {vc}, classes {(nf2 S0 f vd vc).2}; openings {wo.map fun w => (w.2.1, w.2.2.1, w.2.2.2.1, w.2.2.2.2)}, regroupings {wr.map fun w => (w.2.1, w.2.2.1)}"
     | _ => throw "rule: matched node differs"
     set { w with atoms := rest, atomIdx := w.atomIdx + 1, σ := σ, ρ := ρ, μ := μ }
     let i ← instOf f ic.toList n (some w.atomIdx)
@@ -2183,15 +2196,14 @@ def stepCore (S : St P) (line : String) : St P :=
     | some c, some m, some k =>
       { S with regroups := S.regroups ++ [(k, c, m)], events := S.events - 1 }
     | _, _, _ => S.fail "regroup: unreadable"
-  | ["s", c, m, k] =>
-    match S.node? c, S.node? m, k.toNat? with
-    | some c, some m, some k =>
-      { S with opens := S.opens ++ [(k, c, m, none)], events := S.events - 1 }
-    | _, _, _ => S.fail "splice: unreadable"
-  | ["s", c, m, k, p] =>
-    match S.node? c, S.node? m, k.toNat?, p.toNat? with
-    | some c, some m, some k, some p =>
-      { S with opens := S.opens ++ [(k, c, m, some p)], events := S.events - 1 }
+  | ["s", c, m, k, p, at_] =>
+    match S.node? c, S.node? m, k.toNat?, at_.toNat? with
+    | some c, some m, some k, some at_ =>
+      if p == "-" then
+        { S with opens := S.opens ++ [(k, c, m, none, at_)], events := S.events - 1 }
+      else match p.toNat? with
+        | some p => { S with opens := S.opens ++ [(k, c, m, some p, at_)], events := S.events - 1 }
+        | none => S.fail "splice: unreadable"
     | _, _, _, _ => S.fail "splice: unreadable"
   | ["z", f, u] =>
     match S.node? u, (S.prog.opDecl? f).bind (·.unit) with

@@ -492,7 +492,7 @@ pub struct MatchPool<Cfg: EGraphConfig> {
     /// Per register, the members its view's derivation read
     /// (`crate::flatten::FlattenScratch::witness`), kept when `record_splices` is set:
     /// the replay stream writes them with the match.
-    view_wit: Vec<Vec<(usize, Cfg::G, Cfg::G, usize)>>,
+    view_wit: Vec<Vec<(usize, Cfg::G, Cfg::G, usize, usize)>>,
     pub(crate) record_splices: bool,
     flatten_scratch: Vec<crate::flatten::FlattenScratch<Cfg::G, Cfg::M>>,
     /// Nodes the `Flatten` step skipped for exceeding a bound
@@ -611,7 +611,11 @@ impl<Cfg: EGraphConfig> MatchPool<Cfg> {
             }
             let w = &mut self.view_wit[r.0];
             w.clear();
-            w.extend(fl.witness(i).iter().map(|&(c, m, re)| (root, c, m, re)));
+            w.extend(
+                fl.witness(i)
+                    .iter()
+                    .map(|&(c, m, tag, at)| (root, c, m, tag, at)),
+            );
         }
     }
 
@@ -821,7 +825,7 @@ pub struct MatchSet<Cfg: EGraphConfig> {
     /// span of `splice_pool` per match, kept only for the matches that have any
     /// (`splice_spans` is shorter than `count` otherwise).
     splice_spans: Vec<(usize, usize)>,
-    splice_pool: Vec<(usize, Cfg::G, Cfg::G, usize)>,
+    splice_pool: Vec<(usize, Cfg::G, Cfg::G, usize, usize)>,
 }
 
 impl<Cfg: EGraphConfig> MatchSet<Cfg> {
@@ -829,7 +833,7 @@ impl<Cfg: EGraphConfig> MatchSet<Cfg> {
     pub fn set_splices(
         &mut self,
         row: usize,
-        data: impl Iterator<Item = (usize, Cfg::G, Cfg::G, usize)>,
+        data: impl Iterator<Item = (usize, Cfg::G, Cfg::G, usize, usize)>,
     ) {
         let start = self.splice_pool.len();
         self.splice_pool.extend(data);
@@ -840,7 +844,7 @@ impl<Cfg: EGraphConfig> MatchSet<Cfg> {
     }
 
     /// The members match `row`'s `:flatten` views read.
-    pub fn splices(&self, row: usize) -> &[(usize, Cfg::G, Cfg::G, usize)] {
+    pub fn splices(&self, row: usize) -> &[(usize, Cfg::G, Cfg::G, usize, usize)] {
         match self.splice_spans.get(row) {
             Some(&(s, n)) => &self.splice_pool[s..s + n],
             None => &[],
@@ -1067,7 +1071,7 @@ pub trait MatchView<Cfg: EGraphConfig> {
     /// The members the match's `:flatten` views read, when the matcher records them
     /// (`MatchSet::splices`): the pattern variable of the node viewed, the class, its
     /// member, and the tag of `crate::flatten::FlattenScratch::witness`.
-    fn splices(&self) -> &[(usize, Cfg::G, Cfg::G, usize)] {
+    fn splices(&self) -> &[(usize, Cfg::G, Cfg::G, usize, usize)] {
         &[]
     }
 }
@@ -1103,7 +1107,7 @@ pub struct MatchRow<'a, Cfg: EGraphConfig> {
 }
 
 impl<'a, Cfg: EGraphConfig> MatchView<Cfg> for MatchRow<'a, Cfg> {
-    fn splices(&self) -> &[(usize, Cfg::G, Cfg::G, usize)] {
+    fn splices(&self) -> &[(usize, Cfg::G, Cfg::G, usize, usize)] {
         self.set.splices(self.j)
     }
     fn get(&self, v: VarId) -> Cfg::G {
