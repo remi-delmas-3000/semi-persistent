@@ -1994,29 +1994,44 @@ def walkQ (p : Pat) : WalkM P (Nat × Nat) :=
         else throw "rule: literal differs"
       | _ => throw "rule: literal differs"
     | _ => throw "rule: no line for a literal"
-  | .app f ps => walkQs ps >>= walkApp (key (.app f ps)) f ps
+  | .app f ps => do
+    -- A multiset's or a set's equal argument patterns are one pattern with a
+    -- count: the match writes its lines once.
+    let k := (← get).S.prog.kind f
+    walkQs (k == .ac || k == .aci) none ps >>= walkApp (key (.app f ps)) f ps
 
 /-- The matched node and instance of each argument that is no variable. -/
-def walkQs : List Pat → WalkM P (List (Option (Nat × Nat)))
+def walkQs (share : Bool) (prev : Option (String × Nat × Nat)) :
+    List Pat → WalkM P (List (Option (Nat × Nat)))
   | [] => pure []
-  | .var _ :: rest => walkQs rest >>= fun r => pure (none :: r)
-  | .rest _ :: rest => walkQs rest >>= fun r => pure (none :: r)
+  | .var _ :: rest => walkQs share prev rest >>= fun r => pure (none :: r)
+  | .rest _ :: rest => walkQs share prev rest >>= fun r => pure (none :: r)
   -- A repeated argument is matched once.
-  | .rep (.var _) _ :: rest => walkQs rest >>= fun r => pure (none :: r)
+  | .rep (.var _) _ :: rest => walkQs share prev rest >>= fun r => pure (none :: r)
   | .rep (.rest _) _ :: _ => throw "rule: a repeated rest variable"
   | .rep (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .rep (.lit s v) _ :: rest =>
-    walkQ (.lit s v) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
+    walkQ (.lit s v) >>= fun x => walkQs share prev rest >>= fun r => pure (some x :: r)
   | .rep (.app f qs) _ :: rest =>
-    walkQ (.app f qs) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
+    walkQ (.app f qs) >>= fun x => walkQs share prev rest >>= fun r => pure (some x :: r)
   | .lit s v :: rest =>
-    walkQ (.lit s v) >>= fun x => walkQs rest >>= fun r => pure (some x :: r)
+    walkQ (.lit s v) >>= fun x => walkQs share prev rest >>= fun r => pure (some x :: r)
   | .app f qs :: rest =>
-    groundNode (.app f qs) >>= fun g =>
-      (match g with
-        | some n => letInstance (.app f qs) n >>= fun i => pure (n, i)
-        | none => walkQ (.app f qs)) >>= fun x =>
-      walkQs rest >>= fun r => pure (some x :: r)
+    match (if share then prev else none) with
+    | some (k, x) =>
+      if k == key (.app f qs) then walkQs share prev rest >>= fun r => pure (some x :: r)
+      else
+        groundNode (.app f qs) >>= fun g =>
+          (match g with
+            | some n => letInstance (.app f qs) n >>= fun i => pure (n, i)
+            | none => walkQ (.app f qs)) >>= fun x =>
+          walkQs share (some (key (.app f qs), x)) rest >>= fun r => pure (some x :: r)
+    | none =>
+      groundNode (.app f qs) >>= fun g =>
+        (match g with
+          | some n => letInstance (.app f qs) n >>= fun i => pure (n, i)
+          | none => walkQ (.app f qs)) >>= fun x =>
+        walkQs share (some (key (.app f qs), x)) rest >>= fun r => pure (some x :: r)
 
 end
 
