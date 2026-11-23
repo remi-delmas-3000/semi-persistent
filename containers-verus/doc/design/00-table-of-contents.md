@@ -111,7 +111,7 @@ listing's order.
     generics tested before any read; one executable write path); the list
     append peel; the second-pass review table; the validation protocol.
 21. **[The Abstract-Value Pool](21-abstract-value-pool.md)**: the
-    `abs-class-storage` design, implemented. A per-class handle into a
+    abstract-value storage of the class layer. A per-class handle into a
     semi-persistent pool of opaque abstract values, invariant W8, the
     restore theorem, and the payload-size decision with its measurement.
 

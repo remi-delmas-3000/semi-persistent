@@ -1,6 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Acceptance tests for the abstract-value pool and frozen W8 contract in
+//! Acceptance tests for the abstract-value pool and the W8 contract in
 //! `doc/design/21-abstract-value-pool.md`. Entries are opaque `u64` values.
 
 use semi_persistent_containers_verus::HotFirst;
@@ -221,7 +221,8 @@ fn reset_retains_frame_restore_consumes_frame() {
     ec.push_frame(ShrinkPolicy::Never); // frame 1: a=2, b=20
     ec.set_abs_value(ka, 3);
     ec.set_abs_value(kb, 30);
-    // Public Member methods delegate to the C6 frame operations.
+    // Public Member methods delegate to the `EClasses` frame operations
+    // (`reset_frames`/`restore_frames`).
     ec.reset_frame(1);
     assert_eq!(ec.depth_exec(), 2);
     assert_eq!([ec.abs_value(ka), ec.abs_value(kb)], [Some(2), Some(20)]);

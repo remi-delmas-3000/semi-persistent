@@ -50,7 +50,7 @@ const _: () = assert!(
 // The per-class slot has four configured-width words: use-list head, min-row,
 // abstract-value handle, and member count; plus four flags (row presence,
 // handle presence, atomic, matchable). Option A grows the 31-bit slot from
-// 16 to 20 bytes (21-abstract-value-pool.md §5). Measured against f8276da
+// 16 to 20 bytes (21-abstract-value-pool.md §5). Measured against main at 16cd7599
 // on the corpus programs (release, Apple M4, median of 10 interleaved runs,
 // peak RSS from `/usr/bin/time -l`): RSS changes by -0.6%/+4.1% on
 // math-microbenchmark rules/native (243/226 MB before), +0.07% on acgen

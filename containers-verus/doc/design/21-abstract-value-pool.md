@@ -6,20 +6,20 @@ SPDX-License-Identifier: Apache-2.0
 
 [← 20 Hot-Path Discipline](20-hot-path-discipline.md) · [Table of contents](00-table-of-contents.md)
 
-Status: implemented on the branch `abs-class-storage`, PR 2 of 4. The
-decisions are recorded in §8.1. Signatures marked "proposed" below are the
-hand-off proposals; §8.2 lists where the implementation departs from them.
+This chapter describes how the class layer stores one abstract value per
+e-class. §7 records the design decisions and where the implementation departs
+from the API sketched in §2.
 
-## 1. What the PR delivers
+## 1. What the pool provides
 
-The PR gives every e-class an optional abstract value stored in the class
+The class layer gives every e-class an optional abstract value stored in the class
 layer. The class layer is `containers-verus/src/eclasses.rs`, and
 `egraph::EClasses` and `egraph::UnionFind` are type aliases of it. The
 design follows the storage proposal in
 [eclass-analysis.md §4](../../../egraph/doc/future/eclass-analysis.md#4-storage):
 a handle in `ClassData`, values in a pool under the same mark.
 
-The PR delivers five things:
+It consists of five parts:
 
 1. a field `abs` in `ClassData`, a handle into a new abstract-value pool;
 2. the pool itself, a semi-persistent vector of opaque fixed-width `Copy`
@@ -30,13 +30,12 @@ The PR delivers five things:
 5. the archive extension, so `restore` returns every handle and every pool
    entry to its state at the matching mark.
 
-The PR does not compute abstract values, meets or reductions. The sibling
-branch `abs-saturation-engine` (PR 3) computes the meet on a merge and calls
-this API. The sibling branch `abs-domain-registry` (PR 4) defines the
-fixed-width entry format. The sibling branch `abs-surface-syntax` (PR 1)
-defines the input syntax. This crate must not depend on `abstract-domains`.
+The class layer does not compute abstract values, meets or reductions. The
+saturation engine in `egraph` computes the meet on a merge and calls this API;
+the domain registry in `abstract-domains` defines the fixed-width entry
+format. This crate must not depend on `abstract-domains`.
 
-## 2. Proposed API
+## 2. API
 
 All signatures in this section are proposals.
 
@@ -48,7 +47,7 @@ layer never inspects an entry; it stores, copies and restores it. The width of
 unit type, keeps existing instantiations source-compatible.
 
 ```rust
-// proposed: EClasses gains the entry type after the store policy.
+// EClasses gains the entry type after the store policy.
 pub struct EClasses<T, K, L, N, J, const TRACK: bool, const PROOFS: bool,
                     P = HotFirst, A = NoAbs>
 where
@@ -60,7 +59,6 @@ where
 ### 2.2 Class payload and merge result
 
 ```rust
-// proposed
 pub struct ClassData<L: DenseId, T: DenseId> {
     // existing fields: use_list, min_row, atomic, matchable, size
     pub abs: Option<<T as DenseId>::Index>,
@@ -81,10 +79,10 @@ caller reads it through `abs_value_at`.
 ### 2.3 Field and spec views
 
 ```rust
-// proposed field, next to min_pool
+// field, next to min_pool
 pub(crate) abs_pool: SpVec<A, usize, <P as PlainFamily<A, usize, TRACK>>::Store, TRACK>,
 
-// proposed spec views, next to pool_view / pool_archive
+// spec views, next to pool_view / pool_archive
 pub open(crate) spec fn abs_pool_view(&self) -> Seq<A>;
 pub open(crate) spec fn abs_pool_archive(&self) -> Seq<Seq<A>>;
 /// The value of live class `id`: None without a handle, else the pool entry.
@@ -94,7 +92,6 @@ pub open(crate) spec fn abs_value_spec(&self, id: nat) -> Option<A>;
 ### 2.4 Operations
 
 ```rust
-// proposed
 pub fn abs_handle(&self, key: K) -> (h: Option<<T as DenseId>::Index>)
     requires self.wf(),
     ensures h == self.class_data_spec(key.as_nat()).abs;
@@ -129,7 +126,7 @@ pub fn set_abs_value(&mut self, key: K, v: A)
 `merge_directed_with` and the `merge_justified*` forms:
 
 ```rust
-// proposed, inside the `r matches Some(mi)` block of merge_with
+// inside the `r matches Some(mi)` block of merge_with
 &&& mi.absorbed_abs == old(self).class_data_spec(
         old(self).key_of(mi.absorbed.id_nat() as int)).abs
 &&& final(self).abs_pool_view() == old(self).abs_pool_view()
@@ -167,7 +164,7 @@ parameter:
                 != ss_value(reprs_dense, reprs_sparse, id2).abs->Some_0.as_nat())
 ```
 
-If the student stores an entry across `abs_width > 1` cells, W8a becomes
+An entry stored across `abs_width > 1` cells, which §7 rejects, would make W8a
 `abs_width > 0 ==> abs_pool.len() % abs_width == 0`. W8b then becomes
 `(h + 1) * abs_width <= abs_pool.len()`, the exact shape of W6. If `A` carries
 a decode predicate, W8a also states it per cell, as the pool-cells-decode
@@ -217,10 +214,10 @@ obligation is that both restore together.
 Together with the existing `reprs_dense_view() == old.reprs_dense_archive()[f]`,
 items 3 and 4 give the semi-persistence theorem for abstract values. For every
 class key live at mark `f`, after a restore to `f`, the class's handle and its
-pool entry equal their values at mark `f`. The student states this theorem as
-an ensures of `restore_frames` in terms of `abs_value_spec`.
+pool entry equal their values at mark `f`. `restore_frames` and
+`reset_frames` state this theorem as an ensures in terms of `abs_value_spec`.
 
-## 5. Payload size (decision 1)
+## 5. Payload size
 
 `egraph/src/classes.rs` pins the `ClassData` repr at 16 bytes for 31-bit ids
 and at most 32 bytes for 63-bit ids. The current repr holds three index words
@@ -235,13 +232,7 @@ byte, so the assert fails at both widths. This is the first design decision.
 | B1. Share a word: one side-row number indexes both the `min_pool` row and the pool entry | 16 bytes | 32 bytes | a class with only one of the two allocates both; the two pools grow in lockstep | W6 and W8 share one allocation clause; `set_min_monomial` and `set_abs_value` share allocation |
 | B2. Share bits: encode `None` as a sentinel index and move the flags into spare high bits of the index words | 16 bytes | 32 bytes | decode costs a mask per read | new `repr_wf` and extensionality proofs for packed words; the use-list word's high bit already carries the capture tag |
 
-Option A requires a measurement. The student reports peak resident memory and
-wall time on the benchmark set, before and after, and updates both asserts and
-their comments with the measured result. Option B1 or B2 keeps both asserts
-unchanged; the student states which pool allocations become shared or which
-bits are reused.
-
-Outcome: option A was chosen (§8.1) and measured against `f8276da` on the
+Option A was chosen (§7) and measured against main at `16cd7599` on the
 corpus programs. Peak RSS changes by at most +4.1% at 31-bit ids and +8.6%
 at 63-bit ids (math-microbenchmark), under 0.2% on the largest program
 (acgen), and wall time stays within run-to-run spread. Both asserts in
@@ -251,94 +242,28 @@ A further option drops the handle and indexes the pool by class key. The key
 is unique per live class and survives a merge as the survivor's key. This
 option keeps 16 bytes and makes W8c hold by construction. It departs from the
 handle design of eclass-analysis.md §4 and sizes the pool by the key range,
-so the student argues it against the table above before choosing it.
+and it was not chosen.
 
-## 6. Change sites
+## 6. Where the change lives
 
-Each site carries a comment `TODO(abs-class-storage)` that names the change
-and the section of this chapter. Line numbers refer to the hand-off commit
-of this branch.
+- `containers-verus/src/eclasses.rs`: `ClassData::abs` and its repr,
+  `EqSpec::eq_exec`, W8 in `eg_model_wf`, the pool snapshots in
+  `eg_archive_agrees`, the `abs_pool` field, `MergeInfo::absorbed_abs`,
+  `set_abs_value`, `abs_handle`, `abs_value`, `abs_value_at`, and the pool in
+  `push_frames`, `reset_frames` and `restore_frames`.
+- `containers-verus/src/group.rs`: the pool in the `Member` model and archive.
+- `egraph/src/classes.rs`: the two `ClassData` size asserts.
 
-| File:line | Site | Change | § |
-|---|---|---|---|
-| `containers-verus/src/eclasses.rs:42` | module header | add W8 to the W-invariant table | 3 |
-| `containers-verus/src/eclasses.rs:62` | `ClassData` | add `abs` | 2 |
-| `containers-verus/src/eclasses.rs:96` | `EqSpec::eq_exec` | compare `abs` as `min_row` | 7 |
-| `containers-verus/src/eclasses.rs:142` | `Default for ClassData` | `abs: None` | 2 |
-| `containers-verus/src/eclasses.rs:156` | `ClassDataRepr` | store `abs`; the 16-byte decision | 5 |
-| `containers-verus/src/eclasses.rs:184` | `Tagged for ClassData` | extend `value_of`, `repr_wf`, extensionality, `into_repr`, `from_repr` | 7 |
-| `containers-verus/src/eclasses.rs:291` | `eg_model_wf` parameters | add the pool view | 3 |
-| `containers-verus/src/eclasses.rs:363` | `eg_model_wf` W6 clauses | state W8 after W6 | 3 |
-| `containers-verus/src/eclasses.rs:411` | `eg_archive_agrees` | archived pool snapshots, per-frame W8, monotone lengths | 4 |
-| `containers-verus/src/eclasses.rs:477` | `min_pool` field | add `abs_pool` and its `PlainFamily` bound | 2 |
-| `containers-verus/src/eclasses.rs:693` | `EClasses::wf` | `abs_pool.wf()`, predicate arguments, archived-length bound | 4 |
-| `containers-verus/src/eclasses.rs:718` | `new` | allocate the empty pool | 2 |
-| `containers-verus/src/eclasses.rs:879` | `add_singleton` | `abs: None`, also in the spec literal | 2 |
-| `containers-verus/src/eclasses.rs:1216` | `MergeInfo` | add `absorbed_abs` | 2 |
-| `containers-verus/src/eclasses.rs:1244` | `lemma_merge_wf` | carry `abs`; discharge W8 | 3 |
-| `containers-verus/src/eclasses.rs:1730` | `merge_with` ensures | `absorbed_abs`; pool view unchanged | 2 |
-| `containers-verus/src/eclasses.rs:1906` | `merge_with` result | `absorbed_abs: data.abs` | 2 |
-| `containers-verus/src/eclasses.rs:2250` | `set_min_monomial` | model for `set_abs_value` | 7 |
-| `containers-verus/src/eclasses.rs:2754` | `min_monomial_at_row` | model for `abs_value_at` | 2 |
-| `containers-verus/src/eclasses.rs:2799` | `merge` | carry the `absorbed_abs` ensures to every public merge form | 2 |
-| `containers-verus/src/eclasses.rs:2959` | `push_frames` | push the pool in lockstep | 4 |
-| `containers-verus/src/eclasses.rs:3135` | `reset_frames` | reset the pool in lockstep | 4 |
-| `containers-verus/src/eclasses.rs:3295` | `restore_frames` | restore the pool; view equals archive | 4 |
-| `containers-verus/src/group.rs:1607` | `Member for EClasses` | pool in `Model`, `archive` and depth checks | 4 |
-| `egraph/src/classes.rs:50` | 31-bit size assert | 16-byte decision | 5 |
-| `egraph/src/classes.rs:62` | 63-bit size assert | 32-byte bound | 5 |
-| `containers-verus/doc/design/egraph-class-layer.md:30` | Surface | list the handle and pool | 2 |
-| `containers-verus/doc/design/egraph-class-layer.md:37` | Invariants | W1 through W8 | 3 |
+Every step follows the `min_row` / `min_pool` code: the `(row, present)`
+repr pinned by `repr_wf`, W6 for allocation and distinctness, the
+`pool_snaps` clauses of `eg_archive_agrees`, first-use allocation in
+`set_min_monomial`, and the read through a carried handle in
+`min_monomial_at_row`.
 
-The type aliases in `egraph/src/classes.rs` and the `fold_min_monomial` call
-sites in `egraph/src/egraph.rs` change only if the entry parameter `A` has no
-default. The meet on merge belongs to `abs-saturation-engine`. The unverified
-reference `containers/src/eclasses.rs` is a differential oracle and needs no
-change; `containers-conformance` may compare `absorbed_abs` once the
-reference has it.
+The meet on merge belongs to the saturation engine. The unverified reference
+`containers/src/eclasses.rs` is a differential oracle and needs no change.
 
-## 7. Patterns to follow
-
-Every step of this PR has a precedent in the `min_row` / `min_pool` code.
-Line numbers refer to the hand-off commit, which includes the TODO comments.
-
-- `ClassData::min_row` (`eclasses.rs:68`) and its `(row, present)` repr
-  (`ClassDataRepr`, line 163): the absent value is pinned to
-  `(min, false)` by `repr_wf`, which the extensionality lemma needs.
-- `EqSpec::eq_exec` (line 97): the `min_row` match and its injectivity proof.
-- W6 in `eg_model_wf` (line 364): allocation and distinctness of live rows.
-- `eg_archive_agrees` (line 397): `pool_snaps` and its monotone-length clause.
-- The `min_pool` field (line 482) and its `PlainFamily` bound.
-- `MergeInfo::absorbed_min_row` (line 1221), set at line 1907 and ensured in
-  `merge_with` (line 1687).
-- `set_min_monomial` (line 2257): first-use allocation by
-  `min_pool.try_push_repeat` (line 2314), the payload write `reprs.set_live`
-  (line 2333), the tracked cell write `min_pool.set_index` (line 2411), and
-  the mid-state lemma `lemma_mid_pool_wf` (line 2436).
-- `min_monomial_at_row` (line 2759): a read through a handle carried in
-  `MergeInfo`, with a runtime allocation check.
-- `push_frames` (line 2963), `reset_frames` (line 3139), `restore_frames`
-  (line 3299): the `pool_view` / `pool_archive` ensures.
-- `set_min_width` (line 2080): the one place outside mark and restore that
-  reveals `eg_archive_agrees`; it must pass the new pool arguments through.
-
-## 8. Decisions left to the student
-
-1. Payload size (§5): option A with a measurement, or option B1 or B2.
-2. Entry representation: a type parameter `A`, a const-generic word array,
-   or entries spanning `abs_width` cells.
-3. One pool or one pool per sort. Per-sort pools widen the handle to a
-   `(sort tag, offset)` pair, as eclass-analysis.md §4 sketches.
-4. Handle adoption on merge: when the survivor has no handle and the absorbed
-   class has one, `merge` may move the handle to the survivor. Adoption saves
-   one pool entry and adds one payload write to `merge_with`.
-5. Whether `set_abs_value` returns the previous value, so the caller detects
-   a change without a second read.
-
-Each decision is recorded in this chapter, with its reason, before the PR
-leaves draft.
-
-### 8.1 Recorded decisions
+## 7. Design decisions
 
 1. Payload size: option A. `abs` is stored as a `(handle, present)` pair,
    exactly as `min_row` is stored, and `repr_wf` pins the absent value to
@@ -366,47 +291,25 @@ leaves draft.
    it with `abs_value` first; the saturation engine reads both inputs of the
    meet before it writes, so it has the old value already.
 
-### 8.2 Departures from the proposals
+### Departures from the API of §2
 
 - `abs_value_spec` is defined through the free function
   `abs_value_of(dense, sparse, abs_pool, id)`, so the restore theorem can
-  name a value in an archived frame. The meaning is the one proposed in §2.3.
+  name a value in an archived frame. The meaning is the one in §2.3.
 - The restore theorem is an ensures of both `reset_frames` and
   `restore_frames`, and holds for every key, not only the keys live at the
   mark: the restored repr columns and pool are the archived ones.
 - The live-length bound on archived pool snapshots sits in `EClasses::wf`,
   outside the opaque `eg_archive_agrees`, as for `min_pool`; the per-frame
-  count and the monotone lengths sit inside it, as §4 proposes.
+  count and the monotone lengths sit inside it, as §4 states.
 
-## 9. Acceptance criteria
-
-1. Verification reports 0 errors for the modules `eclasses` and `group`:
-   `cargo verus focus -p semi-persistent-containers-verus -- --verify-only-module eclasses`,
-   and the same with `group`.
-2. The PR adds no `admit`, no `assume` and no `external_body`. The trust
-   ledger in [Chapter 2](02-trust-boundary.md) is unchanged.
-3. The tests in `containers-verus/tests/abs_class_storage.rs` are
-   implemented, their `#[ignore]` attributes removed, and they pass:
-   `cargo test -p semi-persistent-containers-verus --test abs_class_storage`.
-4. The existing suites pass, among them `eclasses_behavior` and the
-   `containers-conformance` test `egraph_reference_differential`.
-5. `egraph` builds with the size asserts updated to the chosen option of §5.
-   Option A reports the measurement in the assert comment.
-6. W8 appears in the `eclasses.rs` module header and in
-   [egraph-class-layer.md](egraph-class-layer.md), and every
-   `TODO(abs-class-storage)` comment is resolved and removed.
-7. `cargo fmt --all --check`, `cargo clippy` and
-   `bash scripts/check-oss-scaffold.sh` pass.
-
-## 10. Links
+## 8. Links
 
 - [eclass-analysis.md §4 Storage](../../../egraph/doc/future/eclass-analysis.md#4-storage):
-  the storage design this PR implements.
+  the storage design this chapter implements.
 - [E-Graph Class-Layer Integration](egraph-class-layer.md): the class layer's
   surface and invariants.
 - [Chapter 2, The Trust Boundary](02-trust-boundary.md): the
   `external_body` ledger.
 - [Chapter 18, Store Policy](18-store-policy.md): the `PlainFamily` column
   family the pool uses.
-- Sibling branches: `abs-surface-syntax` (PR 1), `abs-saturation-engine`
-  (PR 3), `abs-domain-registry` (PR 4).
