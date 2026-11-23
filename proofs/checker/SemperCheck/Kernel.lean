@@ -166,6 +166,19 @@ def internS : STm → Option Nat
   | .atom (.lit s v) => C.lookup (.lit s v)
   | .app f args => (args.mapM internS).bind fun ids => C.lookup (.app f ids)
 
+/-- Above this count an argument is held once with its count (`Node.napp`);
+up to it, as that many arguments (`Node.app`). The two nodes have one value. -/
+def countLimit : Nat := 65536
+
+/-- The children `cks`, each as many times as its count. -/
+def spread (cks : List (Nat × Nat)) : List Nat :=
+  cks.flatMap fun ck => List.replicate ck.2 ck.1
+
+/-- The node that is `f` applied to the counted children `cks`. -/
+def mkApp (f : String) (cks : List (Nat × Nat)) : Option Nat :=
+  if cks.all (fun ck => ck.2 ≤ countLimit) then C.lookup (.app f (spread cks))
+  else C.lookup (.napp f cks)
+
 mutual
 
 /-- The node that is pattern `p` with each variable read from `σ`. -/
@@ -177,27 +190,29 @@ def instP (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : Lis
   | .rep _ _ => none
   | .times _ _ => none
   | .count k => (μ.lookup k).bind fun n => C.lookup (.lit "i64" (toString n))
-  | .app f ps => (instArgs σ ρ μ ps).bind fun ids => C.lookup (.app f ids)
+  | .app f ps => (instArgs σ ρ μ ps).bind (C.mkApp f)
 
-/-- The nodes of an argument list: a rest variable gives the nodes `ρ` binds
-it to, a repeated argument its node as many times as `μ` says. -/
+/-- The nodes of an argument list, each with its count: a rest variable gives
+the nodes `ρ` binds it to, a repeated argument its node with the count `μ`
+says. -/
 def instArgs (σ : List (String × Nat)) (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
-    List Pat → Option (List Nat)
+    List Pat → Option (List (Nat × Nat))
   | [] => some []
-  | .rest x :: ps => (ρ.lookup x).bind fun r => (instArgs σ ρ μ ps).map (r ++ ·)
+  | .rest x :: ps =>
+    (ρ.lookup x).bind fun r => (instArgs σ ρ μ ps).map (r.map (·, 1) ++ ·)
   | .rep p k :: ps =>
     (μ.lookup k).bind fun n => (instP σ ρ μ p).bind fun i =>
-      (instArgs σ ρ μ ps).map (List.replicate n i ++ ·)
+      (instArgs σ ρ μ ps).map ((i, n) :: ·)
   | .times p n :: ps =>
-    (instP σ ρ μ p).bind fun i => (instArgs σ ρ μ ps).map (List.replicate n i ++ ·)
-  | .var x :: ps => (σ.lookup x).bind fun i => (instArgs σ ρ μ ps).map (i :: ·)
-  | .lit s v :: ps => (C.lookup (.lit s v)).bind fun i => (instArgs σ ρ μ ps).map (i :: ·)
+    (instP σ ρ μ p).bind fun i => (instArgs σ ρ μ ps).map ((i, n) :: ·)
+  | .var x :: ps => (σ.lookup x).bind fun i => (instArgs σ ρ μ ps).map ((i, 1) :: ·)
+  | .lit s v :: ps => (C.lookup (.lit s v)).bind fun i => (instArgs σ ρ μ ps).map ((i, 1) :: ·)
   | .count k :: ps =>
     ((μ.lookup k).bind fun n => C.lookup (.lit "i64" (toString n))).bind fun i =>
-      (instArgs σ ρ μ ps).map (i :: ·)
+      (instArgs σ ρ μ ps).map ((i, 1) :: ·)
   | .app f as :: ps =>
-    ((instArgs σ ρ μ as).bind fun ids => C.lookup (.app f ids)).bind fun i =>
-      (instArgs σ ρ μ ps).map (i :: ·)
+    ((instArgs σ ρ μ as).bind (C.mkApp f)).bind fun i =>
+      (instArgs σ ρ μ ps).map ((i, 1) :: ·)
 
 end
 

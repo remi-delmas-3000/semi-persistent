@@ -454,6 +454,47 @@ def mval (μ : List (String × Nat)) (k : String) : Nat :=
   | some n => n
   | none => 0
 
+/-- The values of counted children, each as many times as its count. -/
+def spreadV (M : Model) (nodes : Array Node) (cks : List (Nat × Nat)) : List M.α :=
+  cks.flatMap fun ck => List.replicate ck.2 (nval M nodes ck.1)
+
+theorem spread_map (cks : List (Nat × Nat)) :
+    (spread cks).map (nval M C.nodes) = spreadV M C.nodes cks := by
+  unfold spread spreadV
+  induction cks with
+  | nil => rfl
+  | cons ck t ih =>
+    simp only [List.flatMap_cons, List.map_append, List.map_replicate, ih]
+
+theorem spreadV_cons (i n : Nat) (t : List (Nat × Nat)) :
+    spreadV M C.nodes ((i, n) :: t) =
+      List.replicate n (nval M C.nodes i) ++ spreadV M C.nodes t := by
+  simp only [spreadV, List.flatMap_cons]
+
+theorem spreadV_one (i : Nat) (t : List (Nat × Nat)) :
+    spreadV M C.nodes ((i, 1) :: t) = nval M C.nodes i :: spreadV M C.nodes t := by
+  rw [spreadV_cons]
+  rfl
+
+theorem spreadV_ones (r : List Nat) (t : List (Nat × Nat)) :
+    spreadV M C.nodes (r.map (·, 1) ++ t) = r.map (nval M C.nodes) ++ spreadV M C.nodes t := by
+  induction r with
+  | nil => rfl
+  | cons x r ih =>
+    simp only [List.map_cons, List.cons_append]
+    rw [spreadV_one, ih]
+
+/-- The node `mkApp` finds is `f` on the children's values, each as many
+times as its count. -/
+theorem mkApp_sound (hwf : wfNodes C.nodes = true) {f : String} {cks : List (Nat × Nat)}
+    {i : Nat} (h : C.mkApp f cks = some i) :
+    nval M C.nodes i = M.app f (spreadV M C.nodes cks) := by
+  unfold mkApp at h
+  split at h
+  · rw [nval_app hwf (lookup_some h), spread_map]
+  · rw [nval_napp hwf (lookup_some h)]
+    rfl
+
 mutual
 
 theorem instP_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
@@ -481,71 +522,71 @@ theorem instP_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
     rw [nval_lit (lookup_some h), Model.evalP, mval, hn]
   | .app f ps, i, h => by
     rw [instP, Option.bind_eq_some_iff] at h
-    obtain ⟨ids, hids, hi⟩ := h
-    rw [nval_app hwf (lookup_some hi), Model.evalP, instArgs_sound hwf σ ρ μ ps ids hids]
+    obtain ⟨cks, hcks, hi⟩ := h
+    rw [mkApp_sound hwf hi, Model.evalP, instArgs_sound hwf σ ρ μ ps cks hcks]
 
 theorem instArgs_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
     (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
-    ∀ (ps : List Pat) (ids : List Nat), C.instArgs σ ρ μ ps = some ids →
-      ids.map (nval M C.nodes) =
+    ∀ (ps : List Pat) (cks : List (Nat × Nat)), C.instArgs σ ρ μ ps = some cks →
+      spreadV M C.nodes cks =
         M.evalArgs (sval M C.nodes σ) (rval M C.nodes ρ) (mval μ) ps
-  | [], ids, h => by
+  | [], cks, h => by
     rw [instArgs] at h
     cases h
     rw [Model.evalArgs]
     rfl
-  | .rest x :: ps, ids, h => by
+  | .rest x :: ps, cks, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨r, hr, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, List.map_append, instArgs_sound hwf σ ρ μ ps t ht, rval, hr]
-  | .rep p k :: ps, ids, h => by
+    rw [Model.evalArgs, spreadV_ones, instArgs_sound hwf σ ρ μ ps t ht, rval, hr]
+  | .rep p k :: ps, cks, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨n, hn, h⟩ := h
     rw [Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, List.map_append, List.map_replicate, instArgs_sound hwf σ ρ μ ps t ht,
+    rw [Model.evalArgs, spreadV_cons, instArgs_sound hwf σ ρ μ ps t ht,
       instP_sound hwf σ ρ μ p i hi, mval, hn]
-  | .times p n :: ps, ids, h => by
+  | .times p n :: ps, cks, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, List.map_append, List.map_replicate, instArgs_sound hwf σ ρ μ ps t ht,
+    rw [Model.evalArgs, spreadV_cons, instArgs_sound hwf σ ρ μ ps t ht,
       instP_sound hwf σ ρ μ p i hi]
-  | .count k :: ps, ids, h => by
+  | .count k :: ps, cks, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
     rw [Option.bind_eq_some_iff] at hi
     obtain ⟨n, hn, hi⟩ := hi
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ μ ps t ht,
+    rw [Model.evalArgs, spreadV_one, instArgs_sound hwf σ ρ μ ps t ht,
       nval_lit (lookup_some hi), mval, hn]
-  | .var x :: ps, ids, h => by
+  | .var x :: ps, cks, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ μ ps t ht, sval, hi]
-  | .lit s v :: ps, ids, h => by
+    rw [Model.evalArgs, spreadV_one, instArgs_sound hwf σ ρ μ ps t ht, sval, hi]
+  | .lit s v :: ps, cks, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ μ ps t ht, nval_lit (lookup_some hi)]
-  | .app f as :: ps, ids, h => by
+    rw [Model.evalArgs, spreadV_one, instArgs_sound hwf σ ρ μ ps t ht, nval_lit (lookup_some hi)]
+  | .app f as :: ps, cks, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
     rw [Option.bind_eq_some_iff] at hi
     obtain ⟨is, his, hi⟩ := hi
-    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ μ ps t ht,
-      nval_app hwf (lookup_some hi), instArgs_sound hwf σ ρ μ as is his]
+    rw [Model.evalArgs, spreadV_one, instArgs_sound hwf σ ρ μ ps t ht,
+      mkApp_sound hwf hi, instArgs_sound hwf σ ρ μ as is his]
 
 end
 
