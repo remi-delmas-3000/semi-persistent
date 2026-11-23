@@ -812,7 +812,8 @@ def viewArgs (S : St P) (f : String) (tree : Bool) (W : List Wit) (todo : List (
         if _h : (W.erase w).length < W.length then
           -- A multiset's argument has a count, and an opening reads all of its
           -- copies: every other copy of the node at this level goes with it.
-          let copies := if S.prog.kind f == .ac then (rest.filter (· == (a, ctx))).length else 0
+          -- A regrouping stands for one occurrence of its class.
+          let copies := if tree && S.prog.kind f == .ac then (rest.filter (· == (a, ctx))).length else 0
           let rest := if copies == 0 then rest else rest.filter (· != (a, ctx))
           let sub := cs.map (·, some w.1)
           viewArgs S f tree (W.erase w) ((List.replicate (copies + 1) sub).flatten ++ rest) out
@@ -1748,7 +1749,7 @@ def openArgs (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (W : List 
     -- The node the argument becomes, and the witnesses left.
     -- A multiset's argument an opening already read: its other copies become
     -- the same node.
-    let again := if S.prog.kind f == .ac then opened.lookup a else none
+    let again := if tree && S.prog.kind f == .ac then opened.lookup a else none
     -- With `only`, a witness applies at the listed positions and nowhere else.
     let here := match only with
       | some ps => ps.contains out.size
