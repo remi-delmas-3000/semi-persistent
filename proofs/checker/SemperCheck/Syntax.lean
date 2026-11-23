@@ -142,7 +142,19 @@ inductive SNum where
   | count (g : String)
   /-- The sum of the counts of filter `g`'s elements. -/
   | sum (g : String)
+  /-- A count (of a multiplicity variable, or of a comprehension's element)
+  as a literal of sort `sort`. -/
+  | cnt (x : String) (sort : String)
   | prim (f : String) (args : List SNum)
+  deriving Repr, Inhabited
+
+/-- What a comprehension ranges over: one sequence (a filter's elements, a
+column, a rest sequence), several side by side (to the shortest), or several
+one after the other. -/
+inductive SSrc where
+  | one (x : String)
+  | zip (xs : List String)
+  | concat (xs : List String)
   deriving Repr, Inhabited
 
 mutual
@@ -161,6 +173,14 @@ of a filter's elements or of a rest sequence. -/
 inductive SArg where
   | tm (t : SRhs)
   | splice (x : String)
+  /-- `t`, as many times as `k` computes. -/
+  | times (t : SRhs) (k : SNum)
+  /-- A comprehension: `body` for each row of `src`, with `binders` bound to
+  the row's values and `kvar` to its count (`grouped`: a rest sequence's equal
+  neighbours are one row with their number as count), when `guard` computes
+  `true`, as many times as `mult` computes (once without it). -/
+  | comp (body : SRhs) (binders : List String) (kvar : Option String) (src : SSrc)
+      (grouped : Bool) (guard : Option SNum) (mult : Option SNum)
   deriving Repr, Inhabited
 
 end
@@ -169,6 +189,9 @@ structure SeqRule where
   /-- The root operator. -/
   op : String
   items : List SItem
+  /-- A left side that is a pattern with rest variables and counts and no
+  filter: it replaces `op` and `items`. -/
+  lhs : Option Pat := none
   rhs : SRhs
   /-- The `:when` conditions: each computes `true` for the rule to apply. -/
   guards : List SNum := []
@@ -189,6 +212,8 @@ structure SBind where
   cols : List (String × List SAtom) := []
   /-- Each variable bound once. -/
   scalars : List (String × SAtom) := []
+  /-- Each multiplicity variable's count. -/
+  kcounts : List (String × Nat) := []
   deriving Repr, Inhabited
 
 /-- A command that states or asks for an equality. -/

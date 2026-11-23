@@ -144,8 +144,14 @@ literal, a scalar, `(count g)`, a primitive). `:except` is read and adds
 nothing, since a binding names each filter's elements. The reader reads a
 sequence rule with no tag but `:when`, a filter with or without a count
 (`..g:k`, `..g:k>=n`, whose least count `seqApply` checks; `(sum k)` is the
-sum of the elements' counts), and a right side
-of variables, literals, applications, splices `..x` and computed literals.
+sum of the elements' counts), and a right side of variables, literals,
+applications, splices `..x`, computed literals, counted arguments `t:k`, and
+comprehensions `..[ t for x in s if c ]` and `..{ t:k for x:n in s }` over a
+filter's elements, a column, a rest sequence, `(zip ..)` or `(concat ..)`. A
+comprehension's condition and count are computed on the binding by the same
+evaluator. A rule with a comprehension and no filter is a sequence rule whose
+left side is a pattern: its binding is read from the match's `e` lines, and
+equal neighbours of a rest sequence are one row with their number as count.
 
 ## What the reader reads
 
@@ -195,9 +201,9 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,759 |
-| programs with every `check-eq` proved, of 1,066 | 1,045 |
-| kernel steps checked | 16,547,937 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 29,781 |
+| programs with every `check-eq` proved, of 1,066 | 1,048 |
+| kernel steps checked | 16,548,078 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,101 |
 | events whose check fails | 8,069 |

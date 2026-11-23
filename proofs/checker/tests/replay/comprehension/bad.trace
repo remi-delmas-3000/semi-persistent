@@ -1,0 +1,31 @@
+n 0 a
+t 0 a
+n 1 F 0
+t 1 F 0
+n 2 b
+t 2 b
+n 3 F 2
+t 3 F 2
+n 4 c
+t 4 c
+n 5 G 4
+t 5 G 4
+n 6 Cat 1 3 5
+t 6 Cat 1 3 5
+n 7 P 0 4
+n 8 Cat 7
+w 8 7
+r 465 w
+q 6
+qf fs 1 3
+qn x 0 2
+qf gs 5
+qn y 0
+qe fs 1 3
+qe gs 5
+b 8
+m 0 8 6
+t 0 a
+t 4 c
+t 7 P 0 4
+g 558 6 7

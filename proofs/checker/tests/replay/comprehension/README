@@ -1,0 +1,2 @@
+`ok.trace` is the stream `semi-persistent --proofs --types machine --trace` writes for `program.egg`.
+`bad.trace` differs in line 23: the `qn` line gives the column `y` node 0 instead of node 4, so the comprehension builds another term than the engine built and the left term is not the root node.

@@ -490,6 +490,7 @@ def SNum.sort? (sorts : List (String × String)) : SNum → Option String
   | .var x => sorts.lookup x
   | .count _ => some "i64"
   | .sum _ => some "i64"
+  | .cnt _ s => some s
   | .prim f _ => (primSig f).map (·.2)
 
 /-- A value a sequence rule computes: a literal, a scalar, `(count g)`, or a
@@ -501,7 +502,13 @@ partial def Env.seqNum (E : Env) (exp : Option String) : SExp → PatM SNum
       match litSort exp a with
       | some s => pure (.lit s (canonLit s a))
       | none => throw "a literal of another sort than its position"
-    else pure (.var a)
+    else do
+      -- A count (a multiplicity variable, or a comprehension's) is a number of
+      -- the position's sort.
+      let st ← get
+      if (st.mults.lookup a).isSome || (st.pending.lookup s!"#cnt:{a}").isSome then
+        pure (.cnt a (exp.getD "i64"))
+      else pure (.var a)
   | .list [.atom "count", .atom g] => pure (.count g)
   -- `(sum k)`, for the count variable `k` of a filter: recorded as a
   -- multiplicity variable whose bound names the filter's position.
@@ -534,7 +541,11 @@ partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
     else if (E.globals.lookup a).isSome then throw "a let name in a sequence rule"
     else match E.op? a with
       | some _ => pure (.app a [])
-      | none => pure (.var a)
+      | none => do
+        let st ← get
+        if (st.mults.lookup a).isSome || (st.pending.lookup s!"#cnt:{a}").isSome then
+          pure (.val (.cnt a (exp.getD "i64")))
+        else pure (.var a)
   | .list [.atom "count", .atom g] => pure (.val (.count g))
   | .list [.atom "sum", .atom k] => do return .val (← E.seqNum exp (.list [.atom "sum", .atom k]))
   | .list (.atom f :: args) => do
@@ -543,15 +554,80 @@ partial def Env.seqRhs (E : Env) (exp : Option String) : SExp → PatM SRhs
       return .val (← E.seqNum exp (.list (.atom f :: args)))
     let some d := E.op? f | throw s!"a sequence form ({f})"
     let mut out : Array SArg := #[]
-    for (x, i) in args.zipIdx do
+    let mut todo := args
+    let mut i := 0
+    -- An argument's count, written after it: `:k`, `:3`, or `:` and a value.
+    let count (todo : List SExp) : PatM (Option SNum × List SExp) := do
+      match todo with
+      | .atom ":" :: e :: rest => pure (some (← E.seqNum (some "u64") e), rest)
+      | .atom a :: rest =>
+        if a.startsWith ":" && a.length > 1 then
+          pure (some (← E.seqNum (some "u64") (.atom (a.drop 1).toString)), rest)
+        else pure (none, todo)
+      | _ => pure (none, todo)
+    while !todo.isEmpty do
       let exp := if d.kind.isAssoc then d.args.head? else d.args[i]?
-      match x with
-      | .atom a =>
-        if a.startsWith ".." then
-          if a.contains ':' || a.contains '{' || a.contains '[' then throw s!"a sequence form ({a})"
+      i := i + 1
+      match todo with
+      | .atom a :: rest =>
+        if a == "..[" || a == "..{" then
+          -- A comprehension, up to the atom that ends with its closing bracket.
+          let close := if a == "..[" then ']' else '}'
+          let ends (x : SExp) : Bool := match x with
+            | .atom b => b.endsWith (String.singleton close)
+            | _ => false
+          let inner := rest.takeWhile (!ends ·)
+          let some last := (rest.drop inner.length).head? | throw "a comprehension that does not end"
+          let lastTok := match last with
+            | .atom b => if b.length == 1 then [] else [SExp.atom (b.dropEnd 1).toString]
+            | _ => []
+          todo := rest.drop (inner.length + 1)
+          let toks := inner ++ lastTok
+          let body :: toks := toks | throw "a comprehension with no body"
+          -- The binder and the source come first: the body reads them.
+          let afterBody := toks.dropWhile fun x => match x with | .atom "for" => false | _ => true
+          let .atom "for" :: binder :: .atom "in" :: src :: tail := afterBody
+            | throw "a comprehension that is no `for .. in ..`"
+          let (binders, kv) ← match binder with
+            | .atom b =>
+              match b.splitOn ":" with
+              | [x] => pure ([x], none)
+              | [x, k] => pure ([x], some k)
+              | _ => throw "a comprehension's binder"
+            | .list bs =>
+              pure (bs.filterMap (fun x => match x with | .atom b => some b | _ => none), none)
+          if let some k := kv then
+            modify fun st => { st with pending := (s!"#cnt:{k}", "") :: st.pending }
+          let source ← match src with
+            | .atom x => pure (SSrc.one x)
+            | .list (.atom "zip" :: xs) =>
+              pure (SSrc.zip (xs.filterMap fun x => match x with | .atom b => some b | _ => none))
+            | .list (.atom "concat" :: xs) =>
+              pure (SSrc.concat (xs.filterMap fun x => match x with | .atom b => some b | _ => none))
+            | _ => throw "a comprehension's source"
+          let guard ← match tail with
+            | [] => pure none
+            | [.atom "if", c] => pure (some (← E.seqNum (some "bool") c))
+            | _ => throw "a comprehension's condition"
+          let (mult, extra) ← count (toks.takeWhile fun x => match x with | .atom "for" => false | _ => true)
+          unless extra.isEmpty do throw "a comprehension's body"
+          let b ← E.seqRhs exp body
+          out := out.push (.comp b binders kv source (a == "..{") guard mult)
+        else if a.startsWith ".." then
+          if a.contains ':' then throw s!"a sequence form ({a})"
           out := out.push (.splice (a.drop 2).toString)
-        else out := out.push (.tm (← E.seqRhs exp x))
-      | _ => out := out.push (.tm (← E.seqRhs exp x))
+          todo := rest
+        else
+          let t ← E.seqRhs exp (.atom a)
+          let (k, rest) ← count rest
+          out := out.push (match k with | some k => .times t k | none => .tm t)
+          todo := rest
+      | x :: rest =>
+        let t ← E.seqRhs exp x
+        let (k, rest) ← count rest
+        out := out.push (match k with | some k => .times t k | none => .tm t)
+        todo := rest
+      | [] => pure ()
     pure (.app f out.toList)
   | _ => throw "a sequence form"
 
@@ -575,6 +651,11 @@ def isSeqLhs : SExp → Bool
     | _ => false
   | _ => false
 
+/-- Whether a right side holds a comprehension. -/
+partial def hasComp : SExp → Bool
+  | .atom a => a == "..[" || a == "..{"
+  | .list xs => xs.any hasComp
+
 /-- The sequence rule of a `rewrite` whose left side has a filter. -/
 def Env.seqRule (E : Env) (lhs rhs : SExp) (tags : List SExp) : Except String SeqRule :=
   match tags with
@@ -582,6 +663,15 @@ def Env.seqRule (E : Env) (lhs rhs : SExp) (tags : List SExp) : Except String Se
   | _ => .error "a sequence rule with a tag other than :when"
 where
   go : PatM SeqRule := do
+    if !isSeqLhs lhs then
+      -- No filter: the left side is a pattern, the right side has a comprehension.
+      let (l, sl) ← E.pat none lhs
+      let r ← E.seqRhs sl rhs
+      let mut guards : Array SNum := #[]
+      if let [_, .list gs] := tags then
+        for g in gs do guards := guards.push (← E.seqNum (some "bool") g)
+      return { op := "", items := [], lhs := some l, rhs := r, guards := guards.toList,
+               sorts := (← get).sorts }
     let .list (.atom f :: items) := lhs | throw "a sequence rule's left side"
     let some d := E.op? f | throw s!"unknown operator {f}"
     unless d.kind.isAssoc do throw "a filter under an operator that takes no sequence"
@@ -679,7 +769,7 @@ def step (E : Env) (P : Program) (o : Nat) : SExp → Except String (Env × Prog
     let (tb, _) ← E.term (some sa) b
     return (E, { P with decls := P.decls ++ [(o, .goal ta tb)] })
   | .list (.atom "rewrite" :: l :: r :: tags) =>
-    if isSeqLhs l then
+    if isSeqLhs l || hasComp r then
       match E.seqRule l r tags with
       | .ok sr => return (E, { P with decls := P.decls ++ [(o, .seq (some sr))] })
       | .error e =>

@@ -2645,6 +2645,78 @@ def readSeq (S : St P) (r : SeqRule) (lines : List (List String)) : SeqRead :=
     -- A multiplicity scalar: not read yet.
     | _ => { R with ok := false }) {}
 
+/-- The kernel steps of a sequence rule's firing under the binding `B`, which
+merged the node `new` it built with `root`: the `seq` step proves the rule's
+two terms equal; each element's pattern instance is its member argument by
+argument; an application of a sequence operator to one argument is that
+argument; the left term is then `root` and the right term `new` under the
+operators' laws. -/
+def seqFinish (S : St P) (od : Nat) (r : SeqRule) (B : SBind) (members : List (String × List Nat))
+    (root new : Nat) : St P := Id.run do
+  let some (L, T) := seqApply r B
+    | return S.fail s!"sequence rule: no instance under the binding | left {(match r.lhs with | some p => (patB B (B.look none) p).isSome | none => (itemsArgs B r.items).isSome)}, right {(rhsS r B {} r.rhs).isSome}, binding {repr B}, rule {repr r.rhs}"
+  let (S, a) := addS S L
+  let (S, b) := addS S T
+  let (some a, some b) := (a, b) | return S.fail "sequence rule: instance ill-sorted"
+  let (S, st) := emit S (.seq od B a b) a b
+  let mut S := S
+  -- Each element's instance is its member.
+  for it in r.items do
+    if let .filter name p := it then
+      if let (some ms, .app g _) := (members.lookup name, p) then
+        for (m, i) in ms.zipIdx do
+          if let some t := patB B (B.look (some i)) p then
+            let (S1, ti) := addS S t
+            S := S1
+            if let some ti := ti then
+              if S.fd ti != S.fd m then
+                let (S1, pf) := congStep S g ti m
+                S := S1.mergeBy ti m pf
+  -- An application to one argument is that argument.
+  for (t, x) in (singlesS (fun f => (S.prog.kind f).isAssoc) T).reverse do
+    let (S1, ti) := addS S t
+    let (S1, xi) := addS S1 x
+    S := S1
+    if let (some ti, some xi, .app f _) := (ti, xi, t) then
+      if S.fd ti != S.fd xi then
+        let (S1, pf) := congStepL S f ti xi
+        S := S1.mergeBy ti xi pf
+  let f := match L with
+    | .app f _ => f
+    | .atom _ => r.op
+  let (S1, p1) := congStepL S f root a
+  let (S1, p2) : St P × Pf := match T with
+    | .app g _ => congStepL S1 g b new
+    | .atom _ => eqP S1 b new
+  if p1.isNone then return S1.fail "sequence rule: left side is not the root node"
+  if p2.isNone then return S1.fail "sequence rule: right side is not the built node"
+  let (S1, q) := transP S1 root b p1 (some (some st))
+  let (S1, q) := transP S1 root new q p2
+  return S1.mergeBy root new q
+
+/-- A firing of a sequence rule whose left side is a pattern: the `e` lines
+give the match, as for a rule, and the binding is read from it (a variable
+bound to a literal node is that literal; a rest variable's nodes in order; a
+multiplicity variable's count). -/
+def seqFireP (S : St P) (od : Nat) (r : SeqRule) (p : Pat) (x y : Nat) : St P :=
+  let (atoms, rhs) := (S.atoms.toList, S.rhs)
+  let (res, w) := ((walkQ p).run).run { S := S, atoms, rhs }
+  let S := w.S
+  match res with
+  | .error e => S.fail e
+  | .ok (nl, il) =>
+    let atomOf (n : Nat) : SAtom := match S.defOf n with
+      | some (.lit s v) => .lit s v
+      | _ => .node n
+    let B : SBind := { scalars := w.σ.map fun (v, n) => (v, atomOf n),
+                       -- A rest variable is named with its dots in a pattern, and
+                       -- without them as a comprehension's source.
+                       seqs := w.ρ.flatMap fun (v, ns) =>
+                         [(v, ns.map SAtom.node), ((v.drop 2).toString, ns.map SAtom.node)],
+                       kcounts := w.μ }
+    let new := if S.fd nl == S.fd x then y else x
+    seqFinish S od r B [] il new
+
 /-- A sequence rule's firing, which merged `new`, the node it built, with the
 root node. The `seq` step proves the rule's two terms under the binding
 equal; each element's pattern instance is its member argument by argument;
@@ -2662,42 +2734,7 @@ def seqFire (S : St P) (o : Nat) (x y : Nat) : St P := Id.run do
   let some root := R.root | return S.fail "sequence rule: binding unreadable"
   if !R.ok then return skip S
   let new := if x == root then y else x
-  let some (L, T) := seqApply r R.B | return S.fail "sequence rule: no instance under the binding"
-  let (S, a) := addS S L
-  let (S, b) := addS S T
-  let (some a, some b) := (a, b) | return S.fail "sequence rule: instance ill-sorted"
-  let (S, st) := emit S (.seq od R.B a b) a b
-  let mut S := S
-  -- Each element's instance is its member.
-  for it in r.items do
-    if let .filter name p := it then
-      if let (some ms, .app g _) := (R.members.lookup name, p) then
-        for (m, i) in ms.zipIdx do
-          if let some t := patS (R.B.look (some i)) p then
-            let (S1, ti) := addS S t
-            S := S1
-            if let some ti := ti then
-              if S.fd ti != S.fd m then
-                let (S1, pf) := congStep S g ti m
-                S := S1.mergeBy ti m pf
-  -- An application to one argument is that argument.
-  for (t, x) in (singlesS (fun f => (S.prog.kind f).isAssoc) T).reverse do
-    let (S1, ti) := addS S t
-    let (S1, xi) := addS S1 x
-    S := S1
-    if let (some ti, some xi, .app f _) := (ti, xi, t) then
-      if S.fd ti != S.fd xi then
-        let (S1, pf) := congStepL S f ti xi
-        S := S1.mergeBy ti xi pf
-  let (S1, p1) := congStepL S r.op root a
-  let (S1, p2) : St P × Pf := match T with
-    | .app g _ => congStepL S1 g b new
-    | .atom _ => eqP S1 b new
-  if p1.isNone then return S1.fail "sequence rule: left side is not the root node"
-  if p2.isNone then return S1.fail "sequence rule: right side is not the built node"
-  let (S1, q) := transP S1 root b p1 (some (some st))
-  let (S1, q) := transP S1 root new q p2
-  return S1.mergeBy root new q
+  return seqFinish S od r R.B R.members root new
 
 /-- The engine's node `i` is definition `d`. An id is defined once between
 restores. -/
@@ -2855,6 +2892,11 @@ def stepCore (S : St P) (line : String) : St P :=
     | some j, some a, some b, some (o, rw) =>
       -- The engine cites a rule by an offset inside its command.
       match ((S.prog.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl)) with
+      | some (od, Decl.seq (some sr)) =>
+        match sr.lhs with
+        | some p => seqFireP S od sr p a b
+        | none => S.fail "sequence rule: no binding"
+      | some (od, Decl.seq none) => S.fail s!"rule: outside the reader's language | {od} 0"
       | some (od, Decl.rules rs) =>
         match rs[j]? with
         | some (some r) =>
