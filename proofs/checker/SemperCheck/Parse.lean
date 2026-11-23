@@ -199,6 +199,8 @@ pairs of variables an equality between two unsorted variables relates. -/
 structure VarSorts where
   sorts : List (String × String) := []
   pending : List (String × String) := []
+  /-- Each multiplicity variable with the least count it takes. -/
+  mults : List (String × Nat) := []
 
 /-- A rule the reader does not read fails with the reason, which
 `parseProgramWhy` reports. -/
@@ -213,6 +215,29 @@ def setSort (x s : String) : PatM Unit := do
 def ofTerm : Term → Pat
   | .lit s v => .lit s v
   | .app f args => .app f (args.map ofTerm)
+
+/-- The argument patterns after `ps` for pattern `p` with the count `cnt`: a
+number repeats `p` that many times; a multiplicity variable `k`, or `k>=n`,
+makes it a repeated argument and records the least count `k` takes. -/
+def counted (ps : Array Pat) (p : Pat) (cnt : String) : PatM (Array Pat) := do
+  match cnt.toNat? with
+  | some n =>
+    if n > 65536 then throw s!"a count above 65536"
+    let mut ps := ps
+    for _ in [0:n] do ps := ps.push p
+    pure ps
+  | none =>
+    let (k, bound) ← match cnt.splitOn ">=" with
+      | [k] => pure (k, 1)
+      | [k, n] =>
+        match n.toNat? with
+        | some n => pure (k, max n 1)
+        | none => throw "a multiplicity constraint that is no number"
+      | _ => throw "a multiplicity constraint"
+    if k.isEmpty || k.any (fun c => !(c.isAlphanum || c == '_' || c == '-')) then
+      throw "a multiplicity constraint other than >="
+    modify fun st => { st with mults := (k, bound) :: st.mults }
+    pure (ps.push (.rep p k))
 
 /-- A pattern at a position of sort `exp`, and its sort if known; fails on a
 construct the `Pat` type does not express and on a sort conflict. -/
@@ -252,6 +277,17 @@ partial def Env.pat (E : Env) (exp : Option String) : SExp → PatM (Pat × Opti
           setSort a d.res
           ps := ps.push (.rest a)
           continue
+        -- A count on the argument before it (`:6`, `:k`, `:k>=2`), or on the
+        -- variable it is written after (`x:6`, `x:k`).
+        if d.kind.isAssoc && a.startsWith ":" && !a.startsWith "::" then
+          let some last := ps.back? | throw "a count without an argument"
+          ps ← counted ps.pop last (a.drop 1).toString
+          continue
+        if d.kind.isAssoc && !a.startsWith ".." && !isLiteral a then
+          if let [name, cnt] := a.splitOn ":" then
+            let (q, _) ← E.pat (argSort d ps.size) (.atom name)
+            ps ← counted ps q cnt
+            continue
       let (p, _) ← E.pat (argSort d ps.size) x
       ps := ps.push p
     pure (.app f ps.toList, some d.res)
@@ -298,7 +334,7 @@ def settle : Nat → PatM Unit
 def finish (lhs rhs : Pat) (eqs : List (Pat × Pat)) : PatM Rule := do
   settle 64
   let st ← get
-  let r : Rule := { lhs, rhs, eqs, sorts := st.sorts }
+  let r : Rule := { lhs, rhs, eqs, sorts := st.sorts, mults := st.mults }
   unless r.vars.all fun x => (st.sorts.lookup x).isSome do throw "a variable of no sort"
   unless r.rests.all fun x => (st.sorts.lookup x).isSome do throw "a rest variable of no sort"
   pure r
@@ -525,7 +561,7 @@ def parseCert (src : String) : Except String Cert := do
           let mut σ : Array (String × Nat) := #[]
           for k in [0:n] do
             σ := σ.push (sig[2 * k]!, ← nat sig[2 * k + 1]!)
-          pure (.rule (← nat o) (← nat j) σ.toList [] (← (rest.drop (2 * n)).mapM nat) (← nat a) (← nat b))
+          pure (.rule (← nat o) (← nat j) σ.toList [] [] (← (rest.drop (2 * n)).mapM nat) (← nat a) (← nat b))
         | "cong", f :: a :: b :: ps => pure (.cong f (← nat a) (← nat b) (← ps.mapM nat))
         | _, _ => throw s!"bad step: {l}"
       steps := steps.push st

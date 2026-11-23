@@ -43,22 +43,27 @@ def eval : Term → M.α
 
 mutual
 
-/-- The value of a pattern under an assignment `σ` of its variables and an
-assignment `ρ` of its rest variables to lists of elements. A rest variable is
-no term by itself: it only contributes arguments (`evalArgs`). -/
-def evalP (σ : String → M.α) (ρ : String → List M.α) : Pat → M.α
+/-- The value of a pattern under an assignment `σ` of its variables, an
+assignment `ρ` of its rest variables to lists of elements, and an assignment
+`μ` of its multiplicity variables to counts. A rest variable and a repeated
+argument are no terms by themselves: they only contribute arguments
+(`evalArgs`). -/
+def evalP (σ : String → M.α) (ρ : String → List M.α) (μ : String → Nat) : Pat → M.α
   | .var x => σ x
   | .lit s v => M.lit s v
   | .rest _ => M.lit "" ""
-  | .app f args => M.app f (evalArgs σ ρ args)
+  | .rep _ _ => M.lit "" ""
+  | .app f args => M.app f (evalArgs σ ρ μ args)
 
-/-- The values of an argument list: a rest variable gives its whole list. -/
-def evalArgs (σ : String → M.α) (ρ : String → List M.α) : List Pat → List M.α
+/-- The values of an argument list: a rest variable gives its whole list, a
+repeated argument its value as many times as its count. -/
+def evalArgs (σ : String → M.α) (ρ : String → List M.α) (μ : String → Nat) : List Pat → List M.α
   | [] => []
-  | .rest x :: ps => ρ x ++ evalArgs σ ρ ps
-  | .var x :: ps => σ x :: evalArgs σ ρ ps
-  | .lit s v :: ps => M.lit s v :: evalArgs σ ρ ps
-  | .app f args :: ps => M.app f (evalArgs σ ρ args) :: evalArgs σ ρ ps
+  | .rest x :: ps => ρ x ++ evalArgs σ ρ μ ps
+  | .rep p k :: ps => List.replicate (μ k) (evalP σ ρ μ p) ++ evalArgs σ ρ μ ps
+  | .var x :: ps => σ x :: evalArgs σ ρ μ ps
+  | .lit s v :: ps => M.lit s v :: evalArgs σ ρ μ ps
+  | .app f args :: ps => M.app f (evalArgs σ ρ μ args) :: evalArgs σ ρ μ ps
 
 end
 
@@ -100,10 +105,12 @@ def OpSat (d : OpDecl) : Prop :=
         b x z = b y z → x = y)
 
 def RuleSat (r : Rule) : Prop :=
-  ∀ (σ : String → M.α) (ρ : String → List M.α),
+  ∀ (σ : String → M.α) (ρ : String → List M.α) (μ : String → Nat),
     (∀ x ∈ r.vars, ∃ s, r.sorts.lookup x = some s ∧ M.dom s (σ x)) →
     (∀ x ∈ r.rests, ∃ s, r.sorts.lookup x = some s ∧ ∀ y ∈ ρ x, M.dom s y) →
-    (∀ e ∈ r.eqs, M.evalP σ ρ e.1 = M.evalP σ ρ e.2) → M.evalP σ ρ r.lhs = M.evalP σ ρ r.rhs
+    (∀ kn ∈ r.mults, kn.2 ≤ μ kn.1) →
+    (∀ e ∈ r.eqs, M.evalP σ ρ μ e.1 = M.evalP σ ρ μ e.2) →
+    M.evalP σ ρ μ r.lhs = M.evalP σ ρ μ r.rhs
 
 def DeclSat : Decl → Prop
   | .axiom l r => M.eval l = M.eval r

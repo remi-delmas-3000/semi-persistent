@@ -282,12 +282,18 @@ def rval (M : Model) (nodes : Array Node) (ρ : List (String × List Nat)) (x : 
   | some ns => ns.map (nval M nodes)
   | none => []
 
+/-- The assignment `μ` names for the multiplicity variables. -/
+def mval (μ : List (String × Nat)) (k : String) : Nat :=
+  match μ.lookup k with
+  | some n => n
+  | none => 0
+
 mutual
 
 theorem instP_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
-    (ρ : List (String × List Nat)) :
-    ∀ (p : Pat) (i : Nat), C.instP σ ρ p = some i →
-      nval M C.nodes i = M.evalP (sval M C.nodes σ) (rval M C.nodes ρ) p
+    (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
+    ∀ (p : Pat) (i : Nat), C.instP σ ρ μ p = some i →
+      nval M C.nodes i = M.evalP (sval M C.nodes σ) (rval M C.nodes ρ) (mval μ) p
   | .var x, i, h => by
     rw [instP] at h
     rw [Model.evalP, sval, h]
@@ -297,15 +303,19 @@ theorem instP_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
   | .rest x, i, h => by
     rw [instP] at h
     cases h
+  | .rep p k, i, h => by
+    rw [instP] at h
+    cases h
   | .app f ps, i, h => by
     rw [instP, Option.bind_eq_some_iff] at h
     obtain ⟨ids, hids, hi⟩ := h
-    rw [nval_app hwf (lookup_some hi), Model.evalP, instArgs_sound hwf σ ρ ps ids hids]
+    rw [nval_app hwf (lookup_some hi), Model.evalP, instArgs_sound hwf σ ρ μ ps ids hids]
 
 theorem instArgs_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
-    (ρ : List (String × List Nat)) :
-    ∀ (ps : List Pat) (ids : List Nat), C.instArgs σ ρ ps = some ids →
-      ids.map (nval M C.nodes) = M.evalArgs (sval M C.nodes σ) (rval M C.nodes ρ) ps
+    (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
+    ∀ (ps : List Pat) (ids : List Nat), C.instArgs σ ρ μ ps = some ids →
+      ids.map (nval M C.nodes) =
+        M.evalArgs (sval M C.nodes σ) (rval M C.nodes ρ) (mval μ) ps
   | [], ids, h => by
     rw [instArgs] at h
     cases h
@@ -316,19 +326,28 @@ theorem instArgs_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat)
     obtain ⟨r, hr, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, List.map_append, instArgs_sound hwf σ ρ ps t ht, rval, hr]
+    rw [Model.evalArgs, List.map_append, instArgs_sound hwf σ ρ μ ps t ht, rval, hr]
+  | .rep p k :: ps, ids, h => by
+    rw [instArgs, Option.bind_eq_some_iff] at h
+    obtain ⟨n, hn, h⟩ := h
+    rw [Option.bind_eq_some_iff] at h
+    obtain ⟨i, hi, h⟩ := h
+    rw [Option.map_eq_some_iff] at h
+    obtain ⟨t, ht, rfl⟩ := h
+    rw [Model.evalArgs, List.map_append, List.map_replicate, instArgs_sound hwf σ ρ μ ps t ht,
+      instP_sound hwf σ ρ μ p i hi, mval, hn]
   | .var x :: ps, ids, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ ps t ht, sval, hi]
+    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ μ ps t ht, sval, hi]
   | .lit s v :: ps, ids, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
     rw [Option.map_eq_some_iff] at h
     obtain ⟨t, ht, rfl⟩ := h
-    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ ps t ht, nval_lit (lookup_some hi)]
+    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ μ ps t ht, nval_lit (lookup_some hi)]
   | .app f as :: ps, ids, h => by
     rw [instArgs, Option.bind_eq_some_iff] at h
     obtain ⟨i, hi, h⟩ := h
@@ -336,8 +355,8 @@ theorem instArgs_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat)
     obtain ⟨t, ht, rfl⟩ := h
     rw [Option.bind_eq_some_iff] at hi
     obtain ⟨is, his, hi⟩ := hi
-    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ ps t ht,
-      nval_app hwf (lookup_some hi), instArgs_sound hwf σ ρ as is his]
+    rw [Model.evalArgs, List.map_cons, instArgs_sound hwf σ ρ μ ps t ht,
+      nval_app hwf (lookup_some hi), instArgs_sound hwf σ ρ μ as is his]
 
 end
 
@@ -827,20 +846,20 @@ theorem decl_mem {o : Nat} {d : Decl} (h : C.decl? o = some d) : (o, d) ∈ C.P.
   exact List.mem_of_find?_eq_some hf
 
 theorem eqsOk_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat))
-    (ρ : List (String × List Nat)) :
-    ∀ (es : List (Pat × Pat)) (ps : List (Nat × Nat)), C.eqsOk σ ρ es ps = true →
+    (ρ : List (String × List Nat)) (μ : List (String × Nat)) :
+    ∀ (es : List (Pat × Pat)) (ps : List (Nat × Nat)), C.eqsOk σ ρ μ es ps = true →
       (∀ p ∈ ps, nval M C.nodes p.1 = nval M C.nodes p.2) →
-      ∀ e ∈ es, M.evalP (sval M C.nodes σ) (rval M C.nodes ρ) e.1 =
-        M.evalP (sval M C.nodes σ) (rval M C.nodes ρ) e.2
+      ∀ e ∈ es, M.evalP (sval M C.nodes σ) (rval M C.nodes ρ) (mval μ) e.1 =
+        M.evalP (sval M C.nodes σ) (rval M C.nodes ρ) (mval μ) e.2
   | [], [], _, _ => by simp
   | (p, q) :: es, (x, y) :: ps, h, hps => by
     simp only [eqsOk, Bool.and_eq_true, beq_iff_eq] at h
     obtain ⟨⟨hp, hq⟩, h⟩ := h
     intro e he
     rcases List.mem_cons.1 he with rfl | he
-    · rw [← instP_sound hwf σ ρ p x hp, ← instP_sound hwf σ ρ q y hq]
+    · rw [← instP_sound hwf σ ρ μ p x hp, ← instP_sound hwf σ ρ μ q y hq]
       exact hps (x, y) (List.mem_cons_self ..)
-    · exact eqsOk_sound hwf σ ρ es ps h (fun p hp => hps p (List.mem_cons_of_mem _ hp)) e he
+    · exact eqsOk_sound hwf σ ρ μ es ps h (fun p hp => hps p (List.mem_cons_of_mem _ hp)) e he
   | [], _ :: _, h, _ => by simp [eqsOk] at h
   | _ :: _, [], h, _ => by simp [eqsOk] at h
 
@@ -858,6 +877,18 @@ theorem sortsOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes 
     rw [hn]
     exact nval_dom hwf hws hT n s hx'
   · cases hx'
+
+theorem multsOk_sound {μ : List (String × Nat)} {r : Rule} (h : multsOk μ r = true) :
+    ∀ kn ∈ r.mults, kn.2 ≤ mval μ kn.1 := by
+  intro kn hkn
+  unfold multsOk at h
+  have hk := (List.all_eq_true.1 h) kn hkn
+  unfold mval
+  split at hk
+  · rename_i v hv
+    rw [hv]
+    exact of_decide_eq_true hk
+  · cases hk
 
 theorem restsOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
     (hT : Typed M C.P) {ρ : List (String × List Nat)} {r : Rule} (h : C.restsOk ρ r = true) :
@@ -914,7 +945,7 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
         rw [intern_sound hwf l a hab.1, intern_sound hwf r b hab.2, hs]
       · cases h
     · cases h
-  | rule o j σ ρ prems a b =>
+  | rule o j σ ρ μ prems a b =>
     simp only [inferStep] at h
     split at h
     · rename_i rs hd
@@ -923,16 +954,16 @@ theorem inferStep_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
         split at h
         · rename_i hok
           cases h
-          obtain ⟨hl, hrr, heqs, hso, hro⟩ := hok
+          obtain ⟨hl, hrr, heqs, hso, hro, hmu⟩ := hok
           have hs := hM.2.2 o _ (decl_mem hd)
             (Nat.lt_of_lt_of_le (Nat.lt_succ_self o) (Nat.le_max_left _ _))
           simp only [Model.DeclSat] at hs
           have hrule := hs r (List.mem_of_getElem? hr)
           have hpv := (premConcls_sound hacc hps).1 (hM.mono (Nat.le_max_right _ _))
           simp only
-          rw [instP_sound hwf σ ρ _ a hl, instP_sound hwf σ ρ _ b hrr]
-          exact hrule _ _ (sortsOk_sound hwf hws hT hso) (restsOk_sound hwf hws hT hro)
-            (eqsOk_sound hwf σ ρ r.eqs ps heqs hpv)
+          rw [instP_sound hwf σ ρ μ _ a hl, instP_sound hwf σ ρ μ _ b hrr]
+          exact hrule _ _ _ (sortsOk_sound hwf hws hT hso) (restsOk_sound hwf hws hT hro)
+            (multsOk_sound hmu) (eqsOk_sound hwf σ ρ μ r.eqs ps heqs hpv)
         · cases h
       · cases h
     · cases h

@@ -105,8 +105,11 @@ and the two results are compared as lists (`assoc`), multisets (`ac`) or sets
 
 The reader (`Parse.lean`) keeps the theory it returns implied by the
 program's: it reads no rule from a command whose
-pattern or guard uses a multiplicity, a filter, a primitive predicate or a
-comprehension. A rest variable `..r` is read as an argument of an `assoc`,
+pattern or guard uses a filter, a primitive predicate or a comprehension. A
+count on an argument of an `assoc`, `ac` or `aci` operator is read: `x:6` is
+six arguments, and `x:k` (or `x:k>=2`) repeats the argument as many times as
+the multiplicity variable `k`, which in a model ranges over the counts from 1
+(or from the constraint's bound). A rest variable `..r` is read as an argument of an `assoc`,
 `ac` or `aci` operator: in a model the rule holds for every list of elements
 of the operator's sort in its place, the empty one included. Dropping a law or a rule makes some
 certificates fail to check; it never makes a false equality check. A program
@@ -146,13 +149,13 @@ not the one the position takes).
 
 | | count |
 | --- | --- |
-| `check-eq` proved (`replay_sound` covers them), of 29,808 | 27,733 |
-| programs with every `check-eq` proved, of 1,066 | 892 |
-| kernel steps checked | 16,410,830 |
+| `check-eq` proved (`replay_sound` covers them), of 29,808 | 28,744 |
+| programs with every `check-eq` proved, of 1,066 | 949 |
+| kernel steps checked | 16,436,173 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,396,100 |
-| events whose check fails | 11,026 |
-| events the stream gives no witness for | 1,550 |
+| events whose check fails | 9,740 |
+| events the stream gives no witness for | 347 |
 
 `GAP.md`, which `check-replay.py --gap` writes, assigns each `check-eq` not
 proved to one cause: that of its program's first event that fails, has no

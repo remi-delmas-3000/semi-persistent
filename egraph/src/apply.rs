@@ -1513,11 +1513,15 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 eg.trace_atom(m.get(*node), Some(*op));
                 splices(eg, *node);
                 for (v, k) in elems {
-                    // A multiplicity variable is not spelled out: the firing is opaque.
-                    let RMult::Exact(k) = k else {
-                        return eg.trace_atom_opaque("multiplicity-variable");
+                    // A multiplicity variable: the count it is bound to.
+                    let k = match k {
+                        RMult::Exact(k) => *k,
+                        RMult::Var { var, .. } => match m.get_mult(*var).to_u64() {
+                            Some(k) => k,
+                            None => return eg.trace_atom_opaque("multiplicity-overflow"),
+                        },
                     };
-                    eg.trace_atom_arg_n(bind(v), *k);
+                    eg.trace_atom_arg_n(bind(v), k);
                 }
             }
             RAtom::ACIExact { node, op, elems } => {
@@ -1602,10 +1606,15 @@ fn trace_atoms<Cfg, L, Q, S: Copy, const T: bool, const P: bool>(
                 eg.trace_atom(m.get(*node), Some(*op));
                 splices(eg, *node);
                 for (v, k) in elems {
-                    let RMult::Exact(k) = k else {
-                        return eg.trace_atom_opaque("multiplicity-variable");
+                    // A multiplicity variable: the count it is bound to.
+                    let k = match k {
+                        RMult::Exact(k) => *k,
+                        RMult::Var { var, .. } => match m.get_mult(*var).to_u64() {
+                            Some(k) => k,
+                            None => return eg.trace_atom_opaque("multiplicity-overflow"),
+                        },
                     };
-                    eg.trace_atom_arg_n(bind(v), *k);
+                    eg.trace_atom_arg_n(bind(v), k);
                 }
                 eg.trace_atom_group(true);
                 for i in 0..m.mset_slice(*rest).len() {
