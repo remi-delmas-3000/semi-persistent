@@ -114,6 +114,10 @@ structure St (P : Program) where
   logFailed : Bool := false
   failedLog : Array String := #[]
   unchecked : Std.HashMap String Nat := {}
+  /-- The sequence-rule firings the kernel took a `seq` step for, and those of
+  a rule whose result reads a sequence as a whole (`SeqRule.whole`). -/
+  seqFired : Nat := 0
+  seqWhole : Nat := 0
 
 variable {P : Program}
 
@@ -3223,6 +3227,7 @@ def seqFinish (S : St P) (od j : Nat) (r : SeqRule) (B : SBind) (members : List 
   let (S, b) := addS S T
   let (some a, some b) := (a, b) | return S.fail "sequence rule: instance ill-sorted"
   let (S, st) := emit S (.seq od j B a b) a b
+  let S := { S with seqFired := S.seqFired + 1, seqWhole := S.seqWhole + (if r.whole then 1 else 0) }
   let mut S := S
   -- Each element's instance is its member.
   for it in r.items do

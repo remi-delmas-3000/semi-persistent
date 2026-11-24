@@ -145,7 +145,13 @@ the rule when the two terms are equal under every binding and every valuation
 of the binding's atoms (`SeqSat`). The statement does not ask that a filter's
 elements be all the arguments that match `p`, and it does not restrict the
 atoms to their sorts: a model must satisfy more instances than the engine
-fires. A `:when` condition is part of the rule: `seqApply` yields nothing
+fires. The replay reports the rules for which this matters most
+(`SeqRule.whole`): a rule whose result reads a sequence as a whole (a number
+of elements, a sum or a fold over them, an interval union) and whose left
+side has a rest sequence beside a filter yields another equality under a
+binding that leaves a matching argument in the rest. Of the 65 sequence rules
+the sweep reads, in 35 programs, 19 are such rules, in 13 programs; they fire
+28 times, and these 13 programs hold 22 of the 31,101 `check-eq`. A `:when` condition is part of the rule: `seqApply` yields nothing
 under a binding for which a condition does not compute `true` (`numS`: a
 literal, a scalar, `(count g)`, a primitive). `:except` is read and adds
 nothing, since a binding names each filter's elements. The reader reads a

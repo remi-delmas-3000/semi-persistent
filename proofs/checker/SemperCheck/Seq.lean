@@ -398,4 +398,66 @@ def seqApply (r : SeqRule) (B : SBind) : Option (STm × STm) :=
       | none => (itemsArgs B r.items).map (STm.mk r.op)
     L.bind fun L => (rhsS r B lc r.rhs).map fun R => (L, R)
 
+/-! ## Rules that read a sequence as a whole
+
+The statement admits a sequence rule under every binding, and the engine
+fires it under the binding whose filters hold every matching argument. A rule
+whose result reads a filter or a rest sequence as a whole (its number of
+elements, a sum or a fold over them, an interval union) yields another
+equality under a binding that leaves a matching argument in the rest. The
+functions below recognize these rules, for the replay's report: they are no
+part of the statement. -/
+
+mutual
+
+def SNum.whole : SNum → Bool
+  | .count _ => true
+  | .sum _ => true
+  | .rows _ => true
+  | .agg _ _ => true
+  | .prim _ args => SNum.wholes args
+  | .lit _ _ => false
+  | .var _ => false
+  | .cnt _ _ => false
+
+def SNum.wholes : List SNum → Bool
+  | [] => false
+  | e :: es => e.whole || SNum.wholes es
+
+end
+
+def SSrc.whole : SSrc → Bool
+  | .unionBy _ _ _ => true
+  | .narrow _ _ _ _ _ _ _ => true
+  | _ => false
+
+mutual
+
+def SRhs.whole : SRhs → Bool
+  | .var _ => false
+  | .lit _ _ => false
+  | .app _ args => SArg.wholes args
+  | .val e => e.whole
+  | .ite c a b => c.whole || a.whole || b.whole
+
+def SArg.wholes : List SArg → Bool
+  | [] => false
+  | .tm t :: as => t.whole || SArg.wholes as
+  | .splice _ :: as => SArg.wholes as
+  | .times t k :: as => t.whole || k.whole || SArg.wholes as
+  | .comp body _ _ src _ guard mult :: as =>
+    body.whole || src.whole || (match guard with | some g => g.whole | none => false) ||
+      (match mult with | some k => k.whole | none => false) || SArg.wholes as
+
+end
+
+/-- The rule's result reads a sequence as a whole, and its left side has a
+rest sequence beside a filter: a binding can leave a matching argument in the
+rest, and the rule then yields another equality than under the binding the
+engine fires it with. -/
+def SeqRule.whole (r : SeqRule) : Bool :=
+  (r.rhs.whole || r.guards.any SNum.whole || r.lets.any (·.2.whole)) &&
+    r.items.any (fun it => match it with | .filter _ _ => true | _ => false) &&
+    r.items.any (fun it => match it with | .rest _ => true | _ => false)
+
 end SemperCheck

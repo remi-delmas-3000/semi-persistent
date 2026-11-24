@@ -185,6 +185,9 @@ def check_one(path, args):
 
     def by(label):
         return {c: int(n) for n, c in re.findall(label + r": (\d+) (.+)", p.stdout)}
+    # Rules read, rules that read a sequence as a whole, and the firings of each.
+    sq = re.search(r"sequence rules: (\d+) read, (\d+) whole; (\d+) firings, (\d+) whole",
+                   p.stdout)
     return path, {
         "status": "replayed", "events": events, "failed": failed, "unchecked": unchecked,
         "joined": joined, "total": total, "steps": int(k.group(1)), "proved": int(k.group(2)),
@@ -194,6 +197,7 @@ def check_one(path, args):
         "nostep_by": by("no kernel step"), "failed_events": failed_events,
         "first": (re.search(r"^first: (.*)$", p.stdout, re.M) or [None, None])[1],
         "unread_rules": by("unread rule"),
+        "seq": [int(x) for x in sq.groups()] if sq else [0, 0, 0, 0],
     }
 
 
@@ -339,6 +343,14 @@ def main():
     print(f"{sum(r['joined'] for r in done)} of {total} check-eq joined by the replay; "
           f"{sum(r['events'] for r in done)} events, {sum(r['failed'] for r in done)} failed, "
           f"{sum(r['unchecked'] for r in done)} unchecked")
+    seq = [r for r in done if r.get("seq", [0])[0]]
+    whole = [r for r in seq if r["seq"][1]]
+    fired = [r for r in whole if r["seq"][3]]
+    print(f"sequence rules: {sum(r['seq'][0] for r in seq)} read in {len(seq)} programs, "
+          f"{sum(r['seq'][2] for r in seq)} firings; {sum(r['seq'][1] for r in whole)} read a "
+          f"sequence as a whole beside a rest, in {len(whole)} programs, "
+          f"{sum(r['seq'][3] for r in whole)} firings in {len(fired)} programs with "
+          f"{sum(r['proved'] for r in fired)} check-eq")
     if done:
         print(f"streams: {sum(r['bytes'] for r in done)} bytes, largest "
               f"{max(r['bytes'] for r in done)}; slowest replay "

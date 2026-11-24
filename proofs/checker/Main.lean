@@ -84,6 +84,13 @@ def replay (progPath tracePath : String) : IO UInt32 := do
   if let some c := first then IO.println s!"first: {c}"
   for (c, k) in (skipped.foldl (fun (m : Std.HashMap String Nat) (_, _, e) => m.insert e (m.getD e 0 + 1)) {}).toList do
     IO.println s!"unread rule: {k} {c}"
+  -- The sequence rules read, those whose result reads a sequence as a whole
+  -- (`SeqRule.whole`), and the firings of each.
+  let seqRules := P.decls.flatMap fun (_, d) => match d with
+    | .seq rs => rs.filterMap id
+    | _ => []
+  if !seqRules.isEmpty then
+    IO.println s!"sequence rules: {seqRules.length} read, {(seqRules.filter (·.whole)).length} whole; {S.seqFired} firings, {S.seqWhole} whole"
   for (c, k) in S.failed.toList do IO.println s!"failed: {k} {c}"
   for (c, k) in S.unchecked.toList do IO.println s!"unchecked: {k} {c}"
   for (c, k) in S.unjustified.toList do IO.println s!"no kernel step: {k} {c}"
