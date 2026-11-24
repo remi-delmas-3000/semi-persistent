@@ -228,11 +228,23 @@ disequality is written as `u rewrite:REASON`: the reader
 reads no rule from such a command. `GAP.md` counts the `check-eq` each reason
 costs.
 
-The table holds a count above 65,536 as a counted node (`Node.napp`: each child
-once with its count) and a count up to it as that many arguments (`Node.app`).
-The kernel compares the two forms through one counted view (`cview`), so a
-count of 4,294,967,295 costs one table entry. A program term has the same two
-forms (`Term.app`, `Term.napp`). The sequence-rule evaluator (`Seq.lean`) still
-writes a built count as that many arguments: one firing in
-`seq_rhs_too_wide.egg`, which builds a count of 4,194,304, fails its check and
-costs no `check-eq`.
+The table holds one node form per operator class. A positional operator
+(plain, `:comm`, `:assoc`, `:assoc-left`, `:assoc-right`) has `Node.app`: an
+ordered list of children. A multiset operator (`:assoc-comm`,
+`:assoc-comm-idem`) has `Node.napp`: each child once with its count, adjacent
+entries of one child merged. No count is written as repeated children, in the
+table, in a program term (`Term.napp`) or in a kernel check: `congCount`
+compares two nodes on their flattened counted children, `congShallow` on their
+own children class by class, and `inv`, `nil` and `cancel` read the counted
+shape.
+
+The replayer still runs four derivations on argument lists: completion and
+critical pairs, the walk of a `:flatten` rule, a term's normal form under its
+operator's laws, and the sequence-rule evaluator of `Seq.lean`. It tries the
+counted comparison first and reads a multiset node as a list only for these
+derivations, and only when the node flattens to at most 1,048,576 arguments
+(`St.listWidth`, the engine's bound on the arguments one application builds).
+Above that the event fails its check with a cause: one firing in
+`seq_rhs_too_wide.egg`, which builds a count of 4,194,304, and it costs no
+`check-eq`. The next change moves these derivations to counted children and
+removes `listWidth`.

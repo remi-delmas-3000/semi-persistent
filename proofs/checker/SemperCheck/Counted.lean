@@ -126,6 +126,53 @@ theorem spread_ones : ∀ cs : List Nat, Ctx.spread (cs.map fun c => (c, 1)) = c
     rw [List.map_cons, spread_cons, spread_ones t]
     rfl
 
+theorem spread_rle : ∀ l : List Nat, Ctx.spread (rle l) = l
+  | [] => rfl
+  | c :: t => by
+    have ih := spread_rle t
+    unfold rle
+    split
+    · rename_i d k r h
+      rw [h] at ih
+      split
+      · rename_i hc
+        subst hc
+        rw [spread_cons] at ih ⊢
+        rw [← ih, List.replicate_succ, List.cons_append]
+      · rw [spread_cons, ih]
+        rfl
+    · rename_i h
+      rw [h] at ih
+      rw [← ih]
+      rfl
+
+theorem replicate_append_same (c : Nat) : ∀ k j : Nat,
+    List.replicate k c ++ List.replicate j c = List.replicate (j + k) c
+  | 0, j => by simp
+  | k + 1, j => by
+    rw [List.replicate_succ, List.cons_append, replicate_append_same c k j, ← Nat.add_assoc,
+      List.replicate_succ]
+
+theorem spread_mergeAdj : ∀ l : List (Nat × Nat), Ctx.spread (mergeAdj l) = Ctx.spread l
+  | [] => rfl
+  | (c, k) :: t => by
+    have ih := spread_mergeAdj t
+    unfold mergeAdj
+    split
+    · rename_i d j r h
+      rw [h] at ih
+      split
+      · rename_i hc
+        subst hc
+        rw [spread_cons] at ih
+        rw [spread_cons, spread_cons, ← ih, ← List.append_assoc]
+        congr 1
+        exact (replicate_append_same c k j).symm
+      · rw [spread_cons (c := c), spread_cons (c := c), ih]
+    · rename_i h
+      rw [h] at ih
+      rw [spread_cons, spread_cons, ← ih]
+
 theorem total_cons (c k : Nat) (t : List (Nat × Nat)) (z : Nat) :
     total ((c, k) :: t) z = (if c = z then k else 0) + total t z := by
   unfold total

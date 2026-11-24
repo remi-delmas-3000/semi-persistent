@@ -146,6 +146,23 @@ def total (v : List (Nat × Nat)) (y : Nat) : Nat :=
 def scaleC (k : Nat) (v : List (Nat × Nat)) : List (Nat × Nat) :=
   v.map fun yn => (yn.1, yn.2 * k)
 
+/-- Adjacent equal children as one child with its count. -/
+def rle : List Nat → List (Nat × Nat)
+  | [] => []
+  | c :: t =>
+    match rle t with
+    | (d, k) :: r => if c = d then (d, k + 1) :: r else (c, 1) :: (d, k) :: r
+    | [] => [(c, 1)]
+
+/-- Adjacent entries of one child as one entry, their counts added. A
+multiset node holds its children in this form. -/
+def mergeAdj : List (Nat × Nat) → List (Nat × Nat)
+  | [] => []
+  | (c, k) :: t =>
+    match mergeAdj t with
+    | (d, j) :: r => if c = d then (d, j + k) :: r else (c, k) :: (d, j) :: r
+    | [] => [(c, k)]
+
 /-- Counted children with `k` more of child `y`. -/
 def addC (y k : Nat) : List (Nat × Nat) → List (Nat × Nat)
   | [] => [(y, k)]
@@ -182,24 +199,26 @@ def lookup (n : Node) : Option Nat :=
   | some i => if C.nodes[i]? = some n then some i else none
   | none => none
 
-/-- The node that is the term `t` over atoms, an atom `node n` being node `n`. -/
-def internS : STm → Option Nat
-  | .atom (.node n) => if n < C.nodes.size then some n else none
-  | .atom (.lit s v) => C.lookup (.lit s v)
-  | .app f args => (args.mapM internS).bind fun ids => C.lookup (.app f ids)
-
-/-- Above this count an argument is held once with its count (`Node.napp`);
-up to it, as that many arguments (`Node.app`). The two nodes have one value. -/
-def countLimit : Nat := 65536
-
 /-- The children `cks`, each as many times as its count. -/
 def spread (cks : List (Nat × Nat)) : List Nat :=
   cks.flatMap fun ck => List.replicate ck.2 ck.1
 
 /-- The node that is `f` applied to the counted children `cks`. -/
 def mkApp (f : String) (cks : List (Nat × Nat)) : Option Nat :=
-  if cks.all (fun ck => ck.2 ≤ countLimit) then C.lookup (.app f (spread cks))
-  else C.lookup (.napp f cks)
+  if C.P.multiset f && !cks.isEmpty then C.lookup (.napp f (mergeAdj cks))
+  else C.lookup (.app f (spread cks))
+
+/-- Node `a` is `f` applied to the counted children `cks`, in the form `f`'s
+kind gives its nodes. -/
+def isApp (a : Nat) (f : String) (cks : List (Nat × Nat)) : Bool :=
+  if C.P.multiset f && !cks.isEmpty then decide (C.nodes[a]? = some (.napp f (mergeAdj cks)))
+  else decide (C.nodes[a]? = some (.app f (spread cks)))
+
+/-- The node that is the term `t` over atoms, an atom `node n` being node `n`. -/
+def internS : STm → Option Nat
+  | .atom (.node n) => if n < C.nodes.size then some n else none
+  | .atom (.lit s v) => C.lookup (.lit s v)
+  | .app f args => (args.mapM internS).bind fun ids => C.mkApp f (rle ids)
 
 /-- The node that is term `t`, child for child. -/
 def intern : Term → Option Nat
@@ -264,6 +283,17 @@ def substOf (prems : List (Nat × Nat)) (y : Nat) : Nat :=
   match prems.find? (·.1 == y) with
   | some p => p.2
   | none => y
+
+/-- The table `m` of nodes with their class's representative, with the two
+nodes of `p` in one class. -/
+def addEq (m : List (Nat × Nat)) (p : Nat × Nat) : List (Nat × Nat) :=
+  if substOf m p.1 = substOf m p.2 then m
+  else (p.1, substOf m p.1) :: (p.2, substOf m p.1) ::
+    m.map fun e => if e.2 = substOf m p.2 then (e.1, substOf m p.1) else e
+
+/-- Each node the premises name with a representative of its class under the
+equalities the premises give. -/
+def classes (prems : List (Nat × Nat)) : List (Nat × Nat) := prems.foldl addEq []
 
 def dropUnit : Option Nat → List Nat → List Nat
   | none, l => l
@@ -401,6 +431,17 @@ def congCount (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
     C.sortOf a == some d.res && C.sortOf b == some d.res && sameCounts d.kind l m
   | _, _, _ => false
 
+/-- Two counted nodes of a multiset operator `f` whose children, each
+replaced by its premise and none flattened, have the same counts: a child that
+is an application of `f` stands for its class. -/
+def congShallow (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
+  match C.P.opDecl? f, C.nodes[a]?, C.nodes[b]? with
+  | some d, some (.napp g cs), some (.napp h ds) =>
+    g == f && h == f &&
+      sameCounts d.kind (cs.map fun ck => (substOf (classes prems) ck.1, ck.2))
+        (ds.map fun ck => (substOf (classes prems) ck.1, ck.2))
+  | _, _, _ => false
+
 def congAssoc (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
   match C.P.opDecl? f, C.side f prems a, C.side f prems b with
   | some d, some l, some m =>
@@ -414,12 +455,12 @@ def congOk (f : String) (a b : Nat) (prems : List (Nat × Nat)) : Bool :=
     | .comm => C.congComm f a b prems
     | .foldL => C.congFoldL f a b prems
     | .foldR => C.congFoldR f a b prems
-    | _ => C.congAssoc f a b prems || C.congCount f a b prems
+    | _ => C.congAssoc f a b prems || C.congCount f a b prems || C.congShallow f a b prems
 
 def invOk (f : String) (a x q e : Nat) : Bool :=
   match C.P.opDecl? f with
   | some d =>
-    d.kind.isAssoc && decide (C.nodes[a]? = some (.app f [x, q])) &&
+    d.kind.isAssoc && C.isApp a f [(x, 1), (q, 1)] &&
     (match d.inverse with
       | some g => decide (C.nodes[q]? = some (.app g [x]))
       | none => false) &&
@@ -429,7 +470,7 @@ def invOk (f : String) (a x q e : Nat) : Bool :=
 def nilOk (f : String) (a x k e : Nat) : Bool :=
   match C.P.opDecl? f with
   | some d =>
-    d.kind.isAssoc && decide (C.nodes[a]? = some (.app f (x :: List.replicate k x))) &&
+    d.kind.isAssoc && C.isApp a f [(x, k + 1)] &&
     decide (d.nilpotent = some (k + 1)) && decide (C.unitOf f = some e)
   | none => false
 
@@ -456,8 +497,8 @@ def primStepOk (f : String) (a e : Nat) : Bool :=
 def cancelOk (f : String) (p q a b z : Nat) : Bool :=
   match C.P.opDecl? f with
   | some d =>
-    d.kind.isAssoc && decide (C.nodes[p]? = some (.app f [a, z])) &&
-    decide (C.nodes[q]? = some (.app f [b, z])) &&
+    d.kind.isAssoc && (C.isApp p f [(a, 1), (z, 1)] || C.isApp p f [(a, 2)] && a == z) &&
+    (C.isApp q f [(b, 1), (z, 1)] || C.isApp q f [(b, 2)] && b == z) &&
     (d.cancellative || (d.inverse.isSome && (C.unitOf f).isSome))
   | none => false
 

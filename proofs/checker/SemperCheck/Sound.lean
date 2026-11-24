@@ -406,24 +406,6 @@ theorem lookup_some {n : Node} {i : Nat} (h : C.lookup n = some i) : C.nodes[i]?
     · cases h
   · cases h
 
-theorem internS_sound (hwf : wfNodes C.nodes = true) :
-    ∀ (t : STm) (i : Nat), C.internS t = some i → nval M C.nodes i = M.evS (nval M C.nodes) t
-  | .atom (.node n), i, h => by
-    rw [internS] at h
-    split at h
-    · cases h
-      rw [Model.evS, Model.evA]
-    · cases h
-  | .atom (.lit s v), i, h => by
-    rw [internS] at h
-    rw [nval_lit (lookup_some h), Model.evS, Model.evA]
-  | .app f args, i, h => by
-    rw [internS, Option.bind_eq_some_iff] at h
-    obtain ⟨ids, hids, hi⟩ := h
-    rw [nval_app hwf (lookup_some hi), Model.evS]
-    congr 1
-    exact mapM_some_map args ids hids fun a _ j hj => internS_sound hwf a j hj
-
 /-- The assignment `σ` names, through node values. -/
 def sval (M : Model) (nodes : Array Node) (σ : List (String × Nat)) (x : String) : M.α :=
   match σ.lookup x with
@@ -480,9 +462,59 @@ theorem mkApp_sound (hwf : wfNodes C.nodes = true) {f : String} {cks : List (Nat
     nval M C.nodes i = M.app f (spreadV M C.nodes cks) := by
   unfold mkApp at h
   split at h
-  · rw [nval_app hwf (lookup_some h), spread_map]
   · rw [nval_napp hwf (lookup_some h)]
-    rfl
+    show M.app f (spreadV M C.nodes (mergeAdj cks)) = _
+    rw [← spread_map, spread_mergeAdj, spread_map]
+  · rw [nval_app hwf (lookup_some h), spread_map]
+
+/-- A node that is `f` of counted children has that value, and its children
+of a count above zero are of `f`'s sort when `f` has an associative kind. -/
+theorem isApp_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    {a : Nat} {f : String} {cks : List (Nat × Nat)} (h : C.isApp a f cks = true)
+    {d : OpDecl} (hd : C.P.opDecl? f = some d) (hk : d.kind.isAssoc = true) :
+    nval M C.nodes a = M.app f (spreadV M C.nodes cks) ∧
+      ∀ ck ∈ cks, ck.2 ≠ 0 → nodeSort C.P C.nodes ck.1 = some d.res := by
+  unfold isApp at h
+  split at h
+  · rw [decide_eq_true_eq] at h
+    obtain ⟨d', hd', -, -, hcs⟩ := wfSorts_napp hws h
+    rw [hd] at hd'
+    cases hd'
+    refine ⟨?_, ?_⟩
+    · rw [nval_napp hwf h]
+      show M.app f (spreadV M C.nodes (mergeAdj cks)) = _
+      rw [← spread_map, spread_mergeAdj, spread_map]
+    · intro ck hck hne
+      have hm := mem_spread_of hck hne
+      rw [← spread_mergeAdj] at hm
+      obtain ⟨yn, hyn, he, -⟩ := mem_spread hm
+      rw [← he]
+      exact (hcs yn hyn).1
+  · rw [decide_eq_true_eq] at h
+    obtain ⟨d', hd', hA, -⟩ := wfSorts_app hws h
+    rw [hd] at hd'
+    cases hd'
+    exact ⟨by rw [nval_app hwf h, spread_map],
+      fun ck hck hne => (hA hk).1 ck.1 (mem_spread_of hck hne)⟩
+
+theorem internS_sound (hwf : wfNodes C.nodes = true) :
+    ∀ (t : STm) (i : Nat), C.internS t = some i → nval M C.nodes i = M.evS (nval M C.nodes) t
+  | .atom (.node n), i, h => by
+    rw [internS] at h
+    split at h
+    · cases h
+      rw [Model.evS, Model.evA]
+    · cases h
+  | .atom (.lit s v), i, h => by
+    rw [internS] at h
+    rw [nval_lit (lookup_some h), Model.evS, Model.evA]
+  | .app f args, i, h => by
+    rw [internS, Option.bind_eq_some_iff] at h
+    obtain ⟨ids, hids, hi⟩ := h
+    rw [mkApp_sound hwf hi, Model.evS]
+    congr 1
+    rw [← spread_map, spread_rle]
+    exact mapM_some_map args ids hids fun a _ j hj => internS_sound hwf a j hj
 
 theorem intern_sound (hwf : wfNodes C.nodes = true) :
     ∀ (t : Term) (i : Nat), C.intern t = some i → nval M C.nodes i = M.eval t
@@ -602,6 +634,53 @@ theorem instArgs_sound (hwf : wfNodes C.nodes = true) (σ : List (String × Nat)
 end
 
 /-! ## Flattened views -/
+
+/-- `substOf` gives a node related to its argument, for a reflexive relation
+the table's pairs are in. -/
+theorem substOf_rel {R : Nat → Nat → Prop} (hrefl : ∀ x, R x x) {m : List (Nat × Nat)}
+    (hm : ∀ e ∈ m, R e.1 e.2) (y : Nat) : R y (substOf m y) := by
+  unfold substOf
+  split
+  · rename_i q hq
+    have hmem := List.mem_of_find?_eq_some hq
+    have hy : q.1 = y := by simpa using List.find?_some hq
+    rw [← hy]
+    exact hm q hmem
+  · exact hrefl y
+
+/-- The table of classes relates each node to its representative, for an
+equivalence the premises are in. -/
+theorem classes_rel {R : Nat → Nat → Prop} (hrefl : ∀ x, R x x) (hsymm : ∀ x y, R x y → R y x)
+    (htrans : ∀ x y z, R x y → R y z → R x z) {prems : List (Nat × Nat)}
+    (hp : ∀ p ∈ prems, R p.1 p.2) : ∀ e ∈ classes prems, R e.1 e.2 := by
+  unfold classes
+  suffices h : ∀ (ps : List (Nat × Nat)) (m : List (Nat × Nat)), (∀ p ∈ ps, R p.1 p.2) →
+      (∀ e ∈ m, R e.1 e.2) → ∀ e ∈ ps.foldl addEq m, R e.1 e.2 from
+    h prems [] hp (by simp)
+  intro ps
+  induction ps with
+  | nil => intro m _ hm; exact hm
+  | cons p t ih =>
+    intro m hps hm
+    rw [List.foldl_cons]
+    apply ih _ (fun q hq => hps q (List.mem_cons_of_mem _ hq))
+    have hp1 := substOf_rel hrefl hm p.1
+    have hp2 := substOf_rel hrefl hm p.2
+    have hpp := hps p (List.mem_cons_self ..)
+    intro e he
+    unfold addEq at he
+    split at he
+    · exact hm e he
+    · rcases List.mem_cons.1 he with rfl | he
+      · exact hp1
+      · rcases List.mem_cons.1 he with rfl | he
+        · exact htrans _ _ _ (hsymm _ _ hpp) hp1
+        · obtain ⟨e0, he0, rfl⟩ := List.mem_map.1 he
+          split
+          · rename_i heq
+            exact htrans _ _ _ (hm e0 he0) (heq ▸ htrans _ _ _ (hsymm _ _ hp2)
+              (htrans _ _ _ (hsymm _ _ hpp) hp1))
+          · exact hm e0 he0
 
 theorem substOf_sound {prems : List (Nat × Nat)}
     (hp : ∀ p ∈ prems, nval M C.nodes p.1 = nval M C.nodes p.2) (y : Nat) :
@@ -1404,6 +1483,131 @@ theorem congFoldR_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.node
     rw [← e1, ← e2, ht, hl']
   · cases h
 
+/-- The children of a counted node, repeated, fold to the node's value. -/
+theorem napp_fold (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    (hT : Typed M C.P) {f : String} {d : OpDecl} (hd : C.P.opDecl? f = some d)
+    {b : M.α → M.α → M.α} (L : AssocLaws M f d.res b) {x : Nat} {cs : List (Nat × Nat)}
+    (hn : C.nodes[x]? = some (.napp f cs)) :
+    fold b ((spread cs).map (nval M C.nodes)) = some (nval M C.nodes x) := by
+  obtain ⟨d', hd', -, hne, hcs⟩ := wfSorts_napp hws hn
+  rw [hd] at hd'
+  cases hd'
+  rw [nval_napp hwf hn, spread_map]
+  unfold spreadV
+  have hall : ∀ y ∈ cs.flatMap (fun ck => List.replicate ck.2 (nval M C.nodes ck.1)),
+      M.dom d.res y := by
+    intro y hy
+    obtain ⟨ck, hck, hy⟩ := List.mem_flatMap.1 hy
+    obtain ⟨-, rfl⟩ := List.mem_replicate.1 hy
+    exact nval_dom hwf hws hT ck.1 _ (hcs ck hck).1
+  cases hxs : cs.flatMap (fun ck => List.replicate ck.2 (nval M C.nodes ck.1)) with
+  | nil =>
+    cases cs with
+    | nil => exact absurd rfl hne
+    | cons c0 rest =>
+      have hpos := (hcs c0 (List.mem_cons_self ..)).2
+      have hin : nval M C.nodes c0.1 ∈
+          (c0 :: rest).flatMap (fun ck => List.replicate ck.2 (nval M C.nodes ck.1)) :=
+        List.mem_flatMap.2 ⟨c0, List.mem_cons_self .., List.mem_replicate.2 ⟨by omega, rfl⟩⟩
+      rw [hxs] at hin
+      cases hin
+  | cons y rest =>
+    rw [hxs] at hall
+    rw [fold_cons L.closed L.assoc _ _ (hall y (List.mem_cons_self ..))
+        (fun z hz => hall z (List.mem_cons_of_mem _ hz)),
+      L.app _ _ (hall y (List.mem_cons_self ..))
+        (fun z hz => hall z (List.mem_cons_of_mem _ hz))]
+
+theorem congShallow_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    (hT : Typed M C.P) {f : String} {a b : Nat} {prems : List (Nat × Nat)}
+    (hp : ∀ p ∈ prems, nval M C.nodes p.1 = nval M C.nodes p.2)
+    (hps : ∀ p ∈ prems, C.sortOf p.1 = C.sortOf p.2)
+    (h : C.congShallow f a b prems = true) : nval M C.nodes a = nval M C.nodes b := by
+  have hp := classes_rel (R := fun x y => nval M C.nodes x = nval M C.nodes y)
+    (fun _ => rfl) (fun _ _ h => h.symm) (fun _ _ _ h1 h2 => h1.trans h2) hp
+  have hps := classes_rel (R := fun x y => C.sortOf x = C.sortOf y)
+    (fun _ => rfl) (fun _ _ h => h.symm) (fun _ _ _ h1 h2 => h1.trans h2) hps
+  unfold congShallow at h
+  split at h
+  · rename_i d g cs h' ds hd ha hb
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    obtain ⟨⟨rfl, rfl⟩, h⟩ := h
+    obtain ⟨hmem, hname⟩ := opDecl_spec hd
+    have hk : d.kind.isAssoc = true := by
+      cases hdk : d.kind <;> rw [hdk] at h <;> simp_all [sameCounts, Kind.isAssoc]
+    have hk2 : d.kind = .ac ∨ d.kind = .aci := by
+      cases hdk : d.kind <;> rw [hdk] at h <;> simp_all [sameCounts]
+    obtain ⟨op, L, hC, hI, hU⟩ := assoc_laws (hT.1 d hmem).2 hk
+    rw [hname] at L
+    have fa := napp_fold hwf hws hT hd L ha
+    have fb := napp_fold hwf hws hT hd L hb
+    obtain ⟨d0, hd0, -, -, hcs⟩ := wfSorts_napp hws ha
+    obtain ⟨d2, hd2, -, -, hds⟩ := wfSorts_napp hws hb
+    have hsub : ∀ l : List (Nat × Nat),
+        (spread (l.map fun ck => (substOf (classes prems) ck.1, ck.2))).map (nval M C.nodes) =
+          (spread l).map (nval M C.nodes) := by
+      intro l
+      induction l with
+      | nil => rfl
+      | cons ck t ih =>
+        rw [List.map_cons, spread_cons, List.map_append, ih,
+          show ck :: t = (ck.1, ck.2) :: t from rfl, spread_cons, List.map_append,
+          List.map_replicate, List.map_replicate, substOf_sound hp]
+    have hdl : ∀ x ∈ (spread (cs.map fun ck => (substOf (classes prems) ck.1, ck.2))).map (nval M C.nodes),
+        M.dom d.res x := by
+      intro x hx
+      rw [hsub] at hx
+      obtain ⟨y, hy, rfl⟩ := List.mem_map.1 hx
+      obtain ⟨yn, hyn, rfl, -⟩ := mem_spread hy
+      obtain ⟨d1, hd1, -, -, hcs1⟩ := wfSorts_napp hws ha
+      rw [hd] at hd1
+      cases hd1
+      exact nval_dom hwf hws hT yn.1 _ (hcs1 yn hyn).1
+    have key : fold op ((spread (cs.map fun ck => (substOf (classes prems) ck.1, ck.2))).map
+        (nval M C.nodes)) =
+        fold op ((spread (ds.map fun ck => (substOf (classes prems) ck.1, ck.2))).map (nval M C.nodes)) := by
+      rcases hk2 with hdk | hdk
+      · rw [hdk] at h
+        simp only [sameCounts, List.all_eq_true, beq_iff_eq] at h
+        have htot : ∀ y, total (cs.map fun ck => (substOf (classes prems) ck.1, ck.2)) y =
+            total (ds.map fun ck => (substOf (classes prems) ck.1, ck.2)) y := by
+          intro y
+          rw [← total_normC (cs.map _) y, ← total_normC (ds.map _) y]
+          by_cases hy : ∃ yn ∈ normC (cs.map fun ck => (substOf (classes prems) ck.1, ck.2)) ++
+              normC (ds.map fun ck => (substOf (classes prems) ck.1, ck.2)), yn.1 = y
+          · obtain ⟨yn, hyn, rfl⟩ := hy
+            exact h yn hyn
+          · rw [total_eq_zero (fun yn hyn he => hy ⟨yn, List.mem_append_left _ hyn, he⟩),
+              total_eq_zero (fun yn hyn he => hy ⟨yn, List.mem_append_right _ hyn, he⟩)]
+        exact fold_perm L.closed L.assoc (hC (Or.inl hdk))
+          ((spread_perm_of_total htot).map _) hdl
+      · rw [hdk] at h
+        simp only [sameCounts, Bool.and_eq_true, List.all_eq_true, List.any_eq_true,
+          beq_iff_eq] at h
+        apply fold_same_elems L.closed L.assoc (hC (Or.inr hdk)) (hI hdk)
+        · intro y hy
+          obtain ⟨z, hz, rfl⟩ := List.mem_map.1 hy
+          obtain ⟨yn, hyn, rfl, -⟩ := mem_spread hz
+          obtain ⟨zn, hzn, he⟩ := h.1 yn hyn
+          obtain ⟨z0, hz0, rfl⟩ := List.mem_map.1 hzn
+          exact List.mem_map_of_mem (he ▸ mem_spread_of hzn (by
+            have := (hds z0 hz0).2
+            show z0.2 ≠ 0
+            omega))
+        · intro y hy
+          obtain ⟨z, hz, rfl⟩ := List.mem_map.1 hy
+          obtain ⟨yn, hyn, rfl, -⟩ := mem_spread hz
+          obtain ⟨zn, hzn, he⟩ := h.2 yn hyn
+          obtain ⟨z0, hz0, rfl⟩ := List.mem_map.1 hzn
+          exact List.mem_map_of_mem (he ▸ mem_spread_of hzn (by
+            have := (hcs z0 hz0).2
+            show z0.2 ≠ 0
+            omega))
+        · exact hdl
+    rw [hsub, hsub, fa, fb] at key
+    exact Option.some.inj key
+  · cases h
+
 theorem congOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
     (hT : Typed M C.P) {f : String} {a b : Nat} {prems : List (Nat × Nat)}
     (hp : ∀ p ∈ prems, nval M C.nodes p.1 = nval M C.nodes p.2)
@@ -1420,8 +1624,11 @@ theorem congOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes =
     · exact congFoldR_sound hwf hws hT hp h
     · rw [Bool.or_eq_true] at h
       rcases h with h | h
-      · exact congAssoc_sound hwf hws hT hp hps h
-      · exact congCount_sound hwf hws hT hp hps h
+      · rw [Bool.or_eq_true] at h
+        rcases h with h | h
+        · exact congAssoc_sound hwf hws hT hp hps h
+        · exact congCount_sound hwf hws hT hp hps h
+      · exact congShallow_sound hwf hws hT hp hps h
 
 /-! ## Steps -/
 
@@ -1451,14 +1658,14 @@ theorem invOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = 
       obtain ⟨u, hdu, hev⟩ := unitOf_sound (M := M) hwf hd hu
       obtain ⟨hmem, hname⟩ := opDecl_spec hd
       obtain ⟨b, L, -, hInv, -, -⟩ := assoc_laws_ext (hT.1 d hmem).2 hk
-      obtain ⟨d', hd', hA, -⟩ := wfSorts_app hws hn
-      rw [hd] at hd'
-      cases hd'
+      obtain ⟨hv, hs⟩ := isApp_sound (M := M) hwf hws hn hd hk
       have hx : M.dom d.res (nval M C.nodes x) :=
-        nval_dom hwf hws hT x _ ((hA hk).1 x (by simp))
+        nval_dom hwf hws hT x _ (hs (x, 1) (by simp) (by simp))
       obtain ⟨hgx, hlaw⟩ := hInv g u hg hdu _ hx
-      rw [nval_app hwf hn, hev]
-      simp only [List.map_cons, List.map_nil]
+      have hv' : nval M C.nodes a = M.app f [nval M C.nodes x, nval M C.nodes q] := by
+        rw [hv]
+        rfl
+      rw [hv', hev]
       rw [nval_app hwf hq]
       simp only [List.map_cons, List.map_nil]
       rw [← hname, L.app _ _ hx (by
@@ -1482,13 +1689,14 @@ theorem nilOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = 
     obtain ⟨u, hdu, hev⟩ := unitOf_sound (M := M) hwf hd hu
     obtain ⟨hmem, hname⟩ := opDecl_spec hd
     obtain ⟨b, L, -, -, hNil, -⟩ := assoc_laws_ext (hT.1 d hmem).2 hk
-    obtain ⟨d', hd', hA, -⟩ := wfSorts_app hws hn
-    rw [hd] at hd'
-    cases hd'
+    obtain ⟨hv, hs⟩ := isApp_sound (M := M) hwf hws hn hd hk
     have hx : M.dom d.res (nval M C.nodes x) :=
-      nval_dom hwf hws hT x _ ((hA hk).1 x (by simp))
-    rw [nval_app hwf hn, hev]
-    simp only [List.map_cons, List.map_replicate]
+      nval_dom hwf hws hT x _ (hs (x, k + 1) (by simp) (by simp))
+    have hv' : nval M C.nodes a =
+        M.app f (nval M C.nodes x :: List.replicate k (nval M C.nodes x)) := by
+      rw [hv]
+      simp [spreadV, List.replicate_succ]
+    rw [hv', hev]
     rw [← hname, L.app _ _ hx (by
       intro y hy
       rw [List.eq_of_mem_replicate hy]
@@ -1513,6 +1721,21 @@ theorem unitOk_sound (hwf : wfNodes C.nodes = true) (hT : Typed M C.P) {f : Stri
     rw [← hname]
     exact (hU u hdu).2.1
 
+/-- A node that is `f(a, z)`, held as two children or as one child twice. -/
+theorem pairApp_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
+    {p : Nat} {f : String} {a z : Nat} {d : OpDecl} (hd : C.P.opDecl? f = some d)
+    (hk : d.kind.isAssoc = true)
+    (h : C.isApp p f [(a, 1), (z, 1)] = true ∨ (C.isApp p f [(a, 2)] = true ∧ (a == z) = true)) :
+    nval M C.nodes p = M.app f [nval M C.nodes a, nval M C.nodes z] ∧
+      nodeSort C.P C.nodes a = some d.res ∧ nodeSort C.P C.nodes z = some d.res := by
+  rcases h with h | ⟨h, he⟩
+  · obtain ⟨hv, hs⟩ := isApp_sound (M := M) hwf hws h hd hk
+    exact ⟨by rw [hv]; rfl, hs (a, 1) (by simp) (by simp), hs (z, 1) (by simp) (by simp)⟩
+  · rw [beq_iff_eq] at he
+    subst he
+    obtain ⟨hv, hs⟩ := isApp_sound (M := M) hwf hws h hd hk
+    exact ⟨by rw [hv]; rfl, hs (a, 2) (by simp) (by simp), hs (a, 2) (by simp) (by simp)⟩
+
 /-- From `f(a, z) = f(b, z)`, `a = b`. -/
 theorem cancelOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes = true)
     (hT : Typed M C.P) {f : String} {p q a b z : Nat} (h : C.cancelOk f p q a b z = true)
@@ -1526,17 +1749,12 @@ theorem cancelOk_sound (hwf : wfNodes C.nodes = true) (hws : wfSorts C.P C.nodes
     obtain ⟨⟨⟨hk, hp⟩, hq⟩, hlaw⟩ := h
     obtain ⟨hmem, hname⟩ := opDecl_spec hd
     obtain ⟨b', L, hU, hInv, -, hCan⟩ := assoc_laws_ext (hT.1 d hmem).2 hk
-    obtain ⟨d1, hd1, hA1, -⟩ := wfSorts_app hws hp
-    rw [hd] at hd1
-    cases hd1
-    obtain ⟨d2, hd2, hA2, -⟩ := wfSorts_app hws hq
-    rw [hd] at hd2
-    cases hd2
-    have ha : M.dom d.res (nval M C.nodes a) := nval_dom hwf hws hT a _ ((hA1 hk).1 a (by simp))
-    have hz : M.dom d.res (nval M C.nodes z) := nval_dom hwf hws hT z _ ((hA1 hk).1 z (by simp))
-    have hb : M.dom d.res (nval M C.nodes b) := nval_dom hwf hws hT b _ ((hA2 hk).1 b (by simp))
-    rw [nval_app hwf hp, nval_app hwf hq] at hpq
-    simp only [List.map_cons, List.map_nil] at hpq
+    obtain ⟨hv1', hsa, hsz⟩ := pairApp_sound (M := M) hwf hws hd hk hp
+    obtain ⟨hv2', hsb, -⟩ := pairApp_sound (M := M) hwf hws hd hk hq
+    have ha : M.dom d.res (nval M C.nodes a) := nval_dom hwf hws hT a _ hsa
+    have hz : M.dom d.res (nval M C.nodes z) := nval_dom hwf hws hT z _ hsz
+    have hb : M.dom d.res (nval M C.nodes b) := nval_dom hwf hws hT b _ hsb
+    rw [hv1', hv2'] at hpq
     rw [← hname, L.app _ _ ha (by
         intro y hy
         rw [List.mem_singleton] at hy

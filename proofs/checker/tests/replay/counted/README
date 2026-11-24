@@ -1,4 +1,4 @@
-A multiset operator whose nodes hold counts above 65,536. Building
+A multiset operator whose nodes hold counts up to 4,294,967,295. Building
 `(Plus (Plus a:65535 b):65537 c)` flattens the inner sum and multiplies its
 counts: the `w 6 5` line merges the nested node with `Plus a:4294967295
 b:65537 c`. The kernel compares the counted arguments of both sides and never

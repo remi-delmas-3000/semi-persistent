@@ -211,9 +211,8 @@ partial def Env.term (E : Env) (exp : Option String) : SExp → Except String (T
           | _ => throw s!"unsupported child {a}"
         else out := out.push ((← E.term (argSort d i) x).1, 1)
       | _ => out := out.push ((← E.term (argSort d i) x).1, 1)
-    -- A count above 65,536 keeps the argument once with its count.
-    if out.any (fun tk => tk.2 > 65536) then
-      unless d.kind == .ac || d.kind == .aci do throw s!"a count in {f}, which is no multiset"
+    -- A multiset operator keeps each argument once with its count.
+    if (d.kind == .ac || d.kind == .aci) && !out.isEmpty then
       return (.napp f (out.toList.map (·.1)) (out.toList.map (·.2)), d.res)
     let flat := out.toList.flatMap fun tk => List.replicate tk.2 tk.1
     unless d.kind.isAssoc || d.kind.isFold || flat.length == d.args.length do
@@ -246,7 +245,8 @@ def setSort (x s : String) : PatM Unit := do
 def ofTerm : Term → Pat
   | .lit s v => .lit s v
   | .app f args => .app f (args.map ofTerm)
-  | .napp f args ks => .app f (((args.map ofTerm).zip ks).map fun pk => .times pk.1 pk.2)
+  | .napp f args ks =>
+    .app f (((args.map ofTerm).zip ks).map fun pk => if pk.2 == 1 then pk.1 else .times pk.1 pk.2)
 
 /-- The argument patterns after `ps` for pattern `p` with the count `cnt`: a
 number makes it `p` that many times (`Pat.times`); a multiplicity variable `k`, or `k>=n`,
@@ -512,7 +512,8 @@ partial def ofTermS : Term → SRhs
   | .lit s v => .lit s v
   | .app f args => .app f (args.map fun t => .tm (ofTermS t))
   | .napp f args ks =>
-    .app f ((args.zip ks).map fun tk => .times (ofTermS tk.1) (.lit "i64" (toString tk.2)))
+    .app f ((args.zip ks).map fun tk =>
+      if tk.2 == 1 then .tm (ofTermS tk.1) else .times (ofTermS tk.1) (.lit "i64" (toString tk.2)))
 
 /-- The sort of a computed value, as far as its form tells. -/
 def SNum.sort? (sorts : List (String × String)) : SNum → Option String

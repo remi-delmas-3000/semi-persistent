@@ -239,15 +239,14 @@ records; `--update` rewrites `coverage.tsv` after a change that proves more.
 of line, a stream that proves its goal and the same stream with one witness
 changed, which costs the goal that depends on it.
 
-Over the 1,684 programs (release build, 60 s and 4 GB per run, four jobs, 27 s
-of wall time): 1,559 are replayed and 125 expect an outcome other than `ok`. The reader
+Over the 1,684 programs (release build, 60 s and 4 GB per run, four jobs): 1,559 are replayed and 125 expect an outcome other than `ok`. The reader
 reads every program.
 
 | | count |
 | --- | --- |
 | `check-eq` proved (`replay_sound` covers them), of 31,101 | 31,101 |
 | programs with every `check-eq` proved, of 1,163 | 1,163 |
-| kernel steps checked | 16,636,176 |
+| kernel steps checked | 17,339,908 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,438,563 |
 | events whose check fails | 3 |

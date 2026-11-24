@@ -40,7 +40,7 @@ structure St (P : Program) where
   cid : Array (Option Nat) := #[]
   /-- `(f, c1 .. ck) -> id`: the program term `f(c1 .. ck)` evaluated to `id`. -/
   spell : Spell := {}
-  /-- As `spell`, for an application with a count above the kernel's limit. -/
+  /-- As `spell`, for an application of a multiset operator. -/
   spellC : Std.HashMap (String × List (Nat × Nat)) Nat := {}
   /-- The node of each operator's unit (`z` lines). -/
   units : Std.HashMap String Nat := {}
@@ -123,7 +123,40 @@ def index (S : St P) : Std.HashMap Node Nat := S.core.index
 
 def fd (S : St P) (i : Nat) : Nat := find S.core.parent i
 
-def defOf (S : St P) (i : Nat) : Option Def := S.core.nodes[i]?
+/-- The replayer's derivations on monomials (completion, critical pairs,
+flattening walks, a term's normal form) read a multiset node as an argument
+list. They do not run on counted children of more arguments than this, the
+engine's bound on the arguments one application builds: the event then fails
+its check with a cause. The table, the kernel and the walk on counted
+children have no such bound. -/
+def listWidth : Nat := 1048576
+
+/-- Counted children the derivations on monomials do not read. -/
+def wide (cks : List (Nat × Nat)) : Bool := cks.foldl (fun n ck => n + ck.2) 0 > listWidth
+
+/-- Node `i` as the table holds it. -/
+def defC (S : St P) (i : Nat) : Option Def := S.core.nodes[i]?
+
+/-- Node `i` read as an argument list: a multiset node's children, each as
+many times as its count. The replayer's derivations on monomials read nodes
+this way; the table holds the counted form only. -/
+def defOf (S : St P) (i : Nat) : Option Def :=
+  match S.core.nodes[i]? with
+  | some (.napp f cks) => if wide cks then some (.napp f cks) else some (.app f (Ctx.spread cks))
+  | d => d
+
+/-- Counted children as a table key: each child once, in the order of ids. -/
+def keyC (cks : List (Nat × Nat)) : List (Nat × Nat) :=
+  mergeAdj cks
+
+/-- The form the table holds a definition in: a multiset operator's
+application is counted. -/
+def normD (S : St P) (d : Def) : Def :=
+  match d with
+  | .app f cs => if S.prog.multiset f && !cs.isEmpty then .napp f (rle cs) else d
+  | d => d
+
+def idx (S : St P) (d : Def) : Option Nat := S.core.index[S.normD d]?
 
 /-- The table id of the engine's node `i`. -/
 def tr (S : St P) (i : Nat) : Option Nat := S.cid.getD i none
@@ -262,10 +295,10 @@ def St.mergeBy (S : St P) (a b : Nat) (pf : Pf) : St P :=
       | (S, false) => S.noStep
     | _ => S.noStep
 
-/-- The node that is `f` applied to counted children: the children repeated
-up to the kernel's `countLimit`, a counted application above it. -/
-def countedNode (f : String) (cks : List (Nat × Nat)) : Node :=
-  if cks.all (fun ck => ck.2 ≤ Ctx.countLimit) then .app f (Ctx.spread cks) else .napp f cks
+/-- The node that is `f` applied to counted children, in the form `f`'s kind
+gives its nodes: counted for a multiset operator, a list for any other. -/
+def countedNode (S : St P) (f : String) (cks : List (Nat × Nat)) : Node :=
+  if S.prog.multiset f && !cks.isEmpty then .napp f (mergeAdj cks) else .app f (Ctx.spread cks)
 
 /-- A merge the replayer has no kernel step for: it is not applied. -/
 def St.merge (S : St P) (a b : Nat) : St P := S.mergeBy a b none
@@ -284,7 +317,7 @@ def eval (S : St P) : Term → Option Nat
   | .app f args =>
     (evalArgs S (if S.prog.kind f == .assoc then some f else none) args).bind fun ids =>
       S.spell[(f, ids)]?
-  | .napp f args ks => (evalArgs S none args).bind fun ids => S.spellC[(f, ids.zip ks)]?
+  | .napp f args ks => (evalArgs S none args).bind fun ids => S.spellC[(f, St.keyC (ids.zip ks))]?
 
 /-- The nodes of a term's arguments. With `fl = some f`, the arguments of a
 nested application of `f` take its place, as the engine's term builder
@@ -308,7 +341,7 @@ whose nested applications are `let` names, each standing for its class. -/
 def evalN (S : St P) : Term → Option Nat
   | .lit s v => eval S (.lit s v)
   | .app f args => (evalNs S args).bind fun ids => S.spell[(f, ids)]?
-  | .napp f args ks => (evalNs S args).bind fun ids => S.spellC[(f, ids.zip ks)]?
+  | .napp f args ks => (evalNs S args).bind fun ids => S.spellC[(f, St.keyC (ids.zip ks))]?
 
 def evalNs (S : St P) : List Term → Option (List Nat)
   | [] => some []
@@ -326,7 +359,7 @@ def denotes (S : St P) (n : Nat) : Term → Bool
   | .app f ts => match S.defOf n with
     | some (.app g cs) => g == f && denotesArgs S cs ts
     | _ => false
-  | .napp f ts ks => match S.defOf n with
+  | .napp f ts ks => match S.defC n with
     | some (.napp g cks) => g == f && cks.map (·.2) == ks && denotesArgs S (cks.map (·.1)) ts
     | _ => false
 
@@ -449,7 +482,7 @@ def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false)
 /-- The table's application of `f` to the arguments `m`, in the table's
 order, if it holds one. -/
 def nodeOfArgs (S : St P) (f : String) (m : List Nat) : Option Nat :=
-  if m.isEmpty then none else S.index[Node.app f (m.mergeSort (· ≤ ·))]?
+  if m.isEmpty then none else S.idx (Node.app f (m.mergeSort (· ≤ ·)))
 
 /-- Node `n` has the value of `f(cs)`: it is an application of `f` whose
 arguments have the same normal form, or the normal form is the one class of
@@ -822,7 +855,8 @@ def ids (S : St P) (xs : List String) : Option (List Nat) := do
     | [n, k] =>
       let n ← S.node? n
       let k ← k.toNat?
-      if k > 65536 then none
+      -- A list of more arguments than the derivations on monomials read.
+      if out.size + k > St.listWidth then none
       for _ in [0:k] do out := out.push n
     | _ => none
   return out.toList
@@ -989,7 +1023,7 @@ def droppedRegroups (S : St P) (f : String) (W : List Wit) (bound view : List Na
 /-- The fields of an `e` line after the operator: the nodes of the argument
 patterns, and between `[` and `]` the nodes of each rest variable, in the
 pattern's order. -/
-def atomArgs (S : St P) (xs : List String) : Option (List (Nat × Nat) × List (List Nat) × List (List (Nat × Nat))) := do
+def atomArgs (S : St P) (f : String) (xs : List String) : Option (List (Nat × Nat) × List (List Nat) × List (List (Nat × Nat))) := do
   let mut fixed : Array (Nat × Nat) := #[]
   let mut groups : Array (List Nat) := #[]
   let mut groupsC : Array (List (Nat × Nat)) := #[]
@@ -1000,9 +1034,8 @@ def atomArgs (S : St P) (xs : List String) : Option (List (Nat × Nat) × List (
     | "]", some g =>
       let gc ← idsC S g.reverse
       groupsC := groupsC.push gc
-      -- A group with a count above the kernel's limit is read from `groupsC`.
-      groups := groups.push (if gc.any (fun ck => ck.2 > Ctx.countLimit) then []
-        else Ctx.spread gc)
+      -- A multiset operator's group is read from `groupsC`, with its counts.
+      groups := groups.push (if S.prog.multiset f then [] else Ctx.spread gc)
       open? := none
     | "[", some _ => none
     | "]", none => none
@@ -1082,7 +1115,7 @@ def foldCong (S : St P) (f : String) (left : Bool) (a b : Nat) : St P × Pf := I
 /-- The counted arguments node `x` flattens to under the multiset operator
 `f`, as the kernel's `cview` reads them. -/
 def cviewR (S : St P) (f : String) (x : Nat) : List (Nat × Nat) :=
-  match S.defOf x with
+  match S.defC x with
   | some (.napp g cs) =>
     if g == f then
       cs.flatMap fun ck => if _h : ck.1 < x then scaleC ck.2 (cviewR S f ck.1) else [(ck.1, ck.2)]
@@ -1094,33 +1127,58 @@ def cviewR (S : St P) (f : String) (x : Nat) : List (Nat × Nat) :=
   | _ => [(x, 1)]
 termination_by x
 
+/-- Counted children that flatten, under `f`, to more arguments than the
+derivations on monomials read. -/
+def wideFlat (S : St P) (f : String) (cks : List (Nat × Nat)) : Bool :=
+  St.wide (cks.flatMap fun ck => scaleC ck.2 (cviewR S f ck.1))
+
+/-- A multiset node that flattens to more arguments than the derivations on
+monomials read. -/
+def nodeWide (S : St P) (x : Nat) : Bool :=
+  match S.defC x with
+  | some (.napp f _) => St.wide (cviewR S f x)
+  | _ => false
+
 /-- A `cong` step for two nodes of a multiset operator whose counted
 arguments agree: each child has the same total count on both sides. -/
 def countedCong (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   if a == b then return (S, some none)
+  -- Two nodes of one class already have a proof.
+  if S.fd a == S.fd b then return eqP S a b
   let kind := S.prog.kind f
   let (l, m) := (cviewR S f a, cviewR S f b)
   if sameCounts kind l m then
     let (S, s) := emit S (.cong f a b []) a b
     return (S, some (some s))
-  -- Two counted nodes with the same counts and children equal one by one:
-  -- no flattening, a child that is an application of `f` stands for its class.
-  if let (some (.napp g cs), some (.napp h ds)) := (S.defOf a, S.defOf b) then
-    if g == f && h == f && cs.map (·.2) == ds.map (·.2) &&
-        (cs.zip ds).all (fun cd => S.fd cd.1.1 == S.fd cd.2.1) then
-      let mut S := S
-      let mut prems : Array Nat := #[]
-      let mut ok := true
-      for (c, d) in cs.zip ds do
-        if c.1 != d.1 && ok then
-          let (S', p) := eqP S c.1 d.1
-          S := S'
-          match p with
-          | some (some st) => prems := prems.push st
-          | _ => ok := false
-      if ok then
-        let (S', st) := emit S (.cong f a b prems.toList) a b
-        return (S', some (some st))
+  -- One state from here on: a second reference to it, alive while a step is
+  -- emitted, would make the step copy the state's tables.
+  let mut S := S
+  -- Two counted nodes whose children, none flattened, have the same counts
+  -- class by class: a child that is an application of `f` stands for its
+  -- class. Each child goes to the first child of its class by a premise.
+  if let (some (.napp g cs), some (.napp h ds)) := (S.defC a, S.defC b) then
+    if g == f && h == f then
+      let kids := (cs ++ ds).map (·.1)
+      let reps0 : List (Nat × Nat) := kids.foldl (fun acc y =>
+        if acc.any (fun rc => rc.1 == S.fd y) then acc else acc ++ [(S.fd y, y)]) []
+      let rep0 (y : Nat) : Nat := (reps0.lookup (S.fd y)).getD y
+      let byClass (v : List (Nat × Nat)) : List (Nat × Nat) := v.map fun ck => (rep0 ck.1, ck.2)
+      if sameCounts kind (byClass cs) (byClass ds) then
+        let todo0 : List (Nat × Nat) := kids.eraseDups.filterMap fun y =>
+          let r := rep0 y
+          if r != y then some (y, r) else none
+        let mut prems : Array Nat := #[]
+        let mut ok := true
+        for (y, r) in todo0 do
+          if ok then
+            let (S', p) := eqP S y r
+            S := S'
+            match p with
+            | some (some st) => prems := prems.push st
+            | _ => ok := false
+        if ok then
+          let (S', st) := emit S (.cong f a b prems.toList) a b
+          return (S', some (some st))
   -- Arguments equal as classes: each goes to the first argument of its
   -- class, by a premise, and the two sides are compared again.
   let keys := (normC l ++ normC m).map (·.1)
@@ -1131,16 +1189,18 @@ def countedCong (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   let side (v : List (Nat × Nat)) : List (Nat × Nat) :=
     (v.flatMap fun yn => scaleC yn.2 (cviewR S f (repOf yn.1))).filter fun yn => some yn.1 != u
   if !sameCounts kind (side l) (side m) then return (S, none)
-  let mut S := S
-  let mut prems : Array Nat := #[]
-  for y in keys.eraseDups do
+  -- The pairs to prove are computed before the state is updated: a closure
+  -- over the state, alive in the loop, would make each step copy its tables.
+  let todo : List (Nat × Nat) := keys.eraseDups.filterMap fun y =>
     let r := repOf y
-    if r != y then
-      let (S', p) := eqP S y r
-      S := S'
-      match p with
-      | some (some st) => prems := prems.push st
-      | _ => return (S, none)
+    if r != y then some (y, r) else none
+  let mut prems : Array Nat := #[]
+  for (y, r) in todo do
+    let (S', p) := eqP S y r
+    S := S'
+    match p with
+    | some (some st) => prems := prems.push st
+    | _ => return (S, none)
   let (S', s) := emit S (.cong f a b prems.toList) a b
   return (S', some (some s))
 
@@ -1262,11 +1322,11 @@ def inverseNode (S : St P) (inv : String) (a : Nat) (unit : Nat) (others : List 
 def appNode (S : St P) (f : String) (m : List Nat) : St P × Option Nat :=
   let d := Node.app f m
   if m.isEmpty then (S, none)
-  else match S.index[d]? with
+  else match S.idx (d) with
     | some t => (S, some t)
     | none =>
       -- The table takes the node only if it is well-sorted.
-      S.withCore fun c => c.addNode d
+      S.withCore fun c => c.addNode (S.normD d)
 
 /-- One pass of `lawNormP` from `cur`, which `pf` proves equal to `x`: the
 result when no inverse pair and no `n` arguments of one class are left, or
@@ -1720,9 +1780,9 @@ mutual
 
 /-- The table id of a program term as the kernel interns it: child for child. -/
 def internT (S : St P) : Term → Option Nat
-  | .lit s v => S.index[Node.lit s v]?
-  | .app f args => (internTs S args).bind fun cs => S.index[Node.app f cs]?
-  | .napp f args ks => (internTs S args).bind fun cs => S.index[countedNode f (cs.zip ks)]?
+  | .lit s v => S.idx (Node.lit s v)
+  | .app f args => (internTs S args).bind fun cs => S.idx (Node.app f cs)
+  | .napp f args ks => (internTs S args).bind fun cs => S.idx (countedNode S f (cs.zip ks))
 
 def internTs (S : St P) : List Term → Option (List Nat)
   | [] => some []
@@ -1752,7 +1812,8 @@ def sortOf (S : St P) (t : Nat) : Option String :=
 /-- The table id of definition `d`, added to the table if it is new and
 well-sorted. -/
 def intern (S : St P) (d : Def) : St P × Option Nat :=
-  match S.index[d]? with
+  let d := S.normD d
+  match S.idx (d) with
   | some t => (S, some t)
   | none =>
     match S.withCore fun c => c.addNode d with
@@ -1773,7 +1834,7 @@ def writtenApp (S : St P) (f : String) (noArgs : Bool) (node : Option Nat) (ws :
     St P × Option (Nat × Nat × Pf) := Id.run do
   let mut S := S
   let d := Node.app f ws.toList
-  let w ← match S.index[d]? with
+  let w ← match S.idx (d) with
     | some w => pure w
     | none =>
       match intern S d with
@@ -1804,7 +1865,7 @@ The terms join their nodes' classes. -/
 def writtenP (S : St P) (t : Term) : St P × Option (Nat × Nat × Pf) :=
   match t with
   | .lit s v =>
-    match S.index[Node.lit s v]? with
+    match S.idx (Node.lit s v) with
     | some n => (S, some (n, n, some none))
     | none => (S, none)
   | .app f args =>
@@ -1820,11 +1881,15 @@ def writtenP (S : St P) (t : Term) : St P × Option (Nat × Nat × Pf) :=
     let node := eval S (.napp f args ks)
     match writtenArgs S args #[] with
     | (S, some ws) =>
-      match intern S (countedNode f (ws.toList.zip ks)), node with
+      match intern S (countedNode S f (ws.toList.zip ks)), node with
       | (S, some w), some n =>
         match countedCong S f w n with
-        | (S, some p) => (S, some (w, n, some p))
-        | (S, none) => (S, none)
+        | (S, some p) => (S.mergeBy w n (some p), some (w, n, some p))
+        -- The term is its node by `f`'s laws: the derivation on monomials.
+        | (S, none) =>
+          if wideFlat S f (ws.toList.zip ks) then (S, none)
+          else writtenApp S f false node
+            ((ws.toList.zip ks).flatMap fun wk => List.replicate wk.2 wk.1).toArray
       | (S, _), _ => (S, none)
     | (S, none) => (S, none)
 
@@ -2120,13 +2185,15 @@ the pattern matched or was built as. An instance joins that node's class. -/
 
 structure Walk (P : Program) where
   S : St P
+  /-- Multiset applications are walked as argument lists: the second attempt
+  at a firing the walk on counted children did not read. -/
+  noCount : Bool := false
   σ : List (String × Nat) := []
   /-- The nodes each rest variable is bound to. -/
   ρ : List (String × List Nat) := []
   /-- The count each multiplicity variable is bound to. -/
   μ : List (String × Nat) := []
-  /-- The rest variables bound to counted nodes (a count above the kernel's
-  limit). -/
+  /-- The rest variables bound to counted nodes (walked on counted children). -/
   ρC : List (String × List (Nat × Nat)) := []
   /-- The position of the next `e` line. -/
   atomIdx : Nat := 0
@@ -2529,11 +2596,10 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
     let S := w.S
     if g != f || !(fixedArgs ps).all (· == units fixed) then
       throw "rule: line for another application"
-    -- A count above the kernel's limit: each argument takes its field whole,
-    -- and the instance is the counted node itself.
+    -- A multiset operator: each argument takes its field whole, with its
+    -- count, and the instance is a counted node.
     let groupsC := S.atomsC.getD w.atomIdx []
-    if fixed.any (fun e => e.2 > Ctx.countLimit) ||
-        groupsC.any (·.any fun ck => ck.2 > Ctx.countLimit) then
+    if S.prog.multiset f && !w.noCount then
       let mut σ := w.σ
       let mut μ := w.μ
       let mut ρC := w.ρC
@@ -2580,7 +2646,7 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
         cks := cks.push (inst, cnt)
       if !fixed.isEmpty || !groupsC.isEmpty then throw "rule: line for another application"
       set { w with atoms := rest, atomIdx := w.atomIdx + 1, σ := σ, μ := μ, ρC := ρC }
-      match ← withS fun S => intern S (countedNode f cks.toList) with
+      match ← withS fun S => intern S (countedNode S f cks.toList) with
       | some i =>
         -- The instance is the matched node, or has the same counted arguments.
         if i != n then
@@ -2601,7 +2667,9 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
     -- nodes.
     let mut bound : Array Nat := #[]
     let mut fixed := fixed
-    let mut groups := groups
+    if S.prog.multiset f && (wideFlat S f fixed || groupsC.any (wideFlat S f)) then
+      throw "rule: counted node differs"
+    let mut groups := if S.prog.multiset f then groupsC.map Ctx.spread else groups
     for (q, o) in ps.zip sub do
       -- A rest variable takes the next group of nodes.
       if let .rest x := q then
@@ -2837,6 +2905,10 @@ def groundPs : List Pat → WalkM P (List (Nat × Nat))
 
 end
 
+/-- Whether applications of `f` are walked on counted children now. -/
+def countedNow (f : String) : WalkM P Bool :=
+  modifyGet fun w => (w.S.prog.multiset f && !w.noCount, w)
+
 /-- The built application `f` of counted built arguments against the next `b`
 node, which is the counted node itself. -/
 def builtAppC (f : String) (cks : List ((Nat × Nat) × Nat)) : WalkM P (Nat × Nat) := do
@@ -2844,7 +2916,7 @@ def builtAppC (f : String) (cks : List ((Nat × Nat) × Nat)) : WalkM P (Nat × 
   match w.rhs with
   | (n, _) :: rest =>
     set { w with rhs := rest }
-    match ← withS fun S => intern S (countedNode f (cks.map fun x => (x.1.2, x.2))) with
+    match ← withS fun S => intern S (countedNode S f (cks.map fun x => (x.1.2, x.2))) with
     | some i =>
       if i == n then pure (n, i)
       else
@@ -2855,13 +2927,6 @@ def builtAppC (f : String) (cks : List ((Nat × Nat) × Nat)) : WalkM P (Nat × 
         if ok then pure (n, i) else throw "rule: built counted node differs"
     | none => throw "rule: instance ill-sorted"
   | [] => throw "rule: no node for a built application"
-
-/-- Whether an argument list holds a count above the kernel's limit. -/
-def bigCount (ρC : List (String × List (Nat × Nat))) (ps : List Pat) : Bool :=
-  ps.any fun p => match p with
-    | .times _ n => n > Ctx.countLimit
-    | .rest x => (ρC.lookup x).isSome
-    | _ => false
 
 /-- The built application `f` of the built arguments `cs` against the next
 `b` node. -/
@@ -2908,13 +2973,15 @@ def walkB (p : Pat) : WalkM P (Nat × Nat) :=
       -- A primitive application's `b` node is the literal the engine computed;
       -- its arguments have none.
       | none =>
-        get >>= fun w0 =>
+        -- The walk is read for one Boolean and released: holding it across
+        -- the built application would make each step copy the state.
+        countedNow f >>= fun counted =>
           if (primSig f).isSome then groundPs ps >>= builtPrim f
-          else if bigCount w0.ρC ps then walkBsC ps >>= builtAppC f
+          else if counted && !ps.isEmpty then walkBsC ps >>= builtAppC f
           else walkBs ps >>= builtApp f
 
 /-- The built arguments with their counts, none repeated: for an argument
-list with a count above the kernel's limit. -/
+list of a multiset operator. -/
 def walkBsC : List Pat → WalkM P (List ((Nat × Nat) × Nat))
   | [] => pure []
   | .times (.var x) n :: ps =>
@@ -2937,7 +3004,15 @@ def walkBsC : List Pat → WalkM P (List ((Nat × Nat) × Nat))
     match (w.ρC.lookup x).orElse fun _ => (w.ρ.lookup x).map (·.map (·, 1)) with
     | some ys => walkBsC ps >>= fun r => pure (ys.map (fun yk => ((yk.1, yk.1), yk.2)) ++ r)
     | none => throw "rule: unbound rest variable"
-  | .rep _ _ :: _ => throw "rule: a multiplicity variable beside a count above the limit"
+  | .rep q k :: ps => do
+    let some n := (← get).μ.lookup k | throw "rule: unbound multiplicity variable"
+    let y ← match q with
+      | .var x => walkB (.var x)
+      | .lit s v => walkB (.lit s v)
+      | .app f qs => walkB (.app f qs)
+      | _ => throw "rule: a repeated argument repeated"
+    let r ← walkBsC ps
+    pure ((y, n) :: r)
 
 def walkBs : List Pat → WalkM P (List (Nat × Nat))
   | [] => pure []
@@ -3285,8 +3360,11 @@ def seqFireP (S : St P) (od j : Nat) (r : SeqRule) (p : Pat) (x y : Nat) : St P 
     let B : SBind := { scalars := w.σ.map fun (v, n) => (v, atomOf n),
                        -- A rest variable is named with its dots in a pattern, and
                        -- without them as a comprehension's source.
-                       seqs := w.ρ.flatMap fun (v, ns) =>
-                         [(v, ns.map SAtom.node), ((v.drop 2).toString, ns.map SAtom.node)],
+                       seqs := (w.ρ ++ w.ρC.map fun (vc : String × List (Nat × Nat)) =>
+                           (vc.1, if St.wide vc.2 then [] else Ctx.spread vc.2)).flatMap
+                         fun (vn : String × List Nat) =>
+                           [(vn.1, vn.2.map SAtom.node),
+                            ((vn.1.drop 2).toString, vn.2.map SAtom.node)],
                        kcounts := w.μ }
     let new := if S.fd nl == S.fd x then y else x
     seqFinish S od j r B [] il new
@@ -3329,7 +3407,7 @@ def stepCore (S : St P) (line : String) : St P :=
   match line.splitOn " " with
   | "n" :: id :: f :: kids =>
     match id.toNat?, idsC S kids with
-    | some i, some cks => define S i (countedNode f cks)
+    | some i, some cks => define S i (countedNode S f cks)
     | _, _ => S.fail "definition: unreadable"
   | "l" :: id :: s :: rest =>
     match id.toNat? with
@@ -3338,11 +3416,10 @@ def stepCore (S : St P) (line : String) : St P :=
   | "t" :: id :: f :: kids =>
     match S.node? id, idsC S kids with
     | some i, some cks =>
-      if cks.any (fun ck => ck.2 > Ctx.countLimit) then
-        -- A counted application: the node holds these children and counts.
-        if S.defOf i == some (countedNode f cks) then
-          { S with spellC := S.spellC.insert (f, cks) i }
-        else S.fail "term: its counted node differs"
+      let S := { S with spellC := S.spellC.insert (f, St.keyC cks) i }
+      -- A counted application that is the node itself needs no step.
+      if S.prog.multiset f && !cks.isEmpty && S.defC i == some (countedNode S f cks) then S
+      else if nodeWide S i || wideFlat S f cks then S.fail "term: its counted node differs"
       else
       let cs := Ctx.spread cks
       if spells S i f cs then termLine { S with spell := S.spell.insert (f, cs) i } i f cs
@@ -3418,14 +3495,17 @@ def stepCore (S : St P) (line : String) : St P :=
     | some a, some b =>
       -- Two nodes of a multiset operator, one of them counted: equal when
       -- their counted arguments agree.
-      let counted : Option String := match S.defOf a, S.defOf b with
+      let counted : Option String := match S.defC a, S.defC b with
         | some (.napp f _), _ => some f
         | _, some (.napp f _) => some f
         | _, _ => none
-      if let some f := counted then
-        match countedCong S f a b with
-        | (S, some p) => S.mergeBy a b (some p)
-        | (S, none) => S.fail "law: counted arguments differ"
+      -- The state goes through the attempt and comes back: no second
+      -- reference to it is kept, which would copy its tables.
+      let (S, direct) := match counted with
+        | some f => countedCong S f a b
+        | none => (S, none)
+      if let some p := direct then S.mergeBy a b (some p)
+      else if nodeWide S a || nodeWide S b then S.fail "law: counted arguments differ"
       else
       -- Either node can be the application whose arguments normalize to the other.
       let one (x y : Nat) : Bool :=
@@ -3514,7 +3594,7 @@ def stepCore (S : St P) (line : String) : St P :=
     | some o => { S with fire := some (o, kind == "w"), atoms := #[], atomsC := #[], rhs := [], seqLines := [], events := S.events - 1 }
     | none => S.fail "rule: unreadable"
   | "e" :: id :: f :: kids =>
-    match S.node? id, atomArgs S kids with
+    match S.node? id, atomArgs S f kids with
     | some i, some (fixed, groups, groupsC) =>
       { S with atoms := S.atoms.push (i, f, fixed, groups), atomsC := S.atomsC.push groupsC,
                events := S.events - 1 }
@@ -3551,7 +3631,14 @@ def stepCore (S : St P) (line : String) : St P :=
         | some (some r) =>
           -- The walk takes the state and gives it back, whether it succeeds or not.
           let (atoms, rhs) := (S.atoms.toList, S.rhs)
-          let (res, w) := ((fireRule r rw).run).run { S := S, atoms, rhs }
+          -- A regrouping line names a member of the class it regroups: the
+          -- walk on counted children, which needs no such line, is not tried
+          -- on a firing whose line names another node.
+          let regOk := S.regroups.all fun (_, c, m) => S.fd c == S.fd m
+          let (res, w) := ((fireRule r rw).run).run { S := S, atoms, rhs, noCount := !regOk }
+          let (res, w) := match res with
+            | .ok fr => (Except.ok fr, w)
+            | .error _ => ((fireRule r rw).run).run { S := w.S, atoms, rhs, noCount := true }
           let S := w.S
           match res with
           | .ok fr =>
@@ -3627,7 +3714,20 @@ def stepCore (S : St P) (line : String) : St P :=
                   | (S, some tn) => let (S, p) := congStepL S f tn n; (S, some (tn, p))
                   | (S, none) => (S, none)
               | .lit _ _ => (S, none)
-              | .napp _ _ _ => (S, none)
+              | .napp f args ks =>
+                -- The counted term as the kernel interns it is the stream's
+                -- node by `f`'s laws.
+                match writtenArgs S args #[] with
+                | (S, some ws) =>
+                  match intern S (countedNode S f (ws.toList.zip ks)) with
+                  | (S, some tn) =>
+                    match countedCong S f tn n with
+                    | (S, some p) => (S, some (tn, some p))
+                    | (S, none) =>
+                      if nodeWide S tn || nodeWide S n then (S, none)
+                      else let (S, p) := congStepL S f tn n; (S, some (tn, p))
+                  | (S, none) => (S, none)
+                | (S, none) => (S, none)
             match side S l a with
             | (S, some (tl, pl)) =>
               match side S r b with
@@ -3640,7 +3740,8 @@ def stepCore (S : St P) (line : String) : St P :=
                   let (S, pr') := symmP S tr b pr
                   let (S, q) := transP S tl tr q pr'
                   match stepOf S tl q with
-                  | (S, some st) => (S.withCore fun c => c.goal o l r st).1
+                  | (S, some st) =>
+                    (S.withCore fun c => c.goal o l r st).1
                   | (S, none) => S
               | (S, none) => S.fail "goal: its terms differ"
             | (S, none) => S.fail "goal: its terms differ"
@@ -3674,14 +3775,18 @@ def stepCore (S : St P) (line : String) : St P :=
         | _ => none
       -- A counted node: the two merged nodes have the same counted arguments,
       -- a rewritten argument standing for its class.
-      let counted : Option String := match S.defOf a, S.defOf b with
+      let counted : Option String := match S.defC a, S.defC b with
         | some (.napp f _), _ => some f
         | _, some (.napp f _) => some f
         | _, _ => none
-      if let some f := counted then
-        match countedCong S f a b with
-        | (S, some p) => S.mergeBy a b (some p)
-        | (S, none) => S.fail "completion: counted arguments differ"
+      -- The state goes through the attempt and comes back: no second
+      -- reference to it is kept, which would copy its tables.
+      let (S, direct) := match counted with
+        | some f => countedCong S f a b
+        | none => (S, none)
+      if let some p := direct then S.mergeBy a b (some p)
+      else if nodeWide S a || nodeWide S b || nodeWide S n then
+        S.fail "completion: counted arguments differ"
       else
       if let some f := seqOp then
         match rs with

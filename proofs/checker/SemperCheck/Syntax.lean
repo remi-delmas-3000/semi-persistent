@@ -294,4 +294,9 @@ def Program.kind (P : Program) (f : String) : Kind :=
   | some d => d.kind
   | none => .plain
 
+/-- A multiset operator: its nodes hold each child once with its count. Every
+other operator's nodes hold an ordered list of children. -/
+def Program.multiset (P : Program) (f : String) : Bool :=
+  P.kind f == .ac || P.kind f == .aci
+
 end SemperCheck
