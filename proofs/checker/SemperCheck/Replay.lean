@@ -880,6 +880,8 @@ def groupLaw (S : St P) (a b n1 n2 : Nat) : Except String Unit := do
 /-- `c` and `c:k` fields as nodes with their counts. -/
 def idsC (S : St P) (xs : List String) : Option (List (Nat × Nat)) :=
   xs.mapM fun x =>
+    -- A field with no count is read without being split.
+    if !x.contains ':' then (S.node? x).map (·, 1) else
     match x.splitOn ":" with
     | [n] => (S.node? n).map (·, 1)
     | [n, k] => (S.node? n).bind fun n => k.toNat?.bind fun k => if k == 0 then none else some (n, k)
@@ -1075,6 +1077,7 @@ def atomArgs (S : St P) (xs : List String) : Option (List (Nat × Nat) × List A
     | _, some g => open? := some (x :: g)
     | _, none =>
       -- `c` or `c:k`: a node and the number of times the pattern takes it.
+      if !x.contains ':' then fixed := fixed.push (← S.node? x, 1) else
       match x.splitOn ":" with
       | [n] => fixed := fixed.push (← S.node? n, 1)
       | [n, k] =>
@@ -2223,6 +2226,9 @@ structure Walk (P : Program) where
   /-- The matched node and the instance of each matched pattern, by the
   pattern's printed form. -/
   memo : List (String × Nat × Nat) := []
+  /-- The rule has body equalities, whose sides are looked up in `memo`: the
+  walk fills `memo` only then. -/
+  memoOn : Bool := true
 
 /-- The walk keeps its state when it fails: the replayer's state is in it,
 and is held by one reference at a time so that its arrays are updated in
@@ -2239,7 +2245,24 @@ def withS {α : Type} (k : St P → St P × α) : WalkM P α :=
     let (S, a) := k S
     (a, { w with S := S })
 
-def key (p : Pat) : String := toString (repr p)
+mutual
+
+/-- A pattern's key in the walk's memo: its spelling, built by concatenation
+(the pretty-printer of `repr` took a fifth of a replay). -/
+def key : Pat → String
+  | .var x => "v " ++ x
+  | .lit s v => "l " ++ s ++ " " ++ v
+  | .app f ps => "(" ++ f ++ keys ps ++ ")"
+  | .rest x => ".." ++ x
+  | .rep p k => "r " ++ k ++ " " ++ key p
+  | .times p n => "t " ++ toString n ++ " " ++ key p
+  | .count k => "c " ++ k
+
+def keys : List Pat → String
+  | [] => ""
+  | p :: ps => " " ++ key p ++ keys ps
+
+end
 
 mutual
 
@@ -2636,6 +2659,10 @@ def matchCheck (S : St P) (f : String) (n k : Nat) (cs : Args) : Except String U
     let bag := S.prog.multiset f
     let S0 := { S with splices := [] }
     let (wo, wr) := witsOf S k
+    -- A plain operator with no witness: the views are the lists themselves.
+    if wo.isEmpty && wr.isEmpty && S.prog.kind f == .plain then
+      if h == f && ds.map S.fd == cs.map S.fd then .ok () else .error "rule: matched node differs"
+    else
     let vd := viewArgs S f true wo (entries bag ds none)
     let csU := cs ++ Args.ofList (droppedRegroups S f wr cs vd)
     let vc := if S.prog.kind f == .assoc && !wr.isEmpty then
@@ -2648,9 +2675,10 @@ def matchCheck (S : St P) (f : String) (n k : Nat) (cs : Args) : Except String U
 
 /-- The application pattern `f(ps)` against the next line, once each argument
 that is no variable has its matched node and instance in `sub`. -/
-def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat × Nat))) :
+def walkApp (f : String) (ps : List Pat) (sub : List (Option (Nat × Nat))) :
     WalkM P (Nat × Nat) := do
   let w ← get
+  let memoOn := w.memoOn
   match w.atoms with
   | (n, g, fixed, groups) :: rest =>
     let S := w.S
@@ -2730,13 +2758,13 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
           | (S, some p) => (S.mergeBy i n (some p), true)
           | (S, none) => (S, false)
       if ok then
-        modify fun w => { w with memo := (key, n, i) :: w.memo }
+        if memoOn then modify fun w => { w with memo := (key (.app f ps), n, i) :: w.memo }
         return (n, i)
     match ← withS fun S => (S, matchCheck S f n k cs) with
     | .error e => throw e
     | .ok _ => pure ()
     let i ← instOf f ia n (some k)
-    modify fun w => { w with memo := (key, n, i) :: w.memo }
+    if memoOn then modify fun w => { w with memo := (key (.app f ps), n, i) :: w.memo }
     pure (n, i)
   | [] => throw "rule: no line for an application"
 
@@ -2764,7 +2792,7 @@ def walkQ (p : Pat) : WalkM P (Nat × Nat) :=
         else throw "rule: literal differs"
       | _ => throw "rule: literal differs"
     | _ => throw "rule: no line for a literal"
-  | .app f ps => walkQs ps >>= walkApp (key (.app f ps)) f ps
+  | .app f ps => walkQs ps >>= walkApp f ps
 
 /-- The matched node and instance of each argument that is no variable. -/
 def walkQs : List Pat → WalkM P (List (Option (Nat × Nat)))
@@ -3352,8 +3380,10 @@ def define (S : St P) (i : Nat) (d : Def) : St P :=
     | _ => S
 
 def stepCore (S : St P) (line : String) : St P :=
-  let S := { S with events := S.events + 1, cur := (line.splitOn " ").headD "" }
-  match line.splitOn " " with
+  -- The line is split once.
+  let ws := line.splitOn " "
+  let S := { S with events := S.events + 1, cur := ws.headD "" }
+  match ws with
   | "n" :: id :: f :: kids =>
     match id.toNat?, idsC S kids with
     | some i, some cks => define S i (S.nodeA f (Args.ofRuns cks))
@@ -3580,7 +3610,8 @@ def stepCore (S : St P) (line : String) : St P :=
           -- comparison on counted arguments, which needs no such line, is not
           -- tried on a firing whose line names another node.
           let regOk := S.regroups.all fun (_, c, m) => S.fd c == S.fd m
-          let (res, w) := ((fireRule r rw).run).run { S := S, atoms, rhs, direct := regOk }
+          let (res, w) := ((fireRule r rw).run).run
+            { S := S, atoms, rhs, direct := regOk, memoOn := !r.eqs.isEmpty }
           let S := w.S
           match res with
           | .ok fr =>

@@ -38,7 +38,7 @@ def replay (progPath tracePath : String) : IO UInt32 := do
     let before := S.nFailed
     let beforeR := S.core.rejected
     let beforeN := S.unchecked.fold (fun n _ k => n + k) 0
-    S := Replay.step S ((line.splitOn "\n").headD "")
+    S := Replay.step S (if line.endsWith "\n" then (line.dropEnd 1).copy else line)
     if S.nUnjustified > beforeU && beforeU < shown then IO.eprintln s!"no kernel step at event {S.events}: {line}"
     if S.nFailed > before && S.nFailed ≤ shown then IO.eprintln s!"failed event {S.events} [{S.lastCause}]: {line}"
     -- With `SEMPER_REPLAY_NODES`, each node the failed line names: its table
@@ -51,7 +51,9 @@ def replay (progPath tracePath : String) : IO UInt32 := do
             | some (.lit s v) => s!"{s} {v}"
             | none => "?"
           IO.eprintln s!"  {x}: table {t}, root {S.fd t}, {d}"
-    if first.isNone then
+    -- Read only when the line failed, had no witness or got no kernel step.
+    let unchecked := S.unchecked.fold (fun n _ k => n + k) 0
+    if first.isNone && (S.nFailed > before || unchecked > beforeN || S.nUnjustified > beforeU) then
       let kind := (line.splitOn " ").headD ""
       if S.nFailed > before then
         let parts := S.lastCause.splitOn " | "
@@ -66,7 +68,7 @@ def replay (progPath tracePath : String) : IO UInt32 := do
         first := some (match why with
           | some e => s!"unread rule: {e}"
           | none => cause)
-      else if S.unchecked.fold (fun n _ k => n + k) 0 > beforeN then
+      else if unchecked > beforeN then
         -- A `u` line names its kind; an `m` line with no witness checked is a
         -- sequence rule's firing.
         first := some (if line.startsWith "u " then
