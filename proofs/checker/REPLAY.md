@@ -238,13 +238,11 @@ compares two nodes on their flattened counted children, `congShallow` on their
 own children class by class, and `inv`, `nil` and `cancel` read the counted
 shape.
 
-The replayer still runs four derivations on argument lists: completion and
-critical pairs, the walk of a `:flatten` rule, a term's normal form under its
-operator's laws, and the sequence-rule evaluator of `Seq.lean`. It tries the
-counted comparison first and reads a multiset node as a list only for these
-derivations, and only when the node flattens to at most 1,048,576 arguments
-(`St.listWidth`, the engine's bound on the arguments one application builds).
-Above that the event fails its check with a cause: one firing in
-`seq_rhs_too_wide.egg`, which builds a count of 4,194,304, and it costs no
-`check-eq`. The next change moves these derivations to counted children and
-removes `listWidth`.
+The replayer reads every argument list as runs (`Args.lean`): a node and the
+number of consecutive times it occurs. A multiset node's counted children are
+its runs, and a positional node's list is run-length encoded on reading. Each
+derivation (completion and critical pairs, the walk of a `:flatten` rule, a
+term's normal form, the law steps) costs the number of runs, and none writes a
+count as repeated arguments. The sequence-rule evaluator of `Seq.lean` still
+builds one term per repeated argument: the firing in `seq_rhs_too_wide.egg`,
+which builds a count of 4,194,304, replays in 1.7 s with a peak of 741 MB.

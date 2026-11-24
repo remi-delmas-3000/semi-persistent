@@ -1,5 +1,6 @@
 import SemperCheck.Parse
 import SemperCheck.Core
+import SemperCheck.Args
 import Std.Data.HashMap
 
 /-!
@@ -26,7 +27,16 @@ open SemperCheck
 /-- What a node id stands for. -/
 abbrev Def := Node
 
-abbrev Spell := Std.HashMap (String × List Nat) Nat
+/-- A node as the replayer's derivations read it: a literal, or an operator
+applied to an argument list in run-length form. A multiset node's counted
+children are its runs; a positional node's argument list is run-length encoded
+on reading. -/
+inductive View where
+  | lit (s v : String)
+  | app (f : String) (cs : Args)
+deriving Repr, BEq
+
+abbrev Spell := Std.HashMap (String × List (Nat × Nat)) Nat
 
 structure St (P : Program) where
   declAt : Std.HashMap Nat Decl := {}
@@ -38,10 +48,9 @@ structure St (P : Program) where
   engine's ids past the mark, and the engine reuses them; the table keeps its
   nodes. -/
   cid : Array (Option Nat) := #[]
-  /-- `(f, c1 .. ck) -> id`: the program term `f(c1 .. ck)` evaluated to `id`. -/
+  /-- `(f, arguments) -> id`: the program term `f(arguments)` evaluated to
+  `id`. The arguments are the runs of the term's argument nodes. -/
   spell : Spell := {}
-  /-- As `spell`, for an application of a multiset operator. -/
-  spellC : Std.HashMap (String × List (Nat × Nat)) Nat := {}
   /-- The node of each operator's unit (`z` lines). -/
   units : Std.HashMap String Nat := {}
   /-- Each literal's node, checked against its definition on use. -/
@@ -92,9 +101,7 @@ structure St (P : Program) where
   /-- The firing's `e` lines: the matched node, the operator, the nodes the
   argument patterns are bound to, each with its count, and, for each rest
   variable, its nodes. -/
-  atoms : Array (Nat × String × List (Nat × Nat) × List (List Nat)) := #[]
-  /-- Per `e` line of the firing, its rest groups with their counts. -/
-  atomsC : Array (List (List (Nat × Nat))) := #[]
+  atoms : Array (Nat × String × List (Nat × Nat) × List Args) := #[]
   /-- The right-hand side's nodes; `true` marks a `let` name's node. -/
   rhs : List (Nat × Bool) := []
   /-- The `check-eq` whose two nodes were in one class at their `g` line. -/
@@ -123,31 +130,29 @@ def index (S : St P) : Std.HashMap Node Nat := S.core.index
 
 def fd (S : St P) (i : Nat) : Nat := find S.core.parent i
 
-/-- The replayer's derivations on monomials (completion, critical pairs,
-flattening walks, a term's normal form) read a multiset node as an argument
-list. They do not run on counted children of more arguments than this, the
-engine's bound on the arguments one application builds: the event then fails
-its check with a cause. The table, the kernel and the walk on counted
-children have no such bound. -/
-def listWidth : Nat := 1048576
-
-/-- Counted children the derivations on monomials do not read. -/
-def wide (cks : List (Nat × Nat)) : Bool := cks.foldl (fun n ck => n + ck.2) 0 > listWidth
-
 /-- Node `i` as the table holds it. -/
 def defC (S : St P) (i : Nat) : Option Def := S.core.nodes[i]?
 
-/-- Node `i` read as an argument list: a multiset node's children, each as
-many times as its count. The replayer's derivations on monomials read nodes
-this way; the table holds the counted form only. -/
-def defOf (S : St P) (i : Nat) : Option Def :=
+/-- Node `i` as the derivations read it: its arguments as runs. -/
+def defOf (S : St P) (i : Nat) : Option View :=
   match S.core.nodes[i]? with
-  | some (.napp f cks) => if wide cks then some (.napp f cks) else some (.app f (Ctx.spread cks))
-  | d => d
+  | some (.lit s v) => some (.lit s v)
+  | some (.app f cs) => some (.app f (Args.ofList cs))
+  | some (.napp f cks) => some (.app f (Args.ofRuns cks))
+  | none => none
 
-/-- Counted children as a table key: each child once, in the order of ids. -/
-def keyC (cks : List (Nat × Nat)) : List (Nat × Nat) :=
-  mergeAdj cks
+/-- The operator and the argument of an application to one argument. -/
+def unary? (S : St P) (i : Nat) : Option (String × Nat) :=
+  match S.core.nodes[i]? with
+  | some (.app g [y]) => some (g, y)
+  | some (.napp g [(y, 1)]) => some (g, y)
+  | _ => none
+
+/-- The node that is `f` applied to the arguments `m`, in the form `f`'s kind
+gives its nodes: counted children for a multiset operator, a list for any
+other. -/
+def nodeA (S : St P) (f : String) (m : Args) : Node :=
+  if S.prog.multiset f && !m.isEmpty then .napp f m.runs else .app f m.toList
 
 /-- The form the table holds a definition in: a multiset operator's
 application is counted. -/
@@ -157,6 +162,9 @@ def normD (S : St P) (d : Def) : Def :=
   | d => d
 
 def idx (S : St P) (d : Def) : Option Nat := S.core.index[S.normD d]?
+
+/-- The table id of `f` applied to the arguments `m`. -/
+def idxA (S : St P) (f : String) (m : Args) : Option Nat := S.core.index[S.nodeA f m]?
 
 /-- The table id of the engine's node `i`. -/
 def tr (S : St P) (i : Nat) : Option Nat := S.cid.getD i none
@@ -316,8 +324,8 @@ def eval (S : St P) : Term → Option Nat
     | none => none
   | .app f args =>
     (evalArgs S (if S.prog.kind f == .assoc then some f else none) args).bind fun ids =>
-      S.spell[(f, ids)]?
-  | .napp f args ks => (evalArgs S none args).bind fun ids => S.spellC[(f, St.keyC (ids.zip ks))]?
+      S.spell[(f, (Args.ofList ids).runs)]?
+  | .napp f args ks => (evalArgs S none args).bind fun ids => S.spell[(f, (Args.ofRuns (ids.zip ks)).runs)]?
 
 /-- The nodes of a term's arguments. With `fl = some f`, the arguments of a
 nested application of `f` take its place, as the engine's term builder
@@ -340,8 +348,8 @@ mutual
 whose nested applications are `let` names, each standing for its class. -/
 def evalN (S : St P) : Term → Option Nat
   | .lit s v => eval S (.lit s v)
-  | .app f args => (evalNs S args).bind fun ids => S.spell[(f, ids)]?
-  | .napp f args ks => (evalNs S args).bind fun ids => S.spellC[(f, St.keyC (ids.zip ks))]?
+  | .app f args => (evalNs S args).bind fun ids => S.spell[(f, (Args.ofList ids).runs)]?
+  | .napp f args ks => (evalNs S args).bind fun ids => S.spell[(f, (Args.ofRuns (ids.zip ks)).runs)]?
 
 def evalNs (S : St P) : List Term → Option (List Nat)
   | [] => some []
@@ -356,8 +364,9 @@ def denotes (S : St P) (n : Nat) : Term → Bool
   | .lit s v => match S.defOf n with
     | some (.lit s' v') => s' == s && v' == v
     | _ => false
-  | .app f ts => match S.defOf n with
+  | .app f ts => match S.defC n with
     | some (.app g cs) => g == f && denotesArgs S cs ts
+    | some (.napp g cks) => g == f && denotesArgs S (Ctx.spread cks) ts
     | _ => false
   | .napp f ts ks => match S.defC n with
     | some (.napp g cks) => g == f && cks.map (·.2) == ks && denotesArgs S (cks.map (·.1)) ts
@@ -379,21 +388,25 @@ def St.unit (S : St P) (f : String) : Option Nat :=
 
 /-- The applications of `f` among `xs` and, literally nested, below them:
 each is a splice witness for its own class. -/
-def nested (defs : Array Node) (f : String) (x : Nat) : List (Nat × List Nat) :=
+def nested (defs : Array Node) (f : String) (x : Nat) : List (Nat × Args) :=
   match defs[x]? with
   | some (.app g cs) =>
     if g == f && !cs.isEmpty then
-      (x, cs) :: cs.flatMap fun c => if _h : c < x then nested defs f c else []
+      (x, Args.ofList cs) :: cs.flatMap fun c => if _h : c < x then nested defs f c else []
+    else []
+  | some (.napp g cks) =>
+    if g == f && !cks.isEmpty then
+      (x, Args.ofRuns cks) :: cks.flatMap fun ck => if _h : ck.1 < x then nested defs f ck.1 else []
     else []
   | _ => []
 termination_by x
 
 /-- `a`, or the arguments a witness for `a`'s class splices in. A class is
 not expanded inside its own expansion: each expansion removes its witness. -/
-def expand (S : St P) (W : List (Nat × List Nat)) (a : Nat) : List Nat :=
+def expand (S : St P) (bag : Bool) (W : List (Nat × Args)) (a : Nat) : Args :=
   match h : W.find? (·.1 == S.fd a) with
-  | some (_, cs) => cs.flatMap (expand S (W.filter (·.1 != S.fd a)))
-  | none => [a]
+  | some (_, cs) => cs.bind bag (expand S bag (W.filter (·.1 != S.fd a)))
+  | none => Args.one a
 termination_by W.length
 decreasing_by
   have hm := List.mem_of_find?_eq_some h
@@ -406,48 +419,54 @@ decreasing_by
 /-- Removes each argument that is `inv` applied to a node together with one
 argument in that node's class; with `unit` given, also each argument that is
 `inv` applied to a node of the unit's class. -/
-def cancelInverse (S : St P) (inv : String) (unit : Option Nat) (xs : List Nat) : List Nat := Id.run do
+def cancelInverse (S : St P) (inv : String) (unit : Option Nat) (xs : Args) : Args := Id.run do
   -- What `a` is the inverse of: its own argument, or that of a witness (`j`
   -- line) in its class.
   let inverseOf (a : Nat) : List Nat :=
     let arg (m : Nat) : Option Nat :=
-      match S.defOf m with
-      | some (.app g [y]) => if g == inv then some y else none
-      | _ => none
+      match S.unary? m with
+      | some (g, y) => if g == inv then some y else none
+      | none => none
     (arg a).toList ++ (S.inverses.filterMap fun m => if S.fd m == S.fd a then arg m else none)
       ++ (S.invIn.getD (S.fd a) []).filterMap arg
-  let mut out := xs.toArray
-  for a in xs do
-    if let some i := out.findIdx? (· == a) then
-      let rest := out.eraseIdxIfInBounds i
+  let mut out := xs
+  for a in xs.keys do
+    -- Each pass cancels every copy of `a` that one partner answers.
+    for _ in [0:out.runs.length + 1] do
+      let cnt := out.count a
+      if cnt == 0 then break
+      let rest := out.erase a
       -- The first of these that has what it cancels with: `inv(e)` is `e`
       -- and, with `unit` given, goes by itself; else an argument of the
       -- class it is the inverse of.
-      let pick := (inverseOf a).findSome? fun y =>
-        if unit == some (S.fd y) then some rest
-        else (rest.findIdx? (fun b => S.fd b == S.fd y)).map rest.eraseIdxIfInBounds
-      if let some r := pick then out := r
-  return out.toList
+      let pick : Option (Option Nat) := (inverseOf a).findSome? fun y =>
+        if unit == some (S.fd y) then some none
+        else (rest.find? fun b => S.fd b == S.fd y).map some
+      match pick with
+      | some none => out := out.eraseN a cnt
+      | some (some b) =>
+        let j := if b == a then cnt / 2 else min cnt (out.count b)
+        if j == 0 then break
+        out := (out.eraseN a j).eraseN b j
+      | none => break
+  return out
 
 /-- Sorted classes with each class's count reduced modulo `n`. -/
-def modCount (n : Nat) (xs : List Nat) : List Nat :=
-  let groups := xs.foldl (fun (acc : List (Nat × Nat)) c =>
-    match acc with
-    | (d, k) :: rest => if d == c then (d, k + 1) :: rest else (c, 1) :: acc
-    | [] => [(c, 1)]) []
-  groups.reverse.flatMap fun (c, k) => List.replicate (k % n) c
+def modCount (n : Nat) (xs : Args) : Args :=
+  Args.ofRuns (xs.sort.runs.map fun ck => (ck.1, ck.2 % n))
 
 /-- The normal forms, as classes, of the argument lists `as` and `bs` of `f`.
 An associative operator's argument is one class unless a witness of the
 stream splices it (`s` lines, checked here): an application of `f` among the
 arguments stands for its class when no line says the engine read through it.
 Both lists use the same witnesses. -/
-def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false)
-    (self : Option Nat := none) : List Nat × List Nat :=
+def nf2 (S : St P) (f : String) (as bs : Args) (invUnit : Bool := false)
+    (self : Option Nat := none) : Args × Args :=
   match S.prog.kind f with
   | .plain => (as.map S.fd, bs.map S.fd)
-  | .comm => ((as.map S.fd).mergeSort (· ≤ ·), (bs.map S.fd).mergeSort (· ≤ ·))
+  | .comm => ((as.map S.fd).sort, (bs.map S.fd).sort)
   | k =>
+    let bag := S.prog.multiset f
     let given := S.splices.filterMap fun (c, m) =>
       match S.defOf m with
       | some (.app g cs) => if g == f && !cs.isEmpty && S.fd m == S.fd c then some (S.fd c, cs) else none
@@ -457,12 +476,12 @@ def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false)
     let W := given ++ (match self with | some n => [(S.fd n, as)] | none => [])
     let u := (S.unit f).map S.fd
     let d := S.prog.opDecl? f
-    let one (xs : List Nat) : List Nat :=
+    let one (xs : Args) : Args :=
       -- The unit's arguments go first, as in the engine: `f(e, inv(e))` is
       -- `inv(e)`, which is in `e`'s class only once that is derived.
       -- An argument of the unit's class goes before it is read as its own
       -- arguments.
-      let atoms := ((xs.filter fun a => some (S.fd a) != u).flatMap (expand S W)).filter
+      let atoms := ((xs.filter fun a => some (S.fd a) != u).bind bag (expand S bag W)).filter
         fun a => some (S.fd a) != u
       let atoms := match k, d.bind (·.inverse) with
         | .assoc, _ => atoms
@@ -472,22 +491,21 @@ def nf2 (S : St P) (f : String) (as bs : List Nat) (invUnit : Bool := false)
       match k with
       | .assoc => cls
       | .ac =>
-        let cls := cls.mergeSort (· ≤ ·)
         match d.bind (·.nilpotent) with
-        | some n => if n > 0 then modCount n cls else cls
-        | none => cls
-      | _ => (cls.mergeSort (· ≤ ·)).eraseDups
+        | some n => if n > 0 then modCount n cls else cls.sort
+        | none => cls.sort
+      | _ => cls.sort.dedup
     (one as, one bs)
 
 /-- The table's application of `f` to the arguments `m`, in the table's
 order, if it holds one. -/
-def nodeOfArgs (S : St P) (f : String) (m : List Nat) : Option Nat :=
-  if m.isEmpty then none else S.idx (Node.app f (m.mergeSort (· ≤ ·)))
+def nodeOfArgs (S : St P) (f : String) (m : Args) : Option Nat :=
+  if m.isEmpty then none else S.idxA f m.sort
 
 /-- Node `n` has the value of `f(cs)`: it is an application of `f` whose
 arguments have the same normal form, or the normal form is the one class of
 `n`, or it is empty and `n` is in the unit's class. -/
-def spells (S : St P) (n : Nat) (f : String) (cs : List Nat) : Bool :=
+def spells (S : St P) (n : Nat) (f : String) (cs : Args) : Bool :=
   -- An inverse of a node of the unit's class goes by itself: `inv(e) = e`.
   let invUnit := true
   (match S.defOf n with
@@ -495,10 +513,10 @@ def spells (S : St P) (n : Nat) (f : String) (cs : List Nat) : Bool :=
       | _ => false)
     || ((S.prog.kind f).isAssoc &&
         -- The unit dropped and nothing else: the one argument left is the node.
-        ((nf2 S f cs [] false).1 == [S.fd n] ||
-        (let t := (nf2 S f cs [] invUnit).1
+        ((nf2 S f cs Args.nil false).1 == Args.one (S.fd n) ||
+        (let t := (nf2 S f cs Args.nil invUnit).1
          -- One class left: the application is that class. None left: it is the unit.
-         t == [S.fd n] || (t.isEmpty && (S.unit f).map S.fd == some (S.fd n)) ||
+         t == Args.one (S.fd n) || (t.isEmpty && (S.unit f).map S.fd == some (S.fd n)) ||
          -- The normal form is the argument list of a node of `n`'s class.
          (match nodeOfArgs S f t with
            | some x => S.fd x == S.fd n
@@ -515,51 +533,58 @@ recognizable, and reduces it by the operator's laws after each rewrite. -/
 /-- A monomial reduced by `f`'s laws: inverse pairs and the unit's class
 removed, and each class kept once (ACI) or its count modulo `n`
 (`:nilpotent n`). -/
-def lawReduce (S : St P) (f : String) (atoms : List Nat) (inverse : Bool := true)
-    (peak : Bool := false) : List Nat :=
+def lawReduce (S : St P) (f : String) (atoms : Args) (inverse : Bool := true)
+    (peak : Bool := false) : Args :=
   let d := S.prog.opDecl? f
   let u := (S.unit f).map S.fd
-  let dropUnit (xs : List Nat) : List Nat := xs.filter fun a => some (S.fd a) != u
+  let dropUnit (xs : Args) : Args := xs.filter fun a => some (S.fd a) != u
   -- The unit's arguments go before the inverse pairs are cancelled, except in
   -- the peak of a critical pair with the inverse law (`peak`), which is a
   -- rule's left side and the inverse of one of its arguments: that pair is
   -- cancelled even when one of the two is in the unit's class.
-  let live : List Nat := match inverse, d.bind (fun d => d.inverse) with
+  let live : Args := match inverse, d.bind (fun d => d.inverse) with
     | true, some inv =>
       if peak then dropUnit (cancelInverse S inv none atoms)
       else cancelInverse S inv u (dropUnit atoms)
     | _, _ => dropUnit atoms
   -- Each class with its atoms, in order of first occurrence.
-  let groups : Array (Nat × Array Nat) := live.foldl (fun groups a =>
-    let c := S.fd a
+  let groups : Array (Nat × Array (Nat × Nat)) := live.runs.foldl (fun groups a =>
+    let c := S.fd a.1
     match groups.findIdx? (fun g => g.1 == c) with
     | some i => groups.modify i fun (c, xs) => (c, xs.push a)
     | none => groups.push (c, #[a])) #[]
-  let keep (limit : Nat → Nat) : List Nat :=
-    groups.toList.flatMap fun (_, xs) => (xs.toList.take (limit xs.size))
+  let keep (limit : Nat → Nat) : Args :=
+    Args.ofRuns (groups.toList.flatMap fun (_, xs) =>
+      let g : Args := Args.ofRuns xs.toList
+      (g.take (limit g.length)).runs)
   match S.prog.kind f, d.bind (fun d => d.nilpotent) with
   | .aci, _ => keep fun _ => 1
   | _, some n => if n > 0 then keep (fun k => k % n) else live
   | _, none => live
 
 /-- The classes of a monomial, sorted. -/
-def classesOf (S : St P) (atoms : List Nat) : List Nat := (atoms.map S.fd).mergeSort (· ≤ ·)
+def classesOf (S : St P) (atoms : Args) : Args := (atoms.map S.fd).sort
 
-def countOf (c : Nat) (xs : List Nat) : Nat := (xs.filter (· == c)).length
+def countOf (c : Nat) (xs : Args) : Nat := xs.count c
 
 /-- Removes `k` atoms of class `c`. -/
-def dropClass (S : St P) (c : Nat) : Nat → List Nat → List Nat
-  | 0, xs => xs
-  | _, [] => []
-  | k + 1, x :: xs => if S.fd x == c then dropClass S c k xs else x :: dropClass S c (k + 1) xs
+def dropClassRuns (S : St P) (c : Nat) : List (Nat × Nat) → Nat → List (Nat × Nat)
+  | [], _ => []
+  | (x, j) :: t, k =>
+    if k = 0 then (x, j) :: t
+    else if S.fd x == c then (if j ≤ k then dropClassRuns S c t (k - j) else (x, j - k) :: t)
+    else (x, j) :: dropClassRuns S c t k
+
+def dropClass (S : St P) (c : Nat) (k : Nat) (xs : Args) : Args :=
+  Args.ofRuns (dropClassRuns S c xs.runs k)
 
 /-- The monomial `m` with the classes `l` replaced by the atoms `r`, as many
 times as `m` holds `l` (once under ACI or a nilpotent law, where a class's
 count is bounded, and once when `once` is set). `none` when `m` does not hold `l`. -/
-def applyRule (S : St P) (f : String) (m : List Nat) (l : List Nat) (r : List Nat) (once : Bool := false) :
-    Option (Nat × List Nat × List Nat) :=
+def applyRule (S : St P) (f : String) (m : Args) (l : Args) (r : Args) (once : Bool := false) :
+    Option (Nat × Args × Args) :=
   let mc := classesOf S m
-  let distinct := l.eraseDups
+  let distinct := l.keys
   if l.isEmpty || !distinct.all (fun c => countOf c mc ≥ countOf c l) then none
   else
     let bounded := S.prog.kind f == .aci || ((S.prog.opDecl? f).bind (·.nilpotent)).isSome
@@ -568,16 +593,17 @@ def applyRule (S : St P) (f : String) (m : List Nat) (l : List Nat) (r : List Na
     let rest := distinct.foldl (fun m c => dropClass S c (q * countOf c l) m) m
     -- Between rewrites the engine clamps counts and drops the unit; it cancels
     -- inverse pairs on the normal form only.
-    some (q, rest, lawReduce S f (rest ++ (List.replicate q r).flatten) (inverse := false))
+    some (q, rest, lawReduce S f (rest ++ r.times (S.prog.multiset f) q) (inverse := false))
 
 /-- The arguments of `x` as a monomial of `f`: its own, if it is an
 application of `f`, else `x` itself. -/
-def monomial (S : St P) (f : String) (W : List (Nat × List Nat)) (x : Nat) : List Nat :=
+def monomial (S : St P) (f : String) (W : List (Nat × Args)) (x : Nat) : Args :=
   -- A node that is one argument is still expanded when a witness splices its
   -- class: every list of one event reads a class the same way.
+  let bag := S.prog.multiset f
   match S.defOf x with
-  | some (.app g cs) => if g == f && !cs.isEmpty then cs.flatMap (expand S W) else expand S W x
-  | _ => expand S W x
+  | some (.app g cs) => if g == f && !cs.isEmpty then cs.bind bag (expand S bag W) else expand S bag W x
+  | _ => expand S bag W x
 
 /-- One rewrite of a monomial, for the kernel steps that follow it: the rule's
 two nodes, the number of copies rewritten, the arguments left untouched, and
@@ -586,30 +612,31 @@ structure Rewrote where
   l : Nat
   r : Nat
   q : Nat
-  rest : List Nat
-  after : List Nat
+  rest : Args
+  after : Args
   /-- The right side is `r` as one argument. -/
   atom : Bool := false
 
 /-- Rewrites `m` by the rules `rules`, in order: the result and each rewrite.
 Monomials are read on the classes of `S`; a rule's two nodes are in one class
 of `now`, the current classes. -/
-def rewriteR (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool)
-    (done : Array Rewrote) (raw : Option (List Nat)) :
-    List (Nat × Nat × Bool) → Except String (List Nat × Array Rewrote)
+def rewriteR (now S : St P) (f : String) (W : List (Nat × Args)) (m : Args) (once : Bool)
+    (done : Array Rewrote) (raw : Option Args) :
+    List (Nat × Nat × Bool) → Except String (Args × Array Rewrote)
   | [] => pure (m, done)
   | (l, r, atom) :: rest => do
     if now.fd l != now.fd r then throw "completion: rule sides in two classes"
+    let bag := S.prog.multiset f
     match S.defOf l with
     | some (.app g ls) =>
       if g != f then throw "completion: rule of another operator"
       -- A rule's left side keeps its inverse pairs: the engine cancels them on
       -- a normal form only.
-      let lc := classesOf S (lawReduce S f (ls.flatMap (expand S W)) (inverse := false))
+      let lc := classesOf S (lawReduce S f (ls.bind bag (expand S bag W)) (inverse := false))
       -- The rule applies to the monomial as the laws left it, or to what the
       -- last rewrite gave before the laws clamped its counts (`raw`): the
       -- engine applies some rules before it clamps.
-      let rr := if atom then [r] else monomial S f W r
+      let rr := if atom then Args.one r else monomial S f W r
       let hit := match applyRule S f m lc rr once, raw with
         | some x, _ => some x
         | none, some m0 => applyRule S f m0 lc rr once
@@ -617,14 +644,14 @@ def rewriteR (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List 
       match hit with
       | some (q, left, m') =>
         rewriteR now S f W m' once (done.push { l, r, q, rest := left, after := m', atom })
-          (some (left ++ (List.replicate q rr).flatten)) rest
+          (some (left ++ rr.times bag q)) rest
       | none => throw s!"completion: rule does not apply | rule {done.size}: left side {ls} as classes {lc}, monomial {m} as classes {classesOf S m}"
     | _ => throw "completion: rule of another operator"
 
 /-- `rewriteR` from a monomial the laws have reduced. -/
-def rewrite (now S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (once : Bool := false)
+def rewrite (now S : St P) (f : String) (W : List (Nat × Args)) (m : Args) (once : Bool := false)
     (done : Array Rewrote := #[]) (rules : List (Nat × Nat × Bool)) :
-    Except String (List Nat × Array Rewrote) :=
+    Except String (Args × Array Rewrote) :=
   rewriteR now S f W m once done none rules
 
 /-- `y` is the unit's node, or an application of `f` in the unit's class. -/
@@ -638,9 +665,9 @@ def unitLike (S : St P) (f : String) (y : Nat) : Bool :=
 /-- The monomial `m` has the value of node `t`: it is `t`'s arguments, or it
 is the one class of `t` (a result of one argument is that argument's class,
 whose root can itself be an application of `f`). -/
-def reaches (S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) (t : Nat) : Bool :=
+def reaches (S : St P) (f : String) (W : List (Nat × Args)) (m : Args) (t : Nat) : Bool :=
   let c := classesOf S (lawReduce S f m)
-  c == classesOf S (lawReduce S f (monomial S f W t)) || c == [S.fd t] ||
+  c == classesOf S (lawReduce S f (monomial S f W t)) || c == Args.one (S.fd t) ||
     -- The engine builds the node of the result: when the table holds the
     -- application of `f` to these arguments, the result is that node's class.
     -- The node is looked up before inverse pairs are cancelled, and with the
@@ -656,10 +683,10 @@ def reaches (S : St P) (f : String) (W : List (Nat × List Nat)) (m : List Nat) 
 
 /-- The splice witnesses a completion event shares: the applications of `f`
 nested in the arguments of the nodes it names. -/
-def lawWitnesses (S : St P) (f : String) (nodes : List Nat) : List (Nat × List Nat) :=
+def lawWitnesses (S : St P) (f : String) (nodes : List Nat) : List (Nat × Args) :=
   (nodes.flatMap fun x =>
     match S.defOf x with
-    | some (.app g cs) => if g == f then cs.flatMap (nested S.defs f) else []
+    | some (.app g cs) => if g == f then cs.keys.flatMap (nested S.defs f) else []
     | _ => []).map fun (x, cs) => (S.fd x, cs)
 
 /-- Rules as the stream writes them: `l r k`, with `k = 1` when the right
@@ -676,13 +703,13 @@ def rules (S : St P) (xs : List Nat) : Option (List (Nat × Nat × Bool)) :=
 monomial, through the monomial it reduces to and each rewrite, to a node. -/
 structure Chain where
   f : String
-  start : Nat ⊕ List Nat
+  start : Nat ⊕ Args
   /-- The start is the peak of a critical pair with a law, and `first` is the
   peak reduced by that law. -/
   peak : Bool := false
-  first : List Nat
+  first : Args
   steps : Array Rewrote
-  target : Nat ⊕ List Nat
+  target : Nat ⊕ Args
 
 /-- The derivations of a critical pair: each side from the peak; with a
 cancellation, each side first to its monomial before it, then `left`, `right`
@@ -691,7 +718,7 @@ what stays. -/
 structure PeakPlan where
   a : Chain
   b : Chain
-  cancel : Option (List Nat × List Nat × List Nat × Chain × Chain) := none
+  cancel : Option (Args × Args × Args × Chain × Chain) := none
 
 /-- `i a b n l1 r1 ..`: node `n`, a member of one merged class, rewrites by
 the rules to the other merged node. The engine computes a round's rewrites on
@@ -703,8 +730,8 @@ def interReduce (S R : St P) (a b n : Nat) (rules : List (Nat × Nat × Bool)) :
   let t ← if S.fd n == S.fd b then pure a else if S.fd n == S.fd a then pure b
     else throw "completion: start in neither class"
   -- A monomial is a node's arguments, each one class, as the engine reads it.
-  let W : List (Nat × List Nat) := []
-  let first := lawReduce R f (as.flatMap (expand R W))
+  let W : List (Nat × Args) := []
+  let first := lawReduce R f (as.bind true (expand R true W))
   let (m, steps) ← rewrite S R f W first false #[] rules
   unless reaches S f W m t do
     throw s!"completion: normal form differs | {m} as classes {classesOf S (lawReduce S f m)}"
@@ -760,8 +787,8 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
       | _ => none)
     | throw "completion: no AC operator"
   -- A monomial is a node's arguments, each one class, as the engine reads it.
-  let W : List (Nat × List Nat) := []
-  let peak := w.peak.flatMap (expand R W)
+  let W : List (Nat × Args) := []
+  let peak := (Args.ofList w.peak).bind true (expand R true W)
   -- A critical pair's own rules rewrite the peak once each; the normal form's
   -- rules, after it, rewrite every copy.
   let firstB := if w.reduceB then lawReduce R f peak (peak := true) else peak
@@ -777,9 +804,9 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
     let (ca, cb) := (classesOf R mA, classesOf R mB)
     let keep := w.keep.map R.fd
     -- The common part: each class, as many times as both sides hold it.
-    let common := ca.eraseDups.map fun c =>
+    let common := ca.keys.map fun c =>
       (c, min (countOf c ca) (countOf c cb) - (if some c == keep then 1 else 0))
-    let drop (m : List Nat) := common.foldl (fun m (c, k) => dropClass R c k m) m
+    let drop (m : Args) := common.foldl (fun m (c, k) => dropClass R c k m) m
     let (left, right) := (drop mA, drop mB)
     unless (!left.isEmpty && !right.isEmpty) || (S.unit f).isSome do
       throw "completion: cancellation empties a side"
@@ -788,7 +815,7 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
     unless reaches S f W mA' a && reaches S f W mB' b do
       throw s!"completion: normal form differs | after cancellation: left {left} right {right}, side A {mA'} as classes {classesOf S (lawReduce S f mA')}, side B {mB'} as classes {classesOf S (lawReduce S f mB')}, without inverse cancellation {lawReduce S f mB' (inverse := false)} roots {(lawReduce S f mB' (inverse := false)).map S.fd}"
     -- What side A loses: its arguments that are not in `left`.
-    let gone := left.foldl (fun m x => m.erase x) mA
+    let gone := left.runs.foldl (fun m xk => m.eraseN xk.1 xk.2) mA
     pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inr mA },
            b := { f, start := .inr peak, peak := w.reduceB, first := firstB, steps := sB, target := .inr mB },
            cancel := some (left, right, gone,
@@ -811,8 +838,8 @@ is enough). One of:
 - under `:nilpotent k`: `f(x1, .., x1) = n1` and `f(n1, .., n1) = x1`, with
   `k - 1` arguments. -/
 def groupLaw (S : St P) (a b n1 n2 : Nat) : Except String Unit := do
-  let some (.app g [x1]) := S.defOf n1 | throw "group law: not an inverse node"
-  let some (.app g' [x2]) := S.defOf n2 | throw "group law: not an inverse node"
+  let some (g, x1) := S.unary? n1 | throw "group law: not an inverse node"
+  let some (g', x2) := S.unary? n2 | throw "group law: not an inverse node"
   let some d := S.prog.ops.find? (fun d => d.inverse == some g && (d.kind == .ac || d.kind == .aci))
     | throw "group law: no operator with this inverse"
   unless g' == g do throw "group law: not an inverse node"
@@ -825,8 +852,8 @@ def groupLaw (S : St P) (a b n1 n2 : Nat) : Except String Unit := do
   let power (x y : Nat) : Bool :=
     match d.nilpotent with
     | some (k + 1) =>
-      let plain := List.replicate k y
-      let withInv := if fd n1 == fd y && k > 0 then n1 :: List.replicate (k - 1) y else plain
+      let plain := Args.rep k y
+      let withInv := if fd n1 == fd y && k > 0 then Args.one n1 ++ Args.rep (k - 1) y else plain
       reaches S f [] plain x || reaches S f [] withInv x
     | _ => false
   let injective := fd n1 == fd n2 && is x1 x2
@@ -846,20 +873,8 @@ def idsC (S : St P) (xs : List String) : Option (List (Nat × Nat)) :=
     | [n, k] => (S.node? n).bind fun n => k.toNat?.bind fun k => if k == 0 then none else some (n, k)
     | _ => none
 
-/-- `c` and `c:k` fields as node ids, a counted one repeated. -/
-def ids (S : St P) (xs : List String) : Option (List Nat) := do
-  let mut out : Array Nat := #[]
-  for x in xs do
-    match x.splitOn ":" with
-    | [n] => out := out.push (← S.node? n)
-    | [n, k] =>
-      let n ← S.node? n
-      let k ← k.toNat?
-      -- A list of more arguments than the derivations on monomials read.
-      if out.size + k > St.listWidth then none
-      for _ in [0:k] do out := out.push n
-    | _ => none
-  return out.toList
+/-- `c` and `c:k` fields as an argument list. -/
+def ids (S : St P) (xs : List String) : Option Args := (idsC S xs).map Args.ofRuns
 
 /-- A witness of one `e` line: its position among the line's openings, the
 class, the member, the opening it lies under (`none`: the node's own
@@ -897,32 +912,42 @@ def Wit.pick (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (off : Opt
   (W.find? fun w => w.2.1 == a && Wit.reads S f tree ctx off a w).orElse fun _ =>
     W.find? fun w => !later.contains w.2.1 && Wit.reads S f tree ctx off a w
 
+/-- An argument list as the entries a `:flatten` view reads: a multiset's
+runs, each with its count; a sequence's arguments one by one. Each lies under
+the opening `ctx`. -/
+def entries (bag : Bool) (xs : Args) (ctx : Option Nat) : List (Nat × Option Nat × Nat) :=
+  if bag then xs.runs.map fun ck => (ck.1, ctx, ck.2) else xs.toList.map fun c => (c, ctx, 1)
+
 /-- The arguments `todo`, each with the opening it lies under, as one side of
 a `:flatten` match reads them, after `out`: an argument a witness of `W` reads
 (`Wit.reads`) is replaced by the arguments of the witness's member, which lie
 under that witness and are read the same way with the witnesses left; each
 witness is used once. Every other argument is one class, an application of
 `f` included. -/
-def viewArgs (S : St P) (f : String) (tree : Bool) (W : List Wit) (todo : List (Nat × Option Nat))
-    (out : Array Nat := #[]) : List Nat :=
+def viewArgs (S : St P) (f : String) (tree : Bool) (W : List Wit) (todo : List (Nat × Option Nat × Nat))
+    (out : Array (Nat × Nat) := #[]) : Args :=
   match todo with
-  | [] => out.toList
-  | (a, ctx) :: rest =>
-    match Wit.pick S f tree ctx (offOf S f tree out.size) a ((rest.filter (·.2 == ctx)).map (·.1)) W with
+  | [] => Args.ofRuns out.toList
+  | (a, ctx, k) :: rest =>
+    -- A sequence's entries hold one argument each: `out.size` arguments are read.
+    match Wit.pick S f tree ctx (offOf S f tree out.size) a ((rest.filter (·.2.1 == ctx)).map (·.1)) W with
     | some w =>
       match S.defOf w.2.2.1 with
       | some (.app _ cs) =>
         if _h : (W.erase w).length < W.length then
           -- A multiset's argument has a count, and an opening reads all of its
-          -- copies: every other copy of the node at this level goes with it.
+          -- copies: every other entry of the node at this level goes with it.
           -- A regrouping stands for one occurrence of its class.
-          let copies := if tree && S.prog.kind f == .ac then (rest.filter (· == (a, ctx))).length else 0
-          let rest := if copies == 0 then rest else rest.filter (· != (a, ctx))
-          let sub := cs.map (·, some w.1)
-          viewArgs S f tree (W.erase w) ((List.replicate (copies + 1) sub).flatten ++ rest) out
-        else viewArgs S f tree W rest (out.push a)
-      | _ => viewArgs S f tree W rest (out.push a)
-    | none => viewArgs S f tree W rest (out.push a)
+          let all := tree && S.prog.kind f == .ac
+          let same (e : Nat × Option Nat × Nat) : Bool := e.1 == a && e.2.1 == ctx
+          let n := if all then (rest.filter same).foldl (fun n e => n + e.2.2) k else 1
+          let rest := if all then rest.filter (fun e => !same e)
+            else if k ≤ 1 then rest else (a, ctx, k - 1) :: rest
+          let sub := (entries (S.prog.multiset f) cs (some w.1)).map fun e => (e.1, e.2.1, e.2.2 * n)
+          viewArgs S f tree (W.erase w) (sub ++ rest) out
+        else viewArgs S f tree W rest (out.push (a, k))
+      | _ => viewArgs S f tree W rest (out.push (a, k))
+    | none => viewArgs S f tree W rest (out.push (a, k))
 termination_by (W.length, todo.length)
 
 /-- The regrouping of `W` that reads the bound argument `b`: one that names
@@ -978,7 +1003,7 @@ def viewAt (S : St P) (f : String) (W : List Wit) (at_ : List Nat) (bound : List
         | some w =>
           W := W.erase w
           match S.defOf w.2.2.1 with
-          | some (.app _ cs) => out := out ++ (cs.map (·, true)).toArray
+          | some (.app _ cs) => out := out ++ (cs.toList.map (·, true)).toArray
           | _ => out := out.push (b, false)
         | none => out := out.push (b, false)
       cur := out
@@ -993,12 +1018,12 @@ do not hold, because the operator's laws dropped them from the match's view:
 - for an idempotent operator, a regrouping in a class the view holds an
   argument of reads one copy of the bound argument, and the view's argument is
   another. -/
-def droppedRegroups (S : St P) (f : String) (W : List Wit) (bound view : List Nat) : List Nat :=
+def droppedRegroups (S : St P) (f : String) (W : List Wit) (bound view : Args) : List Nat :=
   let u := S.unit f
   let inv := (S.prog.opDecl? f).bind (·.inverse)
   -- Each regrouping stands for one occurrence of its class: a bound argument
   -- answers one regrouping, and `left` holds those not answered yet.
-  (W.foldl (fun (acc : List Nat × List Nat) w =>
+  (W.foldl (fun (acc : List Nat × Args) w =>
     let (out, left) := acc
     if (u.map S.fd) == some (S.fd w.2.1) then (out ++ u.toList, left)
     -- A set's argument the view holds as it is and a regrouping reads too:
@@ -1011,9 +1036,9 @@ def droppedRegroups (S : St P) (f : String) (W : List Wit) (bound view : List Na
       | none =>
         match inv with
         | some g =>
-          match view.find? (fun e => match S.defOf e with
-              | some (.app h [y]) => h == g && S.fd y == S.fd w.2.1
-              | _ => false) with
+          match view.find? (fun e => match S.unary? e with
+              | some (h, y) => h == g && S.fd y == S.fd w.2.1
+              | none => false) with
           -- The class is named by a plain member: the kernel reads through an
           -- application of `f`.
           | some e => (out ++ [(S.plain.getD (S.fd w.2.1) none).getD w.2.1, e], left)
@@ -1023,19 +1048,15 @@ def droppedRegroups (S : St P) (f : String) (W : List Wit) (bound view : List Na
 /-- The fields of an `e` line after the operator: the nodes of the argument
 patterns, and between `[` and `]` the nodes of each rest variable, in the
 pattern's order. -/
-def atomArgs (S : St P) (f : String) (xs : List String) : Option (List (Nat × Nat) × List (List Nat) × List (List (Nat × Nat))) := do
+def atomArgs (S : St P) (xs : List String) : Option (List (Nat × Nat) × List Args) := do
   let mut fixed : Array (Nat × Nat) := #[]
-  let mut groups : Array (List Nat) := #[]
-  let mut groupsC : Array (List (Nat × Nat)) := #[]
+  let mut groups : Array Args := #[]
   let mut open? : Option (List String) := none
   for x in xs do
     match x, open? with
     | "[", none => open? := some []
     | "]", some g =>
-      let gc ← idsC S g.reverse
-      groupsC := groupsC.push gc
-      -- A multiset operator's group is read from `groupsC`, with its counts.
-      groups := groups.push (if S.prog.multiset f then [] else Ctx.spread gc)
+      groups := groups.push (← ids S g.reverse)
       open? := none
     | "[", some _ => none
     | "]", none => none
@@ -1050,7 +1071,7 @@ def atomArgs (S : St P) (f : String) (xs : List String) : Option (List (Nat × N
         fixed := fixed.push (← S.node? n, k)
       | _ => none
   if open?.isSome then none
-  return (fixed.toList, groups.toList, groupsC.toList)
+  return (fixed.toList, groups.toList)
 
 /-- The number of arguments the fields of an `e` line stand for. -/
 def units (fixed : List (Nat × Nat)) : Nat := fixed.foldl (fun n e => n + e.2) 0
@@ -1059,12 +1080,13 @@ def units (fixed : List (Nat × Nat)) : Nat := fixed.foldl (fun n e => n + e.2) 
 
 /-- The arguments node `x` flattens to under `f`, as the kernel's `view`
 reads them: through every application of `f` nested in them. -/
-def kview (S : St P) (f : String) (x : Nat) : List Nat :=
+def kview (S : St P) (f : String) (x : Nat) : Args :=
   match S.defOf x with
   | some (.app g cs) =>
-    if g == f && !cs.isEmpty then cs.flatMap fun c => if _h : c < x then kview S f c else [c]
-    else [x]
-  | _ => [x]
+    if g == f && !cs.isEmpty then
+      cs.bind (S.prog.multiset f) fun c => if _h : c < x then kview S f c else Args.one c
+    else Args.one x
+  | _ => Args.one x
 termination_by x
 
 /-- The arguments node `x` is read as under a comb `f`, as the kernel's
@@ -1074,7 +1096,7 @@ def kviewF (S : St P) (f : String) (left : Bool) (x : Nat) : List Nat :=
   match S.defOf x with
   | some (.app g cs) =>
     if g == f then
-      match (if left then cs else cs.reverse) with
+      match (if left then cs.toList else cs.toList.reverse) with
       | c :: rest =>
         if _h : c < x then
           if left then kviewF S f left c ++ rest else rest.reverse ++ kviewF S f left c
@@ -1093,7 +1115,7 @@ def foldCong (S : St P) (f : String) (left : Bool) (a b : Nat) : St P × Pf := I
   -- position (the kernel takes them as they are); else the arguments read
   -- through the comb.
   let own (x : Nat) : List Nat := match S.defOf x with
-    | some (.app g cs) => if g == f then cs else [x]
+    | some (.app g cs) => if g == f then cs.toList else [x]
     | _ => [x]
   let same (l m : List Nat) : Bool :=
     l.length == m.length && (l.zip m).all (fun (c, d) => S.fd c == S.fd d)
@@ -1126,18 +1148,6 @@ def cviewR (S : St P) (f : String) (x : Nat) : List (Nat × Nat) :=
     else [(x, 1)]
   | _ => [(x, 1)]
 termination_by x
-
-/-- Counted children that flatten, under `f`, to more arguments than the
-derivations on monomials read. -/
-def wideFlat (S : St P) (f : String) (cks : List (Nat × Nat)) : Bool :=
-  St.wide (cks.flatMap fun ck => scaleC ck.2 (cviewR S f ck.1))
-
-/-- A multiset node that flattens to more arguments than the derivations on
-monomials read. -/
-def nodeWide (S : St P) (x : Nat) : Bool :=
-  match S.defC x with
-  | some (.napp f _) => St.wide (cviewR S f x)
-  | _ => false
 
 /-- A `cong` step for two nodes of a multiset operator whose counted
 arguments agree: each child has the same total count on both sides. -/
@@ -1215,9 +1225,11 @@ def congStep (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   if a == b then return (S, some none)
   let mut S := S
   let kind := S.prog.kind f
+  let bag := S.prog.multiset f
   if kind.isFold then return foldCong S f (kind == .foldL) a b
   if !kind.isAssoc then
     let (some (.app g as), some (.app h bs)) := (S.defOf a, S.defOf b) | return (S, none)
+    let (as, bs) := (as.toList, bs.toList)
     if g != f || h != f || as.length != bs.length then return (S, none)
     let straight := (as.zip bs).all fun (c, d) => S.fd c == S.fd d
     let bs' := if !straight && kind == .comm then bs.reverse else bs
@@ -1235,19 +1247,21 @@ def congStep (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   -- them argument by argument, with no flattening, which is what an argument
   -- that is itself an application of `f`, standing for its class, needs.
   if let (some (.app g as), some (.app h bs)) := (S.defOf a, S.defOf b) then
-    if g == f && h == f && as.length == bs.length && (as.zip bs).all (fun (c, d) => S.fd c == S.fd d) then
-      let mut prems : Array Nat := #[]
-      let mut ok := true
-      for (c, d) in as.zip bs do
-        if c != d && ok then
-          let (S', p) := eqP S c d
-          S := S'
-          match p with
-          | some (some st) => prems := prems.push st
-          | _ => ok := false
-      if ok then
-        let (S', st) := emit S (.cong f a b prems.toList) a b
-        return (S', some (some st))
+    if g == f && h == f then
+      if let some ps := Args.pairs? as bs then
+        if ps.all (fun (c, d) => S.fd c == S.fd d) then
+          let mut prems : Array Nat := #[]
+          let mut ok := true
+          for (c, d) in ps do
+            if c != d && ok then
+              let (S', p) := eqP S c d
+              S := S'
+              match p with
+              | some (some st) => prems := prems.push st
+              | _ => ok := false
+          if ok then
+            let (S', st) := emit S (.cong f a b prems.toList) a b
+            return (S', some (some st))
   -- An associative operator: each flattened argument goes to its class's node.
   let va := kview S f a
   let vb := kview S f b
@@ -1264,7 +1278,7 @@ def congStep (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   -- through it, so every argument of its class goes to it and is read the
   -- same way.
   let argsOf (x : Nat) : List Nat := match S.defOf x with
-    | some (.app g cs) => if g == f then cs else []
+    | some (.app g cs) => if g == f then cs.keys else []
     | _ => []
   for (m, _) in (argsOf a ++ argsOf b).flatMap (nested S.defs f) do
     if !target.contains (S.fd m) then target := target.insert (S.fd m) m
@@ -1277,41 +1291,43 @@ def congStep (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   -- The kernel replaces an argument once and reads the result as it is: an
   -- argument that a replaced node flattens to stands for its own class.
   for (_, m) in target.toList do
-    for z in kview S f m do
+    for z in (kview S f m).keys do
       if !target.contains (S.fd z) then target := target.insert (S.fd z) z
-  for y in va ++ vb do
+  let named := (va ++ vb).keys
+  for y in named do
     if !target.contains (S.fd y) then target := target.insert (S.fd y) y
   -- The kernel's two sides: each argument's node, flattened, without the unit.
-  let sideOf (v : List Nat) : List Nat :=
-    (v.flatMap fun y => kview S f (target.getD (S.fd y) y)).filter fun y => some y != u
+  let sideOf (v : Args) : Args :=
+    (v.bind bag fun y => kview S f (target.getD (S.fd y) y)).filter fun y => some y != u
   let (la, lb) := (sideOf va, sideOf vb)
   let same := match kind with
     | .assoc => la == lb
-    | .ac => la.mergeSort (· ≤ ·) == lb.mergeSort (· ≤ ·)
+    | .ac => la.sort == lb.sort
     | _ => la.all (lb.contains ·) && lb.all (la.contains ·)
   if !same then return (S, none)
-  let mut prems : Array Nat := #[]
-  let mut seen : Std.HashSet Nat := {}
-  for y in va ++ vb do
+  -- The pairs to prove are computed before the state is updated: a closure
+  -- over the state, alive in the loop, would make each step copy its tables.
+  let todo : List (Nat × Nat) := named.filterMap fun y =>
     let t := target.getD (S.fd y) y
-    if y != t && !seen.contains y then
-      seen := seen.insert y
-      let (S', p) := eqP S y t
-      S := S'
-      match p with
-      | some (some s) => prems := prems.push s
-      | _ => return (S, none)
+    if y != t then some (y, t) else none
+  let mut prems : Array Nat := #[]
+  for (y, t) in todo do
+    let (S', p) := eqP S y t
+    S := S'
+    match p with
+    | some (some s) => prems := prems.push s
+    | _ => return (S, none)
   let (S', s) := emit S (.cong f a b prems.toList) a b
   return (S', some (some s))
 
 /-- What `a` is the inverse of under `inv`, and the inverse application that
 says so: `a` itself, or a witness (`j` line) in its class. -/
-def inverseNode (S : St P) (inv : String) (a : Nat) (unit : Nat) (others : List Nat) :
+def inverseNode (S : St P) (inv : String) (a : Nat) (unit : Nat) (others : Args) :
     Option (Nat × Nat) :=
   let arg (m : Nat) : Option (Nat × Nat) :=
-    match S.defOf m with
-    | some (.app g [y]) => if g == inv then some (m, y) else none
-    | _ => none
+    match S.unary? m with
+    | some (g, y) => if g == inv then some (m, y) else none
+    | none => none
   let all := (arg a).toList ++ (S.inverses.filterMap fun m => if S.fd m == S.fd a then arg m else none)
     ++ (S.invIn.getD (S.fd a) []).filterMap arg
   -- The first that has what it cancels with, else the first.
@@ -1319,14 +1335,15 @@ def inverseNode (S : St P) (inv : String) (a : Nat) (unit : Nat) (others : List 
     fun _ => all.head?
 
 /-- `f` applied to `m`, a node the kernel accepts, or `none`. -/
-def appNode (S : St P) (f : String) (m : List Nat) : St P × Option Nat :=
-  let d := Node.app f m
+def appNode (S : St P) (f : String) (m : Args) : St P × Option Nat :=
   if m.isEmpty then (S, none)
-  else match S.idx (d) with
+  else
+    let d := S.nodeA f m
+    match S.core.index[d]? with
     | some t => (S, some t)
     | none =>
       -- The table takes the node only if it is well-sorted.
-      S.withCore fun c => c.addNode (S.normD d)
+      S.withCore fun c => c.addNode d
 
 /-- One pass of `lawNormP` from `cur`, which `pf` proves equal to `x`: the
 result when no inverse pair and no `n` arguments of one class are left, or
@@ -1338,15 +1355,16 @@ def lawPass (S : St P) (f : String) (d : OpDecl) (u x cur : Nat) (pf : Pf) (peak
   -- the two is in the unit's class: the unit's arguments stay.
   let atoms := (kview S f cur).filter fun a => peak || S.fd a != S.fd u
   -- What the next pass replaces by the unit: a node `f(..)` that a step
-  -- proves is the unit, and the arguments it stands for.
-  let mut found : Option (Nat × Nat × List Nat) := none
+  -- proves is the unit, the number of copies of it the arguments hold, and
+  -- the arguments left.
+  let mut found : Option (Nat × Nat × Nat × Args) := none
   if let some g := d.inverse then
-    for a in atoms do
+    for a in atoms.keys do
       if found.isNone then
         if let some (q, y) := inverseNode S g a u (atoms.erase a) then
           if S.fd y == S.fd u then
             -- `f(y, g(y))` is the unit and, `y` being the unit, is `g(y)`.
-            let (S1, pn) := appNode S f [y, q]
+            let (S1, pn) := appNode S f (Args.ofList [y, q])
             S := S1
             if let some pn := pn then
               let (S1, s1) := emit S (.inv f pn y q u) pn u
@@ -1355,30 +1373,33 @@ def lawPass (S : St P) (f : String) (d : OpDecl) (u x cur : Nat) (pf : Pf) (peak
               let (S1, p4) := transP S1 q u p3 (some (some s1))
               S := S1.mergeBy q u p4
           else if let some b := (atoms.erase a).find? (fun b => S.fd b == S.fd y) then
-            let (S1, pn) := appNode S f [y, q]
+            let (S1, pn) := appNode S f (Args.ofList [y, q])
             S := S1
             if let some pn := pn then
               let (S1, s1) := emit S (.inv f pn y q u) pn u
               S := S1
-              found := some (pn, s1, (atoms.erase a).erase b)
+              -- Every pair of the two arguments goes in this pass.
+              let j := if b == a then atoms.count a / 2 else min (atoms.count a) (atoms.count b)
+              found := some (pn, s1, j, (atoms.eraseN a j).eraseN b j)
   if found.isNone then
     if let some (n + 1) := d.nilpotent then
-      for a in atoms do
+      for a in atoms.keys do
         if found.isNone then
           let same := atoms.filter fun b => S.fd b == S.fd a
           if same.length ≥ n + 1 then
-            let (S1, pn) := appNode S f (a :: List.replicate n a)
+            let (S1, pn) := appNode S f (Args.rep (n + 1) a)
             S := S1
             if let some pn := pn then
               let (S1, s1) := emit S (.nil f pn a n u) pn u
               S := S1
-              let gone := same.take (n + 1)
-              found := some (pn, s1, gone.foldl (fun m b => m.erase b) atoms)
+              -- Every `n + 1` arguments of the class go in this pass.
+              let j := same.length / (n + 1)
+              found := some (pn, s1, j, dropClass S (S.fd a) (j * (n + 1)) atoms)
   match found with
   | none => return (S, .inl (some (cur, pf)))
-  | some (pn, s1, rest) =>
-    let (S1, t1) := appNode S f (pn :: rest)
-    let (S1, t2) := appNode S1 f (u :: rest)
+  | some (pn, s1, j, rest) =>
+    let (S1, t1) := appNode S f (Args.rep j pn ++ rest)
+    let (S1, t2) := appNode S1 f (Args.rep j u ++ rest)
     S := S1
     let (some t1, some t2) := (t1, t2) | return (S, .inl none)
     let (S1, t3) := if rest.isEmpty then (S, some u) else appNode S f rest
@@ -1578,37 +1599,39 @@ def latticeP (S : St P) (x y : Nat) (pos neg : List (Nat × Nat)) : St P × Opti
   let some (n0, _) := (pos ++ neg).head? | return (S.fail "lattice: no equation", none)
   let some (.app f _) := S.defOf n0 | return (S.fail "lattice: equation of no application", none)
   let rep (c : Nat) : Nat := (S.plain.getD (S.fd c) none).getD (S.fd c)
-  let kids (n : Nat) : List Nat := match S.defOf n with
+  let kids (n : Nat) : Args := match S.defOf n with
     | some (.app _ cs) => cs
-    | _ => []
-  let each (g : Nat → List Nat) (ps : List (Nat × Nat)) : List Nat :=
-    ps.flatMap fun (n, q) => (List.replicate q (g n)).flatten
-  let one (g : Nat → Nat) : Nat → List Nat := fun n => [g n]
+    | _ => Args.nil
+  let each (g : Nat → Args) (ps : List (Nat × Nat)) : Args :=
+    ps.foldl (fun acc nq => acc ++ (g nq.1).times true nq.2) Args.nil
+  let one (g : Nat → Nat) : Nat → Args := fun n => Args.one (g n)
   let rx := rep x
   let ry := rep y
   let zs := each (one rep) pos ++ each (one rep) neg
   -- The sums, from `f(x, z)` to `f(y, z)`; `true` marks a link whose two
   -- sides have the same arguments read through.
-  let sums : List (List Nat × Bool) := [
-    ([rx] ++ zs, true),
-    ([rx] ++ each (one id) pos ++ each (one rep) neg, false),
-    ([rx] ++ each kids pos ++ each (one rep) neg, true),
-    ([rx] ++ each (fun n => (kids n).map rep) pos ++ each (one rep) neg, false),
-    ([ry] ++ each (one rep) pos ++ each (fun n => (kids n).map rep) neg, true),
-    ([ry] ++ each (one rep) pos ++ each kids neg, false),
-    ([ry] ++ each (one rep) pos ++ each (one id) neg, true),
-    ([ry] ++ zs, false)]
+  let (ax, ay) := (Args.one rx, Args.one ry)
+  let sums : List (Args × Bool) := [
+    (ax ++ zs, true),
+    (ax ++ each (one id) pos ++ each (one rep) neg, false),
+    (ax ++ each kids pos ++ each (one rep) neg, true),
+    (ax ++ each (fun n => (kids n).map rep) pos ++ each (one rep) neg, false),
+    (ay ++ each (one rep) pos ++ each (fun n => (kids n).map rep) neg, true),
+    (ay ++ each (one rep) pos ++ each kids neg, false),
+    (ay ++ each (one rep) pos ++ each (one id) neg, true),
+    (ay ++ zs, false)]
   let mut S := S
   let (S1, z) := appNode S f zs
   let some z := z | return (S1.fail "lattice: sum ill-sorted", none)
-  let (S1, a4) := appNode S1 f [rx, z]
-  let (S1, b4) := appNode S1 f [ry, z]
+  let (S1, a4) := appNode S1 f (Args.ofList [rx, z])
+  let (S1, b4) := appNode S1 f (Args.ofList [ry, z])
+  let yz := Args.ofList [ry, z]
   S := S1
   let (some a4, some b4) := (a4, b4) | return (S.fail "lattice: sum ill-sorted", none)
   let mut cur := a4
   let mut pf : Pf := some none
-  for (args, flat) in sums ++ [([ry, z], true)] do
-    let (S1, i) := if args == [ry, z] then (S, some b4) else appNode S f args
+  for (args, flat) in sums ++ [(yz, true)] do
+    let (S1, i) := if args == yz then (S, some b4) else appNode S f args
     let some i := i | return (S1.fail "lattice: sum ill-sorted", none)
     S := S1
     if i != cur then
@@ -1643,8 +1666,8 @@ def seqReduce (S : St P) (f : String) (n other l r : Nat) : St P × Option (Opti
     let (vn, vl) := (kviewF S f left n, kviewF S f left l)
     if S.fd l != S.fd r || vl.length > vn.length then return (S, none)
     let rest := if left then vn.drop vl.length else vn.take (vn.length - vl.length)
-    let (S, x1) := appNode S f (if left then l :: rest else rest ++ [l])
-    let (S, x2) := appNode S f (if left then r :: rest else rest ++ [r])
+    let (S, x1) := appNode S f (Args.ofList (if left then l :: rest else rest ++ [l]))
+    let (S, x2) := appNode S f (Args.ofList (if left then r :: rest else rest ++ [r]))
     let (some x1, some x2) := (x1, x2) | return (S, none)
     let (S, p1) := foldCong S f left n x1
     -- `f(l, rest) = f(r, rest)` argument by argument, from `l = r`.
@@ -1659,16 +1682,17 @@ def seqReduce (S : St P) (f : String) (n other l r : Nat) : St P × Option (Opti
     let (S, p) := transP S n x2 p1 p2
     let (S, p) := transP S n other p p3
     return (S, p)
-  let args := kview S f n
-  let ls := kview S f l
+  -- A sequence operator's arguments, one by one.
+  let args := (kview S f n).toList
+  let ls := (kview S f l).toList
   if ls.isEmpty || S.fd l != S.fd r then return (S, none)
   let at_ := (List.range (args.length + 1 - ls.length)).find? fun i =>
     ((args.drop i).take ls.length).map S.fd == ls.map S.fd
   let some i := at_ | return (S, none)
   let pre := args.take i
   let suf := args.drop (i + ls.length)
-  let (S, x1) := appNode S f (pre ++ [l] ++ suf)
-  let (S, x2) := appNode S f (pre ++ [r] ++ suf)
+  let (S, x1) := appNode S f (Args.ofList (pre ++ [l] ++ suf))
+  let (S, x2) := appNode S f (Args.ofList (pre ++ [r] ++ suf))
   let (some x1, some x2) := (x1, x2) | return (S, none)
   let (S, p1) := congStepL S f n x1
   let (S, p2) := congStep S f x1 x2
@@ -1689,7 +1713,7 @@ the merge is then read from the classes. With `n1 = g(x1)`, `n2 = g(x2)`:
 - under `:nilpotent (k + 1)`, `f(x1^k, x1) = e = f(n1, x1)`, so `x1^k = n1`,
   and the same with `n1` and `x1` exchanged. -/
 def groupLawP (S : St P) (a b n1 n2 : Nat) : St P × Pf := Id.run do
-  let (some (.app g [x1]), some (.app _ [x2])) := (S.defOf n1, S.defOf n2) | return (S, none)
+  let (some (g, x1), some (_, x2)) := (S.unary? n1, S.unary? n2) | return (S, none)
   let some d := S.prog.ops.find? (fun d => d.inverse == some g && (d.kind == .ac || d.kind == .aci))
     | return (S, none)
   let f := d.name
@@ -1697,7 +1721,7 @@ def groupLawP (S : St P) (a b n1 n2 : Nat) : St P × Pf := Id.run do
   let mut S := S
   -- `f(x, q) = e` for an inverse application `q = g(x)`: the node and the step.
   let invFact (S : St P) (x q : Nat) : St P × Option (Nat × Nat) :=
-    match appNode S f [x, q] with
+    match appNode S f (Args.ofList [x, q]) with
     | (S, some p) => let (S, s) := emit S (.inv f p x q u) p u; (S, some (p, s))
     | (S, none) => (S, none)
   let (S1, i1) := invFact S x1 n1
@@ -1723,7 +1747,7 @@ def groupLawP (S : St P) (a b n1 n2 : Nat) : St P × Pf := Id.run do
     let (S1, q) := transP S1 other u q (some (some s1))
     S := S1.mergeBy other u q
   if S.fd n1 == S.fd n2 && S.fd x1 != S.fd x2 then
-    let (S1, qn) := appNode S f [x2, n1]
+    let (S1, qn) := appNode S f (Args.ofList [x2, n1])
     S := S1
     if let some qn := qn then
       let (S1, e) := eqP S n1 n2
@@ -1735,8 +1759,8 @@ def groupLawP (S : St P) (a b n1 n2 : Nat) : St P × Pf := Id.run do
         let (S1, pf) := viaUnit S1 p1 qn (some (some s1)) r
         S := cancel S1 p1 x1 x2 n1 pf
   if S.fd x1 == S.fd n2 && S.fd n1 != S.fd x2 then
-    let (S1, l) := appNode S f [n1, x1]
-    let (S1, r) := appNode S1 f [x2, x1]
+    let (S1, l) := appNode S f (Args.ofList [n1, x1])
+    let (S1, r) := appNode S1 f (Args.ofList [x2, x1])
     S := S1
     if let (some l, some r) := (l, r) then
       let (S1, pl) := congStep S f l p1
@@ -1754,13 +1778,13 @@ def groupLawP (S : St P) (a b n1 n2 : Nat) : St P × Pf := Id.run do
       -- `y^k = w`, where `f(w, y) = e` is `f(x1, n1) = e` up to the order.
       for (y, w) in [(x1, n1), (n1, x1)] do
         if S.fd a != S.fd b then
-          let (S1, t) := if k == 1 then (S, some y) else appNode S f (List.replicate k y)
-          let (S1, n) := appNode S1 f (y :: List.replicate k y)
+          let (S1, t) := if k == 1 then (S, some y) else appNode S f (Args.rep k y)
+          let (S1, n) := appNode S1 f (Args.rep (k + 1) y)
           S := S1
           if let (some t, some n) := (t, n) then
             let (S1, sn) := emit S (.nil f n y k u) n u
-            let (S1, l) := appNode S1 f [t, y]
-            let (S1, r) := appNode S1 f [w, y]
+            let (S1, l) := appNode S1 f (Args.ofList [t, y])
+            let (S1, r) := appNode S1 f (Args.ofList [w, y])
             S := S1
             if let (some l, some r) := (l, r) then
               let (S1, pl) := congStep S f l n
@@ -1806,7 +1830,6 @@ def sortOf (S : St P) (t : Nat) : Option String :=
   match S.defOf t with
   | some (.lit s _) => some s
   | some (.app f _) => (S.prog.opDecl? f).map (·.res)
-  | some (.napp f _) => (S.prog.opDecl? f).map (·.res)
   | none => none
 
 /-- The table id of definition `d`, added to the table if it is new and
@@ -1829,11 +1852,15 @@ def intern (S : St P) (d : Def) : St P × Option Nat :=
                 else S.plain).setIfInBounds t (if isPlain then some t else none) }, some t)
     | (S, none) => (S, none)
 
+/-- The table id of `f` applied to the arguments `m`, added to the table if
+it is new and well-sorted. -/
+def internA (S : St P) (f : String) (m : Args) : St P × Option Nat := intern S (S.nodeA f m)
+
 /-- `writtenP` for an application whose arguments' terms are `ws`. -/
-def writtenApp (S : St P) (f : String) (noArgs : Bool) (node : Option Nat) (ws : Array Nat) :
+def writtenApp (S : St P) (f : String) (noArgs : Bool) (node : Option Nat) (ws : Args) :
     St P × Option (Nat × Nat × Pf) := Id.run do
   let mut S := S
-  let d := Node.app f ws.toList
+  let d := S.nodeA f ws
   let w ← match S.idx (d) with
     | some w => pure w
     | none =>
@@ -1873,7 +1900,7 @@ def writtenP (S : St P) (t : Term) : St P × Option (Nat × Nat × Pf) :=
     -- its own: the term then stands for itself.
     let node := eval S (.app f args)
     match writtenArgs S args #[] with
-    | (S, some ws) => writtenApp S f args.isEmpty node ws
+    | (S, some ws) => writtenApp S f args.isEmpty node (Args.ofList ws.toList)
     | (S, none) => (S, none)
   | .napp f args ks =>
     -- The counted term as the kernel interns it, and the node it evaluated
@@ -1881,15 +1908,12 @@ def writtenP (S : St P) (t : Term) : St P × Option (Nat × Nat × Pf) :=
     let node := eval S (.napp f args ks)
     match writtenArgs S args #[] with
     | (S, some ws) =>
-      match intern S (countedNode S f (ws.toList.zip ks)), node with
+      match internA S f (Args.ofRuns (ws.toList.zip ks)), node with
       | (S, some w), some n =>
         match countedCong S f w n with
         | (S, some p) => (S.mergeBy w n (some p), some (w, n, some p))
-        -- The term is its node by `f`'s laws: the derivation on monomials.
-        | (S, none) =>
-          if wideFlat S f (ws.toList.zip ks) then (S, none)
-          else writtenApp S f false node
-            ((ws.toList.zip ks).flatMap fun wk => List.replicate wk.2 wk.1).toArray
+        -- The term is its node by `f`'s laws.
+        | (S, none) => writtenApp S f false node (Args.ofRuns (ws.toList.zip ks))
       | (S, _), _ => (S, none)
     | (S, none) => (S, none)
 
@@ -1905,7 +1929,7 @@ end
 
 /-- The node of a monomial: `f` applied to its arguments, or the unit for
 none. -/
-def monoNode (S : St P) (f : String) (m : List Nat) (literal : Nat := 0) : St P × Option Nat :=
+def monoNode (S : St P) (f : String) (m : Args) (literal : Nat := 0) : St P × Option Nat :=
   if m.isEmpty then (S, S.unit f)
   else
     -- An argument that is an application of `f` stands for its class: name
@@ -1915,8 +1939,7 @@ def monoNode (S : St P) (f : String) (m : List Nat) (literal : Nat := 0) : St P 
       match S.defOf x with
       | some (.app g _) => if g == f then (S.plain.getD (S.fd x) none).getD x else x
       | _ => x
-    let d := Node.app f m
-    intern S d
+    internA S f m
 
 /-- Node `x` with a plain member in place of each argument that is an
 application of `f`: `x` itself when it has none, or is no application of `f`. -/
@@ -1928,12 +1951,12 @@ def plainArgs (S : St P) (f : String) (x : Nat) : St P × Option Nat :=
 /-- `low = y`, for `low = f(unit, rest)`: under `f`'s laws; or, when `rest` is
 one argument, `low` is that argument by the unit law, which is in `y`'s
 class. -/
-def lowTo (S : St P) (f : String) (low : Nat) (rest : List Nat) (y : Nat) : St P × Pf :=
+def lowTo (S : St P) (f : String) (low : Nat) (rest : Args) (y : Nat) : St P × Pf :=
   let (S, p) := congStepL S f low y
   if p.isSome then (S, p)
   else
-    match rest with
-    | [r0] =>
+    match rest.single? with
+    | some r0 =>
       let (S, p1) := congStepL S f low r0
       let (S, p2) := eqP S r0 y
       if p1.isNone || p2.isNone then (S, none) else transP S low y p1 p2
@@ -1948,17 +1971,18 @@ def invDirect (S : St P) (f : String) (x y : Nat) : St P × Pf := Id.run do
   let args := kview S f x
   let g := (S.prog.opDecl? f).bind (·.inverse)
   if !(S.prog.kind f == .ac || S.prog.kind f == .aci) then return (S, none)
-  for q in args do
-    let some (.app h [c]) := S.defOf q | continue
+  for q in args.keys do
+    let some (h, c) := S.unary? q | continue
     if some h != g then continue
-    let take (cs : List Nat) : Option (List Nat) :=
-      cs.foldl (fun (r : Option (List Nat)) k =>
-        r.bind fun r => if r.contains k then some (r.erase k) else none) (some (args.erase q))
+    -- The arguments without one `q` and without the arguments `cs`.
+    let take (cs : Args) : Option Args :=
+      cs.runs.foldl (fun (r : Option Args) kj =>
+        r.bind fun r => if r.count kj.1 ≥ kj.2 then some (r.eraseN kj.1 kj.2) else none) (some (args.erase q))
     let open_ := match S.defOf c with
       | some (.app h' _) => if h' == f then take (kview S f c) else none
       | _ => none
-    let some rest := (take [c]).orElse fun _ => open_ | continue
-    let (S, pn) := appNode S f [c, q]
+    let some rest := (take (Args.one c)).orElse fun _ => open_ | continue
+    let (S, pn) := appNode S f (Args.ofList [c, q])
     let some pn := pn | return (S, none)
     let (S, s) := emit S (.inv f pn c q u) pn u
     if rest.isEmpty then
@@ -1969,8 +1993,8 @@ def invDirect (S : St P) (f : String) (x y : Nat) : St P × Pf := Id.run do
       let (S, p3) := eqP S u y
       if p3.isNone then return (S, none)
       return transP S x y p p3
-    let (S, mid) := appNode S f (pn :: rest)
-    let (S, low) := appNode S f (u :: rest)
+    let (S, mid) := appNode S f (Args.one pn ++ rest)
+    let (S, low) := appNode S f (Args.one u ++ rest)
     let (some mid, some low) := (mid, low) | return (S, none)
     let (S, p1) : St P × Pf := if mid == x then (S, some none) else
       (let (S, t) := emit S (.cong f x mid []) x mid; (S, some (some t)))
@@ -1984,25 +2008,25 @@ def invDirect (S : St P) (f : String) (x y : Nat) : St P × Pf := Id.run do
   -- inverse application `g(c)`, with another argument in `c`'s class, cancels.
   let (S, xp) := plainArgs S f x
   let some xp := xp | return (S, none)
-  let cls : List Nat := match S.defOf xp with
+  let cls : Args := match S.defOf xp with
     | some (.app _ cs) => cs
-    | _ => []
-  for a in cls do
+    | _ => Args.nil
+  for a in cls.keys do
     for q in (S.invIn.getD (S.fd a) []) do
-      let some (.app h [c]) := S.defOf q | continue
+      let some (h, c) := S.unary? q | continue
       if some h != g then continue
       let some b := (cls.erase a).find? (fun b => S.fd b == S.fd c) | continue
-      let rest : List Nat := (cls.erase a).erase b
-      let (S, pn) := appNode S f [c, q]
+      let rest : Args := (cls.erase a).erase b
+      let (S, pn) := appNode S f (Args.ofList [c, q])
       let some pn := pn | return (S, none)
       let (S, s) := emit S (.inv f pn c q u) pn u
       let (S, p0) : St P × Pf := if xp == x then (S, some none) else congStep S f x xp
       let (S, mid, low, pml) : St P × Nat × Nat × Pf :=
         if rest.isEmpty then (S, pn, u, some (some s))
         else
-          match appNode S f (pn :: rest) with
+          match appNode S f (Args.one pn ++ rest) with
           | (S, some mid) =>
-            match appNode S f (u :: rest) with
+            match appNode S f (Args.one u ++ rest) with
             | (S, some low) =>
               let (S, t2) := emit S (.cong f mid low [s]) mid low
               (S, mid, low, some (some t2))
@@ -2058,8 +2082,8 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
     -- A right side that is one argument is named by a plain member of its
     -- class, which the kernel reads as one argument.
     let r := if st.atom then (S.plain.getD (S.fd st.r) none).getD st.r else st.r
-    let (S1, t1) := monoNode S f (List.replicate st.q st.l ++ st.rest) st.q
-    let (S2, t2) := monoNode S1 f (List.replicate st.q r ++ st.rest) st.q
+    let (S1, t1) := monoNode S f (Args.rep st.q st.l ++ st.rest) st.q
+    let (S2, t2) := monoNode S1 f (Args.rep st.q r ++ st.rest) st.q
     let (S3, t3) := monoNode S2 f st.after
     S := S3
     let (some t1, some t2, some t3) := (t1, t2, t3) | return (S, none)
@@ -2073,7 +2097,7 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
       if l' != st.l then
         let (S', pl) := congStep S f l' st.l
         S := if pl.isSome then S'.mergeBy l' st.l pl else S'
-        let (S', t1') := monoNode S f (List.replicate st.q l' ++ st.rest) st.q
+        let (S', t1') := monoNode S f (Args.rep st.q l' ++ st.rest) st.q
         S := S'
         let some t1' := t1' | return (S, none)
         let (S', pf') := hop S cur t1' pf
@@ -2103,7 +2127,7 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
         if r' != r then
           let (S', pr) := congStep S f r r'
           S := if pr.isSome then S'.mergeBy r r' pr else S'
-          let (S', t2') := monoNode S f (List.replicate st.q r' ++ st.rest) st.q
+          let (S', t2') := monoNode S f (Args.rep st.q r' ++ st.rest) st.q
           S := S'
           let some t2' := t2' | return (S, none)
           let (S', pf') := hop S cur t2' pf
@@ -2133,23 +2157,23 @@ def emitChain (S : St P) (c : Chain) : St P × Option (Nat × Nat × Pf) := Id.r
 
 /-- The kernel steps of a `t` line, whose check passed: the term as the
 program writes it (its arguments' own terms as arguments) is node `i`. -/
-def termLine (S : St P) (i : Nat) (f : String) (cs : List Nat) : St P := Id.run do
+def termLine (S : St P) (i : Nat) (f : String) (cs : Args) : St P := Id.run do
   let done (S : St P) : St P := { S with splices := [], opens := [], regroups := [], inverses := [] }
   -- The application to no argument is the unit, by the `unit` step.
-  let S := match cs, S.unit f with
-    | [], some u =>
+  let S := match cs.isEmpty, S.unit f with
+    | true, some u =>
       match intern S (Node.app f []) with
       | (S, some w) =>
         if S.fd w == S.fd u then S
         else let (S, st) := emit S (.unit f w u) w u; S.mergeBy w u (some (some st))
       | (S, none) => S
     | _, _ => S
-  let ws := cs.map fun c => ((S.lastTerm[c]?).map (·.1)).getD c
-  let (dW, dT) := (Node.app f ws, Node.app f cs)
-  let (S, w) ← match intern S dW with
+  let termOf (c : Nat) : Nat := ((S.lastTerm[c]?).map (·.1)).getD c
+  let ws := cs.map termOf
+  let (S, w) ← match internA S f ws with
     | (S, some w) => pure (S, w)
     | (S, none) => return done S
-  let (S, t2) ← match intern S dT with
+  let (S, t2) ← match internA S f cs with
     | (S, some t) => pure (S, t)
     | (S, none) => return done S
   let mut S := S
@@ -2158,11 +2182,14 @@ def termLine (S : St P) (i : Nat) (f : String) (cs : List Nat) : St P := Id.run 
   if w != t2 then
     let mut prems : Array Nat := #[]
     let mut ok := true
-    for (wc, c) in ws.zip cs do
-      if wc != c then
-        match (S.lastTerm[c]?).map (·.2) with
-        | some (some (some s)) => prems := prems.push s
-        | _ => ok := false
+    for c in cs.keys do
+      match S.lastTerm[c]? with
+      | some (wc, p) =>
+        if wc != c then
+          match p with
+          | some (some s) => prems := prems.push s
+          | _ => ok := false
+      | none => pure ()
     if ok then
       let (S', s) := emit S (.cong f w t2 prems.toList) w t2
       S := S'
@@ -2174,8 +2201,6 @@ def termLine (S : St P) (i : Nat) (f : String) (cs : List Nat) : St P := Id.run 
   let (S', p) := transP S w i p1 p2
   return { S' with lastTerm := S'.lastTerm.insert i (w, p), byTerm := S'.byTerm.insert w (i, p) }
 
-
-
 /-! ## A rule firing
 
 The walk matches the rule's patterns against the firing's lines, as before,
@@ -2185,19 +2210,18 @@ the pattern matched or was built as. An instance joins that node's class. -/
 
 structure Walk (P : Program) where
   S : St P
-  /-- Multiset applications are walked as argument lists: the second attempt
-  at a firing the walk on counted children did not read. -/
-  noCount : Bool := false
+  /-- An instance of a multiset operator's application is first compared with
+  its node on counted arguments. Not set for a firing whose regrouping line
+  names a node outside the class it regroups: that line is then checked. -/
+  direct : Bool := true
   σ : List (String × Nat) := []
   /-- The nodes each rest variable is bound to. -/
-  ρ : List (String × List Nat) := []
+  ρ : List (String × Args) := []
   /-- The count each multiplicity variable is bound to. -/
   μ : List (String × Nat) := []
-  /-- The rest variables bound to counted nodes (walked on counted children). -/
-  ρC : List (String × List (Nat × Nat)) := []
   /-- The position of the next `e` line. -/
   atomIdx : Nat := 0
-  atoms : List (Nat × String × List (Nat × Nat) × List (List Nat))
+  atoms : List (Nat × String × List (Nat × Nat) × List Args)
   rhs : List (Nat × Bool)
   /-- The matched node and the instance of each matched pattern, by the
   pattern's printed form. -/
@@ -2300,6 +2324,9 @@ def keptWits (tree : Bool) (only : Option (List Nat)) (at_ : Nat) (rest : List N
 
 def innerWits (kept W : List Wit) : List Wit := W.filter fun v => !kept.contains v
 
+/-- The nodes of counted entries. -/
+def firsts (l : List (Nat × Nat)) : List Nat := l.map (·.1)
+
 mutual
 
 /-- Node `x`, which lies under the opening `ctx` and starts after `off`
@@ -2317,11 +2344,13 @@ def openNode (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (x : Nat) 
   | some (.app g args) =>
     if g != f then (S, some (x, some none), W, 1)
     else
-      match openArgs S f tree ctx W args #[] #[] false [] only off with
+      -- A multiset's arguments are read run by run, a sequence's one by one.
+      let todo := if S.prog.multiset f then args.runs else args.toList.map (·, 1)
+      match openArgs S f tree ctx W todo #[] #[] false [] only off with
       | (S, some (out, prems, changed), W', n) =>
         if !changed then (S, some (x, some none), W', n)
         else
-          match appNode S f out.toList with
+          match appNode S f (Args.ofRuns out.toList) with
           | (S, some x') =>
             if x' == x then (S, some (x, some none), W', n)
             else
@@ -2333,57 +2362,71 @@ def openNode (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (x : Nat) 
 termination_by (W.length, 1, 0)
 
 /-- The arguments of `openNode`'s result, after `out`, and a step for each
-argument replaced, after `prems`; `off` counts the arguments read so far. -/
+argument replaced, after `prems`; `off` counts the arguments read so far. An
+opening reads every copy of a multiset's argument; a regrouping reads one. -/
 def openArgs (S : St P) (f : String) (tree : Bool) (ctx : Option Nat) (W : List Wit)
-    (args : List Nat) (out : Array Nat) (prems : Array Nat) (changed : Bool)
+    (args : List (Nat × Nat)) (out : Array (Nat × Nat)) (prems : Array Nat) (changed : Bool)
     (opened : List (Nat × Nat) := []) (only : Option (List Nat) := none) (off : Nat := 0) :
-    St P × Option (Array Nat × Array Nat × Bool) × List Wit × Nat :=
+    St P × Option (Array (Nat × Nat) × Array Nat × Bool) × List Wit × Nat :=
   match args with
   | [] => (S, some (out, prems, changed), W, off)
-  | a :: rest =>
+  | (a, k) :: rest =>
     let isApp (m : Nat) : Bool :=
       match S.defOf m with
       | some (.app h cs) => h == f && !cs.isEmpty
       | _ => false
+    let whole := tree && S.prog.kind f == .ac
     -- A multiset's argument an opening already read: its other copies become
     -- the same node.
-    let again := if tree && S.prog.kind f == .ac then opened.lookup a else none
+    let again := if whole then opened.lookup a else none
     -- With `only`, a witness applies at the listed positions and nowhere else.
     let here := match only with
       | some ps => ps.contains out.size
       | none => true
-    -- The node the argument becomes, the witnesses left, and the arguments read.
-    let r : St P × Option Nat × List Wit × Nat :=
-      if let some to := again then (S, some to, W, off + 1) else
-      match (if here then Wit.pick S f tree ctx (offOf S f tree off) a rest W else none) with
+    -- The node the argument becomes, the witnesses left, the arguments read,
+    -- and the number of copies of the argument that become it.
+    let r : St P × Option Nat × List Wit × Nat × Nat :=
+      if let some to := again then (S, some to, W, off + k, k) else
+      match (if here then Wit.pick S f tree ctx (offOf S f tree off) a (firsts rest) W else none) with
       | some w =>
-        if _h : (innerWits (keptWits tree only out.size rest (W.erase w)) (W.erase w)).length < W.length then
-          let kept := keptWits tree only out.size rest (W.erase w)
+        if _h : (innerWits (keptWits tree only out.size (firsts rest) (W.erase w)) (W.erase w)).length < W.length then
+          let kept := keptWits tree only out.size (firsts rest) (W.erase w)
           match openNode S f tree (some w.1) w.2.2.1
-              (innerWits (keptWits tree only out.size rest (W.erase w)) (W.erase w)) none off with
+              (innerWits (keptWits tree only out.size (firsts rest) (W.erase w)) (W.erase w)) none off with
           | (S, some (m', pm), W', n) =>
             -- `a` is the member, which is its opened form.
             let (S, p) := eqP S a w.2.2.1
             let (S, q) := transP S a m' p pm
             let S := S.mergeBy a m' q
             let W' := W' ++ kept.reverse
-            if W'.length ≤ (W.erase w).length then (S, some m', W', n) else (S, none, W, off)
-          | (S, none, _, _) => (S, none, W, off)
-        else (S, none, W, off)
-      | none => (S, some (if isApp a then (S.plain.getD (S.fd a) none).getD a else a), W, off + 1)
+            if W'.length ≤ (W.erase w).length then (S, some m', W', n, if whole then k else 1)
+            else (S, none, W, off, 0)
+          | (S, none, _, _) => (S, none, W, off, 0)
+        else (S, none, W, off, 0)
+      | none => (S, some (if isApp a then (S.plain.getD (S.fd a) none).getD a else a), W, off + k, k)
     match r with
-    | (S, none, _, _) => (S, none, W, off)
-    | (S, some to, W', off') =>
-      if _h : W'.length ≤ W.length then
+    | (S, none, _, _, _) => (S, none, W, off)
+    | (S, some to, W', off', took) =>
+      let pr : St P × Option (Array Nat × Bool) :=
         if to != a then
           let (S, p) := eqP S a to
           match stepOf S a p with
-          | (S, some st) =>
-            openArgs S f tree ctx W' rest (out.push to) (prems.push st) true ((a, to) :: opened) only
-              off'
-          | (S, none) => (S, none, W', off')
-        else openArgs S f tree ctx W' rest (out.push to) prems changed opened only off'
-      else (S, none, W, off)
+          | (S, some st) => (S, some (prems.push st, true))
+          | (S, none) => (S, none)
+        else (S, some (prems, changed))
+      match pr with
+      | (S, none) => (S, none, W', off')
+      | (S, some (prems', changed')) =>
+        let opened' := if to != a then (a, to) :: opened else opened
+        if took < k then
+          -- The copies left are read after this one.
+          if _h : W'.length < W.length then
+            openArgs S f tree ctx W' ((a, k - took) :: rest) (out.push (to, took)) prems' changed' opened'
+              only off'
+          else (S, none, W, off)
+        else if _h : W'.length ≤ W.length then
+          openArgs S f tree ctx W' rest (out.push (to, took)) prems' changed' opened' only off'
+        else (S, none, W, off)
 termination_by (W.length, 0, args.length)
 decreasing_by
   all_goals simp_wf
@@ -2410,7 +2453,8 @@ def foldInst (S : St P) (f : String) (left : Bool) (i n : Nat) (W : List Wit)
       let arg := if left then cs.head? else cs.getLast?
       match arg with
       | some a =>
-        let cs' := if left then y :: cs.drop 1 else cs.dropLast ++ [y]
+        let l := cs.toList
+        let cs' := Args.ofList (if left then y :: l.drop 1 else l.dropLast ++ [y])
         match appNode S f cs' with
         | (S, some x') =>
           if x' == x then (S, some (x, some none))
@@ -2513,22 +2557,23 @@ def instProof (S : St P) (f : String) (i n : Nat) (k : Option Nat) : St P × Pf 
   if (S.prog.kind f).isFold then foldInst S f (S.prog.kind f == .foldL) i n wo wr
   else if wo.isEmpty && wr.isEmpty then congStepL S f i n
   else
-    let argsOf (S : St P) (x : Nat) : List Nat := match S.defOf x with
+    let bag := S.prog.multiset f
+    let argsOf (S : St P) (x : Nat) : Args := match S.defOf x with
       | some (.app _ cs) => cs
-      | _ => []
+      | _ => Args.nil
     -- A regrouping whose class the laws dropped reads an argument the instance
     -- gets back (`droppedRegroups`): the two are equal by the unit or inverse
     -- law.
-    let extra := droppedRegroups S f wr (argsOf S i)
-      (viewArgs S f true wo ((argsOf S n).map (·, none)))
+    let vn := viewArgs S f true wo (entries bag (argsOf S n) none)
+    let extra := droppedRegroups S f wr (argsOf S i) vn
     let (S, i0, p0) : St P × Nat × Pf :=
       if extra.isEmpty then (S, i, some none)
-      else match appNode S f (argsOf S i ++ extra) with
+      else match appNode S f (argsOf S i ++ Args.ofList extra) with
         | (S, some i0) => let (S, p) := congStepL S f i i0; (S, i0, p)
         | (S, none) => (S, i, none)
     -- A sequence's regroupings apply where the node's view puts them.
     let only := if S.prog.kind f == .assoc && !wr.isEmpty then
-        some (regroupAt S f wr (argsOf S i0) (viewArgs S f true wo ((argsOf S n).map (·, none))))
+        some (regroupAt S f wr (argsOf S i0).toList vn.toList)
       else none
     match openNode S f true none n wo with
     | (S, some (n', pn), _, _) =>
@@ -2544,15 +2589,14 @@ def instProof (S : St P) (f : String) (i n : Nat) (k : Option Nat) : St P × Pf 
     | (S, none, _, _) => (S, none)
 
 /-- The instance `f(ic)` of an application pattern, joined to node `n`. -/
-def instOf (f : String) (ic : List Nat) (n : Nat) (k : Option Nat := none) : WalkM P Nat := do
-  let d := Node.app f ic
-  let i ← withS fun S => intern S d
+def instOf (f : String) (ic : Args) (n : Nat) (k : Option Nat := none) : WalkM P Nat := do
+  let i ← withS fun S => internA S f ic
   match i with
   | some i =>
     withS fun S =>
       -- The application to no argument is the unit, by the `unit` step.
-      let S := match ic, S.unit f with
-        | [], some u =>
+      let S := match ic.isEmpty, S.unit f with
+        | true, some u =>
           if S.fd i == S.fd u then S
           else let (S, st) := emit S (.unit f i u) i u; S.mergeBy i u (some (some st))
         | _, _ => S
@@ -2586,6 +2630,25 @@ def groundNode (q : Pat) : WalkM P (Option Nat) := do
   | .app _ _, [] => pure ((Pat.toTerm? q).bind (eval w.S))
   | _, _ => pure none
 
+/-- The node `n` an `e` line at position `k` names is what the pattern's
+bound nodes `cs` spell: the node's arguments under the openings (`s` lines)
+and the bound nodes under the regroupings (`y` lines) have one normal form. -/
+def matchCheck (S : St P) (f : String) (n k : Nat) (cs : Args) : Except String Unit :=
+  match S.defOf n with
+  | some (.app h ds) =>
+    let bag := S.prog.multiset f
+    let S0 := { S with splices := [] }
+    let (wo, wr) := witsOf S k
+    let vd := viewArgs S f true wo (entries bag ds none)
+    let csU := cs ++ Args.ofList (droppedRegroups S f wr cs vd)
+    let vc := if S.prog.kind f == .assoc && !wr.isEmpty then
+        Args.ofList (viewAt S f wr (regroupAt S f wr csU.toList vd.toList) csU.toList)
+      else viewArgs S f false wr (entries bag csU none)
+    if h != f || (let (x, y) := nf2 S0 f vd vc; x != y) then
+      .error s!"rule: matched node differs | node {n} of {h} with arguments {ds} read as {vd}, classes {(nf2 S0 f vd vc).1}; pattern bound to {cs} read as {vc}, classes {(nf2 S0 f vd vc).2}; openings {wo.map fun w => (w.2.1, w.2.2.1, w.2.2.2.1, w.2.2.2.2)}, regroupings {wr.map fun w => (w.2.1, w.2.2.1)}"
+    else .ok ()
+  | _ => .error "rule: matched node differs"
+
 /-- The application pattern `f(ps)` against the next line, once each argument
 that is no variable has its matched node and instance in `sub`. -/
 def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat × Nat))) :
@@ -2596,94 +2659,29 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
     let S := w.S
     if g != f || !(fixedArgs ps).all (· == units fixed) then
       throw "rule: line for another application"
-    -- A multiset operator: each argument takes its field whole, with its
-    -- count, and the instance is a counted node.
-    let groupsC := S.atomsC.getD w.atomIdx []
-    if S.prog.multiset f && !w.noCount then
-      let mut σ := w.σ
-      let mut μ := w.μ
-      let mut ρC := w.ρC
-      let mut groupsC := groupsC
-      let mut cks : Array (Nat × Nat) := #[]
-      let mut fixed := fixed
-      for (q, o) in ps.zip sub do
-        -- A rest variable takes the next group, with its counts.
-        if let .rest x := q then
-          let grp := groupsC.headD []
-          groupsC := groupsC.tail
-          match ρC.lookup x with
-          | some ys => if ys != grp then throw "rule: rest variable bound twice"
-          | none => ρC := (x, grp) :: ρC
-          cks := cks ++ grp.toArray
-          continue
-        let (c, cnt) :: restF := fixed | throw "rule: argument differs | no field left"
-        fixed := restF
-        let q ← match q with
-          | .rep q k =>
-            match μ.lookup k with
-            | some v => if v != cnt then throw "rule: multiplicity variable bound twice"
-            | none => μ := (k, cnt) :: μ
-            pure q
-          | .times q k =>
-            if k != cnt then throw "rule: argument differs | another count"
-            pure q
-          | q =>
-            if cnt != 1 then throw "rule: argument differs | another count"
-            pure q
-        let inst ← match q, o with
-          | .var x, _ =>
-            match σ.lookup x with
-            | some y =>
-              if S.fd y != S.fd c then throw "rule: variable bound twice"
-              pure y
-            | none =>
-              σ := (x, c) :: σ
-              pure c
-          | _, some (m, i) =>
-            if S.fd m != S.fd c then throw "rule: argument differs | the argument's match is not in the field's class"
-            pure i
-          | _, none => throw "rule: argument differs | an argument pattern with no match"
-        cks := cks.push (inst, cnt)
-      if !fixed.isEmpty || !groupsC.isEmpty then throw "rule: line for another application"
-      set { w with atoms := rest, atomIdx := w.atomIdx + 1, σ := σ, μ := μ, ρC := ρC }
-      match ← withS fun S => intern S (countedNode S f cks.toList) with
-      | some i =>
-        -- The instance is the matched node, or has the same counted arguments.
-        if i != n then
-          let ok ← withS fun S =>
-            match countedCong S f i n with
-            | (S, some p) => (S.mergeBy i n (some p), true)
-            | (S, none) => (S, false)
-          if !ok then throw "rule: counted node differs"
-        modify fun w => { w with memo := (key, n, i) :: w.memo }
-        return (n, i)
-      | none => throw "rule: instance ill-sorted"
     let mut σ := w.σ
     let mut ρ := w.ρ
     let mut μ := w.μ
-    let mut ic : Array Nat := #[]
-    -- The nodes the line binds, in the pattern's order: an argument's node
-    -- (as many times as a repeated argument's count), or a rest variable's
+    -- The instance's arguments and the nodes the line binds, in the pattern's
+    -- order, each with its count: an argument's node, or a rest variable's
     -- nodes.
-    let mut bound : Array Nat := #[]
+    let mut ic : Array (Nat × Nat) := #[]
+    let mut bound : Array (Nat × Nat) := #[]
     let mut fixed := fixed
-    if S.prog.multiset f && (wideFlat S f fixed || groupsC.any (wideFlat S f)) then
-      throw "rule: counted node differs"
-    let mut groups := if S.prog.multiset f then groupsC.map Ctx.spread else groups
+    let mut groups := groups
     for (q, o) in ps.zip sub do
       -- A rest variable takes the next group of nodes.
       if let .rest x := q then
-        let grp := groups.headD []
+        let grp := groups.headD Args.nil
         groups := groups.tail
-        bound := bound ++ grp.toArray
+        bound := bound ++ grp.runs.toArray
         match ρ.lookup x with
         | some ys =>
-          if ys.length != grp.length || (ys.zip grp).any (fun (y, c) => S.fd y != S.fd c) then
-            throw "rule: rest variable bound twice"
-          ic := ic ++ ys.toArray
+          if ys.map S.fd != grp.map S.fd then throw "rule: rest variable bound twice"
+          ic := ic ++ ys.runs.toArray
         | none =>
           ρ := (x, grp) :: ρ
-          ic := ic ++ grp.toArray
+          ic := ic ++ grp.runs.toArray
         continue
       -- A repeated argument takes the next field whole, and its count; any
       -- other argument takes one of the field's copies.
@@ -2715,27 +2713,32 @@ def walkApp (key : String) (f : String) (ps : List Pat) (sub : List (Option (Nat
           if S.fd m != S.fd c then throw s!"rule: argument differs | the argument's match {m} is not in the field's class {c}"
           pure i
         | _, none => throw "rule: argument differs | an argument pattern with no match"
-      for _ in [0:times] do
-        bound := bound.push c
-        ic := ic.push inst
+      bound := bound.push (c, times)
+      ic := ic.push (inst, times)
     if !fixed.isEmpty || !groups.isEmpty then throw "rule: line for another application"
-    let cs := bound.toList
-    match S.defOf n with
-    | some (.app h ds) =>
-      -- The node's arguments under the openings (`s` lines), the bound nodes
-      -- under the regroupings (`y` lines), then both as classes.
-      let S0 := { S with splices := [] }
-      let (wo, wr) := witsOf S w.atomIdx
-      let vd := viewArgs S f true wo (ds.map (·, none))
-      let csU := cs ++ droppedRegroups S f wr cs vd
-      let vc := if S.prog.kind f == .assoc && !wr.isEmpty then
-          viewAt S f wr (regroupAt S f wr csU vd) csU
-        else viewArgs S f false wr (csU.map (·, none))
-      if h != f || (let (x, y) := nf2 S0 f vd vc; x != y) then
-        throw s!"rule: matched node differs | node {n} of {h} with arguments {ds} read as {vd}, classes {(nf2 S0 f vd vc).1}; pattern bound to {cs} read as {vc}, classes {(nf2 S0 f vd vc).2}; openings {wo.map fun w => (w.2.1, w.2.2.1, w.2.2.2.1, w.2.2.2.2)}, regroupings {wr.map fun w => (w.2.1, w.2.2.1)}, placed {regroupAt S f wr csU vd}, fd {csU.map S.fd} {wr.map fun w => S.fd w.2.1}"
-    | _ => throw "rule: matched node differs"
-    set { w with atoms := rest, atomIdx := w.atomIdx + 1, σ := σ, ρ := ρ, μ := μ }
-    let i ← instOf f ic.toList n (some w.atomIdx)
+    let cs := Args.ofRuns bound.toList
+    let ia := Args.ofRuns ic.toList
+    let k := w.atomIdx
+    let direct := w.direct && S.prog.multiset f
+    -- The walk gives the state back before any step is emitted: a second
+    -- reference to it would make each step copy its tables.
+    set { w with atoms := rest, atomIdx := k + 1, σ := σ, ρ := ρ, μ := μ }
+    -- A multiset operator's instance with the node's counted arguments is the
+    -- node, by one step.
+    if direct then
+      let some i ← withS fun S => internA S f ia | throw "rule: instance ill-sorted"
+      let ok ← withS fun S =>
+        if i == n then (S, true)
+        else match countedCong S f i n with
+          | (S, some p) => (S.mergeBy i n (some p), true)
+          | (S, none) => (S, false)
+      if ok then
+        modify fun w => { w with memo := (key, n, i) :: w.memo }
+        return (n, i)
+    match ← withS fun S => (S, matchCheck S f n k cs) with
+    | .error e => throw e
+    | .ok _ => pure ()
+    let i ← instOf f ia n (some k)
     modify fun w => { w with memo := (key, n, i) :: w.memo }
     pure (n, i)
   | [] => throw "rule: no line for an application"
@@ -2905,40 +2908,29 @@ def groundPs : List Pat → WalkM P (List (Nat × Nat))
 
 end
 
-/-- Whether applications of `f` are walked on counted children now. -/
-def countedNow (f : String) : WalkM P Bool :=
-  modifyGet fun w => (w.S.prog.multiset f && !w.noCount, w)
-
-/-- The built application `f` of counted built arguments against the next `b`
-node, which is the counted node itself. -/
-def builtAppC (f : String) (cks : List ((Nat × Nat) × Nat)) : WalkM P (Nat × Nat) := do
+/-- The built application `f` of the built arguments `cs`, each with its
+count, against the next `b` node. -/
+def builtApp (f : String) (cs : List ((Nat × Nat) × Nat)) : WalkM P (Nat × Nat) := do
   let w ← get
   match w.rhs with
   | (n, _) :: rest =>
+    let nodes := Args.ofRuns (cs.map fun x => (x.1.1, x.2))
+    let insts := Args.ofRuns (cs.map fun x => (x.1.2, x.2))
+    let direct := w.direct && w.S.prog.multiset f && !cs.isEmpty
     set { w with rhs := rest }
-    match ← withS fun S => intern S (countedNode S f (cks.map fun x => (x.1.2, x.2))) with
-    | some i =>
-      if i == n then pure (n, i)
-      else
-        let ok ← withS fun S =>
-          match countedCong S f i n with
+    -- A multiset operator's instance with the node's counted arguments is the
+    -- node, by one step.
+    if direct then
+      let some i ← withS fun S => internA S f insts | throw "rule: instance ill-sorted"
+      let ok ← withS fun S =>
+        if i == n then (S, true)
+        else match countedCong S f i n with
           | (S, some p) => (S.mergeBy i n (some p), true)
           | (S, none) => (S, false)
-        if ok then pure (n, i) else throw "rule: built counted node differs"
-    | none => throw "rule: instance ill-sorted"
-  | [] => throw "rule: no node for a built application"
-
-/-- The built application `f` of the built arguments `cs` against the next
-`b` node. -/
-def builtApp (f : String) (cs : List (Nat × Nat)) : WalkM P (Nat × Nat) := do
-  let w ← get
-  match w.rhs with
-  | (n, _) :: rest =>
-    if spells w.S n f (cs.map (·.1)) then
-      set { w with rhs := rest }
-      let i ← instOf f (cs.map (·.2)) n
-      pure (n, i)
-    else throw "rule: built node differs"
+      if ok then return (n, i)
+    if !(← withS fun S => (S, spells S n f nodes)) then throw "rule: built node differs"
+    let i ← instOf f insts n
+    pure (n, i)
   | [] => throw "rule: no node for a built application"
 
 mutual
@@ -2973,86 +2965,48 @@ def walkB (p : Pat) : WalkM P (Nat × Nat) :=
       -- A primitive application's `b` node is the literal the engine computed;
       -- its arguments have none.
       | none =>
-        -- The walk is read for one Boolean and released: holding it across
-        -- the built application would make each step copy the state.
-        countedNow f >>= fun counted =>
-          if (primSig f).isSome then groundPs ps >>= builtPrim f
-          else if counted && !ps.isEmpty then walkBsC ps >>= builtAppC f
-          else walkBs ps >>= builtApp f
+        if (primSig f).isSome then groundPs ps >>= builtPrim f
+        else walkBs ps >>= builtApp f
 
-/-- The built arguments with their counts, none repeated: for an argument
-list of a multiset operator. -/
-def walkBsC : List Pat → WalkM P (List ((Nat × Nat) × Nat))
-  | [] => pure []
-  | .times (.var x) n :: ps =>
-    walkB (.var x) >>= fun y => walkBsC ps >>= fun r => pure ((y, n) :: r)
-  | .times (.lit s v) n :: ps =>
-    walkB (.lit s v) >>= fun y => walkBsC ps >>= fun r => pure ((y, n) :: r)
-  | .times (.app f qs) n :: ps =>
-    walkB (.app f qs) >>= fun y => walkBsC ps >>= fun r => pure ((y, n) :: r)
-  | .times (.rest _) _ :: _ => throw "rule: a repeated rest variable"
-  | .times (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
-  | .times (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
-  | .times (.count _) _ :: _ => throw "rule: a repeated argument repeated"
-  | .var x :: ps => walkB (.var x) >>= fun y => walkBsC ps >>= fun r => pure ((y, 1) :: r)
-  | .lit s v :: ps => walkB (.lit s v) >>= fun y => walkBsC ps >>= fun r => pure ((y, 1) :: r)
-  | .app f qs :: ps => walkB (.app f qs) >>= fun y => walkBsC ps >>= fun r => pure ((y, 1) :: r)
-  | .count k :: ps => groundCount k >>= fun y => walkBsC ps >>= fun r => pure ((y, 1) :: r)
-  -- A rest variable gives the nodes it is bound to, with their counts.
-  | .rest x :: ps => do
-    let w ← get
-    match (w.ρC.lookup x).orElse fun _ => (w.ρ.lookup x).map (·.map (·, 1)) with
-    | some ys => walkBsC ps >>= fun r => pure (ys.map (fun yk => ((yk.1, yk.1), yk.2)) ++ r)
-    | none => throw "rule: unbound rest variable"
-  | .rep q k :: ps => do
-    let some n := (← get).μ.lookup k | throw "rule: unbound multiplicity variable"
-    let y ← match q with
-      | .var x => walkB (.var x)
-      | .lit s v => walkB (.lit s v)
-      | .app f qs => walkB (.app f qs)
-      | _ => throw "rule: a repeated argument repeated"
-    let r ← walkBsC ps
-    pure ((y, n) :: r)
-
-def walkBs : List Pat → WalkM P (List (Nat × Nat))
+/-- The built arguments, each with its node, its instance and its count. -/
+def walkBs : List Pat → WalkM P (List ((Nat × Nat) × Nat))
   | [] => pure []
   -- A rest variable gives the nodes it is bound to, each its own instance.
   | .rest x :: ps => do
     match (← get).ρ.lookup x with
-    | some ys => walkBs ps >>= fun r => pure (ys.map (fun y => (y, y)) ++ r)
+    | some ys => walkBs ps >>= fun r => pure (ys.runs.map (fun yk => ((yk.1, yk.1), yk.2)) ++ r)
     | none => throw "rule: unbound rest variable"
-  -- A repeated argument gives its node as many times as its count.
+  -- A repeated argument is built once, and has its count.
   | .rep (.var x) k :: ps => do
     match (← get).μ.lookup k with
-    | some n => walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
+    | some n => walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure ((y, n) :: r)
     | none => throw "rule: unbound multiplicity variable"
   | .rep (.lit s v) k :: ps => do
     match (← get).μ.lookup k with
-    | some n => walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
+    | some n => walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure ((y, n) :: r)
     | none => throw "rule: unbound multiplicity variable"
   | .rep (.app f qs) k :: ps => do
     match (← get).μ.lookup k with
-    | some n => walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
+    | some n => walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure ((y, n) :: r)
     | none => throw "rule: unbound multiplicity variable"
   | .rep (.rest _) _ :: _ => throw "rule: a repeated rest variable"
   | .rep (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .rep (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .rep (.count _) _ :: _ => throw "rule: a repeated argument repeated"
-  -- An argument with a fixed count is built once.
   | .times (.var x) n :: ps =>
-    walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
+    walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure ((y, n) :: r)
   | .times (.lit s v) n :: ps =>
-    walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
+    walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure ((y, n) :: r)
   | .times (.app f qs) n :: ps =>
-    walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure (List.replicate n y ++ r)
+    walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure ((y, n) :: r)
   | .times (.rest _) _ :: _ => throw "rule: a repeated rest variable"
   | .times (.rep _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .times (.times _ _) _ :: _ => throw "rule: a repeated argument repeated"
   | .times (.count _) _ :: _ => throw "rule: a repeated argument repeated"
-  | .count k :: ps => groundCount k >>= fun y => walkBs ps >>= fun r => pure (y :: r)
-  | .var x :: ps => walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
-  | .lit s v :: ps => walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
-  | .app f qs :: ps => walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure (y :: r)
+  | .count k :: ps => groundCount k >>= fun y => walkBs ps >>= fun r => pure ((y, 1) :: r)
+  | .var x :: ps => walkB (.var x) >>= fun y => walkBs ps >>= fun r => pure ((y, 1) :: r)
+  | .lit s v :: ps => walkB (.lit s v) >>= fun y => walkBs ps >>= fun r => pure ((y, 1) :: r)
+  | .app f qs :: ps => walkB (.app f qs) >>= fun y => walkBs ps >>= fun r => pure ((y, 1) :: r)
 
 end
 
@@ -3098,8 +3052,7 @@ structure Fired where
   nr : Nat
   ir : Nat
   σ : List (String × Nat)
-  ρ : List (String × List Nat)
-  ρC : List (String × List (Nat × Nat)) := []
+  ρ : List (String × Args)
   μ : List (String × Nat)
   prems : Option (List Nat)
 
@@ -3123,7 +3076,7 @@ def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
     | some n, some s => if sortOf w.S n != some s then throw "rule: variable of another sort"
     | _, _ => throw "rule: unbound variable"
   for x in r.rests do
-    match (w.ρ.lookup x).orElse (fun _ => (w.ρC.lookup x).map (·.map (·.1))), r.sorts.lookup x with
+    match w.ρ.lookup x, r.sorts.lookup x with
     | some ns, some s =>
       if ns.any (fun n => sortOf w.S n != some s) then throw "rule: rest variable of another sort"
     | _, _ => throw "rule: unbound rest variable"
@@ -3139,7 +3092,7 @@ def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
         | some ps, some st => some (ps.push st)
         | _, _ => none
     | _, _ => prems := none
-  pure { nl, il, nr, ir, σ := (← get).σ, ρ := (← get).ρ, ρC := (← get).ρC, μ := (← get).μ,
+  pure { nl, il, nr, ir, σ := (← get).σ, ρ := (← get).ρ, μ := (← get).μ,
          prems := prems.map (·.toList) }
 
 mutual
@@ -3322,10 +3275,11 @@ def seqFinish (S : St P) (od j : Nat) (r : SeqRule) (B : SBind) (members : List 
     if p1.isSome then return (S1, p1)
     let S := S1
     let (some (.app _ rootArgs), some (.app _ bound)) := (S.defOf root, S.defOf a) | return (S, none)
-    let (opened, left) := rootArgs.foldl (fun (acc : List Nat × List Nat) r =>
-      match acc.2.find? (fun x => S.fd x == S.fd r) with
-      | some x => (acc.1, acc.2.erase x)
-      | none => (acc.1 ++ [r], acc.2)) ([], bound)
+    -- Each root argument is answered by a bound argument of its class; a
+    -- root argument with no answer is the opened one.
+    let (opened, left) := rootArgs.runs.foldl (fun (acc : List Nat × Args) rk =>
+      let got := min rk.2 (acc.2.filter fun x => S.fd x == S.fd rk.1).length
+      (acc.1 ++ List.replicate (min (rk.2 - got) 2) rk.1, dropClass S (S.fd rk.1) got acc.2)) ([], bound)
     let [o] := opened | return (S, none)
     if left.isEmpty then return (S, none)
     let (S, m) := appNode S f left
@@ -3360,11 +3314,9 @@ def seqFireP (S : St P) (od j : Nat) (r : SeqRule) (p : Pat) (x y : Nat) : St P 
     let B : SBind := { scalars := w.σ.map fun (v, n) => (v, atomOf n),
                        -- A rest variable is named with its dots in a pattern, and
                        -- without them as a comprehension's source.
-                       seqs := (w.ρ ++ w.ρC.map fun (vc : String × List (Nat × Nat)) =>
-                           (vc.1, if St.wide vc.2 then [] else Ctx.spread vc.2)).flatMap
-                         fun (vn : String × List Nat) =>
-                           [(vn.1, vn.2.map SAtom.node),
-                            ((vn.1.drop 2).toString, vn.2.map SAtom.node)],
+                       seqs := w.ρ.flatMap fun (vn : String × Args) =>
+                           [(vn.1, vn.2.toList.map SAtom.node),
+                            ((vn.1.drop 2).toString, vn.2.toList.map SAtom.node)],
                        kcounts := w.μ }
     let new := if S.fd nl == S.fd x then y else x
     seqFinish S od j r B [] il new
@@ -3416,13 +3368,11 @@ def stepCore (S : St P) (line : String) : St P :=
   | "t" :: id :: f :: kids =>
     match S.node? id, idsC S kids with
     | some i, some cks =>
-      let S := { S with spellC := S.spellC.insert (f, St.keyC cks) i }
+      let cs := Args.ofRuns cks
+      let S := { S with spell := S.spell.insert (f, cs.runs) i }
       -- A counted application that is the node itself needs no step.
-      if S.prog.multiset f && !cks.isEmpty && S.defC i == some (countedNode S f cks) then S
-      else if nodeWide S i || wideFlat S f cks then S.fail "term: its counted node differs"
-      else
-      let cs := Ctx.spread cks
-      if spells S i f cs then termLine { S with spell := S.spell.insert (f, cs) i } i f cs
+      if S.prog.multiset f && !cs.isEmpty && S.defC i == some (S.nodeA f cs) then S
+      else if spells S i f cs then termLine S i f cs
       else S.fail "term: its node differs"
     | _, _ => S.fail "term: unreadable"
   | ["s", c, m] =>
@@ -3505,7 +3455,6 @@ def stepCore (S : St P) (line : String) : St P :=
         | some f => countedCong S f a b
         | none => (S, none)
       if let some p := direct then S.mergeBy a b (some p)
-      else if nodeWide S a || nodeWide S b then S.fail "law: counted arguments differ"
       else
       -- Either node can be the application whose arguments normalize to the other.
       let one (x y : Nat) : Bool :=
@@ -3516,7 +3465,7 @@ def stepCore (S : St P) (line : String) : St P :=
           if (S.prog.kind f).isFold then
             let left := S.prog.kind f == .foldL
             let own (z : Nat) : List Nat := match S.defOf z with
-              | some (.app g cs) => if g == f then cs else [z]
+              | some (.app g cs) => if g == f then cs.toList else [z]
               | _ => [z]
             let same (l m : List Nat) : Bool :=
               l.length == m.length && (l.zip m).all fun (c, d) => S.fd c == S.fd d
@@ -3591,13 +3540,12 @@ def stepCore (S : St P) (line : String) : St P :=
     | _, _, _, _ => S.fail "group law: unreadable"
   | ["r", off, kind] =>
     match off.toNat? with
-    | some o => { S with fire := some (o, kind == "w"), atoms := #[], atomsC := #[], rhs := [], seqLines := [], events := S.events - 1 }
+    | some o => { S with fire := some (o, kind == "w"), atoms := #[], rhs := [], seqLines := [], events := S.events - 1 }
     | none => S.fail "rule: unreadable"
   | "e" :: id :: f :: kids =>
-    match S.node? id, atomArgs S f kids with
-    | some i, some (fixed, groups, groupsC) =>
-      { S with atoms := S.atoms.push (i, f, fixed, groups), atomsC := S.atomsC.push groupsC,
-               events := S.events - 1 }
+    match S.node? id, atomArgs S kids with
+    | some i, some (fixed, groups) =>
+      { S with atoms := S.atoms.push (i, f, fixed, groups), events := S.events - 1 }
     | _, _ => S.fail "rule: unreadable"
   | "b" :: xs =>
     let one (x : String) : Option (Nat × Bool) :=
@@ -3632,13 +3580,10 @@ def stepCore (S : St P) (line : String) : St P :=
           -- The walk takes the state and gives it back, whether it succeeds or not.
           let (atoms, rhs) := (S.atoms.toList, S.rhs)
           -- A regrouping line names a member of the class it regroups: the
-          -- walk on counted children, which needs no such line, is not tried
-          -- on a firing whose line names another node.
+          -- comparison on counted arguments, which needs no such line, is not
+          -- tried on a firing whose line names another node.
           let regOk := S.regroups.all fun (_, c, m) => S.fd c == S.fd m
-          let (res, w) := ((fireRule r rw).run).run { S := S, atoms, rhs, noCount := !regOk }
-          let (res, w) := match res with
-            | .ok fr => (Except.ok fr, w)
-            | .error _ => ((fireRule r rw).run).run { S := w.S, atoms, rhs, noCount := true }
+          let (res, w) := ((fireRule r rw).run).run { S := S, atoms, rhs, direct := regOk }
           let S := w.S
           match res with
           | .ok fr =>
@@ -3651,7 +3596,7 @@ def stepCore (S : St P) (line : String) : St P :=
               let (x, y) := if S.fd fr.nl == S.fd a then (a, b) else (b, a)
               let (S, pf) := match fr.prems with
                 | some prems =>
-                  let (S, st) := emit S (.rule od j fr.σ ((fr.ρ.map fun (xn : String × List Nat) => (xn.1, xn.2.map fun n => (n, 1))) ++ fr.ρC) fr.μ prems fr.il fr.ir) fr.il fr.ir
+                  let (S, st) := emit S (.rule od j fr.σ (fr.ρ.map fun (xn : String × Args) => (xn.1, xn.2.runs)) fr.μ prems fr.il fr.ir) fr.il fr.ir
                   let (S, p1) := eqP S x fr.il
                   let (S, p2) := eqP S fr.ir y
                   let (S, q) := transP S x fr.ir p1 (some (some st))
@@ -3719,13 +3664,11 @@ def stepCore (S : St P) (line : String) : St P :=
                 -- node by `f`'s laws.
                 match writtenArgs S args #[] with
                 | (S, some ws) =>
-                  match intern S (countedNode S f (ws.toList.zip ks)) with
+                  match internA S f (Args.ofRuns (ws.toList.zip ks)) with
                   | (S, some tn) =>
                     match countedCong S f tn n with
                     | (S, some p) => (S, some (tn, some p))
-                    | (S, none) =>
-                      if nodeWide S tn || nodeWide S n then (S, none)
-                      else let (S, p) := congStepL S f tn n; (S, some (tn, p))
+                    | (S, none) => let (S, p) := congStepL S f tn n; (S, some (tn, p))
                   | (S, none) => (S, none)
                 | (S, none) => (S, none)
             match side S l a with
@@ -3785,8 +3728,6 @@ def stepCore (S : St P) (line : String) : St P :=
         | some f => countedCong S f a b
         | none => (S, none)
       if let some p := direct then S.mergeBy a b (some p)
-      else if nodeWide S a || nodeWide S b || nodeWide S n then
-        S.fail "completion: counted arguments differ"
       else
       if let some f := seqOp then
         match rs with
@@ -3848,8 +3789,8 @@ def stepCore (S : St P) (line : String) : St P :=
               | some (_, _, _), some (_, _, _) => let (S, q) := eqP S a b; S.mergeBy a b q
               | _, _ => S.merge a b
             else
-              let (S, la) := appNode S f [nl, ng]
-              let (S, lb) := appNode S f [nr, ng]
+              let (S, la) := appNode S f (Args.ofList [nl, ng])
+              let (S, lb) := appNode S f (Args.ofList [nr, ng])
               match la, lb with
               | some la, some lb =>
                 let (S, p1) := congStepL S f la ta
