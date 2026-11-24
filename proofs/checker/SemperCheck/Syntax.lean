@@ -132,11 +132,18 @@ inductive SAtom where
   | lit (s v : String)
   deriving Repr, Inhabited, DecidableEq
 
-/-- A term over atoms: what a sequence rule's side is under a binding. -/
+/-- A term over atoms: what a sequence rule's side is under a binding. An
+application holds each argument once with its count (`counts`, as long as
+`args`): no count is written as repeated arguments. -/
 inductive STm where
   | atom (a : SAtom)
-  | app (f : String) (args : List STm)
+  | app (f : String) (args : List STm) (counts : List Nat)
   deriving Repr, Inhabited
+
+/-- `f` applied to arguments with their counts. An argument of count zero is
+left out. -/
+def STm.mk (f : String) (as : List (STm × Nat)) : STm :=
+  .app f ((as.filter fun ak => ak.2 != 0).map (·.1)) ((as.filter fun ak => ak.2 != 0).map (·.2))
 
 inductive SItem where
   | rest (x : String)
@@ -235,8 +242,8 @@ structure SeqRule where
 
 /-- A binding of a sequence rule. -/
 structure SBind where
-  /-- Each rest sequence, an argument with count `k` given `k` times. -/
-  seqs : List (String × List SAtom) := []
+  /-- Each rest sequence: its arguments in order, each with its count. -/
+  seqs : List (String × List (SAtom × Nat)) := []
   /-- Per filter, the count of each element (1 outside a multiset). -/
   counts : List (String × List Nat) := []
   /-- Each variable of a filter's pattern: its value at each element. -/

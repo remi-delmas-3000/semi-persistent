@@ -6,9 +6,12 @@ import SemperCheck.Prim
 
 `seqApply r B` is the pair of terms rule `r` equates under the binding `B`:
 the left side is the root operator applied to its items (a rest sequence
-gives its atoms, a filter gives one instance of its pattern per element, as
-many times as the element's count), or the rule's left pattern under the
-binding; the right side is built from the same elements. It is part of the
+gives its atoms, a filter gives one instance of its pattern per element, with
+the element's count), or the rule's left pattern under the binding; the right
+side is built from the same elements. An argument that occurs `k` times is
+held once with the count `k` (`STm.app`), and a row that occurs `m` times in
+a row once with `m`: the evaluation costs the number of distinct neighbours,
+not the counts. It is part of the
 statement of the soundness theorem: a model satisfies `r` when the two terms
 are equal under every binding and every valuation of the atoms
 (`Semantics.lean`, `SeqSat`).
@@ -44,30 +47,31 @@ mutual
 def patB (B : SBind) (look : String → Option SAtom) : Pat → Option STm
   | .var x => (look x).map .atom
   | .lit s v => some (.atom (.lit s v))
-  | .app f ps => (patsB B look ps).map (.app f)
+  | .app f ps => (patsB B look ps).map (STm.mk f)
   | .count k => (B.kcounts.lookup k).map fun n => .atom (.lit "i64" (toString n))
   | .rest _ => none
   | .rep _ _ => none
   | .times _ _ => none
 
-/-- An argument list: a rest variable gives its atoms, a counted argument its
-instance as many times as its count. -/
-def patsB (B : SBind) (look : String → Option SAtom) : List Pat → Option (List STm)
+/-- An argument list, each argument with its count: a rest variable gives its
+atoms with theirs, a counted argument its instance with its count. -/
+def patsB (B : SBind) (look : String → Option SAtom) : List Pat → Option (List (STm × Nat))
   | [] => some []
   | .rest x :: ps =>
-    (B.seqs.lookup x).bind fun xs => (patsB B look ps).map (xs.map .atom ++ ·)
+    (B.seqs.lookup x).bind fun xs =>
+      (patsB B look ps).map ((xs.map fun ak => (STm.atom ak.1, ak.2)) ++ ·)
   | .rep p k :: ps =>
     (B.kcounts.lookup k).bind fun n => (patB B look p).bind fun t =>
-      (patsB B look ps).map (List.replicate n t ++ ·)
+      (patsB B look ps).map ((t, n) :: ·)
   | .times p n :: ps =>
-    (patB B look p).bind fun t => (patsB B look ps).map (List.replicate n t ++ ·)
-  | .var x :: ps => (look x).bind fun a => (patsB B look ps).map (.atom a :: ·)
-  | .lit s v :: ps => (patsB B look ps).map (.atom (.lit s v) :: ·)
+    (patB B look p).bind fun t => (patsB B look ps).map ((t, n) :: ·)
+  | .var x :: ps => (look x).bind fun a => (patsB B look ps).map ((.atom a, 1) :: ·)
+  | .lit s v :: ps => (patsB B look ps).map ((.atom (.lit s v), 1) :: ·)
   | .count k :: ps =>
     (B.kcounts.lookup k).bind fun n =>
-      (patsB B look ps).map (.atom (.lit "i64" (toString n)) :: ·)
+      (patsB B look ps).map ((.atom (.lit "i64" (toString n)), 1) :: ·)
   | .app f qs :: ps =>
-    (patsB B look qs).bind fun as => (patsB B look ps).map (.app f as :: ·)
+    (patsB B look qs).bind fun as => (patsB B look ps).map ((STm.mk f as, 1) :: ·)
 
 end
 
@@ -89,29 +93,57 @@ def rowsFrom (B : SBind) (p : Pat) (i : Nat) : List Nat → Option (List (STm ×
 
 end SBind
 
-/-- Equal neighbours as one entry with their number. -/
-def groupsOf : List SAtom → List (SAtom × Nat)
+/-- Equal neighbours as one entry, their counts added; an entry of count zero
+is left out. -/
+def groupsOf : List (SAtom × Nat) → List (SAtom × Nat)
   | [] => []
-  | a :: as =>
-    match groupsOf as with
-    | (b, k) :: r => if a == b then (b, k + 1) :: r else (a, 1) :: (b, k) :: r
-    | [] => [(a, 1)]
+  | (a, j) :: as =>
+    if j = 0 then groupsOf as
+    else
+      match groupsOf as with
+      | (b, k) :: r => if a == b then (b, k + j) :: r else (a, j) :: (b, k) :: r
+      | [] => [(a, j)]
 
-/-- The rows of the sequence named `x`, each with its count: the elements of
-the filter `x`; else the column `x`; else the rest sequence `x`, its equal
-neighbours as one row when `grouped`. -/
-def srcRows (r : SeqRule) (B : SBind) (grouped : Bool) (x : String) : Option (List (STm × Nat)) :=
+/-- The rows of the sequence named `x`. A row is a value, its count, and the
+number of times the row occurs in a row: the elements of the filter `x`, each
+once with its count; else the column `x`; else the rest sequence `x`, whose
+equal neighbours are one row with their number as its count when `grouped`,
+and else one row of count 1 that occurs as many times. -/
+def srcRows (r : SeqRule) (B : SBind) (grouped : Bool) (x : String) :
+    Option (List (STm × Nat × Nat)) :=
   match r.items.findSome? (fun it => match it with
       | .filter g p => if g == x then some p else none
       | _ => none) with
-  | some p => (B.counts.lookup x).bind (B.rowsFrom p 0)
+  | some p => ((B.counts.lookup x).bind (B.rowsFrom p 0)).map (·.map fun tk => (tk.1, tk.2, 1))
   | none =>
     match B.cols.lookup x with
-    | some as => some (as.map fun a => (.atom a, 1))
+    | some as => some (as.map fun a => (.atom a, 1, 1))
     | none =>
       (B.seqs.lookup x).map fun as =>
-        if grouped then (groupsOf as).map fun (a, k) => (.atom a, k)
-        else as.map fun a => (.atom a, 1)
+        if grouped then (groupsOf as).map fun (a, k) => (.atom a, k, 1)
+        else (groupsOf as).map fun (a, k) => (.atom a, 1, k)
+
+/-- Sequences of rows side by side: each entry holds the value and count each
+sequence has at a position, and the number of consecutive positions that have
+them. The rows stop at the shortest sequence. `fuel` bounds the number of
+entries: the number of rows of all sequences. -/
+def sideRows : Nat → List (List (STm × Nat × Nat)) → List (List (STm × Nat) × Nat)
+  | 0, _ => []
+  | fuel + 1, ls =>
+    match ls.mapM List.head? with
+    | none => []
+    | some hs =>
+      let m := (hs.map (·.2.2)).foldl min ((hs.head?.map (·.2.2)).getD 0)
+      if m = 0 then []
+      else
+        (hs.map fun h => (h.1, h.2.1), m) :: sideRows fuel (ls.map fun l =>
+          match l with
+          | (t, k, n) :: rest => if n ≤ m then rest else (t, k, n - m) :: rest
+          | [] => [])
+
+/-- `sideRows` with the fuel its sequences need. -/
+def besides (ls : List (List (STm × Nat × Nat))) : List (List (STm × Nat) × Nat) :=
+  sideRows ((ls.map (·.length)).foldl (· + ·) 1) ls
 
 /-- A literal atom as an integer, with its sort. -/
 def intOf : STm → Option (Int × String)
@@ -157,7 +189,7 @@ def intAtom (s : String) (n : Int) : STm := .atom (.lit s (toString n))
 /-- The atom a row's value is, when it is one. -/
 def atomOf? : STm → Option SAtom
   | .atom a => some a
-  | .app _ _ => none
+  | .app _ _ _ => none
 
 /-- An element of an interval operation: its key and its interval. -/
 structure IRow where
@@ -165,48 +197,52 @@ structure IRow where
   lo : Int
   hi : Int
   sort : String
+  /-- The number of times the element occurs in a row. -/
+  reps : Nat := 1
 
 /-- The elements `(key, [lo, hi])` of three columns side by side. -/
-def iRows (ks ls us : List (STm × Nat)) : Option (List IRow) :=
-  (ks.zip (ls.zip us)).mapM fun (x : (STm × Nat) × (STm × Nat) × (STm × Nat)) =>
-    (atomOf? x.1.1).bind fun k => (intOf x.2.1.1).bind fun a => (intOf x.2.2.1).map fun b =>
-      ({ key := k, lo := a.1, hi := b.1, sort := a.2 } : IRow)
+def iRows (ks ls us : List (STm × Nat × Nat)) : Option (List IRow) :=
+  (besides [ks, ls, us]).mapM fun (x : List (STm × Nat) × Nat) =>
+    match x.1 with
+    | [k, a, b] =>
+      (atomOf? k.1).bind fun k => (intOf a.1).bind fun a => (intOf b.1).map fun b =>
+        ({ key := k, lo := a.1, hi := b.1, sort := a.2, reps := x.2 } : IRow)
+    | _ => none
 
 /-- `(union-by p l u)`: per key, in the order of first sight, the union of
-its intervals; a row is the key and one interval. -/
-def unionByRows (ps ls us : List (STm × Nat)) : Option (List (List STm × Nat)) :=
+its intervals; a row is the key and one interval. An interval given twice is
+given once: the union is the same. -/
+def unionByRows (ps ls us : List (STm × Nat × Nat)) : Option (List (List STm × Nat × Nat)) :=
   (iRows ps ls us).map fun (xs : List IRow) =>
     let keys : List SAtom := xs.foldl (fun ks x => if ks.contains x.key then ks else ks ++ [x.key]) []
     let sort : String := (xs.head?.map (·.sort)).getD "i64"
     keys.flatMap fun g =>
       (unionInts ((xs.filter (·.key == g)).map fun x => (x.lo, x.hi))).map fun (ab : Int × Int) =>
-        ([STm.atom g, intAtom sort ab.1, intAtom sort ab.2], 1)
+        ([STm.atom g, intAtom sort ab.1, intAtom sort ab.2], 1, 1)
 
 /-- `(narrow c d r a b q)`: per element `(r, [c, d])`, the interval narrowed
 past the union of the intervals `[a, b]` whose key `q` is `r`; with `changed`,
 only the rows whose interval changed. -/
-def narrowRows (cs ds rs as bs qs : List (STm × Nat)) (changed : Bool) :
-    Option (List (List STm × Nat)) :=
+def narrowRows (cs ds rs as bs qs : List (STm × Nat × Nat)) (changed : Bool) :
+    Option (List (List STm × Nat × Nat)) :=
   (iRows qs as bs).bind fun (ws : List IRow) => (iRows rs cs ds).map fun (fs : List IRow) =>
     fs.filterMap fun f =>
       let windows := unionInts ((ws.filter (·.key == f.key)).map fun w => (w.lo, w.hi))
       let r := narrowInt windows f.lo f.hi
       if !changed || r.1 != f.lo || r.2 != f.hi then
-        some ([STm.atom f.key, intAtom f.sort r.1, intAtom f.sort r.2], 1)
+        some ([STm.atom f.key, intAtom f.sort r.1, intAtom f.sort r.2], 1, f.reps)
       else none
 
-/-- The rows a comprehension ranges over: each the values of its binders and
-a count. Side by side, the rows stop at the shortest sequence and take the
-first one's counts. -/
-def rowsOf (r : SeqRule) (B : SBind) (grouped : Bool) : SSrc → Option (List (List STm × Nat))
-  | .one x => (srcRows r B grouped x).map (·.map fun (t, k) => ([t], k))
+/-- The rows a comprehension ranges over: each the values of its binders, a
+count, and the number of times the row occurs in a row. Side by side, the
+rows stop at the shortest sequence and take the first one's counts. -/
+def rowsOf (r : SeqRule) (B : SBind) (grouped : Bool) : SSrc → Option (List (List STm × Nat × Nat))
+  | .one x => (srcRows r B grouped x).map (·.map fun (t, k, m) => ([t], k, m))
   | .concat xs =>
-    (xs.mapM (srcRows r B grouped)).map fun ls => ls.flatten.map fun (t, k) => ([t], k)
+    (xs.mapM (srcRows r B grouped)).map fun ls => ls.flatten.map fun (t, k, m) => ([t], k, m)
   | .zip xs =>
     (xs.mapM (srcRows r B grouped)).map fun ls =>
-      let n := (ls.map (·.length)).foldl min ((ls.head?.map (·.length)).getD 0)
-      (List.range n).map fun i =>
-        (ls.filterMap fun l => (l[i]?).map (·.1), ((ls.head?.bind (·[i]?)).map (·.2)).getD 1)
+      (besides ls).map fun (hs, m) => (hs.map (·.1), (hs.head?.map (·.2)).getD 1, m)
   | .unionBy p l u =>
     (srcRows r B grouped p).bind fun ps => (srcRows r B grouped l).bind fun ls =>
       (srcRows r B grouped u).bind fun us => unionByRows ps ls us
@@ -216,24 +252,33 @@ def rowsOf (r : SeqRule) (B : SBind) (grouped : Bool) : SSrc → Option (List (L
         (srcRows r B grouped b).bind fun bs => (srcRows r B grouped q).bind fun qs =>
           narrowRows cs ds rs as bs qs changed
 
-/-- The arguments a left-side item stands for. -/
-def SItem.args (B : SBind) : SItem → Option (List STm)
-  | .rest x => (B.seqs.lookup x).map (·.map .atom)
-  | .filter g p =>
-    ((B.counts.lookup g).bind (B.rowsFrom p 0)).map fun rows =>
-      rows.flatMap fun (t, k) => List.replicate k t
-  | .one p => (patB B (B.look none) p).map ([·])
+/-- The arguments a left-side item stands for, each with its count. -/
+def SItem.args (B : SBind) : SItem → Option (List (STm × Nat))
+  | .rest x => (B.seqs.lookup x).map (·.map fun ak => (STm.atom ak.1, ak.2))
+  | .filter g p => (B.counts.lookup g).bind (B.rowsFrom p 0)
+  | .one p => (patB B (B.look none) p).map fun t => [(t, 1)]
 
-def itemsArgs (B : SBind) : List SItem → Option (List STm)
+def itemsArgs (B : SBind) : List SItem → Option (List (STm × Nat))
   | [] => some []
   | it :: its => (it.args B).bind fun a => (itemsArgs B its).map (a ++ ·)
 
 /-- What `..x` splices: the elements of the filter named `x`, else the rest
 sequence `x`. -/
-def spliceOf (r : SeqRule) (B : SBind) (x : String) : Option (List STm) :=
+def spliceOf (r : SeqRule) (B : SBind) (x : String) : Option (List (STm × Nat)) :=
   match r.items.find? (fun it => match it with | .filter g _ => g == x | _ => false) with
   | some it => it.args B
-  | none => (B.seqs.lookup x).map (·.map .atom)
+  | none => (B.seqs.lookup x).map (·.map fun ak => (STm.atom ak.1, ak.2))
+
+/-- Rows with the position each starts at, from position `i` on. A row that
+occurs several times in a row is given once per position where a column of
+length `L` has an entry, which the row reads there, and once for its
+occurrences past the column. -/
+def placeRows (L : Nat) : Nat → List (List STm × Nat × Nat) → List (List STm × Nat × Nat × Nat)
+  | _, [] => []
+  | i, (vs, k, m) :: rest =>
+    ((List.range (min m (L - i))).map fun j => (vs, k, 1, i + j)) ++
+      (if m > min m (L - i) then [(vs, k, m - min m (L - i), i + min m (L - i))] else []) ++
+      placeRows L (i + m) rest
 
 /-- What a comprehension binds while its body is built. -/
 structure SLoc where
@@ -245,7 +290,8 @@ mutual
 /-- The value of `e` under the binding: a filter's count is the number of its
 elements, as an `i64`. -/
 def numS (r : SeqRule) (B : SBind) (lc : SLoc) : SNum → Option Val
-  | .rows src => (rowsOf r B false src).map fun rows => .i64 rows.length
+  | .rows src =>
+    (rowsOf r B false src).map fun rows => .i64 ((rows.foldl (fun n row => n + row.2.2) 0 : Nat) : Int)
   | .agg op e =>
     -- `e` at each element: the filters' variables read at that element.
     let n := (B.cols.map (·.2.length)).foldl max 0
@@ -304,26 +350,28 @@ def rhsS (r : SeqRule) (B : SBind) (lc : SLoc) : SRhs → Option STm
     | some t => some t
     | none => (B.scalars.lookup x).map .atom
   | .lit s v => some (.atom (.lit s v))
-  | .app f args => (argsS r B lc args).map (.app f)
+  | .app f args => (argsS r B lc args).map (STm.mk f)
 
-def argsS (r : SeqRule) (B : SBind) (lc : SLoc) : List SArg → Option (List STm)
+def argsS (r : SeqRule) (B : SBind) (lc : SLoc) : List SArg → Option (List (STm × Nat))
   | [] => some []
-  | .tm t :: as => (rhsS r B lc t).bind fun x => (argsS r B lc as).map (x :: ·)
+  | .tm t :: as => (rhsS r B lc t).bind fun x => (argsS r B lc as).map ((x, 1) :: ·)
   | .splice x :: as => (spliceOf r B x).bind fun xs => (argsS r B lc as).map (xs ++ ·)
   | .times t k :: as =>
     (timesS r B lc (some k)).bind fun n => (rhsS r B lc t).bind fun x =>
-      (argsS r B lc as).map (List.replicate n x ++ ·)
+      (argsS r B lc as).map ((x, n) :: ·)
   | .comp body bs kv src grouped guard mult :: as =>
     (rowsOf r B grouped src).bind fun rows =>
-      (rows.zipIdx.mapM fun ((row, i) : (List STm × Nat) × Nat) =>
-        -- Row `i` also reads each filter variable at element `i`.
+      ((placeRows ((B.cols.map (·.2.length)).foldl max 0) 0 rows).mapM
+        fun (row : List STm × Nat × Nat × Nat) =>
+        -- The row at position `i` also reads each filter variable at element `i`.
         let cols : List (String × STm) := B.cols.filterMap fun (ca : String × List SAtom) =>
-          (ca.2[i]?).map fun a => (ca.1, STm.atom a)
+          (ca.2[row.2.2.2]?).map fun a => (ca.1, STm.atom a)
         let lc' : SLoc := { vals := bs.zip row.1 ++ cols ++ lc.vals,
-                            cnts := (match kv with | some x => [(x, row.2)] | none => []) ++ lc.cnts }
+                            cnts := (match kv with | some x => [(x, row.2.1)] | none => []) ++ lc.cnts }
         (holdsS r B lc' guard).bind fun ok =>
           if ok then
-            (timesS r B lc' mult).bind fun n => (rhsS r B lc' body).map (List.replicate n)
+            -- The body with its count, once per occurrence of the row.
+            (timesS r B lc' mult).bind fun n => (rhsS r B lc' body).map fun t => [(t, n * row.2.2.1)]
           else some []).bind fun parts =>
         (argsS r B lc as).map (parts.flatten ++ ·)
 
@@ -347,7 +395,7 @@ def seqApply (r : SeqRule) (B : SBind) : Option (STm × STm) :=
   else
     let L := match r.lhs with
       | some p => patB B (B.look none) p
-      | none => (itemsArgs B r.items).map (.app r.op)
+      | none => (itemsArgs B r.items).map (STm.mk r.op)
     L.bind fun L => (rhsS r B lc r.rhs).map fun R => (L, R)
 
 end SemperCheck

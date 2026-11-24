@@ -508,13 +508,14 @@ theorem internS_sound (hwf : wfNodes C.nodes = true) :
   | .atom (.lit s v), i, h => by
     rw [internS] at h
     rw [nval_lit (lookup_some h), Model.evS, Model.evA]
-  | .app f args, i, h => by
+  | .app f args ks, i, h => by
     rw [internS, Option.bind_eq_some_iff] at h
     obtain ⟨ids, hids, hi⟩ := h
     rw [mkApp_sound hwf hi, Model.evS]
     congr 1
-    rw [← spread_map, spread_rle]
-    exact mapM_some_map args ids hids fun a _ j hj => internS_sound hwf a j hj
+    have hm := mapM_some_map args ids hids fun a _ j hj => internS_sound hwf a j hj
+    rw [← hm, List.zip_map_left, List.flatMap_map]
+    rfl
 
 theorem intern_sound (hwf : wfNodes C.nodes = true) :
     ∀ (t : Term) (i : Nat), C.intern t = some i → nval M C.nodes i = M.eval t

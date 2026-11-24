@@ -137,7 +137,8 @@ def evA (v : Nat → M.α) : SAtom → M.α
 
 def evS (v : Nat → M.α) : STm → M.α
   | .atom a => M.evA v a
-  | .app f args => M.app f (args.map (evS v))
+  | .app f args ks =>
+    M.app f (((args.map (evS v)).zip ks).flatMap fun yk => List.replicate yk.2 yk.1)
 
 /-- A sequence rule holds when the two terms it yields are equal, under every
 binding and every valuation of the binding's atoms (`Seq.lean`). -/

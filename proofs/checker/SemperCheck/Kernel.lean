@@ -218,7 +218,7 @@ def isApp (a : Nat) (f : String) (cks : List (Nat × Nat)) : Bool :=
 def internS : STm → Option Nat
   | .atom (.node n) => if n < C.nodes.size then some n else none
   | .atom (.lit s v) => C.lookup (.lit s v)
-  | .app f args => (args.mapM internS).bind fun ids => C.mkApp f (rle ids)
+  | .app f args ks => (args.mapM internS).bind fun ids => C.mkApp f (ids.zip ks)
 
 /-- The node that is term `t`, child for child. -/
 def intern : Term → Option Nat

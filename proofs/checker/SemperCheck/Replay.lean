@@ -303,11 +303,6 @@ def St.mergeBy (S : St P) (a b : Nat) (pf : Pf) : St P :=
       | (S, false) => S.noStep
     | _ => S.noStep
 
-/-- The node that is `f` applied to counted children, in the form `f`'s kind
-gives its nodes: counted for a multiset operator, a list for any other. -/
-def countedNode (S : St P) (f : String) (cks : List (Nat × Nat)) : Node :=
-  if S.prog.multiset f && !cks.isEmpty then .napp f (mergeAdj cks) else .app f (Ctx.spread cks)
-
 /-- A merge the replayer has no kernel step for: it is not applied. -/
 def St.merge (S : St P) (a b : Nat) : St P := S.mergeBy a b none
 
@@ -366,7 +361,9 @@ def denotes (S : St P) (n : Nat) : Term → Bool
     | _ => false
   | .app f ts => match S.defC n with
     | some (.app g cs) => g == f && denotesArgs S cs ts
-    | some (.napp g cks) => g == f && denotesArgs S (Ctx.spread cks) ts
+    | some (.napp g cks) =>
+      -- The node's arguments one by one, when it has as many as the term.
+      g == f && (Args.ofRuns cks).length == ts.length && denotesArgs S (Ctx.spread cks) ts
     | _ => false
   | .napp f ts ks => match S.defC n with
     | some (.napp g cks) => g == f && cks.map (·.2) == ks && denotesArgs S (cks.map (·.1)) ts
@@ -1134,21 +1131,6 @@ def foldCong (S : St P) (f : String) (left : Bool) (a b : Nat) : St P × Pf := I
   let (S', s) := emit S (.cong f a b prems.toList) a b
   return (S', some (some s))
 
-/-- The counted arguments node `x` flattens to under the multiset operator
-`f`, as the kernel's `cview` reads them. -/
-def cviewR (S : St P) (f : String) (x : Nat) : List (Nat × Nat) :=
-  match S.defC x with
-  | some (.napp g cs) =>
-    if g == f then
-      cs.flatMap fun ck => if _h : ck.1 < x then scaleC ck.2 (cviewR S f ck.1) else [(ck.1, ck.2)]
-    else [(x, 1)]
-  | some (.app g cs) =>
-    if g == f && !cs.isEmpty then
-      cs.flatMap fun c => if _h : c < x then cviewR S f c else [(c, 1)]
-    else [(x, 1)]
-  | _ => [(x, 1)]
-termination_by x
-
 /-- A `cong` step for two nodes of a multiset operator whose counted
 arguments agree: each child has the same total count on both sides. -/
 def countedCong (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
@@ -1156,7 +1138,7 @@ def countedCong (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   -- Two nodes of one class already have a proof.
   if S.fd a == S.fd b then return eqP S a b
   let kind := S.prog.kind f
-  let (l, m) := (cviewR S f a, cviewR S f b)
+  let (l, m) := ((kview S f a).runs, (kview S f b).runs)
   if sameCounts kind l m then
     let (S, s) := emit S (.cong f a b []) a b
     return (S, some (some s))
@@ -1197,7 +1179,7 @@ def countedCong (S : St P) (f : String) (a b : Nat) : St P × Pf := Id.run do
   let repOf (y : Nat) : Nat := (reps.lookup (S.fd y)).getD y
   let u := S.unit f
   let side (v : List (Nat × Nat)) : List (Nat × Nat) :=
-    (v.flatMap fun yn => scaleC yn.2 (cviewR S f (repOf yn.1))).filter fun yn => some yn.1 != u
+    (v.flatMap fun yn => scaleC yn.2 (kview S f (repOf yn.1)).runs).filter fun yn => some yn.1 != u
   if !sameCounts kind (side l) (side m) then return (S, none)
   -- The pairs to prove are computed before the state is updated: a closure
   -- over the state, alive in the loop, would make each step copy its tables.
@@ -1806,7 +1788,7 @@ mutual
 def internT (S : St P) : Term → Option Nat
   | .lit s v => S.idx (Node.lit s v)
   | .app f args => (internTs S args).bind fun cs => S.idx (Node.app f cs)
-  | .napp f args ks => (internTs S args).bind fun cs => S.idx (countedNode S f (cs.zip ks))
+  | .napp f args ks => (internTs S args).bind fun cs => S.idxA f (Args.ofRuns (cs.zip ks))
 
 def internTs (S : St P) : List Term → Option (List Nat)
   | [] => some []
@@ -3102,9 +3084,9 @@ not there. -/
 def addS (S : St P) : STm → St P × Option Nat
   | .atom (.node n) => (S, some n)
   | .atom (.lit s v) => intern S (.lit s v)
-  | .app f args =>
+  | .app f args ks =>
     match addSs S args with
-    | (S, some ids) => intern S (.app f ids)
+    | (S, some ids) => internA S f (Args.ofRuns (ids.zip ks))
     | (S, none) => (S, none)
 
 def addSs (S : St P) : List STm → St P × Option (List Nat)
@@ -3126,12 +3108,12 @@ that argument (the engine builds the argument in the application's place),
 and those to no argument, which the engine builds as the unit. -/
 def singlesS (isSeq : String → Bool) : STm → List (STm × STm)
   | .atom _ => []
-  | .app f args =>
-    (match args with
-      | [x] => if isSeq f then [(STm.app f [x], x)] else []
+  | .app f args ks =>
+    (match args, ks with
+      | [x], [1] => if isSeq f then [(STm.app f args ks, x)] else []
       -- No argument: listed with itself, for the unit.
-      | [] => if isSeq f then [(STm.app f [], STm.app f [])] else []
-      | _ => []) ++ singlesSs isSeq args
+      | [], _ => if isSeq f then [(STm.app f args ks, STm.app f args ks)] else []
+      | _, _ => []) ++ singlesSs isSeq args
 
 def singlesSs (isSeq : String → Bool) : List STm → List (STm × STm)
   | [] => []
@@ -3144,9 +3126,8 @@ mutual
 /-- A program term as a term over atoms. -/
 def termS : Term → STm
   | .lit s v => .atom (.lit s v)
-  | .app f args => .app f (termsS args)
-  -- No sequence operator holds counts: the kernel refuses a step built on this.
-  | .napp f args _ => .app f (termsS args)
+  | .app f args => .app f (termsS args) (args.map fun _ => 1)
+  | .napp f args ks => .app f (termsS args) ks
 
 def termsS : List Term → List STm
   | [] => []
@@ -3165,7 +3146,7 @@ structure SeqRead where
   ok : Bool := true
 
 /-- Reads the binding lines of rule `r`'s firing. A class with a count `c:k`
-is `k` arguments of a rest sequence, and the count `k` of a filter's element. -/
+is an argument of count `k` of a rest sequence, and the count `k` of a filter's element. -/
 def readSeq (S : St P) (r : SeqRule) (lines : List (List String)) : SeqRead :=
   let rests := r.items.filterMap fun it => match it with | .rest x => some x | _ => none
   let entry (w : String) : Option (Nat × Nat) :=
@@ -3193,7 +3174,7 @@ def readSeq (S : St P) (r : SeqRule) (lines : List (List String)) : SeqRead :=
       | some xs =>
         if rests.contains name then
           { R with B := { R.B with seqs := R.B.seqs ++
-              [(name, xs.flatMap fun (c, k) => List.replicate k (SAtom.node c))] } }
+              [(name, xs.map fun (c, k) => (SAtom.node c, k))] } }
         else { R with B := { R.B with cols := R.B.cols ++ [(name, xs.map fun (c, _) => SAtom.node c)] } }
       | none => { R with ok := false }
     | ["ql", name] => { R with lits := some (name, false), B := { R.B with cols := R.B.cols ++ [(name, [])] } }
@@ -3249,7 +3230,7 @@ def seqFinish (S : St P) (od j : Nat) (r : SeqRule) (B : SBind) (members : List 
     let (S1, ti) := addS S t
     let (S1, xi) := addS S1 x
     S := S1
-    if let (some ti, some xi, .app f as) := (ti, xi, t) then
+    if let (some ti, some xi, .app f as _) := (ti, xi, t) then
       if as.isEmpty then
         -- The application to no argument is the unit, by the `unit` step.
         if let some u := S.unit f then
@@ -3260,11 +3241,11 @@ def seqFinish (S : St P) (od j : Nat) (r : SeqRule) (B : SBind) (members : List 
         let (S1, pf) := congStepL S f ti xi
         S := S1.mergeBy ti xi pf
   let f := match L with
-    | .app f _ => f
+    | .app f _ _ => f
     | .atom _ => r.op
   let (S1, p1) := congStepL S f root a
   let (S1, p2) : St P × Pf := match T with
-    | .app g _ => congStepL S1 g b new
+    | .app g _ _ => congStepL S1 g b new
     | .atom _ => eqP S1 b new
   -- A `:flatten` match that read one root argument through a member of its
   -- class: the member is the application of the bound arguments no other root
@@ -3315,8 +3296,8 @@ def seqFireP (S : St P) (od j : Nat) (r : SeqRule) (p : Pat) (x y : Nat) : St P 
                        -- A rest variable is named with its dots in a pattern, and
                        -- without them as a comprehension's source.
                        seqs := w.ρ.flatMap fun (vn : String × Args) =>
-                           [(vn.1, vn.2.toList.map SAtom.node),
-                            ((vn.1.drop 2).toString, vn.2.toList.map SAtom.node)],
+                           [(vn.1, vn.2.runs.map fun ck => (SAtom.node ck.1, ck.2)),
+                            ((vn.1.drop 2).toString, vn.2.runs.map fun ck => (SAtom.node ck.1, ck.2))],
                        kcounts := w.μ }
     let new := if S.fd nl == S.fd x then y else x
     seqFinish S od j r B [] il new
@@ -3359,7 +3340,7 @@ def stepCore (S : St P) (line : String) : St P :=
   match line.splitOn " " with
   | "n" :: id :: f :: kids =>
     match id.toNat?, idsC S kids with
-    | some i, some cks => define S i (countedNode S f cks)
+    | some i, some cks => define S i (S.nodeA f (Args.ofRuns cks))
     | _, _ => S.fail "definition: unreadable"
   | "l" :: id :: s :: rest =>
     match id.toNat? with
