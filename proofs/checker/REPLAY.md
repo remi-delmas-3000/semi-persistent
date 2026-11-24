@@ -124,7 +124,8 @@ Its right side is `r` as one argument when `k = 1` (the engine's atomic class),
 and `r`'s own arguments when `k = 0`. The engine has to say which: when `r` is
 itself an application of the operator, both readings are terms of the class.
 
-A monomial is a list of argument nodes, each read as its class. **Reducing** a
+A monomial is an argument list in run-length form (`Args.lean`: a node and
+the number of consecutive times it occurs), each node read as its class. **Reducing** a
 monomial by the operator's laws drops the arguments in the unit's class,
 removes each inverse pair (an inverse application, or a class a `j` witness
 stands for, with one argument in the class of its argument), keeps each class
@@ -175,7 +176,11 @@ fields decide: a `w`, `c`, `t` or `e` check drops an inverse application of a
 node of the unit's class by itself; a `p` check with `d = 1` (the peak of a
 critical pair with a law) cancels the peak's inverse pair before it drops the
 unit's arguments; every other reduction drops the unit's arguments first, and
-the two sides of a cancellation keep their inverse pairs.
+the two sides of a cancellation keep their inverse pairs. A `p` check with
+`c = 1` rewrites both sides and removes their common part on the counts as
+they are, and clamps a count under ACI or `:nilpotent n` only on what stays of
+each side: the engine intersects the two sides before it clamps
+(`cancel_close` in `egraph.rs`).
 
 ## Soundness
 
@@ -243,6 +248,10 @@ number of consecutive times it occurs. A multiset node's counted children are
 its runs, and a positional node's list is run-length encoded on reading. Each
 derivation (completion and critical pairs, the walk of a `:flatten` rule, a
 term's normal form, the law steps) costs the number of runs, and none writes a
-count as repeated arguments. The sequence-rule evaluator of `Seq.lean` still
-builds one term per repeated argument: the firing in `seq_rhs_too_wide.egg`,
-which builds a count of 4,194,304, replays in 1.7 s with a peak of 741 MB.
+count as repeated arguments. The sequence-rule evaluator of `Seq.lean` does
+the same in the statement: a term holds each argument once with its count
+(`STm.app`), a binding's rest sequence holds its arguments with their counts,
+and a comprehension's row holds the number of times it occurs in a row. The
+firing in `seq_rhs_too_wide.egg`, which builds a count of 4,194,304, replays
+in 0.19 s with a peak of 6.1 MB. A positional operator's node is the one
+place that holds an argument per occurrence, as in the engine.

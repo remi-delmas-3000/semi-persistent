@@ -138,7 +138,9 @@ in the statement is given by an evaluator (`Seq.lean`, `seqApply`): under a
 binding (the rest sequences, each filter's elements with the values of the
 pattern's variables at each element, the scalars), the rule yields a left
 term (the root operator applied to the rest atoms and to one instance of `p`
-per element) and a right term built from the same elements. A model satisfies
+per element) and a right term built from the same elements. A term holds each
+argument once with its count (`STm.app`), and a rest sequence holds its
+arguments with their counts. A model satisfies
 the rule when the two terms are equal under every binding and every valuation
 of the binding's atoms (`SeqSat`). The statement does not ask that a filter's
 elements be all the arguments that match `p`, and it does not restrict the
@@ -246,10 +248,10 @@ reads every program.
 | --- | --- |
 | `check-eq` proved (`replay_sound` covers them), of 31,101 | 31,101 |
 | programs with every `check-eq` proved, of 1,163 | 1,163 |
-| kernel steps checked | 17,339,908 |
+| kernel steps checked | 17,326,224 |
 | steps the kernel rejects | 0 |
 | events replayed | 7,438,563 |
-| events whose check fails | 3 |
+| events whose check fails | 0 |
 | events the stream gives no witness for | 0 |
 
 `GAP.md`, which `check-replay.py --gap` writes, assigns each `check-eq` not

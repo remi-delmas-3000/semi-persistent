@@ -531,7 +531,7 @@ recognizable, and reduces it by the operator's laws after each rewrite. -/
 removed, and each class kept once (ACI) or its count modulo `n`
 (`:nilpotent n`). -/
 def lawReduce (S : St P) (f : String) (atoms : Args) (inverse : Bool := true)
-    (peak : Bool := false) : Args :=
+    (peak : Bool := false) (clamp : Bool := true) : Args :=
   let d := S.prog.opDecl? f
   let u := (S.unit f).map S.fd
   let dropUnit (xs : Args) : Args := xs.filter fun a => some (S.fd a) != u
@@ -554,6 +554,10 @@ def lawReduce (S : St P) (f : String) (atoms : Args) (inverse : Bool := true)
     Args.ofRuns (groups.toList.flatMap fun (_, xs) =>
       let g : Args := Args.ofRuns xs.toList
       (g.take (limit g.length)).runs)
+  -- Without `clamp`, the counts stay as they are: the unit is dropped and
+  -- nothing else.
+  if !clamp then live
+  else
   match S.prog.kind f, d.bind (fun d => d.nilpotent) with
   | .aci, _ => keep fun _ => 1
   | _, some n => if n > 0 then keep (fun k => k % n) else live
@@ -577,9 +581,10 @@ def dropClass (S : St P) (c : Nat) (k : Nat) (xs : Args) : Args :=
 
 /-- The monomial `m` with the classes `l` replaced by the atoms `r`, as many
 times as `m` holds `l` (once under ACI or a nilpotent law, where a class's
-count is bounded, and once when `once` is set). `none` when `m` does not hold `l`. -/
-def applyRule (S : St P) (f : String) (m : Args) (l : Args) (r : Args) (once : Bool := false) :
-    Option (Nat × Args × Args) :=
+count is bounded, and once when `once` is set). `none` when `m` does not hold
+`l`. With `exact`, the result's counts are not clamped. -/
+def applyRule (S : St P) (f : String) (m : Args) (l : Args) (r : Args) (once : Bool := false)
+    (exact : Bool := false) : Option (Nat × Args × Args) :=
   let mc := classesOf S m
   let distinct := l.keys
   if l.isEmpty || !distinct.all (fun c => countOf c mc ≥ countOf c l) then none
@@ -590,7 +595,7 @@ def applyRule (S : St P) (f : String) (m : Args) (l : Args) (r : Args) (once : B
     let rest := distinct.foldl (fun m c => dropClass S c (q * countOf c l) m) m
     -- Between rewrites the engine clamps counts and drops the unit; it cancels
     -- inverse pairs on the normal form only.
-    some (q, rest, lawReduce S f (rest ++ r.times (S.prog.multiset f) q) (inverse := false))
+    some (q, rest, lawReduce S f (rest ++ r.times (S.prog.multiset f) q) (inverse := false) (clamp := !exact))
 
 /-- The arguments of `x` as a monomial of `f`: its own, if it is an
 application of `f`, else `x` itself. -/
@@ -618,7 +623,7 @@ structure Rewrote where
 Monomials are read on the classes of `S`; a rule's two nodes are in one class
 of `now`, the current classes. -/
 def rewriteR (now S : St P) (f : String) (W : List (Nat × Args)) (m : Args) (once : Bool)
-    (done : Array Rewrote) (raw : Option Args) :
+    (done : Array Rewrote) (raw : Option Args) (exact : Bool := false) :
     List (Nat × Nat × Bool) → Except String (Args × Array Rewrote)
   | [] => pure (m, done)
   | (l, r, atom) :: rest => do
@@ -629,27 +634,27 @@ def rewriteR (now S : St P) (f : String) (W : List (Nat × Args)) (m : Args) (on
       if g != f then throw "completion: rule of another operator"
       -- A rule's left side keeps its inverse pairs: the engine cancels them on
       -- a normal form only.
-      let lc := classesOf S (lawReduce S f (ls.bind bag (expand S bag W)) (inverse := false))
+      let lc := classesOf S (lawReduce S f (ls.bind bag (expand S bag W)) (inverse := false) (clamp := !exact))
       -- The rule applies to the monomial as the laws left it, or to what the
       -- last rewrite gave before the laws clamped its counts (`raw`): the
       -- engine applies some rules before it clamps.
       let rr := if atom then Args.one r else monomial S f W r
-      let hit := match applyRule S f m lc rr once, raw with
+      let hit := match applyRule S f m lc rr once exact, raw with
         | some x, _ => some x
-        | none, some m0 => applyRule S f m0 lc rr once
+        | none, some m0 => applyRule S f m0 lc rr once exact
         | none, none => none
       match hit with
       | some (q, left, m') =>
         rewriteR now S f W m' once (done.push { l, r, q, rest := left, after := m', atom })
-          (some (left ++ rr.times bag q)) rest
+          (some (left ++ rr.times bag q)) exact rest
       | none => throw s!"completion: rule does not apply | rule {done.size}: left side {ls} as classes {lc}, monomial {m} as classes {classesOf S m}"
     | _ => throw "completion: rule of another operator"
 
 /-- `rewriteR` from a monomial the laws have reduced. -/
 def rewrite (now S : St P) (f : String) (W : List (Nat × Args)) (m : Args) (once : Bool := false)
-    (done : Array Rewrote := #[]) (rules : List (Nat × Nat × Bool)) :
+    (done : Array Rewrote := #[]) (rules : List (Nat × Nat × Bool)) (exact : Bool := false) :
     Except String (Args × Array Rewrote) :=
-  rewriteR now S f W m once done none rules
+  rewriteR now S f W m once done none exact rules
 
 /-- `y` is the unit's node, or an application of `f` in the unit's class. -/
 def unitLike (S : St P) (f : String) (y : Nat) : Bool :=
@@ -789,15 +794,19 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
   -- A critical pair's own rules rewrite the peak once each; the normal form's
   -- rules, after it, rewrite every copy.
   let firstB := if w.reduceB then lawReduce R f peak (peak := true) else peak
-  let (mA, sA) ← rewrite S R f W peak true #[] w.preA
-  let (mB, sB) ← rewrite S R f W firstB true #[] w.preB
+  -- A cancelling pair is computed on the counts as they are: the engine
+  -- removes what the two sides share before it clamps a count under an
+  -- idempotent or nilpotent law.
+  let (mA, sA) ← rewrite S R f W peak true #[] w.preA (exact := w.cancel)
+  let (mB, sB) ← rewrite S R f W firstB true #[] w.preB (exact := w.cancel)
   if w.cancel then
     -- Declared, or a consequence of the group laws (`:inverse`).
     unless ((S.prog.opDecl? f).map fun d => d.cancellative || d.inverse.isSome).getD false do
       throw "completion: operator is not cancellative"
-    -- The two sides as the rewrites leave them: inverse pairs are cancelled
-    -- on a normal form only.
-    let (mA, mB) := (lawReduce R f mA (inverse := false), lawReduce R f mB (inverse := false))
+    -- The two sides as the rewrites leave them: the unit is dropped, no count
+    -- is clamped, and inverse pairs are cancelled on a normal form only.
+    let (mA, mB) := (lawReduce R f mA (inverse := false) (clamp := false),
+      lawReduce R f mB (inverse := false) (clamp := false))
     let (ca, cb) := (classesOf R mA, classesOf R mB)
     let keep := w.keep.map R.fd
     -- The common part: each class, as many times as both sides hold it.
@@ -807,8 +816,10 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
     let (left, right) := (drop mA, drop mB)
     unless (!left.isEmpty && !right.isEmpty) || (S.unit f).isSome do
       throw "completion: cancellation empties a side"
-    let (mA', tA) ← rewrite S R f W left false #[] w.postA
-    let (mB', tB) ← rewrite S R f W right false #[] w.postB
+    -- What stays of each side is then reduced by the laws and rewritten.
+    let (left1, right1) := (lawReduce R f left (inverse := false), lawReduce R f right (inverse := false))
+    let (mA', tA) ← rewrite S R f W left1 false #[] w.postA
+    let (mB', tB) ← rewrite S R f W right1 false #[] w.postB
     unless reaches S f W mA' a && reaches S f W mB' b do
       throw s!"completion: normal form differs | after cancellation: left {left} right {right}, side A {mA'} as classes {classesOf S (lawReduce S f mA')}, side B {mB'} as classes {classesOf S (lawReduce S f mB')}, without inverse cancellation {lawReduce S f mB' (inverse := false)} roots {(lawReduce S f mB' (inverse := false)).map S.fd}"
     -- What side A loses: its arguments that are not in `left`.
@@ -816,8 +827,8 @@ def peakMerge (S R : St P) (a b : Nat) (w : Peak) :
     pure { a := { f, start := .inr peak, first := peak, steps := sA, target := .inr mA },
            b := { f, start := .inr peak, peak := w.reduceB, first := firstB, steps := sB, target := .inr mB },
            cancel := some (left, right, gone,
-             { f, start := .inr left, first := left, steps := tA, target := .inl a },
-             { f, start := .inr right, first := right, steps := tB, target := .inl b }) }
+             { f, start := .inr left, first := left1, steps := tA, target := .inl a },
+             { f, start := .inr right, first := right1, steps := tB, target := .inl b }) }
   else
     let (mA, sA) ← rewrite S R f W mA false sA w.postA
     let (mB, sB) ← rewrite S R f W mB false sB w.postB
