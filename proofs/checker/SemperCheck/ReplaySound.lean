@@ -24,13 +24,15 @@ rejects, and the merge it was for is not applied.
 
 namespace SemperCheck.Replay
 
-/-- The replayer's state after the stream `lines`. -/
-def replay (P : Program) (lines : List String) : St P := lines.foldl step (start P)
+/-- The replayer's state after the stream `lines`, its node index sized for
+`cap` nodes at the start. The theorems below hold for every `cap`. -/
+def replay (P : Program) (lines : List String) (cap : Nat := 8) : St P :=
+  lines.foldl step (start P cap)
 
 /-- The `check-eq` of `P`, each with its offset, that the replay of `lines`
 proves. -/
-def proved (P : Program) (lines : List String) : List (Nat × Term × Term) :=
-  (replay P lines).core.goals
+def proved (P : Program) (lines : List String) (cap : Nat := 8) : List (Nat × Term × Term) :=
+  (replay P lines cap).core.goals
 
 /-- After one event, on any state: two nodes of one class have one value in
 every model of the program. -/
@@ -41,10 +43,11 @@ theorem step_classes {P : Program} (S : St P) (line : String) {a b : Nat}
 
 /-- After any stream: two nodes of one class have one value in every model of
 the program. -/
-theorem replay_classes {P : Program} (lines : List String) {a b : Nat}
-    (h : (replay P lines).fd a = (replay P lines).fd b) (M : Model) (hM : ∀ p, M.Models P p) :
-    nval M (replay P lines).defs a = nval M (replay P lines).defs b :=
-  (replay P lines).core.class_sound h M hM
+theorem replay_classes {P : Program} (lines : List String) (cap : Nat) {a b : Nat}
+    (h : (replay P lines cap).fd a = (replay P lines cap).fd b) (M : Model)
+    (hM : ∀ p, M.Models P p) :
+    nval M (replay P lines cap).defs a = nval M (replay P lines cap).defs b :=
+  (replay P lines cap).core.class_sound h M hM
 
 /-- After one event, on any state: every `check-eq` recorded as proved holds
 in every model of the commands before it. -/
@@ -55,9 +58,9 @@ theorem step_goals {P : Program} (S : St P) (line : String) {o : Nat} {l r : Ter
 
 /-- **Soundness of the replay.** A `check-eq` the replay of a stream proves
 holds in every model of the commands before it, whatever the stream is. -/
-theorem replay_sound {P : Program} {lines : List String} {o : Nat} {l r : Term}
-    (h : (o, l, r) ∈ proved P lines) (M : Model) (hM : M.Models P o) : M.eval l = M.eval r :=
-  (replay P lines).core.goal_sound h M hM
+theorem replay_sound {P : Program} {lines : List String} {cap o : Nat} {l r : Term}
+    (h : (o, l, r) ∈ proved P lines cap) (M : Model) (hM : M.Models P o) : M.eval l = M.eval r :=
+  (replay P lines cap).core.goal_sound h M hM
 
 end SemperCheck.Replay
 

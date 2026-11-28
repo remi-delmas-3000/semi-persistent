@@ -44,6 +44,10 @@ structure St (P : Program) where
   proves each link, the classes at each mark and at the round's start, and
   the `check-eq` proved. -/
   core : Core P := Core.new P
+  /-- An empty checked state, held in `core`'s place while a kernel operation
+  runs on `core` (`withCore`): one value for the whole replay, not one
+  allocated per operation. -/
+  blank : Core P := Core.new P
   /-- The table id of each of the engine's node ids. A restore discards the
   engine's ids past the mark, and the engine reuses them; the table keeps its
   nodes. -/
@@ -114,6 +118,7 @@ structure St (P : Program) where
   logFailed : Bool := false
   failedLog : Array String := #[]
   unchecked : Std.HashMap String Nat := {}
+  nUnchecked : Nat := 0
   /-- The sequence-rule firings the kernel took a `seq` step for, and those of
   a rule whose result reads a sequence as a whole (`SeqRule.whole`). -/
   seqFired : Nat := 0
@@ -173,7 +178,7 @@ def idxA (S : St P) (f : String) (m : Args) : Option Nat := S.core.index[S.nodeA
 /-- The table id of the engine's node `i`. -/
 def tr (S : St P) (i : Nat) : Option Nat := S.cid.getD i none
 
-def node? (S : St P) (x : String) : Option Nat := x.toNat?.bind S.tr
+def node? (S : St P) (x : String) : Option Nat := x.nat?.bind S.tr
 
 def fail (S : St P) (cause : String) : St P :=
   -- A cause can carry a detail after ` | `, which is shown and not counted by.
@@ -185,7 +190,7 @@ def fail (S : St P) (cause : String) : St P :=
 its arrays are held once and updated in place. -/
 @[inline] def withCore {α : Type} (S : St P) (k : Core P → Core P × α) : St P × α :=
   let c := S.core
-  let S := { S with core := Core.new P }
+  let S := { S with core := S.blank }
   let (c, x) := k c
   ({ S with core := c }, x)
 
@@ -884,7 +889,7 @@ def idsC (S : St P) (xs : List String) : Option (List (Nat × Nat)) :=
     if !x.contains ':' then (S.node? x).map (·, 1) else
     match x.splitOn ":" with
     | [n] => (S.node? n).map (·, 1)
-    | [n, k] => (S.node? n).bind fun n => k.toNat?.bind fun k => if k == 0 then none else some (n, k)
+    | [n, k] => (S.node? n).bind fun n => k.nat?.bind fun k => if k == 0 then none else some (n, k)
     | _ => none
 
 /-- `c` and `c:k` fields as an argument list. -/
@@ -1081,7 +1086,7 @@ def atomArgs (S : St P) (xs : List String) : Option (List (Nat × Nat) × List A
       match x.splitOn ":" with
       | [n] => fixed := fixed.push (← S.node? n, 1)
       | [n, k] =>
-        let k ← k.toNat?
+        let k ← k.nat?
         if k == 0 then none
         fixed := fixed.push (← S.node? n, k)
       | _ => none
@@ -3096,15 +3101,7 @@ def fireRule (r : Rule) (rewrite : Bool) : WalkM P Fired := do
     | none => walkB r.lhs
   let (nr, ir) ← walkB r.rhs
   let w ← get
-  for x in r.vars do
-    match w.σ.lookup x, r.sorts.lookup x with
-    | some n, some s => if sortOf w.S n != some s then throw "rule: variable of another sort"
-    | _, _ => throw "rule: unbound variable"
-  for x in r.rests do
-    match w.ρ.lookup x, r.sorts.lookup x with
-    | some ns, some s =>
-      if ns.any (fun n => sortOf w.S n != some s) then throw "rule: rest variable of another sort"
-    | _, _ => throw "rule: unbound rest variable"
+  -- The kernel's rule step checks each variable's sort (`sortsOk`, `restsOk`).
   -- The body equalities, between instances: every pattern is matched by now.
   let mut prems : Option (Array Nat) := some #[]
   for (p, q) in r.eqs do
@@ -3195,7 +3192,7 @@ def readSeq (S : St P) (r : SeqRule) (lines : List (List String)) : SeqRead :=
   let entry (w : String) : Option (Nat × Nat) :=
     match w.splitOn ":" with
     | [c] => (S.node? c).map (·, 1)
-    | [c, k] => (S.node? c).bind fun c => k.toNat?.map (c, ·)
+    | [c, k] => (S.node? c).bind fun c => k.nat?.map (c, ·)
     | _ => none
   let push (xs : List (String × List SAtom)) (x : String) (a : SAtom) : List (String × List SAtom) :=
     match xs.lookup x with
@@ -3356,7 +3353,7 @@ def seqFire (S : St P) (o : Nat) (x y : Nat) : St P := Id.run do
   let S := { S with seqLines := [] }
   let skip (S : St P) : St P :=
     let kind := "rewrite:sequence-rule"
-    { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1) }
+    { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), nUnchecked := S.nUnchecked + 1 }
   let some (od, .seq [some r]) := ((S.prog.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl))
     | return skip S
   let R := readSeq S r lines
@@ -3381,15 +3378,15 @@ def define (S : St P) (i : Nat) (d : Def) : St P :=
 
 def stepCore (S : St P) (line : String) : St P :=
   -- The line is split once.
-  let ws := line.splitOn " "
+  let ws := line.fields
   let S := { S with events := S.events + 1, cur := ws.headD "" }
   match ws with
   | "n" :: id :: f :: kids =>
-    match id.toNat?, idsC S kids with
+    match id.nat?, idsC S kids with
     | some i, some cks => define S i (S.nodeA f (Args.ofRuns cks))
     | _, _ => S.fail "definition: unreadable"
   | "l" :: id :: s :: rest =>
-    match id.toNat? with
+    match id.nat? with
     | some i => define S i (.lit s (" ".intercalate rest))
     | none => S.fail "definition: unreadable"
   | "t" :: id :: f :: kids =>
@@ -3407,16 +3404,16 @@ def stepCore (S : St P) (line : String) : St P :=
     | some c, some m => { S with splices := (c, m) :: S.splices, events := S.events - 1 }
     | _, _ => S.fail "splice: unreadable"
   | ["y", c, m, k] =>
-    match S.node? c, S.node? m, k.toNat? with
+    match S.node? c, S.node? m, k.nat? with
     | some c, some m, some k =>
       { S with regroups := S.regroups ++ [(k, c, m)], events := S.events - 1 }
     | _, _, _ => S.fail "regroup: unreadable"
   | ["s", c, m, k, p, at_] =>
-    match S.node? c, S.node? m, k.toNat?, at_.toNat? with
+    match S.node? c, S.node? m, k.nat?, at_.nat? with
     | some c, some m, some k, some at_ =>
       if p == "-" then
         { S with opens := S.opens ++ [(k, c, m, none, at_)], events := S.events - 1 }
-      else match p.toNat? with
+      else match p.nat? with
         | some p => { S with opens := S.opens ++ [(k, c, m, some p, at_)], events := S.events - 1 }
         | none => S.fail "splice: unreadable"
     | _, _, _, _ => S.fail "splice: unreadable"
@@ -3432,7 +3429,7 @@ def stepCore (S : St P) (line : String) : St P :=
     | some m => { S with inverses := m :: S.inverses, events := S.events - 1 }
     | none => S.fail "inverse witness: unreadable"
   | ["x", off, a, b] =>
-    match off.toNat?, S.node? a, S.node? b with
+    match off.nat?, S.node? a, S.node? b with
     | some o, some a, some b =>
       match S.declAt[o]? with
       | some (.axiom l r) =>
@@ -3566,7 +3563,7 @@ def stepCore (S : St P) (line : String) : St P :=
       | .error e => S.fail e
     | _, _, _, _ => S.fail "group law: unreadable"
   | ["r", off, kind] =>
-    match off.toNat? with
+    match off.nat? with
     | some o => { S with fire := some (o, kind == "w"), atoms := #[], rhs := [], seqLines := [], events := S.events - 1 }
     | none => S.fail "rule: unreadable"
   | "e" :: id :: f :: kids =>
@@ -3589,7 +3586,7 @@ def stepCore (S : St P) (line : String) : St P :=
         { S with splices := [], opens := [], regroups := [], inverses := [] }
       | _, _, _ => S.fail "sequence rule: unreadable"
     else
-    match j.toNat?, S.node? a, S.node? b, S.fire with
+    match j.nat?, S.node? a, S.node? b, S.fire with
     | some j, some a, some b, some (o, rw) =>
       -- The engine cites a rule by an offset inside its command.
       match ((S.prog.decls.filter (·.1 ≤ o)).getLast? : Option (Nat × Decl)) with
@@ -3637,7 +3634,7 @@ def stepCore (S : St P) (line : String) : St P :=
       | _ => S.fail "rule: no such command"
     | _, _, _, _ => S.fail "rule: unreadable"
   | ["g", off, a, b] =>
-    match off.toNat?, S.node? a, S.node? b with
+    match off.nat?, S.node? a, S.node? b with
     | some o, some a, some b =>
       match S.declAt[o]? with
       | some (.goal l r) =>
@@ -3721,7 +3718,7 @@ def stepCore (S : St P) (line : String) : St P :=
   -- A cancellative operator's lattice merge, with the combination of node
   -- equations the two classes differ by.
   | "k" :: a :: b :: npos :: rest =>
-    match S.node? a, S.node? b, npos.toNat?, rest.mapM (fun (x : String) => x.toNat?) with
+    match S.node? a, S.node? b, npos.nat?, rest.mapM (fun (x : String) => x.nat?) with
     | some a, some b, some np, some fs =>
       let rec pairs : List Nat → Option (List (Nat × Nat))
         | [] => some []
@@ -3735,7 +3732,7 @@ def stepCore (S : St P) (line : String) : St P :=
       | none => S.fail "lattice: unreadable"
     | _, _, _, _ => S.fail "lattice: unreadable"
   | "i" :: a :: b :: n :: rest =>
-    match S.node? a, S.node? b, S.node? n, (rest.mapM (fun (x : String) => x.toNat?)).bind (rules S) with
+    match S.node? a, S.node? b, S.node? n, (rest.mapM (fun (x : String) => x.nat?)).bind (rules S) with
     | some a, some b, some n, some rs =>
       -- The derivation is computed first, on classes the state shares; the
       -- kernel steps are emitted after, when the state is held once again.
@@ -3783,7 +3780,7 @@ def stepCore (S : St P) (line : String) : St P :=
       | .error e => S.fail e
     | _, _, _, _ => S.fail "completion: unreadable"
   | "p" :: a :: b :: rest =>
-    match S.node? a, S.node? b, (rest.mapM (fun (x : String) => x.toNat?)).bind (Peak.read S) with
+    match S.node? a, S.node? b, (rest.mapM (fun (x : String) => x.nat?)).bind (Peak.read S) with
     | some a, some b, some w =>
       match peakMerge S S.atRound a b w with
       | .ok pl =>
@@ -3844,13 +3841,13 @@ def stepCore (S : St P) (line : String) : St P :=
       | .error e => S.fail e
     | _, _, _ => S.fail "completion: unreadable"
   | ["mark", d] =>
-    match d.toNat? with
+    match d.nat? with
     | some (d + 1) =>
       let S := (S.withCore fun c => (c.mark d, ())).1
       { S with snaps := (S.snaps.extract 0 d).push (S.cid.size, S.plain, S.spell, S.invIn) }
     | _ => S.fail "mark: unreadable"
   | ["restore", d] =>
-    match d.toNat? with
+    match d.nat? with
     | some (d + 1) =>
       match S.snaps[d]?, S.withCore fun c => c.restore d (d + 1) with
       | some (n, pl, sp, iv), (S, true) =>
@@ -3861,7 +3858,7 @@ def stepCore (S : St P) (line : String) : St P :=
       | _, (S, _) => S.fail "restore: no such mark"
     | _ => S.fail "restore: unreadable"
   | ["rpop", d] =>
-    match d.toNat? with
+    match d.nat? with
     | some d =>
       match S.snaps[d]?, S.withCore fun c => c.restore d d with
       | some (n, pl, sp, iv), (S, true) =>
@@ -3872,7 +3869,7 @@ def stepCore (S : St P) (line : String) : St P :=
   | "u" :: kind :: rest =>
     -- An event the stream gives no witness for: counted, and nothing is merged.
     let _ := rest
-    { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), splices := [], opens := [], regroups := [], inverses := [] }
+    { S with unchecked := S.unchecked.insert kind (S.unchecked.getD kind 0 + 1), nUnchecked := S.nUnchecked + 1, splices := [], opens := [], regroups := [], inverses := [] }
   | [""] => { S with events := S.events - 1 }
   | q :: rest =>
     -- The binding of a sequence rule's firing: kept for its `m` line.
@@ -3893,8 +3890,11 @@ def step (S : St P) (line : String) : St P :=
   if line.startsWith "s " || line.startsWith "j " || line.startsWith "y " then S
   else { S with splices := [], opens := [], regroups := [], inverses := [] }
 
-def start (P : Program) : St P :=
-  { declAt := P.decls.foldl (fun m (o, d) => m.insert o d) {},
+/-- The state before the first event. `cap` sizes the node index and changes
+no result. -/
+def start (P : Program) (cap : Nat := 8) : St P :=
+  { core := Core.new P cap,
+    declAt := P.decls.foldl (fun m (o, d) => m.insert o d) {},
     invOps := P.ops.filterMap (·.inverse) }
 
 end SemperCheck.Replay

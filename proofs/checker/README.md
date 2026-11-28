@@ -268,10 +268,15 @@ failed event.
 The certificates this replaces proved 5,702 `check-eq`, and the replay before
 the replayer was proved 21,066. No program proves fewer than under either.
 
-Cost: the 1,442 streams total 235 MB; the median is 1.3 kB and the largest
-94 MB. The slowest replay takes 16.0 s and the largest 745 MB; `bench/acgen.rules.egg` (1,120,646
-events, a 50 MB stream, 6,647,265 kernel steps, every event checked) takes
-11.4 s and 539 MB. With the stream on, the engine runs that benchmark in
+Cost, from the four-job sweep: the 1,559 streams total 263 MB; the median is
+1.3 kB and the largest 95 MB. The slowest replay takes 13.1 s and the largest
+872 MB, both `bench/math-microbenchmark.native.egg` (2,965,212 events,
+5,735,744 kernel steps). `bench/math-microbenchmark.rules.egg` has the largest
+ratio of checking to producing: the engine writes its 94 MB stream in 0.69 s
+and the replay takes 10.7 s, about 2.4 µs per kernel step, which is the cost
+per step on every program. `bench/acgen.rules.egg` (1,120,646 events, a 50 MB
+stream, 6,486,131 kernel steps, every event checked) takes 8.0 s and 541 MB.
+With the stream on, the engine runs that benchmark in
 11.7 s and 706 MB against 10.6 s and 704 MB in proof mode without it, and
 `bench/search-dfs-small.rules.egg` in 2.2 s and 11.6 MB against 2.1 s and
 11.4 MB, with a 47 kB stream (two runs each).

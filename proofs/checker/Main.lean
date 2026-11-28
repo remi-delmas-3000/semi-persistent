@@ -24,7 +24,10 @@ def replay (progPath tracePath : String) : IO UInt32 := do
   -- The cause of the first event that fails, has no witness or gets no kernel
   -- step: the later ones of a program can follow from it.
   let mut first : Option String := none
-  let mut S := Replay.start P
+  -- The node index is sized from the stream's length: a node definition
+  -- takes more than 64 bytes of stream on average.
+  let cap := (← System.FilePath.metadata tracePath).byteSize.toNat / 64
+  let mut S := Replay.start P cap
   -- `SEMPER_REPLAY_SHOW=n` prints the first `n` failed lines.
   let shown := ((← IO.getEnv "SEMPER_REPLAY_SHOW").bind (·.toNat?)).getD 0
   let nodes := (← IO.getEnv "SEMPER_REPLAY_NODES").isSome
@@ -37,7 +40,7 @@ def replay (progPath tracePath : String) : IO UInt32 := do
     let beforeU := S.nUnjustified
     let before := S.nFailed
     let beforeR := S.core.rejected
-    let beforeN := S.unchecked.fold (fun n _ k => n + k) 0
+    let beforeN := S.nUnchecked
     S := Replay.step S (if line.endsWith "\n" then (line.dropEnd 1).copy else line)
     if S.nUnjustified > beforeU && beforeU < shown then IO.eprintln s!"no kernel step at event {S.events}: {line}"
     if S.nFailed > before && S.nFailed ≤ shown then IO.eprintln s!"failed event {S.events} [{S.lastCause}]: {line}"
@@ -52,7 +55,7 @@ def replay (progPath tracePath : String) : IO UInt32 := do
             | none => "?"
           IO.eprintln s!"  {x}: table {t}, root {S.fd t}, {d}"
     -- Read only when the line failed, had no witness or got no kernel step.
-    let unchecked := S.unchecked.fold (fun n _ k => n + k) 0
+    let unchecked := S.nUnchecked
     if first.isNone && (S.nFailed > before || unchecked > beforeN || S.nUnjustified > beforeU) then
       let kind := (line.splitOn " ").headD ""
       if S.nFailed > before then

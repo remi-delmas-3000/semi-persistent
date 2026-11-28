@@ -353,11 +353,15 @@ structure Ok (P : Program) (r : Raw) : Prop where
   snaps : ∀ x ∈ r.snaps, Links r.acc x.1 x.2
   goals : ∀ g ∈ r.goals, ∀ M : Model, M.Models P g.1 → M.eval g.2.1 = M.eval g.2.2
 
-theorem Ok.empty (P : Program) : Ok P {} where
-  wf := by simp [wfNodes]
-  ws := by simp [wfSorts]
-  valid := by intro M s c h; simp at h
-  bnd := by intro s c h; simp at h
+/-- The empty state, its index sized for `cap` nodes: the size changes when
+the index first grows, never what it holds. -/
+def empty (cap : Nat) : Raw := { index := Std.HashMap.emptyWithCapacity cap }
+
+theorem Ok.empty (P : Program) (cap : Nat) : Ok P (empty cap) where
+  wf := by simp [wfNodes, Raw.empty]
+  ws := by simp [wfSorts, Raw.empty]
+  valid := by intro M s c h; simp [Raw.empty] at h
+  bnd := by intro s c h; simp [Raw.empty] at h
   links := Links.empty _
   round := Links.empty _
   snaps := by intro x hx; cases hx
@@ -574,7 +578,7 @@ namespace Core
 
 variable {P : Program}
 
-def new (P : Program) : Core P := ⟨{}, Raw.Ok.empty P⟩
+def new (P : Program) (cap : Nat := 8) : Core P := ⟨Raw.empty cap, Raw.Ok.empty P cap⟩
 
 instance : Inhabited (Core P) := ⟨new P⟩
 

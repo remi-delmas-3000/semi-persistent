@@ -14,6 +14,30 @@ This file is part of the replayer, which the soundness statement does not
 depend on: the kernel checks every step the replayer derives from these lists.
 -/
 
+def String.natGo (s : String) : Nat → Nat → Nat → Option Nat
+  | 0, _, acc => some acc
+  | fuel + 1, i, acc =>
+    if h : i < s.utf8ByteSize then
+      let b := s.getUTF8Byte ⟨i⟩ h
+      if 48 ≤ b && b ≤ 57 then String.natGo s fuel (i + 1) (acc * 10 + (b.toNat - 48)) else none
+    else some acc
+
+/-- A decimal number as the stream writes it: digits only, at least one, read
+in one pass over the bytes. -/
+def String.nat? (s : String) : Option Nat :=
+  if s.utf8ByteSize == 0 then none else s.natGo s.utf8ByteSize 0 0
+
+def String.fieldsGo (s : String) : Nat → Nat → List String → List String
+  | 0, e, acc => String.Pos.Raw.extract s ⟨0⟩ ⟨e⟩ :: acc
+  | i + 1, e, acc =>
+    if (if h : i < s.utf8ByteSize then s.getUTF8Byte ⟨i⟩ h else 0) == 32 then
+      String.fieldsGo s i i (String.Pos.Raw.extract s ⟨i + 1⟩ ⟨e⟩ :: acc)
+    else String.fieldsGo s i e acc
+
+/-- The fields of a stream line, which single spaces separate: `splitOn " "`
+in one pass over the bytes. -/
+def String.fields (s : String) : List String := s.fieldsGo s.utf8ByteSize s.utf8ByteSize []
+
 namespace SemperCheck.Replay
 
 /-- An argument list as runs. No run has count zero and no two neighbouring
